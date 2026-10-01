@@ -60,6 +60,12 @@ describe("pieces of an answer go where they say (useChat)", () => {
   it("skips a piece it already has", () => {
     expect(place("Hello there", " there", 5)).toEqual({ text: "Hello there", gap: false });
   });
+  it("keeps what follows a piece it already has", () => {
+    expect(place("Hello there friend", " there", 5)).toEqual({
+      text: "Hello there friend",
+      gap: false,
+    });
+  });
   it("reports a gap rather than showing one", () => {
     expect(place("Hello", " world", 11)).toEqual({ text: "Hello", gap: true });
   });

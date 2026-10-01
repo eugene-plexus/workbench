@@ -313,8 +313,13 @@ def test_when_the_business_allows_it_the_owner_reads_and_the_person_is_told(
     # Read, never written.
     assert owner.post(f"/api/chats/{chat}/messages", json={"content": "x"}).status_code == 404
     assert owner.delete(f"/api/chats/{chat}").status_code == 404
-    # A member is never an owner, whatever the setting.
+    # A member is never an owner, whatever the setting: not the list, and not
+    # another member's chat.
     assert ada.get("/api/people").status_code == 403
+    bo = world.browser()
+    bo.sign_in("p-bo")
+    assert bo.get(f"/api/chats/{chat}").status_code == 404
+    assert bo.get(f"/api/chats/{chat}/events").status_code == 404
     # And back to the default.
     _owner_reads(world, None)
     assert owner.get(f"/api/chats/{chat}").status_code == 404
