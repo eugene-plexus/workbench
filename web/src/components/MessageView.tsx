@@ -108,7 +108,7 @@ export function MessageView({
         </p>
       )}
       {message.content && <Markdown text={message.content} />}
-      {message.sources.length > 0 && (
+      {(message.sources.length > 0 || message.searches > 0) && (
         <div className="text-sm" data-testid="sources">
           <h3 className="font-semibold">
             Sources
@@ -116,6 +116,11 @@ export function MessageView({
               ? ` (${message.searches} search${message.searches === 1 ? "" : "es"})`
               : ""}
           </h3>
+          {/* A search ran and the answer linked none of what it found: said,
+              so a searched answer never looks like an unsearched one. */}
+          {message.sources.length === 0 && (
+            <p className="text-muted">The answer does not link to any page the search found.</p>
+          )}
           <ol className="list-decimal pl-5">
             {message.sources.map((source) => (
               <li key={source.url}>

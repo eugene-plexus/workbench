@@ -78,13 +78,20 @@ def test_a_sign_in_finished_in_another_browser_is_refused(world: World) -> None:
 
 
 def test_a_sign_in_state_is_good_once(world: World) -> None:
+    """Refused by Workbench, before Eugene is asked: even someone who kept
+    the browser binding cannot finish the same sign-in twice. (Eugene's
+    single-use code would refuse it later; that is Eugene's guard, not this.)"""
     browser = world.browser()
     start = browser.http.get("/signin")
+    binding = browser.http.cookies.get("workbench_signin")
     at_eugene = httpx.get(start.headers["location"] + "&login_as=p-ada", trust_env=False)
     callback = at_eugene.headers["location"].replace(world.workbench, "")
     assert "#signin=" in browser.http.get(callback).headers["location"]
+    asked = world.eugene.token_calls
+    browser.http.cookies.set("workbench_signin", binding or "", domain="127.0.0.1", path="/oidc")
     again = browser.http.get(callback)
-    assert "#signin-error=" in again.headers["location"]
+    assert "has expired" in unquote(again.headers["location"])
+    assert world.eugene.token_calls == asked, "Eugene was asked to trade the code again"
 
 
 def test_a_person_turned_off_is_signed_out_at_the_next_refresh_and_nobody_else(
