@@ -1,0 +1,154 @@
+@import "tailwindcss";
+
+/* Plexus, copied from the console (ui/src/app/globals.css), not shared:
+   components share schemas, never code. Dark is Plexus; light is the
+   console's "modern" palette, which is what the console shows when the
+   system asks for light. The mascot's shirt is the apricot. */
+:root {
+  color-scheme: dark;
+  --background: #141619;
+  --foreground: #e6e8ea;
+  --panel: #1b1e22;
+  --panel-soft: #23272c;
+  --panel-hover: #2b3037;
+  --border: #3a4048;
+  --border-hover: #5c646e;
+  --accent-left: #7fb0cf;
+  --accent-right: #cf9a72;
+  --on-accent-left: #0c1216;
+  --muted: #b3b9bf;
+  --status-warn-fg: #dcb079;
+  --status-warn-bg: rgb(131 96 41 / 0.18);
+  --status-warn-border: #836029;
+  --status-error-fg: #dd9a93;
+  --status-error-bg: rgb(143 70 61 / 0.2);
+  --status-error-border: #8f463d;
+  --radius: 4px;
+  --font-ui: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --font-code: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --background: #fafafb;
+    --foreground: #0d0d10;
+    --panel: #ffffff;
+    --panel-soft: #f3f3f5;
+    --panel-hover: #e7e7eb;
+    --border: #e3e3e8;
+    --border-hover: #8a8a93;
+    --accent-left: #2a55e6;
+    --accent-right: #cf3a85;
+    --on-accent-left: #ffffff;
+    --muted: #5a5a63;
+    --status-warn-fg: #7c3f08;
+    --status-warn-bg: rgb(243 194 90 / 0.18);
+    --status-warn-border: #f3c25a;
+    --status-error-fg: #971838;
+    --status-error-bg: rgb(242 154 169 / 0.18);
+    --status-error-border: #f29aa9;
+  }
+}
+
+@theme inline {
+  --color-bg: var(--background);
+  --color-fg: var(--foreground);
+  --color-panel: var(--panel);
+  --color-soft: var(--panel-soft);
+  --color-hover: var(--panel-hover);
+  --color-line: var(--border);
+  --color-line-strong: var(--border-hover);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent-left);
+  --color-apricot: var(--accent-right);
+  --color-on-accent: var(--on-accent-left);
+  --color-warn: var(--status-warn-fg);
+  --color-warn-bg: var(--status-warn-bg);
+  --color-warn-line: var(--status-warn-border);
+  --color-error: var(--status-error-fg);
+  --color-error-bg: var(--status-error-bg);
+  --color-error-line: var(--status-error-border);
+  --font-sans: var(--font-ui);
+  --font-mono: var(--font-code);
+  --radius-plexus: var(--radius);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-ui);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent-left);
+  outline-offset: 2px;
+}
+
+/* An answer's Markdown. */
+.answer {
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.answer p,
+.answer ul,
+.answer ol,
+.answer pre,
+.answer table,
+.answer blockquote {
+  margin: 0.6em 0;
+}
+.answer ul {
+  list-style: disc;
+  padding-left: 1.4em;
+}
+.answer ol {
+  list-style: decimal;
+  padding-left: 1.4em;
+}
+.answer a {
+  color: var(--accent-left);
+  text-decoration: underline;
+}
+.answer code {
+  font-family: var(--font-code);
+  font-size: 0.92em;
+}
+.answer :not(pre) > code {
+  background: var(--panel-soft);
+  padding: 0.1em 0.3em;
+  border-radius: var(--radius);
+}
+.answer table {
+  border-collapse: collapse;
+}
+.answer th,
+.answer td {
+  border: 1px solid var(--border);
+  padding: 0.3em 0.6em;
+}
+.answer blockquote {
+  border-left: 3px solid var(--border-hover);
+  padding-left: 0.8em;
+  color: var(--muted);
+}
+.answer h1,
+.answer h2,
+.answer h3 {
+  font-weight: 600;
+  margin: 0.8em 0 0.4em;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition: none !important;
+  }
+}

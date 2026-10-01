@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run gitleaks
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz | tar -xz gitleaks
+          ./gitleaks dir . --no-banner --redact
+
+  server:
+    name: Server — lint, type-check, test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install package + dev deps
+        run: pip install -e ".[dev]"
+      - name: Ruff lint
+        run: ruff check .
+      - name: Ruff format check
+        run: ruff format --check .
+      - name: Mypy
+        run: mypy src/
+      - name: Pytest
+        run: pytest
+
+  page:
+    name: Page — type-check, lint, test, build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm test
+      - run: npm run build
+      # The page is copied from the website byte for byte (workbench.md §6).
+      - name: Mascots are the website's own
+        working-directory: .
+        run: |
+          git clone --depth 1 https://github.com/eugene-plexus/website /tmp/website
+          cmp web/public/eugene-face.svg /tmp/website/public/eugene-face.svg
+          for pose in welcome guide working curious; do
+            cmp "web/public/mascots/eugene-$pose.svg" "/tmp/website/public/mascots/eugene-$pose.svg"
+          done
+
+  codegen-freshness:
+    name: Codegen freshness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install package + dev deps
+        run: pip install -e ".[dev]"
+      - name: Regenerate models from pinned specs
+        run: python scripts/codegen.py
+      - name: Assert no diff
+        shell: bash
+        run: |
+          if ! git diff --exit-code src/eugene_plexus_workbench/_generated/; then
+            echo "::error::Generated models are out of sync with SPECS_REF."
+            exit 1
+          fi
+
+  dco:
+    name: DCO sign-off check
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Check Signed-off-by lines on every PR commit
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          status=0
+          while IFS= read -r sha; do
+            [[ -z "$sha" ]] && continue
+            name=$(git log -1 --format=%an "$sha")
+            email=$(git log -1 --format=%ae "$sha")
+            if ! git log -1 --format=%B "$sha" | grep -Fxq "Signed-off-by: ${name} <${email}>"; then
+              echo "::error::Commit $sha is missing a matching DCO sign-off."
+              status=1
+            fi
+          done < <(git rev-list --no-merges "${BASE_SHA}..${HEAD_SHA}")
+          exit $status
