@@ -1,0 +1,6 @@
+* text=auto eol=lf
+*.png binary
+*.woff2 binary
+# GitHub source archives -- what every install is built from -- stamp the
+# commit into this file. See the file for why.
+src/eugene_plexus_workbench/_build.py export-subst

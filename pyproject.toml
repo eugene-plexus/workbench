@@ -1,0 +1,127 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "eugene-plexus-workbench"
+version = "0.1.0"
+description = "Workbench: Eugene Plexus's own chat app, a spoke that reaches the hub only through the doors every other app uses."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.12"
+authors = [
+    { name = "Eugene Plexus contributors" },
+]
+keywords = ["eugene-plexus", "llm", "chat", "openid-connect", "fastapi"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: FastAPI",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications :: Chat",
+]
+
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.32,<1",
+    "pydantic>=2.9,<3",
+    "pydantic-settings>=2.6,<3",
+    # Every model and every search is an HTTP call to the gateway.
+    "httpx>=0.27,<1",
+    # Signing in with Eugene (C2) is OpenID Connect; Authlib is the client
+    # library Open WebUI uses, and joserfc (its JOSE half) checks ID tokens.
+    "authlib>=1.8,<2",
+    "joserfc>=1.6.1,<2",
+    # Attachments arrive as multipart uploads.
+    "python-multipart>=0.0.20,<0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.4.2",
+    "pytest-asyncio==0.26.0",
+    "ruff==0.15.14",
+    "mypy==1.20.2",
+    "datamodel-code-generator==0.57.0",
+]
+
+[project.scripts]
+eugene-plexus-workbench = "eugene_plexus_workbench.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/eugene-plexus"
+Repository = "https://github.com/eugene-plexus/workbench"
+Specs = "https://github.com/eugene-plexus/specs"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/eugene_plexus_workbench"]
+# The built front end is gitignored on `main` and committed on `dist`, and
+# hatch leaves out what .gitignore names unless it is listed here. Without
+# this a dist archive would install with no browser half, as `ui`'s wheel
+# once did.
+artifacts = ["src/eugene_plexus_workbench/static/**"]
+
+[tool.hatch.build.targets.sdist]
+artifacts = ["src/eugene_plexus_workbench/static/**"]
+
+# -----------------------------------------------------------------------------
+# Ruff (linter + formatter)
+# -----------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = [
+    "src/eugene_plexus_workbench/_generated",
+    "web",
+]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",   # pycodestyle / pyflakes
+    "I",             # isort
+    "B",             # bugbear
+    "UP",            # pyupgrade
+    "ASYNC",         # async-correctness
+    "SIM",           # simplifications
+    "RUF",
+]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["E501"]
+# FastAPI's Depends() and File() defaults are the framework's idiom.
+"src/eugene_plexus_workbench/api.py" = ["B008"]
+
+# -----------------------------------------------------------------------------
+# Mypy
+# -----------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+disable_error_code = ["call-arg"]
+warn_unused_configs = true
+warn_unused_ignores = true
+warn_return_any = true
+warn_redundant_casts = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+check_untyped_defs = true
+exclude = [
+    "src/eugene_plexus_workbench/_generated",
+]
+
+[[tool.mypy.overrides]]
+module = "eugene_plexus_workbench._generated.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["authlib.*"]
+ignore_missing_imports = true
+
+# -----------------------------------------------------------------------------
+# Pytest
+# -----------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-ra --strict-markers"
