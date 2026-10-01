@@ -46,6 +46,14 @@ npm run build      # writes src/eugene_plexus_workbench/static/
 
 The built page is gitignored on `main`. Eugene's app catalogue installs from a commit on the **`dist`** branch, which is `main` plus that build. A GitHub archive of `main` alone would install with no page.
 
+To make a `dist` commit from a `main` commit:
+
+1. Check out `dist` beside a clean `main`.
+2. Replace its tree with `main`'s files and the build (`git archive` of `main`, then `src/eugene_plexus_workbench/static/`, added with `git add -f`).
+3. Write `BUILD_INFO` as `built-from: eugene-plexus/workbench@<main commit>`.
+4. **Put `src/eugene_plexus_workbench/_build.py` back as `main` has it.** `git archive` stamps the commit into it. Left stamped, an archive of `dist` would name `main`'s commit instead of its own.
+5. Commit, push `dist`, and point the agent's `apps_catalogue.yaml` at the new commit.
+
 The config-trio shapes are generated from [`eugene-plexus/specs`](https://github.com/eugene-plexus/specs) at the commit in `SPECS_REF`. Run `python scripts/codegen.py` to regenerate them.
 
 ## Licence
