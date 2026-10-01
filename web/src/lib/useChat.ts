@@ -99,6 +99,15 @@ export function useChat(chatId: string | null) {
     setDetailState(next);
   }, []);
 
+  /** A change to the chat as it is now, never to a copy a callback closed
+   * over: a reply that lands after an answer arrived must not undo it. */
+  const update = useCallback(
+    (change: (shown: ChatDetail) => ChatDetail) => {
+      if (current.current) setDetail(change(current.current));
+    },
+    [setDetail],
+  );
+
   const reload = useCallback(async () => {
     if (!chatId) return;
     try {
@@ -142,5 +151,5 @@ export function useChat(chatId: string | null) {
     return () => watching.close();
   }, [chatId, reload, setDetail]);
 
-  return { detail, setDetail, progress, error, reload };
+  return { detail, update, progress, error, reload };
 }

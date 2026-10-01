@@ -133,8 +133,9 @@ def test_status_says_when_sign_in_is_not_set_up(world: World, tmp_path) -> None:
     assert "without Eugene's sign-in settings" in (provider.why_not() or "")
     empty = tmp_path / "empty"
     empty.write_text("", encoding="utf-8")
-    provider = Provider(issuer="http://x/oidc", client_id="c", secret_file=empty,
-                        http=httpx.AsyncClient())
+    provider = Provider(
+        issuer="http://x/oidc", client_id="c", secret_file=empty, http=httpx.AsyncClient()
+    )
     assert "secret is missing" in (provider.why_not() or "")
 
 
@@ -147,8 +148,12 @@ def test_status_says_when_sign_in_is_not_set_up(world: World, tmp_path) -> None:
 def provider(world: World, tmp_path) -> Provider:
     secret = tmp_path / "s"
     secret.write_text("x", encoding="utf-8")
-    return Provider(issuer=world.eugene.issuer, client_id=CLIENT_ID, secret_file=secret,
-                    http=httpx.AsyncClient(trust_env=False))
+    return Provider(
+        issuer=world.eugene.issuer,
+        client_id=CLIENT_ID,
+        secret_file=secret,
+        http=httpx.AsyncClient(trust_env=False),
+    )
 
 
 async def test_an_id_token_for_another_app_is_refused(world: World, provider: Provider) -> None:
@@ -178,9 +183,16 @@ async def test_a_token_signed_by_another_key_is_refused(world: World, provider: 
     from joserfc.jwk import RSAKey
 
     other = RSAKey.generate_key(2048, parameters={"kid": "k1"})
-    forged = jose.encode({"alg": "RS256", "typ": "JWT", "kid": "k1"},
-                         {"iss": world.eugene.issuer, "aud": CLIENT_ID, "sub": "operator",
-                          "exp": int(time.time()) + 60}, other)
+    forged = jose.encode(
+        {"alg": "RS256", "typ": "JWT", "kid": "k1"},
+        {
+            "iss": world.eugene.issuer,
+            "aud": CLIENT_ID,
+            "sub": "operator",
+            "exp": int(time.time()) + 60,
+        },
+        other,
+    )
     with pytest.raises(SignInRefused, match="did not verify"):
         await provider._claims(forged)
 

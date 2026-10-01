@@ -47,8 +47,10 @@ def test_every_answer_carries_the_policy(world: World) -> None:
         assert headers["x-content-type-options"] == "nosniff"
     assert "img-src 'self' data: blob:" in CSP and "frame-ancestors 'none'" in CSP
     assert "script-src 'self'" in CSP and "'unsafe-inline'" not in CSP
-    assert httpx.get(world.workbench + "/api/status", trust_env=False).headers[
-        "cache-control"] == "no-store"
+    assert (
+        httpx.get(world.workbench + "/api/status", trust_env=False).headers["cache-control"]
+        == "no-store"
+    )
 
 
 def test_a_page_built_without_its_front_end_says_so(tmp_path: Path) -> None:
@@ -67,10 +69,20 @@ async def test_a_restart_marks_an_answer_in_progress_interrupted(tmp_path: Path)
     store = Store(tmp_path / "wb.sqlite3")
     await store.open()
     now = time.time()
-    await store.create_chat(Chat(id="c", owner="p", title="t", model="m", created_at=now,
-                                 updated_at=now))
-    await store.add_message(Message(id="m1", chat_id="c", seq=0, role="assistant",
-                                    status="running", created_at=now, content="Half an"))
+    await store.create_chat(
+        Chat(id="c", owner="p", title="t", model="m", created_at=now, updated_at=now)
+    )
+    await store.add_message(
+        Message(
+            id="m1",
+            chat_id="c",
+            seq=0,
+            role="assistant",
+            status="running",
+            created_at=now,
+            content="Half an",
+        )
+    )
     await store.close()
     reopened = Store(tmp_path / "wb.sqlite3")
     await reopened.open()
@@ -99,8 +111,9 @@ def test_a_tab_left_open_is_signed_out_when_its_person_is(world: World, monkeypa
     ada.sign_in("p-ada")
     chat = ada.new_chat()
     events = []
-    with ada.http.stream("GET", f"/api/chats/{chat}/events", headers=ada.headers(),
-                         timeout=10) as response:
+    with ada.http.stream(
+        "GET", f"/api/chats/{chat}/events", headers=ada.headers(), timeout=10
+    ) as response:
         assert response.status_code == 200
         lines = response.iter_lines()
         assert next(lines) == ": watching"
@@ -126,10 +139,12 @@ def test_shutdown_marks_a_running_answer_interrupted_not_stopped(tmp_path: Path)
         store = Store(tmp_path / "wb.sqlite3")
         await store.open()
         now = time.time()
-        await store.create_chat(Chat(id="c", owner="p", title="t", model="m", created_at=now,
-                                     updated_at=now))
-        message = await store.add_message(Message(id="a", chat_id="c", seq=0, role="assistant",
-                                                  status="running", created_at=now))
+        await store.create_chat(
+            Chat(id="c", owner="p", title="t", model="m", created_at=now, updated_at=now)
+        )
+        message = await store.add_message(
+            Message(id="a", chat_id="c", seq=0, role="assistant", status="running", created_at=now)
+        )
         answers = Answers(store, Slow(None, None))
         answers.start("c", message, lambda: {})
         await asyncio.sleep(0.2)

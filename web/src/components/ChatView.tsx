@@ -24,22 +24,39 @@ export function ChatView({
   onChanged: () => void;
   onDeleted: () => void;
 }) {
-  const { detail, setDetail, progress, error, reload } = useChat(chatId);
+  const { detail, update, progress, error, reload } = useChat(chatId);
   const [showSettings, setShowSettings] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
-  const bottom = useRef<HTMLDivElement>(null);
-  const scroller = useRef<HTMLDivElement>(null);
-  const lastLength = detail?.messages.reduce((n, m) => n + m.content.length, 0) ?? 0;
+  const box = useRef<HTMLDivElement>(null);
+  const content = useRef<HTMLDivElement>(null);
+  // Follow the bottom until the reader scrolls up, and again once they
+  // scroll back down. Growth alone never unpins: an answer arriving, or an
+  // image loading late, moves the bottom without the reader doing anything.
+  const pinned = useRef(true);
+  const lastTop = useRef(0);
+  const running = detail?.messages.some((m) => m.status === "running") ?? false;
+  const wasRunning = useRef(running);
+  const loaded = detail !== null;
 
   useEffect(() => {
-    const box = scroller.current;
-    if (!box) return;
-    // Follow the answer only while the reader is already at the bottom.
-    if (box.scrollHeight - box.scrollTop - box.clientHeight < 160) {
-      bottom.current?.scrollIntoView({ block: "end" });
-    }
-  }, [lastLength, detail?.messages.length]);
+    const inner = content.current;
+    const outer = box.current;
+    if (!inner || !outer) return;
+    const follow = () => {
+      if (pinned.current) outer.scrollTop = outer.scrollHeight;
+    };
+    follow();
+    const observer = new ResizeObserver(follow);
+    observer.observe(inner);
+    return () => observer.disconnect();
+  }, [loaded]);
+
+  useEffect(() => {
+    // An answer that has just ended changes the dot in the chat list.
+    if (wasRunning.current && !running) onChanged();
+    wasRunning.current = running;
+  }, [running, onChanged]);
 
   if (error && !detail) {
     return (
@@ -52,16 +69,15 @@ export function ChatView({
   if (!detail) return <div className="flex-1" />;
 
   const { chat, messages } = detail;
-  const running = messages.some((m) => m.status === "running");
 
   async function saveSettings(next: Settings) {
     const updated = await patch<typeof chat>(`/api/chats/${chat.id}`, { settings: next });
-    setDetail({ ...detail!, chat: updated });
+    update((shown) => ({ ...shown, chat: { ...updated, running: shown.chat.running } }));
   }
 
   async function rename(title: string) {
     const updated = await patch<typeof chat>(`/api/chats/${chat.id}`, { title });
-    setDetail({ ...detail!, chat: updated });
+    update((shown) => ({ ...shown, chat: { ...updated, running: shown.chat.running } }));
     setRenaming(null);
     onChanged();
   }
@@ -177,11 +193,18 @@ export function ChatView({
         />
       )}
       <div
-        ref={scroller}
+        ref={box}
+        onScroll={(e) => {
+          const outer = e.currentTarget;
+          const atBottom = outer.scrollHeight - outer.scrollTop - outer.clientHeight < 80;
+          if (atBottom) pinned.current = true;
+          else if (outer.scrollTop < lastTop.current) pinned.current = false;
+          lastTop.current = outer.scrollTop;
+        }}
         className="min-h-0 flex-1 overflow-y-auto px-4 py-4"
         data-testid="messages"
       >
-        <div className="mx-auto flex max-w-3xl flex-col gap-5">
+        <div ref={content} className="mx-auto flex max-w-3xl flex-col gap-5">
           {messages.length === 0 && (
             <p className="py-10 text-center text-muted">Ask anything to start.</p>
           )}
@@ -200,7 +223,6 @@ export function ChatView({
               }}
             />
           ))}
-          <div ref={bottom} />
         </div>
       </div>
       {!chat.readOnly && (
@@ -211,14 +233,21 @@ export function ChatView({
           modelsError={modelsError}
           running={running}
           onSent={(user, answer) => {
-            setDetail({
-              ...detail,
-              chat: { ...chat, running: true },
-              messages: [...detail.messages, user, answer],
-            });
+            update((shown) => ({
+              ...shown,
+              chat: { ...shown.chat, running: true },
+              // The answer's own events may already have put it here.
+              messages: [
+                ...shown.messages.filter((m) => m.id !== user.id && m.id !== answer.id),
+                user,
+                shown.messages.find((m) => m.id === answer.id) ?? answer,
+              ],
+            }));
             onChanged();
           }}
-          onChat={(next) => setDetail({ ...detail, chat: next })}
+          onChat={(next) =>
+            update((shown) => ({ ...shown, chat: { ...next, running: shown.chat.running } }))
+          }
         />
       )}
     </div>

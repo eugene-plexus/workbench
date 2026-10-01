@@ -98,27 +98,44 @@ export function Composer({
   const [pending, setPending] = useState<Pending[]>([]);
   const [problem, setProblem] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  // The switch and the picker change the moment they are used; the chat on
+  // the server follows, and a refusal puts them back and says why.
+  const [searchWanted, setSearchWanted] = useState(chat.search);
+  const [picked, setPicked] = useState<string | null>(chat.model);
   const files = useRef<HTMLInputElement>(null);
 
   const available = useMemo(() => models?.models ?? [], [models]);
   const chosenId =
-    chat.model ??
+    picked ??
     available.find((m) => m.id === remembered())?.id ??
     available.find((m) => m.ready)?.id ??
     available[0]?.id ??
     null;
   const chosen = available.find((m) => m.id === chosenId);
   const searchOff = searchProblem(models, chosen);
-  const searchOn = chat.search && !searchOff;
+  const searchOn = searchWanted && !searchOff;
   const cannotTake = attachmentProblem(chosen, pending);
 
   async function setModel(id: string) {
+    const before = picked;
+    setPicked(id);
     remember(id);
-    onChat(await patch<Chat>(`/api/chats/${chat.id}`, { model: id }));
+    try {
+      onChat(await patch<Chat>(`/api/chats/${chat.id}`, { model: id }));
+    } catch (error) {
+      setPicked(before);
+      setProblem(error instanceof Error ? error.message : String(error));
+    }
   }
 
   async function setSearch(on: boolean) {
-    onChat(await patch<Chat>(`/api/chats/${chat.id}`, { search: on }));
+    setSearchWanted(on);
+    try {
+      onChat(await patch<Chat>(`/api/chats/${chat.id}`, { search: on }));
+    } catch (error) {
+      setSearchWanted(!on);
+      setProblem(error instanceof Error ? error.message : String(error));
+    }
   }
 
   async function attach(list: FileList | null) {

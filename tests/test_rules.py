@@ -16,7 +16,9 @@ def _sources() -> list[Path]:
 def test_durations_use_perf_counter_never_monotonic() -> None:
     """On the Python the installers provision, Windows `monotonic()` ticks
     every 15.6 ms."""
-    offenders = [str(p) for p in _sources() if re.search(r"time\.monotonic\(", p.read_text("utf-8"))]
+    offenders = [
+        str(p) for p in _sources() if re.search(r"time\.monotonic\(", p.read_text("utf-8"))
+    ]
     assert offenders == []
 
 

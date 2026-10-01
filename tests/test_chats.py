@@ -14,13 +14,15 @@ import httpx
 from .conftest import ADMIN_TOKEN, MODEL, PNG, World
 
 
-def _events(world: World, browser: Any, chat_id: str, out: list[dict[str, Any]],
-            until: str = "done") -> threading.Thread:
+def _events(
+    world: World, browser: Any, chat_id: str, out: list[dict[str, Any]], until: str = "done"
+) -> threading.Thread:
     """A tab watching a chat, in a thread, collecting events until `until`."""
 
     def run() -> None:
-        with browser.http.stream("GET", f"/api/chats/{chat_id}/events",
-                                 headers=browser.headers(), timeout=30) as response:
+        with browser.http.stream(
+            "GET", f"/api/chats/{chat_id}/events", headers=browser.headers(), timeout=30
+        ) as response:
             for line in response.iter_lines():
                 if line.startswith("data: "):
                     event = json.loads(line[6:])
@@ -110,8 +112,9 @@ def test_the_whole_conversation_and_the_instructions_are_sent(world: World) -> N
     ada = world.browser()
     ada.sign_in("p-ada")
     chat = ada.new_chat()
-    ada.patch(f"/api/chats/{chat}", json={"settings": {"instructions": "Be brief.",
-                                                       "temperature": 0.2}})
+    ada.patch(
+        f"/api/chats/{chat}", json={"settings": {"instructions": "Be brief.", "temperature": 0.2}}
+    )
     ada.post(f"/api/chats/{chat}/messages", json={"content": "One"})
     ada.wait_answer(chat)
     ada.post(f"/api/chats/{chat}/messages", json={"content": "Two"})
@@ -153,7 +156,7 @@ def test_editing_a_message_replaces_it_and_everything_after(world: World) -> Non
     assert edited.status_code == 201, edited.text
     ada.wait_answer(chat)
     messages = ada.get(f"/api/chats/{chat}").json()["messages"]
-    assert [(m["role"], m["content"]) for m in messages][0] == ("user", "Uno")
+    assert (messages[0]["role"], messages[0]["content"]) == ("user", "Uno")
     assert len(messages) == 2
     assert [m["content"] for m in world.gateway.requests[-1]["messages"]] == ["Uno"]
 
@@ -269,8 +272,12 @@ def test_chats_are_their_owners(world: World) -> None:
 
 
 def _owner_reads(world: World, on: bool | None) -> httpx.Response:
-    return httpx.patch(f"{world.workbench}/v1/config", json={"ownerReadsChats": on},
-                       headers={"Authorization": f"Bearer {ADMIN_TOKEN}"}, trust_env=False)
+    return httpx.patch(
+        f"{world.workbench}/v1/config",
+        json={"ownerReadsChats": on},
+        headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
+        trust_env=False,
+    )
 
 
 def test_the_owner_cannot_read_peoples_chats_by_default(world: World) -> None:
@@ -315,18 +322,27 @@ def test_when_the_business_allows_it_the_owner_reads_and_the_person_is_told(
 
 def test_settings_are_changed_only_with_the_agents_admin_token(world: World) -> None:
     for headers in ({}, {"Authorization": "Bearer wrong"}):
-        assert httpx.get(f"{world.workbench}/v1/config", headers=headers,
-                         trust_env=False).status_code == 401
+        assert (
+            httpx.get(f"{world.workbench}/v1/config", headers=headers, trust_env=False).status_code
+            == 401
+        )
     good = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
     schema = httpx.get(f"{world.workbench}/v1/config/schema", headers=good, trust_env=False).json()
     assert [f["key"] for f in schema["fields"]] == ["ownerReadsChats"]
     assert schema["fields"][0]["default"] is False
-    assert httpx.get(f"{world.workbench}/v1/config", headers=good,
-                     trust_env=False).json() == {"ownerReadsChats": False}
-    result = httpx.patch(f"{world.workbench}/v1/config", headers=good, trust_env=False,
-                         json={"ownerReadsChats": "yes", "colour": "red"}).json()
+    assert httpx.get(f"{world.workbench}/v1/config", headers=good, trust_env=False).json() == {
+        "ownerReadsChats": False
+    }
+    result = httpx.patch(
+        f"{world.workbench}/v1/config",
+        headers=good,
+        trust_env=False,
+        json={"ownerReadsChats": "yes", "colour": "red"},
+    ).json()
     assert result["applied"] == [] and {r["key"] for r in result["rejected"]} == {
-        "ownerReadsChats", "colour"}
+        "ownerReadsChats",
+        "colour",
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -341,8 +357,9 @@ def test_an_image_is_stored_by_id_and_sent_as_a_data_url(world: World) -> None:
     up = ada.post(f"/api/chats/{chat}/files", files={"file": ("dot.png", PNG, "image/png")})
     assert up.status_code == 201, up.text
     file_id = up.json()["id"]
-    ada.post(f"/api/chats/{chat}/messages", json={"content": "What is this?",
-                                                  "attachments": [file_id]})
+    ada.post(
+        f"/api/chats/{chat}/messages", json={"content": "What is this?", "attachments": [file_id]}
+    )
     ada.wait_answer(chat)
     parts = world.gateway.requests[-1]["messages"][-1]["content"]
     assert parts[0] == {"type": "text", "text": "What is this?"}
@@ -360,11 +377,13 @@ def test_a_file_that_is_not_what_it_says_is_refused(world: World) -> None:
     ada = world.browser()
     ada.sign_in("p-ada")
     chat = ada.new_chat()
-    fake = ada.post(f"/api/chats/{chat}/files",
-                    files={"file": ("x.png", b"<svg onload=alert(1)>", "image/png")})
+    fake = ada.post(
+        f"/api/chats/{chat}/files", files={"file": ("x.png", b"<svg onload=alert(1)>", "image/png")}
+    )
     assert fake.status_code == 415
-    pdf_called_png = ada.post(f"/api/chats/{chat}/files",
-                              files={"file": ("x.png", b"%PDF-1.7 ...", "image/png")})
+    pdf_called_png = ada.post(
+        f"/api/chats/{chat}/files", files={"file": ("x.png", b"%PDF-1.7 ...", "image/png")}
+    )
     assert pdf_called_png.status_code == 415
 
 
@@ -377,8 +396,12 @@ def test_the_gateways_size_limits_are_said_before_an_upload(world: World) -> Non
     assert refused.status_code == 413 and "5 MiB" in refused.json()["detail"]["message"]
     pdf = b"%PDF-1.7\n" + b"0" * (4 * 1024 * 1024)
     for _ in range(2):
-        assert ada.post(f"/api/chats/{chat}/files",
-                        files={"file": ("a.pdf", pdf, "application/pdf")}).status_code == 201
+        assert (
+            ada.post(
+                f"/api/chats/{chat}/files", files={"file": ("a.pdf", pdf, "application/pdf")}
+            ).status_code
+            == 201
+        )
     full = ada.post(f"/api/chats/{chat}/files", files={"file": ("c.pdf", pdf, "application/pdf")})
     assert full.status_code == 413 and "Start a new chat" in full.json()["detail"]["message"]
 
@@ -387,8 +410,9 @@ def test_deleting_a_chat_deletes_its_files(world: World) -> None:
     ada = world.browser()
     ada.sign_in("p-ada")
     chat = ada.new_chat()
-    file_id = ada.post(f"/api/chats/{chat}/files",
-                       files={"file": ("dot.png", PNG, "image/png")}).json()["id"]
+    file_id = ada.post(
+        f"/api/chats/{chat}/files", files={"file": ("dot.png", PNG, "image/png")}
+    ).json()["id"]
     assert ada.delete(f"/api/chats/{chat}").status_code == 204
     assert not list(Path(world.data / "files").rglob(file_id))
     assert ada.get(f"/api/files/{file_id}").status_code == 404

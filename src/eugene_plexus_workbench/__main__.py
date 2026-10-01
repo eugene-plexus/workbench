@@ -24,6 +24,9 @@ def main() -> None:
         stream=sys.stdout,
         format="%(levelname)s %(name)s: %(message)s",
     )
+    # One line per request to the gateway is noise on the Logs page, and
+    # every tab polls the model list.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     uvicorn.run(
         create_app(settings),
         host=settings.bind_host,

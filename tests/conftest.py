@@ -103,14 +103,27 @@ class FakeEugene:
     def issuer(self) -> str:
         return f"{self.url}/oidc"
 
-    def id_token(self, sub: str, *, nonce: str | None = None, aud: str = CLIENT_ID,
-                 typ: str = "JWT", issuer: str | None = None) -> str:
+    def id_token(
+        self,
+        sub: str,
+        *,
+        nonce: str | None = None,
+        aud: str = CLIENT_ID,
+        typ: str = "JWT",
+        issuer: str | None = None,
+    ) -> str:
         person = self.people[sub]
         now = int(time.time())
         claims: dict[str, Any] = {
-            "iss": issuer or self.issuer, "aud": aud, "sub": sub, "iat": now, "exp": now + 600,
-            "name": person["name"], "preferred_username": person["username"],
-            "eugene_role": person["role"], "auth_time": now,
+            "iss": issuer or self.issuer,
+            "aud": aud,
+            "sub": sub,
+            "iat": now,
+            "exp": now + 600,
+            "name": person["name"],
+            "preferred_username": person["username"],
+            "eugene_role": person["role"],
+            "auth_time": now,
         }
         if nonce is not None:
             claims["nonce"] = nonce
@@ -148,10 +161,17 @@ class FakeEugene:
             if sub in self.disabled:
                 return JSONResponse({"message": "turned off"}, status_code=403)
             code = secrets.token_urlsafe(16)
-            self.codes[code] = {"sub": sub, "nonce": q["nonce"], "challenge": q["code_challenge"],
-                                "redirect_uri": q["redirect_uri"]}
-            target = q["redirect_uri"] + "?" + urlencode({"code": code, "state": q["state"],
-                                                           "iss": self.issuer})
+            self.codes[code] = {
+                "sub": sub,
+                "nonce": q["nonce"],
+                "challenge": q["code_challenge"],
+                "redirect_uri": q["redirect_uri"],
+            }
+            target = (
+                q["redirect_uri"]
+                + "?"
+                + urlencode({"code": code, "state": q["state"], "iss": self.issuer})
+            )
             return RedirectResponse(target, status_code=302)
 
         @app.post("/oidc/token")
@@ -164,26 +184,44 @@ class FakeEugene:
             if form["grant_type"] == "authorization_code":
                 found = self.codes.pop(str(form["code"]), None)
                 verifier = str(form.get("code_verifier", ""))
-                challenge = base64.urlsafe_b64encode(
-                    hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
-                if found is None or found["challenge"] != challenge or \
-                        found["redirect_uri"] != form.get("redirect_uri"):
+                challenge = (
+                    base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+                    .rstrip(b"=")
+                    .decode()
+                )
+                if (
+                    found is None
+                    or found["challenge"] != challenge
+                    or found["redirect_uri"] != form.get("redirect_uri")
+                ):
                     return JSONResponse({"error": "invalid_grant"}, status_code=400)
                 sub = found["sub"]
                 refresh = secrets.token_urlsafe(16)
                 self.refresh_tokens[refresh] = sub
-                return {"access_token": "at", "token_type": "Bearer", "expires_in": self.expires_in,
-                        "id_token": self.id_token(sub, nonce=found["nonce"]),
-                        "refresh_token": refresh}
+                return {
+                    "access_token": "at",
+                    "token_type": "Bearer",
+                    "expires_in": self.expires_in,
+                    "id_token": self.id_token(sub, nonce=found["nonce"]),
+                    "refresh_token": refresh,
+                }
             if form["grant_type"] == "refresh_token":
                 self.refreshes += 1
                 sub = self.refresh_tokens.get(str(form["refresh_token"]))
                 if sub is None or sub in self.disabled:
-                    return JSONResponse({"error": "invalid_grant",
-                                         "error_description": "This sign-in is no longer good."},
-                                        status_code=400)
-                return {"access_token": "at", "token_type": "Bearer", "expires_in": self.expires_in,
-                        "id_token": self.id_token(sub)}
+                    return JSONResponse(
+                        {
+                            "error": "invalid_grant",
+                            "error_description": "This sign-in is no longer good.",
+                        },
+                        status_code=400,
+                    )
+                return {
+                    "access_token": "at",
+                    "token_type": "Bearer",
+                    "expires_in": self.expires_in,
+                    "id_token": self.id_token(sub),
+                }
             return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
 
         @app.post("/oidc/revoke")
@@ -202,10 +240,20 @@ class FakeEugene:
 # --------------------------------------------------------------------------- #
 
 
-def chunk(delta: dict[str, Any] | None = None, *, finish: str | None = None,
-          extension: dict[str, Any] | None = None, choices: bool = True) -> str:
-    body: dict[str, Any] = {"id": "c", "object": "chat.completion.chunk", "created": 0,
-                            "model": MODEL, "choices": []}
+def chunk(
+    delta: dict[str, Any] | None = None,
+    *,
+    finish: str | None = None,
+    extension: dict[str, Any] | None = None,
+    choices: bool = True,
+) -> str:
+    body: dict[str, Any] = {
+        "id": "c",
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": MODEL,
+        "choices": [],
+    }
     if choices:
         body["choices"] = [{"index": 0, "delta": delta or {}, "finish_reason": finish}]
     if extension is not None:
@@ -231,26 +279,55 @@ class FakeGateway:
         async def models(request: Request) -> Any:
             if request.headers.get("authorization") != f"Bearer {APP_KEY}":
                 return JSONResponse({"error": {"message": "invalid key"}}, status_code=401)
-            return {"object": "list", "x_eugene_plexus": {"web_search": self.search}, "data": [
-                {"id": MODEL, "object": "model", "x_eugene_plexus": {
-                    "surfaces": ["chat"], "context_length": 32768, "image_input": True,
-                    "web_search": True, "ready_backends": 1}},
-                {"id": "embedder", "object": "model", "x_eugene_plexus": {"surfaces": ["embeddings"]}},
-            ]}
+            return {
+                "object": "list",
+                "x_eugene_plexus": {"web_search": self.search},
+                "data": [
+                    {
+                        "id": MODEL,
+                        "object": "model",
+                        "x_eugene_plexus": {
+                            "surfaces": ["chat"],
+                            "context_length": 32768,
+                            "image_input": True,
+                            "web_search": True,
+                            "ready_backends": 1,
+                        },
+                    },
+                    {
+                        "id": "embedder",
+                        "object": "model",
+                        "x_eugene_plexus": {"surfaces": ["embeddings"]},
+                    },
+                ],
+            }
 
         @app.post("/v1/chat/completions")
         async def chat(request: Request) -> Any:
             body = await request.json()
             self.requests.append(body)
-            if request.headers.get("authorization") != f"Bearer {APP_KEY}" or self.mode == "refuse_key":
-                return JSONResponse({"error": {"message": "This key was revoked."}}, status_code=401)
+            if (
+                request.headers.get("authorization") != f"Bearer {APP_KEY}"
+                or self.mode == "refuse_key"
+            ):
+                return JSONResponse(
+                    {"error": {"message": "This key was revoked."}}, status_code=401
+                )
             if self.mode == "refuse_search" and "web_search_options" in body:
-                return JSONResponse({"error": {"message": "web_search_options: this key's tool "
-                                               "scope does not include web_search"}}, status_code=400)
+                return JSONResponse(
+                    {
+                        "error": {
+                            "message": "web_search_options: this key's tool "
+                            "scope does not include web_search"
+                        }
+                    },
+                    status_code=400,
+                )
 
             async def frames() -> AsyncIterator[str]:
-                yield chunk(choices=False, extension={"progress": {"stage": "prompt",
-                                                                   "prompt_tokens": 10}})
+                yield chunk(
+                    choices=False, extension={"progress": {"stage": "prompt", "prompt_tokens": 10}}
+                )
                 if "web_search_options" in body:
                     yield chunk({"reasoning_content": "Searching first."})
                 for word in self.words:
@@ -261,8 +338,12 @@ class FakeGateway:
                     return
                 annotations = []
                 if "web_search_options" in body:
-                    annotations = [{"type": "url_citation", "url_citation": {
-                        "url": "https://example.org/page", "title": "A page"}}]
+                    annotations = [
+                        {
+                            "type": "url_citation",
+                            "url_citation": {"url": "https://example.org/page", "title": "A page"},
+                        }
+                    ]
                     yield chunk({"annotations": annotations})
                 yield chunk({}, finish="stop", extension={"web_searches": 1 if annotations else 0})
                 yield "data: [DONE]\n\n"
@@ -380,8 +461,9 @@ def world(tmp_path: Path) -> Iterator[World]:
 def _static(tmp_path: Path) -> Path:
     static = tmp_path / "static"
     (static / "assets").mkdir(parents=True)
-    (static / "index.html").write_text("<!doctype html><title>Workbench</title><div id=root>",
-                                       encoding="utf-8")
+    (static / "index.html").write_text(
+        "<!doctype html><title>Workbench</title><div id=root>", encoding="utf-8"
+    )
     (static / "assets" / "app.js").write_text("console.log(1)", encoding="utf-8")
     return static
 
