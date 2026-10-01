@@ -119,9 +119,13 @@ def test_a_tab_left_open_is_signed_out_when_its_person_is(world: World, monkeypa
         assert next(lines) == ": watching"
         # Turned off while the tab is open.
         world.eugene.disabled.add("p-ada")
+        # A stream that is never ended is the defect, not a slow test.
+        deadline = time.perf_counter() + 10
         for line in lines:
             if line.startswith("data: "):
                 events.append(json.loads(line[6:]))
+            if time.perf_counter() > deadline:
+                break
     assert events and events[-1]["type"] == "signed-out"
     assert "no longer accepts" in events[-1]["message"]
 

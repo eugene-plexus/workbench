@@ -416,3 +416,21 @@ def test_deleting_a_chat_deletes_its_files(world: World) -> None:
     assert ada.delete(f"/api/chats/{chat}").status_code == 204
     assert not list(Path(world.data / "files").rglob(file_id))
     assert ada.get(f"/api/files/{file_id}").status_code == 404
+
+
+def test_each_piece_says_where_it_goes_counted_as_the_page_counts(world: World) -> None:
+    """A tab that opened mid-answer, or reloaded, places each piece by its
+    offset: it skips one it has and reloads on a gap. The page counts in
+    UTF-16 units, so an emoji is two there and one in Python."""
+    world.gateway.words = ["Hi \U0001f44b", " there", " friend."]
+    world.gateway.delay = 0.05
+    ada = world.browser()
+    ada.sign_in("p-ada")
+    chat = ada.new_chat()
+    events: list[dict[str, Any]] = []
+    tab = _events(world, ada, chat, events)
+    ada.post(f"/api/chats/{chat}/messages", json={"content": "Hi"})
+    tab.join(timeout=15)
+    pieces = [e for e in events if e["type"] == "delta" and "content" in e]
+    assert [p["contentAt"] for p in pieces] == [0, 5, 11]
+    assert "".join(p["content"] for p in pieces) == "Hi \U0001f44b there friend."

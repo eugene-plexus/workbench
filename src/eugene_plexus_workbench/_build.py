@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 
-COMMIT = "$Format:%H$"
+COMMIT = "ac560253011683002ceea5ace91f15f6e42f736b"
 
 
 def commit() -> str | None:

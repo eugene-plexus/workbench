@@ -98,6 +98,7 @@ class FakeEugene:
     refresh_tokens: dict[str, str] = field(default_factory=dict)
     revoked: list[str] = field(default_factory=list)
     refreshes: int = 0
+    token_calls: int = 0
 
     @property
     def issuer(self) -> str:
@@ -180,6 +181,7 @@ class FakeEugene:
                 return JSONResponse({}, status_code=503)
             if not client_ok(request):
                 return JSONResponse({"error": "invalid_client"}, status_code=401)
+            self.token_calls += 1
             form = await request.form()
             if form["grant_type"] == "authorization_code":
                 found = self.codes.pop(str(form["code"]), None)
