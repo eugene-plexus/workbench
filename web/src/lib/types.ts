@@ -30,6 +30,10 @@ export interface Message {
   finish: string | null;
   createdAt: number;
   finishedAt: number | null;
+  /** Where the text after the reply's last web search begins, in the page's
+   * string length; null when no search marked one (workbench#1). */
+  answerFrom?: number | null;
+  reasoningFrom?: number | null;
 }
 
 export interface ChatSettings {
@@ -89,6 +93,8 @@ export interface Models {
 export interface Progress {
   stage: "prompt" | "working" | "tool";
   tool?: string;
+  /** On `tool`: absent from a gateway before alpha.6, which sends only the start. */
+  phase?: "started" | "finished";
   prompt_tokens?: number;
   cached_tokens?: number;
   processed_tokens?: number;
@@ -105,7 +111,14 @@ export type ChatEvent =
       reasoningAt?: number;
       sources?: Source[];
     }
-  | { type: "progress"; id: string; progress: Progress }
+  | {
+      type: "progress";
+      id: string;
+      progress: Progress;
+      /** Sent when a web search starts or finishes: the answer begins here. */
+      answerFrom?: number;
+      reasoningFrom?: number;
+    }
   | { type: "done"; message: Message }
   | { type: "reload" }
   | { type: "signed-out"; reason: string; message: string };

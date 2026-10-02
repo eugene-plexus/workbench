@@ -4,9 +4,10 @@ The whole conversation travels in each request, as with any OpenAI
 client: the chat's instructions as a `system` message, then every turn.
 A user turn with attachments becomes content parts in OpenAI's shapes
 (`common.yaml` `MessageContentPart`): an image as a `data:` URL, a PDF as a
-file part, audio as `input_audio`. An assistant turn is its text only; an
-answer that failed before it said anything is left out, because the model
-never said it.
+file part, audio as `input_audio`. An assistant turn is its answer only:
+text it wrote before its last web search is a draft and is not sent back
+(workbench#1). An answer that failed before it said anything is left out,
+because the model never said it.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from . import files
+from .answers import answer_text
 from .store import Chat, FileRecord, Message
 
 #: What a chat's settings may hold, and the gateway's name for each.
@@ -73,7 +75,7 @@ def request_for(
         if message.role == "user":
             messages.append({"role": "user", "content": _user_content(message, by_id, root)})
         elif message.role == "assistant" and message.content:
-            messages.append({"role": "assistant", "content": message.content})
+            messages.append({"role": "assistant", "content": answer_text(message)})
     body: dict[str, Any] = {
         "model": model,
         "messages": messages,

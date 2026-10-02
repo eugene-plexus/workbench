@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 
 import type { Message } from "../lib/types";
 import { MessageView } from "./MessageView";
@@ -55,6 +55,61 @@ describe("a searched answer (W6)", () => {
   it("says nothing of a search that did not run", () => {
     show(answer({}));
     expect(screen.queryByTestId("sources")).toBeNull();
+  });
+
+  it("folds away what it wrote before searching and shows the answer after (workbench#1)", () => {
+    const draft = "A first answer 🎉.";
+    show(
+      answer({
+        content: `${draft}\n\nThe answer with results.`,
+        reasoning: "No tools needed.Now with results.",
+        answerFrom: draft.length,
+        reasoningFrom: "No tools needed.".length,
+        searches: 1,
+      }),
+    );
+    const folded = screen.getByTestId("draft");
+    expect(folded).not.toHaveAttribute("open");
+    expect(folded).toHaveTextContent("Written before searching");
+    expect(folded).toHaveTextContent("A first answer 🎉.");
+    expect(screen.getByText("The answer with results.").closest("details")).toBeNull();
+    expect(screen.getByTestId("searched-mark")).toHaveTextContent("Searched the web");
+  });
+
+  it("copies the answer, not the draft", () => {
+    const writeText = vi.fn(() => Promise.resolve());
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    show(answer({ content: "Draft.\n\nThe answer.", answerFrom: 6, searches: 1 }));
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+    expect(writeText).toHaveBeenCalledWith("The answer.");
+  });
+
+  it("keeps the draft folded while the answer after the search has not started", () => {
+    render(
+      <MessageView
+        chatId="c"
+        message={answer({ content: "Draft.", answerFrom: 6, status: "running" })}
+        progress={{ stage: "tool", tool: "web_search", phase: "finished" }}
+        last
+        busy
+        readOnly={false}
+        onChanged={() => undefined}
+      />,
+    );
+    expect(screen.getByTestId("draft")).toHaveTextContent("Draft.");
+    expect(screen.getByTestId("progress")).toHaveTextContent("Reading what the search found");
+  });
+
+  it("shows a reply that stopped right after its search as its answer", () => {
+    show(answer({ content: "Draft.", answerFrom: 6, status: "stopped" }));
+    expect(screen.queryByTestId("draft")).toBeNull();
+    expect(screen.getByText("Draft.")).toBeInTheDocument();
+  });
+
+  it("does not fold a reply that wrote nothing before its search", () => {
+    show(answer({ content: "\n\nOnly an answer.", answerFrom: 0, searches: 1 }));
+    expect(screen.queryByTestId("draft")).toBeNull();
+    expect(screen.queryByTestId("searched-mark")).toBeNull();
   });
 
   it("shows the reasoning folded away, and a failure's own words", () => {

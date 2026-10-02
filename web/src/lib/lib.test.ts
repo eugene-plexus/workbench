@@ -85,6 +85,27 @@ describe("pieces of an answer go where they say (useChat)", () => {
     expect(done.detail.messages[0]!.content).toBe("Whole");
     expect(done.detail.chat.running).toBe(false);
   });
+  it("takes where a search fell from its progress, and nothing else from it", () => {
+    const detail = {
+      chat: { id: "c", running: true },
+      messages: [message({ id: "a", content: "Draft." })],
+      ownerName: null,
+    } as unknown as ChatDetail;
+    const searched = applyEvent(detail, {
+      type: "progress",
+      id: "a",
+      progress: { stage: "tool", tool: "web_search", phase: "started" },
+      answerFrom: 6,
+      reasoningFrom: 0,
+    });
+    expect(searched.detail.messages[0]).toMatchObject({ answerFrom: 6, reasoningFrom: 0 });
+    const reading = applyEvent(searched.detail, {
+      type: "progress",
+      id: "a",
+      progress: { stage: "prompt", prompt_tokens: 10 },
+    });
+    expect(reading.detail.messages[0]).toMatchObject({ answerFrom: 6, content: "Draft." });
+  });
 });
 
 describe("server-sent events", () => {
@@ -104,6 +125,12 @@ describe("what Workbench says", () => {
   it("says what an answer is waiting on", () => {
     expect(progressWords(null)).toBe("Waiting for the model…");
     expect(progressWords({ stage: "tool", tool: "web_search" })).toBe("Searching the web…");
+    expect(progressWords({ stage: "tool", tool: "web_search", phase: "started" })).toBe(
+      "Searching the web…",
+    );
+    expect(progressWords({ stage: "tool", tool: "web_search", phase: "finished" })).toBe(
+      "Reading what the search found…",
+    );
     expect(
       progressWords({
         stage: "prompt",
