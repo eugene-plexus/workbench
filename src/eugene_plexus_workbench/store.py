@@ -3,8 +3,8 @@
 **One interface, SQLite behind it** (`workbench-v1.md` W8). Every read and
 write goes through `Store`'s methods and nothing else names a table, so a
 Postgres store for a business that outgrows SQLite implements this class
-and nothing else changes. No migration tool yet: `SCHEMA_VERSION` and the
-statements under it are the whole history.
+and nothing else changes. No migration tool yet: `SCHEMA_VERSION`, the
+statements under it and `_MIGRATIONS` are the whole history.
 
 **One thread owns the connection.** SQLite is fast, but a write that waits
 on the disk must not stall every stream on the event loop, so each call
@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -75,7 +75,9 @@ CREATE TABLE IF NOT EXISTS messages (
     model TEXT,
     finish TEXT,
     created_at REAL NOT NULL,
-    finished_at REAL
+    finished_at REAL,
+    answer_from INTEGER,
+    reasoning_from INTEGER
 );
 CREATE INDEX IF NOT EXISTS messages_by_chat ON messages (chat_id, seq);
 CREATE TABLE IF NOT EXISTS files (
@@ -90,6 +92,16 @@ CREATE TABLE IF NOT EXISTS files (
 CREATE INDEX IF NOT EXISTS files_by_chat ON files (chat_id);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
+
+#: What brings a store written at version N-1 to N. `_SCHEMA` already holds
+#: the result, for a store made new.
+_MIGRATIONS: dict[int, list[str]] = {
+    # Where a reply's text after its last search begins (workbench#1).
+    2: [
+        "ALTER TABLE messages ADD COLUMN answer_from INTEGER",
+        "ALTER TABLE messages ADD COLUMN reasoning_from INTEGER",
+    ],
+}
 
 
 @dataclass
@@ -145,6 +157,12 @@ class Message:
     model: str | None = None
     finish: str | None = None
     finished_at: float | None = None
+    #: Where the text written after the reply's last web search begins, in
+    #: `content` and `reasoning` (Python indexes). None when nothing marks
+    #: one: no search ran, or the reply predates schema 2. Text before it
+    #: was written before that search (workbench#1).
+    answer_from: int | None = None
+    reasoning_from: int | None = None
 
 
 @dataclass
@@ -189,6 +207,8 @@ def _message(row: sqlite3.Row) -> Message:
         model=row["model"],
         finish=row["finish"],
         finished_at=row["finished_at"],
+        answer_from=row["answer_from"],
+        reasoning_from=row["reasoning_from"],
     )
 
 
@@ -216,6 +236,8 @@ _MESSAGE_FIELDS = {
     "model",
     "finish",
     "finished_at",
+    "answer_from",
+    "reasoning_from",
 }
 _CHAT_FIELDS = {"title", "model", "settings", "search", "updated_at"}
 _JSON_FIELDS = {"attachments", "sources", "settings"}
@@ -252,7 +274,12 @@ class Store:
             db.execute("PRAGMA foreign_keys=ON")
             db.executescript(_SCHEMA)
             found = db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
-            if found is None:
+            if found is not None and int(found["value"]) < SCHEMA_VERSION:
+                for version in range(int(found["value"]) + 1, SCHEMA_VERSION + 1):
+                    for statement in _MIGRATIONS[version]:
+                        db.execute(statement)
+                db.execute("UPDATE meta SET value = ? WHERE key = 'schema'", (str(SCHEMA_VERSION),))
+            elif found is None:
                 db.execute(
                     "INSERT INTO meta (key, value) VALUES ('schema', ?)", (str(SCHEMA_VERSION),)
                 )

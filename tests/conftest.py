@@ -40,6 +40,10 @@ CLIENT_SECRET = "wb-client-secret"
 APP_KEY = "app-key-token"
 ADMIN_TOKEN = "admin-token"
 MODEL = "local-model"
+#: The "draft" mode's text before its search; the emoji is two units in the
+#: page's string length and one in Python's.
+DRAFT = "A first answer 🎉, before searching."
+DRAFT_REASONING = "No tools needed."
 
 
 # --------------------------------------------------------------------------- #
@@ -267,10 +271,12 @@ def chunk(
 class FakeGateway:
     url: str = ""
     requests: list[dict[str, Any]] = field(default_factory=list)
-    #: "answer", "slow", "refuse_key", "refuse_search", "cut"
+    #: "answer", "slow", "refuse_key", "refuse_search", "cut", "draft"
     mode: str = "answer"
     words: list[str] = field(default_factory=lambda: ["Hello", " from", " the", " model."])
     delay: float = 0.0
+    #: The "draft" mode's progress marks around its search.
+    draft_phases: tuple[str | None, ...] = ("started", "finished")
     release: asyncio.Event | None = None
     search: dict[str, Any] = field(default_factory=lambda: {"available": True, "reason": None})
 
@@ -330,7 +336,20 @@ class FakeGateway:
                 yield chunk(
                     choices=False, extension={"progress": {"stage": "prompt", "prompt_tokens": 10}}
                 )
-                if "web_search_options" in body:
+                if self.mode == "draft" and "web_search_options" in body:
+                    # What a local model does under a forced first search
+                    # (gateway#4): a whole answer, then the search, then
+                    # another. The gateway marks the search's start and end.
+                    yield chunk({"reasoning_content": DRAFT_REASONING})
+                    yield chunk({"content": DRAFT})
+                    for phase in self.draft_phases:
+                        tool = {"stage": "tool", "tool": "web_search"}
+                        if phase:  # a gateway before alpha.6 sends no phase
+                            tool["phase"] = phase
+                        yield chunk(choices=False, extension={"progress": tool})
+                    yield chunk({"reasoning_content": "Now with results."})
+                    yield chunk({"content": "\n\n"})
+                elif "web_search_options" in body:
                     yield chunk({"reasoning_content": "Searching first."})
                 for word in self.words:
                     if self.delay:

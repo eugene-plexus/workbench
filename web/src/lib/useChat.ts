@@ -64,6 +64,15 @@ export function applyEvent(detail: ChatDetail, event: ChatEvent): Outcome {
       const known = detail.messages.some((m) => m.id === event.id);
       return { detail: { ...detail, messages }, gap: gap || !known };
     }
+    case "progress": {
+      if (event.answerFrom === undefined) return { detail, gap: false };
+      const messages = detail.messages.map((m) =>
+        m.id === event.id
+          ? { ...m, answerFrom: event.answerFrom, reasoningFrom: event.reasoningFrom }
+          : m,
+      );
+      return { detail: { ...detail, messages }, gap: false };
+    }
     default:
       return { detail, gap: false };
   }

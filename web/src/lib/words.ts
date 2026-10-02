@@ -33,7 +33,8 @@ export function takes(model: Model): string[] {
 export function progressWords(progress: Progress | null | undefined): string {
   if (!progress) return "Waiting for the model…";
   if (progress.stage === "tool") {
-    return progress.tool === "web_search" ? "Searching the web…" : `Using ${progress.tool}…`;
+    if (progress.tool !== "web_search") return `Using ${progress.tool}…`;
+    return progress.phase === "finished" ? "Reading what the search found…" : "Searching the web…";
   }
   if (progress.stage === "prompt" && progress.prompt_tokens) {
     const total = progress.prompt_tokens - (progress.cached_tokens ?? 0);
@@ -46,6 +47,31 @@ export function progressWords(progress: Progress | null | undefined): string {
   }
   return "The model is working…";
 }
+
+/**
+ * A reply split where its last web search fell (workbench#1). A model told
+ * to search can write a whole answer first; that text is a draft, shown
+ * folded, and the answer is what it wrote after reading the results. A reply
+ * that ended before writing anything after its search is all answer.
+ */
+export function answerParts(message: Message): { draft: string; answer: string } {
+  const at = message.answerFrom;
+  if (at == null) return { draft: "", answer: message.content };
+  const answer = message.content.slice(at).replace(/^\s+/, "");
+  if (!answer && message.status !== "running") return { draft: "", answer: message.content };
+  return { draft: message.content.slice(0, at).trim(), answer };
+}
+
+/** The reasoning before and after the last web search, without empty parts. */
+export function reasoningParts(message: Message): string[] {
+  const at = message.reasoningFrom;
+  if (at == null) return [message.reasoning];
+  return [message.reasoning.slice(0, at), message.reasoning.slice(at)].filter((p) => p.trim());
+}
+
+export const DRAFT_LABEL = "Written before searching";
+export const DRAFT_HINT = "The model wrote this before it read what the search found.";
+export const SEARCHED_MARK = "Searched the web";
 
 /** Why an answer is not a finished one, or null when it is. */
 export function statusWords(message: Message): string | null {

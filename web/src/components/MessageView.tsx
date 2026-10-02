@@ -3,7 +3,15 @@ import { useEffect, useState } from "react";
 
 import { fileUrl, post } from "../lib/api";
 import type { AttachedFile, Message, Progress } from "../lib/types";
-import { progressWords, statusWords } from "../lib/words";
+import {
+  answerParts,
+  DRAFT_HINT,
+  DRAFT_LABEL,
+  progressWords,
+  reasoningParts,
+  SEARCHED_MARK,
+  statusWords,
+} from "../lib/words";
 import { Markdown } from "./Markdown";
 
 export function MessageView({
@@ -92,14 +100,39 @@ export function MessageView({
     );
   }
 
-  const waiting = message.status === "running" && !message.content;
+  const { draft, answer } = answerParts(message);
+  const thoughts = reasoningParts(message);
+  const waiting = message.status === "running" && !answer;
   const status = statusWords(message);
   return (
     <article className="flex flex-col gap-2" data-testid="answer" data-status={message.status}>
       {message.reasoning && (
         <details className="rounded-plexus border border-line px-3 py-1.5 text-sm text-muted">
           <summary className="cursor-pointer">Reasoning</summary>
-          <div className="whitespace-pre-wrap pt-1">{message.reasoning}</div>
+          {thoughts.map((thought, i) => (
+            <div key={i}>
+              {i > 0 && (
+                <p className="mt-1 border-t border-line pt-1 text-xs" data-testid="searched-mark">
+                  {SEARCHED_MARK}
+                </p>
+              )}
+              <div className="whitespace-pre-wrap pt-1">{thought}</div>
+            </div>
+          ))}
+        </details>
+      )}
+      {draft && (
+        <details
+          className="rounded-plexus border border-line px-3 py-1.5 text-sm text-muted"
+          data-testid="draft"
+        >
+          <summary className="cursor-pointer" title={DRAFT_HINT}>
+            {DRAFT_LABEL}
+          </summary>
+          <p className="pt-1 text-xs">{DRAFT_HINT}</p>
+          <div className="pt-1">
+            <Markdown text={draft} />
+          </div>
         </details>
       )}
       {waiting && (
@@ -107,7 +140,7 @@ export function MessageView({
           {progressWords(progress)}
         </p>
       )}
-      {message.content && <Markdown text={message.content} />}
+      {answer && <Markdown text={answer} />}
       {(message.sources.length > 0 || message.searches > 0) && (
         <div className="text-sm" data-testid="sources">
           <h3 className="font-semibold">
@@ -152,10 +185,10 @@ export function MessageView({
       )}
       {message.status !== "running" && (
         <div className="flex gap-3 text-xs text-muted">
-          {message.content && (
+          {answer && (
             <button
               type="button"
-              onClick={() => void navigator.clipboard?.writeText(message.content)}
+              onClick={() => void navigator.clipboard?.writeText(answer)}
               className="flex items-center gap-1 hover:text-fg"
             >
               <Copy size={12} aria-hidden /> Copy

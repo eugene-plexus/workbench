@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-from .conftest import ADMIN_TOKEN, MODEL, PNG, World
+from .conftest import ADMIN_TOKEN, DRAFT, DRAFT_REASONING, MODEL, PNG, World
 
 
 def _events(
@@ -220,6 +220,57 @@ def test_a_refused_search_is_shown_with_the_gateways_reason(world: World) -> Non
     assert "tool scope does not include web_search" in answer["error"]
 
 
+def _page_length(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def test_text_written_before_a_search_is_marked_and_not_sent_back(world: World) -> None:
+    """A model told to search can answer first, then search, then answer
+    again (workbench#1): the reply keeps all of it, says where the answer
+    after the search begins, and only that answer goes back as history."""
+    world.gateway.mode = "draft"
+    ada = world.browser()
+    ada.sign_in("p-ada")
+    chat = ada.new_chat()
+    ada.post(f"/api/chats/{chat}/messages", json={"content": "News?", "search": True})
+    answer = ada.wait_answer(chat)
+    assert answer["content"] == DRAFT + "\n\nHello from the model."
+    assert answer["reasoning"] == DRAFT_REASONING + "Now with results."
+    # In the page's string length: the emoji in the draft counts two.
+    assert answer["answerFrom"] == _page_length(DRAFT) == len(DRAFT) + 1
+    assert answer["reasoningFrom"] == len(DRAFT_REASONING)
+
+    ada.post(f"/api/chats/{chat}/messages", json={"content": "And then?"})
+    ada.wait_answer(chat)
+    sent = world.gateway.requests[-1]["messages"]
+    assert [m["role"] for m in sent] == ["user", "assistant", "user"]
+    assert sent[1]["content"] == "Hello from the model.", "the draft is not history"
+
+
+def test_a_search_mark_without_a_phase_still_splits_the_reply(world: World) -> None:
+    """A gateway before alpha.6 sends only the start, with no phase."""
+    world.gateway.mode = "draft"
+    world.gateway.draft_phases = (None,)
+    ada = world.browser()
+    ada.sign_in("p-ada")
+    chat = ada.new_chat()
+    ada.post(f"/api/chats/{chat}/messages", json={"content": "News?", "search": True})
+    answer = ada.wait_answer(chat)
+    assert answer["answerFrom"] == _page_length(DRAFT)
+
+
+def test_a_reply_with_no_search_has_no_mark_and_goes_back_whole(world: World) -> None:
+    ada = world.browser()
+    ada.sign_in("p-ada")
+    chat = ada.new_chat()
+    ada.post(f"/api/chats/{chat}/messages", json={"content": "Hi"})
+    answer = ada.wait_answer(chat)
+    assert answer["answerFrom"] is None and answer["reasoningFrom"] is None
+    ada.post(f"/api/chats/{chat}/messages", json={"content": "Again"})
+    ada.wait_answer(chat)
+    assert world.gateway.requests[-1]["messages"][1]["content"] == "Hello from the model."
+
+
 # --------------------------------------------------------------------------- #
 # the key everyone shares (W11)
 # --------------------------------------------------------------------------- #
@@ -313,8 +364,13 @@ def test_when_the_business_allows_it_the_owner_reads_and_the_person_is_told(
     # Read, never written.
     assert owner.post(f"/api/chats/{chat}/messages", json={"content": "x"}).status_code == 404
     assert owner.delete(f"/api/chats/{chat}").status_code == 404
-    # A member is never an owner, whatever the setting.
+    # A member is never an owner, whatever the setting: not the list, and not
+    # another member's chat.
     assert ada.get("/api/people").status_code == 403
+    bo = world.browser()
+    bo.sign_in("p-bo")
+    assert bo.get(f"/api/chats/{chat}").status_code == 404
+    assert bo.get(f"/api/chats/{chat}/events").status_code == 404
     # And back to the default.
     _owner_reads(world, None)
     assert owner.get(f"/api/chats/{chat}").status_code == 404

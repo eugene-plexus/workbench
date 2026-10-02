@@ -40,6 +40,24 @@ def _js_length(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
+def _js_offset(text: str, index: int | None) -> int | None:
+    """A Python index into `text` as the page counts it."""
+    return None if index is None else _js_length(text[:index])
+
+
+def answer_text(message: Message) -> str:
+    """What the reply answered with: its text after its last web search.
+
+    A model told to search can write a whole answer first and then search
+    (workbench#1); that first text is a draft, not the answer. A reply with
+    no mark, or with nothing after it, is its whole text.
+    """
+    if message.answer_from is None:
+        return message.content
+    after = message.content[message.answer_from :].lstrip()
+    return after or message.content
+
+
 def message_view(message: Message) -> dict[str, Any]:
     """A message as the page reads it."""
     return {
@@ -58,6 +76,8 @@ def message_view(message: Message) -> dict[str, Any]:
         "finish": message.finish,
         "createdAt": message.created_at,
         "finishedAt": message.finished_at,
+        "answerFrom": _js_offset(message.content, message.answer_from),
+        "reasoningFrom": _js_offset(message.reasoning, message.reasoning_from),
     }
 
 
@@ -165,6 +185,8 @@ class Answers:
             "reasoning": m.reasoning,
             "sources": m.sources,
             "searches": m.searches,
+            "answer_from": m.answer_from,
+            "reasoning_from": m.reasoning_from,
         }
         if final:
             values.update(
@@ -213,9 +235,15 @@ class Answers:
             progress = extension.get("progress")
             if isinstance(progress, dict):
                 running.progress = progress
-                self.publish(
-                    running.chat_id, {"type": "progress", "id": m.id, "progress": progress}
-                )
+                said: dict[str, Any] = {"type": "progress", "id": m.id, "progress": progress}
+                if progress.get("stage") == "tool" and progress.get("tool") == "web_search":
+                    # A search starts or finishes here: what the model wrote
+                    # before it is a draft, and its answer comes after. The
+                    # last search's mark wins (workbench#1).
+                    m.answer_from, m.reasoning_from = len(m.content), len(m.reasoning)
+                    said["answerFrom"] = _js_length(m.content)
+                    said["reasoningFrom"] = _js_length(m.reasoning)
+                self.publish(running.chat_id, said)
             return
         choice = choices[0] or {}
         delta = choice.get("delta") or {}
