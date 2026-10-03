@@ -102,6 +102,17 @@ CASES = [
     ),
 ]
 
+if sys.platform.startswith("linux"):
+    CASES.append(
+        (
+            "a moved directory escapes the file boundary",
+            "folder_linux.py",
+            "        _restrict(self.fd, writable)",
+            "        return",
+            "tests/test_folders.py::test_moved_parent_cannot_read_or_create_outside_the_grant",
+        )
+    )
+
 
 def node(test: str) -> str:
     return test if test.startswith("tests/") else f"tests/test_tools.py::{test}"
