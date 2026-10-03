@@ -177,6 +177,7 @@ class Answers:
         message: Message,
         build: Callable[[], Any],
         tool_servers: list[str] | None = None,
+        folder_grants: list[str] | None = None,
     ) -> None:
         """Run the answer `message` holds. `build` makes the request body
         (in a thread: it reads the attachments' bytes)."""
@@ -185,7 +186,8 @@ class Answers:
         running = Running(chat_id=chat_id, message=message)
         self._running[chat_id] = running
         running.task = asyncio.create_task(
-            self._run(running, build, tool_servers or []), name=f"answer-{message.id}"
+            self._run(running, build, tool_servers or [], folder_grants or []),
+            name=f"answer-{message.id}",
         )
 
     def approve(self, chat_id: str, message_id: str, call_id: str, allow: bool) -> bool:
@@ -235,14 +237,18 @@ class Answers:
         running.saved_at = time.perf_counter()
 
     async def _run(
-        self, running: Running, build: Callable[[], Any], tool_servers: list[str]
+        self,
+        running: Running,
+        build: Callable[[], Any],
+        tool_servers: list[str],
+        folder_grants: list[str],
     ) -> None:
         m = running.message
         chat_id = running.chat_id
         try:
             body = await asyncio.to_thread(build)
-            if tool_servers:
-                await self._with_tools(running, body, tool_servers)
+            if tool_servers or folder_grants:
+                await self._with_tools(running, body, tool_servers, folder_grants)
             else:
                 await self._stream(running, body)
             m.status = "done"
@@ -253,7 +259,7 @@ class Answers:
         except ToolError as exc:
             m.status, m.error = "failed", str(exc)
         except Exception as exc:
-            if tool_servers:
+            if tool_servers or folder_grants:
                 # SDK task groups wrap exceptions. Never expose raw transport
                 # errors, which may include a credential or server response.
                 m.status, m.error = "failed", _tool_problem(exc)
@@ -315,14 +321,14 @@ class Answers:
         )
 
     async def _with_tools(
-        self, running: Running, body: dict[str, Any], server_ids: list[str]
+        self, running: Running, body: dict[str, Any], server_ids: list[str], folder_ids: list[str]
     ) -> None:
         if self._tools is None:
             raise ToolError("Tools are unavailable. Restart Workbench and try again.")
         m = running.message
         chat = await self._store.chat(running.chat_id)
         person = await self._store.person(chat.owner) if chat else None
-        async with self._tools.connect(server_ids, person) as session:
+        async with self._tools.connect(server_ids, person, folder_ids) as session:
             if not session.definitions:
                 raise ToolError("The selected servers offer no tools. Check them in Tools.")
             body["tools"] = session.definitions

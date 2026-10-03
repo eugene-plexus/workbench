@@ -58,7 +58,7 @@ export function ToolCalls({
             {labels[call.status]}
           </p>
           <details open={call.status === "pending"}>
-            <summary className="cursor-pointer">Arguments sent to this server</summary>
+            <summary className="cursor-pointer">Arguments for this call</summary>
             <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all py-2">
               {JSON.stringify(call.arguments, null, 2)}
             </pre>

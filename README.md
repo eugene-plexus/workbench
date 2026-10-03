@@ -28,6 +28,7 @@ Workbench's one setting is on its page in the console. It controls whether the o
 - **Attachments**: images (PNG or JPEG), PDFs and audio (WAV or MP3). Each goes to a model that takes that kind of file.
 - **Tools: Search the web**: this runs on the install's search account. When a search cannot run, the switch says why.
 - **MCP tools**: the owner adds shared Streamable HTTP servers in **Toolbox · Tools**. Choose servers in a chat's settings, then approve or decline each proposed call. Credentials stay on the server. Pending approvals expire after 30 minutes; interrupted calls are never automatically repeated.
+- **Folder tools**: the owner grants an existing host folder to a named person in **Toolbox · Tools**. Read-only is the default; text creation and editing are optional. Select folders per chat and approve each listing, read or write. File contents go to the selected model and remain in the chat.
 - **Answers keep going with no tab open**: an answer is saved as it arrives. Close the tab and come back, and it is there.
 
 Network MCP connections use HTTPS, except for loopback HTTP, with an optional bearer credential. They are shared with everyone signed into this Workbench. Tool results and arguments stay with the answer. Stopping or editing a chat does not undo actions already taken.
@@ -36,7 +37,11 @@ Network MCP connections use HTTPS, except for loopback HTTP, with an optional be
 
 Install the program and its dependencies separately, where Workbench's account can execute them; Workbench does not run a package installer or shell command string. On Windows use an `.exe` such as `python.exe` or `node.exe`, putting the script path in Arguments. Keep secrets in environment values, since process lists can show arguments. Stderr is discarded to keep third-party credential output out of shared logs.
 
-Local servers are trusted code in Workbench's account: they can read its files, including people's chats and app credentials. Their separate working folders are **not sandboxes**. Other people cannot list or use them. Folder grants, per-person process isolation, OAuth sign-in to MCP servers, and media screens remain later slices; see the [MCP design](https://github.com/eugene-plexus/specs/blob/main/docs/design/workbench-mcp.md).
+Local servers are trusted code in Workbench's account: they can read its files, including people's chats, app credentials and granted folders. Their separate working folders are **not sandboxes**. Other people cannot list or use them. Per-person process isolation, OAuth sign-in to MCP servers, and media screens remain later slices; see the [MCP design](https://github.com/eugene-plexus/specs/blob/main/docs/design/workbench-mcp.md).
+
+**Folder grants** apply to Workbench's built-in file tools. The machine administrator must first give Workbench's service account access to the specific host folder; saving a grant does not change OS permissions. Windows uses the app's service identity; Linux needs a stable group and systemd configuration. Follow the [folder provisioning guide](https://github.com/eugene-plexus/specs/blob/main/docs/design/workbench-files.md#provisioning-an-existing-folder).
+
+Only the named recipient can use a grant. Removing it blocks pending calls but keeps files and prior chat results. File tools refuse links, special files, replaced folders and Workbench's private storage. Reads accept small UTF-8 text files; edits require the hash from a prior read and refuse changed content. Writes are in place: an interrupted or failed write may leave partial changes and is never automatically repeated. There are no delete, rename or execution operations.
 
 ## Developing
 

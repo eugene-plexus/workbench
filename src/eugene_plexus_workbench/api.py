@@ -244,6 +244,7 @@ class ChatCreate(BaseModel):
 
 class ChatSettings(BaseModel):
     toolServers: list[str] = Field(default_factory=list, max_length=8)
+    folderGrants: list[str] = Field(default_factory=list, max_length=8)
     instructions: str | None = Field(default=None, max_length=20000)
     temperature: float | None = Field(default=None, ge=0, le=2)
     topP: float | None = Field(default=None, gt=0, le=1)
@@ -274,7 +275,10 @@ def chat_view(chat: Chat, *, running: bool, read_only: bool = False) -> dict[str
         "title": chat.title,
         "model": chat.model,
         "search": chat.search,
-        "settings": {k: chat.settings.get(k) for k in ("instructions", "toolServers", *SAMPLING)},
+        "settings": {
+            k: chat.settings.get(k)
+            for k in ("instructions", "toolServers", "folderGrants", *SAMPLING)
+        },
         "createdAt": chat.created_at,
         "updatedAt": chat.updated_at,
         "running": running,
@@ -368,6 +372,14 @@ async def update_chat(request: Request, chat_id: str, body: ChatUpdate) -> dict[
     if body.search is not None:
         values["search"] = body.search
     if body.settings is not None:
+        if "folderGrants" in body.settings.model_fields_set:
+            from .folders import visible
+
+            grants = {
+                g["id"] for g in await _state(request).store.folder_grants() if visible(g, person)
+            }
+            if any(i not in grants for i in body.settings.folderGrants):
+                raise _problem(400, "A selected folder grant was removed or is unavailable to you.")
         if "toolServers" in body.settings.model_fields_set:
             from .tools import visible_server
 
@@ -483,7 +495,13 @@ async def _ask(
     def build() -> dict[str, Any]:
         return request_for(fresh, history, records, root=root, model=model, search=search)
 
-    _answers(request).start(chat.id, answer, build, list(fresh.settings.get("toolServers") or []))
+    _answers(request).start(
+        chat.id,
+        answer,
+        build,
+        list(fresh.settings.get("toolServers") or []),
+        list(fresh.settings.get("folderGrants") or []),
+    )
     return answer
 
 

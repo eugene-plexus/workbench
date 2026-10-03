@@ -75,10 +75,26 @@ export interface ToolServers {
 
 export interface ChatSettings {
   toolServers?: string[] | null;
+  folderGrants?: string[] | null;
   instructions?: string | null;
   temperature?: number | null;
   topP?: number | null;
   maxTokens?: number | null;
+}
+
+export interface FolderGrant {
+  id: string;
+  name: string;
+  subject: string;
+  writable: boolean;
+  usable: boolean;
+  path?: string;
+}
+
+export interface FolderGrants {
+  grants: FolderGrant[];
+  available: boolean;
+  reason: string | null;
 }
 
 export interface Chat {

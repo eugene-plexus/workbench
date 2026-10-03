@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI
 
-from . import api, config, tools_api, web
+from . import api, config, folders_api, tools_api, web
 from ._build import commit
 from .answers import Answers
 from .hub import Hub
@@ -77,5 +77,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(config.router)
     app.include_router(api.router)
     app.include_router(tools_api.router)
+    app.include_router(folders_api.router)
     web.mount(app, web.static_dir(settings.static_dir))
     return app
