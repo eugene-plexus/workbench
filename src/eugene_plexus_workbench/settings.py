@@ -29,5 +29,7 @@ class Settings(BaseSettings):
     oidc_issuer: str | None = None
     oidc_client_id: str | None = None
     oidc_secret_file: Path | None = None
+    #: Set only by the app-account launcher, never a user-facing setting.
+    account_kind: str | None = None
     #: A developer's own build of the front end; the package's otherwise.
     static_dir: Path | None = None

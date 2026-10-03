@@ -15,11 +15,23 @@ try {
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto(`${cfg.url}/#signin=${cfg.secret}`);
   await page.getByRole("button", { name: "Toolbox · Tools", exact: true }).click();
-  await page.getByLabel("Name", { exact: true }).fill("Browser echo");
-  await page.getByLabel("MCP address").fill(cfg.mcp);
-  await page.getByRole("button", { name: "Add server" }).click();
+  if (cfg.local) {
+    await page.getByLabel("Local server name").fill("Browser echo");
+    await page.getByLabel("Full executable path").fill(cfg.local.command);
+    await page.getByLabel("Arguments (JSON array)").fill(JSON.stringify(cfg.local.args));
+    await page
+      .getByLabel("Environment values (JSON object, optional)")
+      .fill(JSON.stringify(cfg.local.environment));
+    await page.getByRole("button", { name: "Save local server" }).click();
+  } else {
+    await page.getByLabel("Name", { exact: true }).fill("Browser echo");
+    await page.getByLabel("MCP address").fill(cfg.mcp);
+    await page.getByRole("button", { name: "Add server" }).click();
+  }
   await page.getByRole("heading", { name: "Browser echo" }).waitFor();
-  await page.getByRole("button", { name: "Check connection" }).click();
+  await page
+    .getByRole("button", { name: cfg.local ? "Start and check" : "Check connection" })
+    .click();
   await page.getByText("Available tools: echo").waitFor();
   await page.getByRole("button", { name: "Back to chat" }).click();
   await page.getByTestId("new-chat").click();

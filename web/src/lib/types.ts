@@ -47,11 +47,30 @@ export interface ToolCall {
   result: string | null;
 }
 
-export interface ToolServer {
+interface ServerIdentity {
   id: string;
   name: string;
-  url: string;
-  hasToken: boolean;
+}
+
+export type ToolServer = ServerIdentity &
+  (
+    | {
+        transport: "http";
+        url: string;
+        hasToken: boolean;
+      }
+    | {
+        transport: "stdio";
+        command: string;
+        args: string[];
+        environmentKeys: string[];
+        access: "owner";
+      }
+  );
+
+export interface ToolServers {
+  servers: ToolServer[];
+  localProcesses: { available: boolean; reason: string | null };
 }
 
 export interface ChatSettings {

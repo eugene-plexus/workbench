@@ -43,7 +43,33 @@ CASES = [
         '                    status="done",',
         "test_restart_keeps_uncertainty_and_cancels_pending",
     ),
+    (
+        "local process starts without an app account",
+        "local_tools.py",
+        '    if settings.account_kind in {"windows_service", "systemd"}:',
+        "    if True:",
+        "tests/test_local_tools.py::test_local_servers_require_launcher_account",
+    ),
+    (
+        "members gain access to local processes",
+        "tools.py",
+        '    return server.get("transport", "http") == "http" or bool(person and person.is_owner)',
+        "    return True",
+        "tests/test_local_tools.py::test_members_cannot_list_select_or_launch_local_servers",
+    ),
+    (
+        "a local process inherits app credentials",
+        "local_tools.py",
+        '    env = {"PATH": path, "PYTHONUNBUFFERED": "1", "PYTHONUTF8": "1", **extra}',
+        '    env = {**os.environ, "PATH": path, "PYTHONUNBUFFERED": "1", '
+        '"PYTHONUTF8": "1", **extra}',
+        "tests/test_local_tools.py::test_local_discovery_approval_and_environment",
+    ),
 ]
+
+
+def node(test: str) -> str:
+    return test if test.startswith("tests/") else f"tests/test_tools.py::{test}"
 
 
 def run(tests: list[str]) -> subprocess.CompletedProcess[str]:
@@ -59,7 +85,7 @@ def run(tests: list[str]) -> subprocess.CompletedProcess[str]:
 
 
 def main() -> int:
-    selected = [f"tests/test_tools.py::{case[4]}" for case in CASES]
+    selected = [node(case[4]) for case in CASES]
     baseline = run(selected)
     if baseline.returncode:
         print(baseline.stdout + baseline.stderr)
@@ -77,7 +103,7 @@ def main() -> int:
         (backup / filename).write_bytes(original)
         try:
             path.write_bytes(text.replace(before, after).encode("utf-8"))
-            result = run([f"tests/test_tools.py::{test}"])
+            result = run([node(test)])
             output = result.stdout + result.stderr
             passed = result.returncode == 1 and "FAILED tests/" in output.replace("\\", "/")
             passed = passed and "ERROR collecting" not in output

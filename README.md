@@ -15,7 +15,7 @@ Install Workbench from **Apps** in Eugene's console. The install does three thin
 
 - it makes Workbench's key;
 - it registers Workbench to sign people in with Eugene;
-- it runs Workbench in an OS account of its own, where the install can make one.
+- it runs Workbench in an OS account of its own. The current catalogue requires a Windows service install or a Linux system install; per-user installs keep their earlier chat-only version until moved to a supported install.
 
 Open it from the same page.
 
@@ -30,7 +30,13 @@ Workbench's one setting is on its page in the console. It controls whether the o
 - **MCP tools**: the owner adds shared Streamable HTTP servers in **Toolbox · Tools**. Choose servers in a chat's settings, then approve or decline each proposed call. Credentials stay on the server. Pending approvals expire after 30 minutes; interrupted calls are never automatically repeated.
 - **Answers keep going with no tab open**: an answer is saved as it arrives. Close the tab and come back, and it is there.
 
-MCP connections use HTTPS, except for loopback HTTP, with an optional bearer credential. They are shared with everyone signed into this Workbench. Tool results and arguments stay with the answer. Stopping or editing a chat does not undo actions already taken. Local MCP commands, OAuth sign-in to MCP servers, folder grants, and media screens are later slices; see the [MCP design](https://github.com/eugene-plexus/specs/blob/main/docs/design/workbench-mcp.md).
+Network MCP connections use HTTPS, except for loopback HTTP, with an optional bearer credential. They are shared with everyone signed into this Workbench. Tool results and arguments stay with the answer. Stopping or editing a chat does not undo actions already taken.
+
+**Local MCP servers** are available to the install owner when the launcher confirms Workbench's own OS account. In Toolbox, save an absolute executable path, a JSON argument array and optional secret environment values. **Start and check** runs it once to discover tools. Selecting it for a chat starts a process for that answer, with approval for each call. At most four local processes can run at once; Stop and graceful shutdown close them. Failed calls are never automatically replayed.
+
+Install the program and its dependencies separately, where Workbench's account can execute them; Workbench does not run a package installer or shell command string. On Windows use an `.exe` such as `python.exe` or `node.exe`, putting the script path in Arguments. Keep secrets in environment values, since process lists can show arguments. Stderr is discarded to keep third-party credential output out of shared logs.
+
+Local servers are trusted code in Workbench's account: they can read its files, including people's chats and app credentials. Their separate working folders are **not sandboxes**. Other people cannot list or use them. Folder grants, per-person process isolation, OAuth sign-in to MCP servers, and media screens remain later slices; see the [MCP design](https://github.com/eugene-plexus/specs/blob/main/docs/design/workbench-mcp.md).
 
 ## Developing
 

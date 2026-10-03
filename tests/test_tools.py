@@ -339,7 +339,8 @@ def test_streamed_calls_are_interleaved_and_bounded() -> None:
 
 
 @pytest.mark.skipif(not os.getenv("WORKBENCH_PLAYWRIGHT"), reason="opt-in system Chrome acceptance")
-def test_tools_in_system_chrome(world: World, remote: Remote, tmp_path: Path) -> None:
+@pytest.mark.parametrize("local", [False, True])
+def test_tools_in_system_chrome(world: World, remote: Remote, tmp_path: Path, local: bool) -> None:
     """npm run build first; WORKBENCH_PLAYWRIGHT names playwright-core's directory."""
     root = Path(__file__).resolve().parents[1]
     built = root / "src/eugene_plexus_workbench/static"
@@ -349,12 +350,18 @@ def test_tools_in_system_chrome(world: World, remote: Remote, tmp_path: Path) ->
     owner = world.browser()
     owner.sign_in("operator")
     world.gateway.mode = "tools"
+    from .test_local_tools import assert_stopped, configuration, events
+
+    record = tmp_path / "browser-processes.jsonl"
+    if local:
+        world.settings.account_kind = "windows_service" if os.name == "nt" else "systemd"
     cfg = tmp_path / "browser.json"
     cfg.write_text(
         json.dumps(
             {
                 "url": world.workbench,
                 "mcp": remote.url,
+                "local": configuration(record) if local else None,
                 "secret": owner.secret,
                 "model": MODEL,
                 "playwright": os.environ["WORKBENCH_PLAYWRIGHT"],
@@ -383,4 +390,10 @@ def test_tools_in_system_chrome(world: World, remote: Remote, tmp_path: Path) ->
         timeout=60,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert remote.calls == ["hello"]
+    if local:
+        assert [r for r in events(record) if r["event"] == "call"] == [
+            {"event": "call", "text": "hello"}
+        ]
+        assert_stopped(record)
+    else:
+        assert remote.calls == ["hello"]

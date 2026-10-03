@@ -1,4 +1,4 @@
-"""MCP connections and protocol translation. No hub credentials or subprocesses.
+"""MCP connections and protocol translation, through HTTP or owner-selected stdio.
 
 Each answer owns its MCP sessions in one task (SDK cancellation scopes must
 exit in the task that entered them). HTTP pools last for that session; the
@@ -24,7 +24,9 @@ from mcp.client.streamable_http import streamable_http_client
 from referencing import Registry
 from referencing.exceptions import NoSuchResource
 
-from .store import Store
+from .local_tools import LocalProcesses, LocalToolError, unavailable
+from .settings import Settings
+from .store import Person, Store
 
 MAX_TOOLS = 64
 MAX_ARGUMENTS = 16_384
@@ -45,8 +47,12 @@ def known_problem(exc: BaseException) -> str | None:
         if id(error) in seen:
             continue
         seen.add(id(error))
-        if isinstance(error, ToolError):
+        if isinstance(error, (ToolError, LocalToolError)):
             return str(error)
+        if isinstance(error, FileNotFoundError):
+            return "The local executable or a file it needs was not found. Check its full path."
+        if isinstance(error, PermissionError):
+            return "Workbench's account cannot start this executable. Check its file permissions."
         if isinstance(error, httpx2.TimeoutException):
             return "The MCP server timed out. Check that it is running and reachable."
         if isinstance(error, httpx2.ConnectError):
@@ -90,8 +96,21 @@ def validate_url(value: str) -> str:
     return value
 
 
-def public_server(server: dict[str, str]) -> dict[str, Any]:
-    return {key: server[key] for key in ("id", "name", "url")} | {"hasToken": bool(server["token"])}
+def public_server(server: dict[str, Any]) -> dict[str, Any]:
+    common = {key: server[key] for key in ("id", "name")}
+    if server.get("transport", "http") == "stdio":
+        return common | {
+            "transport": "stdio",
+            "command": server["command"],
+            "args": server["args"],
+            "environmentKeys": sorted(server["environment"]),
+            "access": "owner",
+        }
+    return common | {"transport": "http", "url": server["url"], "hasToken": bool(server["token"])}
+
+
+def visible_server(server: dict[str, Any], person: Person | None) -> bool:
+    return server.get("transport", "http") == "http" or bool(person and person.is_owner)
 
 
 def _no_resource(uri: str) -> Any:
@@ -165,39 +184,48 @@ class Calls:
 
 
 class Tools:
-    def __init__(self, store: Store) -> None:
+    def __init__(self, store: Store, settings: Settings) -> None:
         self.store = store
+        self.local = LocalProcesses(settings)
         self.tls = ssl.create_default_context()
 
     @asynccontextmanager
-    async def connect(self, ids: list[str]) -> AsyncIterator[ToolSession]:
+    async def connect(
+        self, ids: list[str], person: Person | None = None
+    ) -> AsyncIterator[ToolSession]:
         servers = {s["id"]: s for s in await self.store.tool_servers()}
         if any(i not in servers for i in ids):
             raise ToolError(
                 "A selected tool server was removed. Choose tools again in this chat's settings."
             )
+        if any(not visible_server(servers[i], person) for i in ids):
+            raise ToolError("Only the install owner can use local tool servers.")
         async with AsyncExitStack() as stack:
-            session = ToolSession(self.store)
+            session = ToolSession(self, person)
             for server_id in dict.fromkeys(ids):
                 server = servers[server_id]
                 try:
-                    http = await stack.enter_async_context(
-                        httpx2.AsyncClient(
-                            verify=self.tls,
-                            trust_env=False,
-                            follow_redirects=False,
-                            timeout=120,
-                            headers={"Authorization": f"Bearer {server['token']}"}
-                            if server["token"]
-                            else {},
-                            event_hooks={"response": [_check_response]},
+                    if server["transport"] == "stdio":
+                        transport = self.local.connect(server)
+                    else:
+                        http = await stack.enter_async_context(
+                            httpx2.AsyncClient(
+                                verify=self.tls,
+                                trust_env=False,
+                                follow_redirects=False,
+                                timeout=120,
+                                headers={"Authorization": f"Bearer {server['token']}"}
+                                if server["token"]
+                                else {},
+                                event_hooks={"response": [_check_response]},
+                            )
                         )
-                    )
+                        transport = streamable_http_client(
+                            server["url"], http_client=http, max_sse_event_size=1_048_576
+                        )
                     client = await stack.enter_async_context(
                         Client(
-                            streamable_http_client(
-                                server["url"], http_client=http, max_sse_event_size=1_048_576
-                            ),
+                            transport,
                             read_timeout_seconds=30,
                             cache=None,
                         )
@@ -255,6 +283,12 @@ class Tools:
                 except Exception as exc:
                     if reason := known_problem(exc):
                         raise ToolError(f"{server['name']}: {reason}") from None
+                    if server["transport"] == "stdio":
+                        raise ToolError(
+                            f"{server['name']}: the local server did not complete MCP discovery "
+                            f"({type(exc).__name__}). Check the program, "
+                            "its arguments and dependencies."
+                        ) from None
                     raise ToolError(
                         f"Could not list tools from {server['name']} ({type(exc).__name__}). "
                         "Check its address, credential and availability in Tools."
@@ -289,10 +323,12 @@ class _LimitedBody(httpx2.AsyncByteStream):
 
 
 class ToolSession:
-    def __init__(self, store: Store) -> None:
-        self.store = store
+    def __init__(self, tools: Tools, person: Person | None) -> None:
+        self.store = tools.store
+        self.local = tools.local
+        self.person = person
         self.definitions: list[dict[str, Any]] = []
-        self.tools: dict[str, tuple[dict[str, str], Any, str, dict[str, Any]]] = {}
+        self.tools: dict[str, tuple[dict[str, Any], Any, str, dict[str, Any]]] = {}
 
     def prepare(self, call: dict[str, Any]) -> dict[str, Any]:
         name = call["function"]["name"]
@@ -327,7 +363,16 @@ class ToolSession:
         if call["serverId"] not in {s["id"] for s in await self.store.tool_servers()}:
             call.update(status="cancelled", result="The server was removed. This call did not run.")
             return
-        _, client, tool, _ = self.tools[call["name"]]
+        server, client, tool, _ = self.tools[call["name"]]
+        if server["transport"] == "stdio":
+            person = await self.store.person(self.person.sub) if self.person else None
+            reason = unavailable(self.local.settings)
+            if reason or not visible_server(server, person):
+                call.update(
+                    status="cancelled",
+                    result=reason or "Local tool access was removed. This call did not run.",
+                )
+                return
         try:
             # Session API sends exactly once: no elicitation or header-mismatch retry.
             async with asyncio.timeout(120):

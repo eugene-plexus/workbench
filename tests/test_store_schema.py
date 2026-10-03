@@ -58,7 +58,41 @@ def test_a_schema_1_store_gains_the_marks_and_keeps_its_messages(tmp_path: Path)
     assert message.answer_from == 4 and message.reasoning_from == 0
     with sqlite3.connect(path) as db:
         (version,) = db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
-    assert int(version) == SCHEMA_VERSION == 3
+    assert int(version) == SCHEMA_VERSION == 4
+
+
+def test_schema_3_http_connections_survive_local_server_migration(tmp_path: Path) -> None:
+    path = tmp_path / "schema3.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.executescript(_V1_MESSAGES)
+        for target in (2, 3):
+            for statement in storage._MIGRATIONS[target]:
+                db.execute(statement)
+        db.execute("UPDATE meta SET value = '3' WHERE key = 'schema'")
+        db.execute(
+            "INSERT INTO tool_servers VALUES ('one', 'Saved', 'https://example.org/mcp', 'private')"
+        )
+
+    async def read() -> None:
+        store = Store(path)
+        await store.open()
+        try:
+            [server] = await store.tool_servers()
+            assert server == {
+                "id": "one",
+                "name": "Saved",
+                "url": "https://example.org/mcp",
+                "token": "private",
+                "transport": "http",
+                "command": "",
+                "args": [],
+                "environment": {},
+            }
+        finally:
+            await store.close()
+
+    asyncio.run(read())
+    asyncio.run(read())  # A second boot must not repeat ALTER TABLE.
 
 
 def test_a_new_store_starts_at_the_current_schema(tmp_path: Path) -> None:

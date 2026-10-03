@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -93,7 +93,9 @@ CREATE TABLE IF NOT EXISTS files (
 CREATE INDEX IF NOT EXISTS files_by_chat ON files (chat_id);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS tool_servers (
-    id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL, token TEXT NOT NULL
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL, token TEXT NOT NULL,
+    transport TEXT NOT NULL DEFAULT 'http', command TEXT NOT NULL DEFAULT '',
+    args TEXT NOT NULL DEFAULT '[]', environment TEXT NOT NULL DEFAULT '{}'
 );
 """
 
@@ -105,7 +107,17 @@ _MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE messages ADD COLUMN answer_from INTEGER",
         "ALTER TABLE messages ADD COLUMN reasoning_from INTEGER",
     ],
-    3: ["ALTER TABLE messages ADD COLUMN tool_rounds TEXT NOT NULL DEFAULT '[]'"],
+    3: [
+        "ALTER TABLE messages ADD COLUMN tool_rounds TEXT NOT NULL DEFAULT '[]'",
+        "CREATE TABLE IF NOT EXISTS tool_servers (id TEXT PRIMARY KEY, name TEXT NOT NULL, "
+        "url TEXT NOT NULL, token TEXT NOT NULL)",
+    ],
+    4: [
+        "ALTER TABLE tool_servers ADD COLUMN transport TEXT NOT NULL DEFAULT 'http'",
+        "ALTER TABLE tool_servers ADD COLUMN command TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE tool_servers ADD COLUMN args TEXT NOT NULL DEFAULT '[]'",
+        "ALTER TABLE tool_servers ADD COLUMN environment TEXT NOT NULL DEFAULT '{}'",
+    ],
 }
 
 
@@ -134,9 +146,6 @@ def _initialize_schema(db: sqlite3.Connection, path: Path) -> None:
                 f"{path} has unsupported schema {version}{origin}; this Workbench knows "
                 f"schemas 1 through {SCHEMA_VERSION}. Restore matching software and state."
             )
-        for statement in _SCHEMA.split(";"):
-            if statement.strip():
-                db.execute(statement)
         if version is not None:
             for target in range(version + 1, SCHEMA_VERSION + 1):
                 for statement in _MIGRATIONS[target]:
@@ -160,6 +169,9 @@ def _initialize_schema(db: sqlite3.Connection, path: Path) -> None:
                                 )
                             continue
                     db.execute(statement)
+        for statement in _SCHEMA.split(";"):
+            if statement.strip():
+                db.execute(statement)
         db.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?)",
             (str(SCHEMA_VERSION),),
@@ -685,16 +697,33 @@ class Store:
 
     # --- settings -------------------------------------------------------
 
-    async def tool_servers(self) -> list[dict[str, str]]:
-        return await self._run(
-            lambda: [dict(row) for row in self._conn().execute("SELECT * FROM tool_servers")]
-        )
+    async def tool_servers(self) -> list[dict[str, Any]]:
+        def go() -> list[dict[str, Any]]:
+            rows = []
+            for row in self._conn().execute("SELECT * FROM tool_servers"):
+                server = dict(row)
+                for key in ("args", "environment"):
+                    server[key] = json.loads(server[key])
+                rows.append(server)
+            return rows
 
-    async def add_tool_server(self, server: dict[str, str]) -> None:
+        return await self._run(go)
+
+    async def add_tool_server(self, server: dict[str, Any]) -> None:
         await self._run(
             lambda: self._conn().execute(
-                "INSERT INTO tool_servers (id, name, url, token) VALUES (?, ?, ?, ?)",
-                (server["id"], server["name"], server["url"], server["token"]),
+                "INSERT INTO tool_servers (id, name, url, token, transport, command, args, "
+                "environment) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    server["id"],
+                    server["name"],
+                    server.get("url", ""),
+                    server.get("token", ""),
+                    server.get("transport", "http"),
+                    server.get("command", ""),
+                    json.dumps(server.get("args", [])),
+                    json.dumps(server.get("environment", {})),
+                ),
             )
         )
 

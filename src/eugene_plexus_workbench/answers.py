@@ -320,7 +320,9 @@ class Answers:
         if self._tools is None:
             raise ToolError("Tools are unavailable. Restart Workbench and try again.")
         m = running.message
-        async with self._tools.connect(server_ids) as session:
+        chat = await self._store.chat(running.chat_id)
+        person = await self._store.person(chat.owner) if chat else None
+        async with self._tools.connect(server_ids, person) as session:
             if not session.definitions:
                 raise ToolError("The selected servers offer no tools. Check them in Tools.")
             body["tools"] = session.definitions

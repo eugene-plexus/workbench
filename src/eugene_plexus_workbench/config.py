@@ -39,8 +39,9 @@ FIELDS = [
         description=(
             "When on, the owner of this install can read, but not change, the chats of every "
             "person given Workbench, including chats written before it was turned on, and each "
-            "person sees a line above their chats saying so. When off, nobody can read "
-            "anyone else's chats."
+            "person sees a line above their chats saying so. When off, Workbench's chat pages "
+            "refuse reads of anyone else's chats. Local servers run with Workbench's file "
+            "access, so use only programs trusted with everyone's data."
         ),
         category="people",
         valueType=ConfigValueType.boolean,

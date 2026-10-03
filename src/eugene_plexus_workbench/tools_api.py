@@ -2,26 +2,39 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal, Self
 
 from fastapi import APIRouter, Request, Response
-from pydantic import BaseModel, Field, StrictBool, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 
 from .api import _answers, _new_id, _own_chat, _person, _problem, _state
-from .tools import public_server, validate_url
+from .local_tools import unavailable, validate_process
+from .tools import public_server, validate_url, visible_server
 
 router = APIRouter()
 
 
 class ServerCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=80)
-    url: str = Field(min_length=1, max_length=2048)
+    transport: Literal["http", "stdio"] = "http"
+    url: str = Field(default="", max_length=2048)
     token: str = Field(default="", max_length=4096)
+    command: str = Field(default="", max_length=4096)
+    args: list[str] = Field(default_factory=list, max_length=64)
+    environment: dict[str, str] = Field(default_factory=dict, max_length=64)
 
-    @field_validator("url")
-    @classmethod
-    def check_url(cls, value: str) -> str:
-        return validate_url(value.strip())
+    @model_validator(mode="after")
+    def check_transport(self) -> Self:
+        if self.transport == "http":
+            self.url = validate_url(self.url.strip())
+            if self.command or self.args or self.environment:
+                raise ValueError("A network server uses an address and optional bearer credential.")
+        else:
+            if self.url or self.token:
+                raise ValueError("A local server uses a command, arguments and environment values.")
+            validate_process(self.command, self.args, self.environment)
+        return self
 
     @field_validator("name", "token")
     @classmethod
@@ -43,13 +56,25 @@ async def _owner(request: Request) -> None:
 
 @router.get("/api/tools/servers")
 async def servers(request: Request) -> dict[str, Any]:
-    await _person(request)
-    return {"servers": [public_server(s) for s in await _state(request).store.tool_servers()]}
+    person = await _person(request)
+    reason = unavailable(_state(request).settings)
+    if not person.is_owner:
+        reason = "Only the install owner can use local tool servers."
+    return {
+        "servers": [
+            public_server(s)
+            for s in await _state(request).store.tool_servers()
+            if visible_server(s, person)
+        ],
+        "localProcesses": {"available": reason is None, "reason": reason},
+    }
 
 
 @router.post("/api/tools/servers", status_code=201)
 async def add(request: Request, body: ServerCreate) -> dict[str, Any]:
     await _owner(request)
+    if body.transport == "stdio" and (reason := unavailable(_state(request).settings)):
+        raise _problem(409, reason)
     store = _state(request).store
     if not body.name:
         raise _problem(400, "Give this server a name.")
@@ -69,12 +94,17 @@ async def remove(request: Request, server_id: str) -> Response:
 
 @router.post("/api/tools/servers/{server_id}/check")
 async def check(request: Request, server_id: str) -> dict[str, Any]:
-    await _person(request)
+    person = await _person(request)
+    server = next(
+        (s for s in await _state(request).store.tool_servers() if s["id"] == server_id), None
+    )
+    if server is not None and not visible_server(server, person):
+        raise _problem(403, "Only the install owner can start local tool servers.")
     # The answer runner uses this same discovery path.
     from .answers import _tool_problem
 
     try:
-        async with _state(request).tools.connect([server_id]) as session:
+        async with _state(request).tools.connect([server_id], person) as session:
             return {
                 "tools": [
                     {"name": t[2], "description": d["function"]["description"]}

@@ -45,7 +45,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             http=http,
         )
         hub = Hub(settings.gateway_url, settings.key_file)
-        tools = Tools(store)
+        tools = Tools(store, settings)
         answers = Answers(store, hub, tools)
         app.state.tools = tools
         app.state.store = store
