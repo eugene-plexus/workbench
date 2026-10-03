@@ -27,7 +27,10 @@ Workbench's one setting is on its page in the console. It controls whether the o
 - **Markdown and code**: the model's reasoning is shown folded away.
 - **Attachments**: images (PNG or JPEG), PDFs and audio (WAV or MP3). Each goes to a model that takes that kind of file.
 - **Tools: Search the web**: this runs on the install's search account. When a search cannot run, the switch says why.
+- **MCP tools**: the owner adds shared Streamable HTTP servers in **Tools**. Choose servers in a chat's settings, then approve or decline each proposed call. Credentials stay on the server. Pending approvals expire after 30 minutes; interrupted calls are never automatically repeated.
 - **Answers keep going with no tab open**: an answer is saved as it arrives. Close the tab and come back, and it is there.
+
+MCP connections use HTTPS, except for loopback HTTP, with an optional bearer credential. They are shared with everyone signed into this Workbench. Tool results and arguments stay with the answer. Stopping or editing a chat does not undo actions already taken. Local MCP commands, OAuth sign-in to MCP servers, folder grants, and media screens are later slices; see the [MCP design](https://github.com/eugene-plexus/specs/blob/main/docs/design/workbench-mcp.md).
 
 ## Developing
 
@@ -43,6 +46,12 @@ npm ci
 npm test
 npm run build      # writes src/eugene_plexus_workbench/static/
 ```
+
+`python scripts/check-tools-sabotage.py` checks that removing approval,
+ownership, revocation and interrupted-call guards breaks the behavioral tests,
+then restores the exact working files. Run it alone. For system Chrome coverage,
+build the page and set `WORKBENCH_PLAYWRIGHT` to a `playwright-core` installation
+before running pytest; `WORKBENCH_CHROME` can override the browser executable.
 
 The built page is gitignored on `main`. Eugene's app catalogue installs from a commit on the **`dist`** branch, which is `main` plus that build. A GitHub archive of `main` alone would install with no page.
 

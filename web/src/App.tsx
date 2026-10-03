@@ -4,6 +4,7 @@ import { ChatView } from "./components/ChatView";
 import { Mascot } from "./components/Mascot";
 import { Sidebar } from "./components/Sidebar";
 import { SignIn } from "./components/SignIn";
+import { Tools } from "./components/Tools";
 import { api, onSignedOut, post, SignedOut } from "./lib/api";
 import { takeFragment } from "./lib/session";
 import type { Chat, Me, Models } from "./lib/types";
@@ -25,11 +26,15 @@ export default function App() {
   const [chats, setChats] = useState<Chat[]>([]);
   const [models, setModels] = useState<Models | null>(null);
   const [modelsError, setModelsError] = useState<string | null>(null);
+  const [showTools, setShowTools] = useState(false);
+  const [showChats, setShowChats] = useState(false);
 
   const open = useCallback((id: string | null) => {
     const path = id ? `/chats/${id}` : "/";
     if (window.location.pathname !== path) window.history.pushState(null, "", path);
     setChatId(id);
+    setShowTools(false);
+    setShowChats(false);
   }, []);
 
   useEffect(() => {
@@ -119,19 +124,40 @@ export default function App() {
 
   return (
     <div className="flex h-full">
-      <Sidebar
-        me={phase.me}
-        chats={chats}
-        current={chatId}
-        onOpen={open}
-        onNew={() => void newChat()}
-        onSignOut={async () => {
-          await post("/api/signout").catch(() => undefined);
-          setPhase({ kind: "signed-out", message: "You signed out.", unavailable: null });
-        }}
-      />
-      <main className="flex min-w-0 flex-1 flex-col">
-        {chatId ? (
+      <div className={`${showChats ? "flex" : "hidden"} w-full shrink-0 md:flex md:w-auto`}>
+        <Sidebar
+          me={phase.me}
+          chats={chats}
+          current={chatId}
+          onOpen={open}
+          onClose={() => setShowChats(false)}
+          onNew={() => void newChat()}
+          onSignOut={async () => {
+            await post("/api/signout").catch(() => undefined);
+            setPhase({ kind: "signed-out", message: "You signed out.", unavailable: null });
+          }}
+        />
+      </div>
+      <main className={`${showChats ? "hidden md:flex" : "flex"} min-w-0 flex-1 flex-col`}>
+        <div
+          className={`flex justify-between border-b border-line px-4 py-2 ${showTools ? "md:hidden" : ""}`}
+        >
+          <button
+            onClick={() => setShowChats(true)}
+            className="text-sm text-accent md:hidden"
+            aria-controls="chat-navigation"
+          >
+            Chats
+          </button>
+          {!showTools && (
+            <button onClick={() => setShowTools(true)} className="text-sm text-accent">
+              Tools
+            </button>
+          )}
+        </div>
+        {showTools ? (
+          <Tools owner={phase.me.owner} onClose={() => setShowTools(false)} />
+        ) : chatId ? (
           <ChatView
             key={chatId}
             chatId={chatId}

@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -77,7 +77,8 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at REAL NOT NULL,
     finished_at REAL,
     answer_from INTEGER,
-    reasoning_from INTEGER
+    reasoning_from INTEGER,
+    tool_rounds TEXT NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS messages_by_chat ON messages (chat_id, seq);
 CREATE TABLE IF NOT EXISTS files (
@@ -91,6 +92,9 @@ CREATE TABLE IF NOT EXISTS files (
 );
 CREATE INDEX IF NOT EXISTS files_by_chat ON files (chat_id);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS tool_servers (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL, token TEXT NOT NULL
+);
 """
 
 #: What brings a store written at version N-1 to N. `_SCHEMA` already holds
@@ -101,6 +105,7 @@ _MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE messages ADD COLUMN answer_from INTEGER",
         "ALTER TABLE messages ADD COLUMN reasoning_from INTEGER",
     ],
+    3: ["ALTER TABLE messages ADD COLUMN tool_rounds TEXT NOT NULL DEFAULT '[]'"],
 }
 
 
@@ -224,6 +229,7 @@ class Message:
     #: was written before that search (workbench#1).
     answer_from: int | None = None
     reasoning_from: int | None = None
+    tool_rounds: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -270,6 +276,7 @@ def _message(row: sqlite3.Row) -> Message:
         finished_at=row["finished_at"],
         answer_from=row["answer_from"],
         reasoning_from=row["reasoning_from"],
+        tool_rounds=json.loads(row["tool_rounds"]),
     )
 
 
@@ -299,9 +306,23 @@ _MESSAGE_FIELDS = {
     "finished_at",
     "answer_from",
     "reasoning_from",
+    "tool_rounds",
 }
 _CHAT_FIELDS = {"title", "model", "settings", "search", "updated_at"}
-_JSON_FIELDS = {"attachments", "sources", "settings"}
+_JSON_FIELDS = {"attachments", "sources", "settings", "tool_rounds"}
+
+
+def interrupt_tools(rounds: list[dict[str, Any]]) -> None:
+    for turn in rounds:
+        for call in turn["calls"]:
+            if call["status"] == "running":
+                call.update(
+                    status="uncertain",
+                    result="The call was interrupted. It may have acted. "
+                    "Check the server before trying again.",
+                )
+            elif call["status"] == "pending":
+                call.update(status="cancelled", result="The call was not approved and did not run.")
 
 
 def _encode(column: str, value: Any) -> Any:
@@ -611,6 +632,14 @@ class Store:
         """Boot: an answer still `running` was cut off by a restart (W1)."""
 
         def go() -> int:
+            # A sent call may have acted. Never replay it after a restart.
+            for row in self._conn().execute("SELECT * FROM messages WHERE status = 'running'"):
+                rounds = json.loads(row["tool_rounds"])
+                interrupt_tools(rounds)
+                self._conn().execute(
+                    "UPDATE messages SET tool_rounds = ? WHERE id = ?",
+                    (json.dumps(rounds), row["id"]),
+                )
             cursor = self._conn().execute(
                 "UPDATE messages SET status = 'interrupted', finished_at = ? "
                 "WHERE status = 'running'",
@@ -655,6 +684,24 @@ class Store:
         return await self._run(go)
 
     # --- settings -------------------------------------------------------
+
+    async def tool_servers(self) -> list[dict[str, str]]:
+        return await self._run(
+            lambda: [dict(row) for row in self._conn().execute("SELECT * FROM tool_servers")]
+        )
+
+    async def add_tool_server(self, server: dict[str, str]) -> None:
+        await self._run(
+            lambda: self._conn().execute(
+                "INSERT INTO tool_servers (id, name, url, token) VALUES (?, ?, ?, ?)",
+                (server["id"], server["name"], server["url"], server["token"]),
+            )
+        )
+
+    async def delete_tool_server(self, server_id: str) -> None:
+        await self._run(
+            lambda: self._conn().execute("DELETE FROM tool_servers WHERE id = ?", (server_id,))
+        )
 
     async def setting(self, key: str) -> Any:
         def go() -> Any:

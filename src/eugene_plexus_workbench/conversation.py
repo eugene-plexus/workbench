@@ -19,6 +19,7 @@ from typing import Any
 from . import files
 from .answers import answer_text
 from .store import Chat, FileRecord, Message
+from .tools import transcript
 
 #: What a chat's settings may hold, and the gateway's name for each.
 SAMPLING = {"temperature": "temperature", "topP": "top_p", "maxTokens": "max_tokens"}
@@ -74,8 +75,15 @@ def request_for(
     for message in history:
         if message.role == "user":
             messages.append({"role": "user", "content": _user_content(message, by_id, root)})
-        elif message.role == "assistant" and message.content:
-            messages.append({"role": "assistant", "content": answer_text(message)})
+        elif message.role == "assistant":
+            messages.extend(transcript(message.tool_rounds))
+            answer = (
+                message.content[message.answer_from or 0 :].lstrip()
+                if message.tool_rounds
+                else answer_text(message)
+            )
+            if answer:
+                messages.append({"role": "assistant", "content": answer})
     body: dict[str, Any] = {
         "model": model,
         "messages": messages,

@@ -58,7 +58,7 @@ def test_a_schema_1_store_gains_the_marks_and_keeps_its_messages(tmp_path: Path)
     assert message.answer_from == 4 and message.reasoning_from == 0
     with sqlite3.connect(path) as db:
         (version,) = db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
-    assert int(version) == SCHEMA_VERSION == 2
+    assert int(version) == SCHEMA_VERSION == 3
 
 
 def test_a_new_store_starts_at_the_current_schema(tmp_path: Path) -> None:
@@ -89,7 +89,9 @@ def test_interrupted_legacy_migration_recovers(tmp_path: Path) -> None:
             db.execute("SELECT content FROM messages WHERE id = 'm1'").fetchone()[0]
             == "An answer from before."
         )
-        assert db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()[0] == "2"
+        assert db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()[0] == str(
+            SCHEMA_VERSION
+        )
     finally:
         asyncio.run(store.close())
 

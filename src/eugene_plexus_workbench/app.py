@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI
 
-from . import api, config, web
+from . import api, config, tools_api, web
 from ._build import commit
 from .answers import Answers
 from .hub import Hub
@@ -17,6 +17,7 @@ from .sessions import Sessions
 from .settings import Settings
 from .signin import Provider
 from .store import Store
+from .tools import Tools
 
 log = logging.getLogger(__name__)
 
@@ -44,7 +45,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             http=http,
         )
         hub = Hub(settings.gateway_url, settings.key_file)
-        answers = Answers(store, hub)
+        tools = Tools(store)
+        answers = Answers(store, hub, tools)
+        app.state.tools = tools
         app.state.store = store
         app.state.provider = provider
         app.state.hub = hub
@@ -73,5 +76,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(web.SecurityHeaders)
     app.include_router(config.router)
     app.include_router(api.router)
+    app.include_router(tools_api.router)
     web.mount(app, web.static_dir(settings.static_dir))
     return app
