@@ -1,23 +1,13 @@
 /**
- * Plain words in version 1 (Troy, C3 call 1): the workshop names in
- * workbench.md §6 start when there is more than one tool, so none of them
- * is on screen yet. Read as text, because copy is strings and JSX text,
- * not values a module exports.
+ * C3 call 1 starts workshop names with the second tool. C5a adds MCP, so
+ * Toolbox now carries its plain meaning, Tools. Unbuilt modules keep
+ * waiting. Read copy as strings and JSX text, not exported values.
  */
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-const WORKSHOP = [
-  "Toolbox",
-  "Jigs",
-  "Work orders",
-  "Bins",
-  "Crew",
-  "The shop",
-  "Foreman",
-  "Dispatch",
-];
+const WORKSHOP = ["Jigs", "Work orders", "Bins", "Crew", "The shop", "Foreman", "Dispatch"];
 
 function sources(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
@@ -27,10 +17,13 @@ function sources(dir: string): string[] {
   });
 }
 
-it("puts no workshop name on screen in version 1", () => {
+it("explains Toolbox and keeps unbuilt workshop names off screen", () => {
   const found: string[] = [];
   for (const path of sources(import.meta.dirname)) {
     const text = readFileSync(path, "utf8");
+    if (/\bToolbox\b/.test(text.replaceAll("Toolbox · Tools", ""))) {
+      found.push(`${path}: Toolbox without its plain meaning`);
+    }
     for (const word of WORKSHOP) {
       if (new RegExp(`\\b${word}\\b`).test(text)) found.push(`${path}: ${word}`);
     }

@@ -151,7 +151,7 @@ export default function App() {
           </button>
           {!showTools && (
             <button onClick={() => setShowTools(true)} className="text-sm text-accent">
-              Tools
+              Toolbox · Tools
             </button>
           )}
         </div>

@@ -33,7 +33,7 @@ export function Tools({ owner, onClose }: { owner: boolean; onClose: () => void 
     <section aria-label="Tools" className="min-h-0 flex-1 overflow-y-auto p-4">
       <div className="mx-auto flex max-w-3xl flex-col gap-4">
         <div className="flex items-center justify-between">
-          <h1 className="text-lg font-semibold">Tools</h1>
+          <h1 className="text-lg font-semibold">Toolbox · Tools</h1>
           <button onClick={onClose}>Back to chat</button>
         </div>
         <p className="text-sm text-muted">
@@ -219,7 +219,7 @@ export function ToolSelection({
   }, []);
   return (
     <fieldset className="flex flex-col gap-2 text-sm">
-      <legend className="font-medium">Tools for this chat</legend>
+      <legend className="font-medium">Toolbox · Tools for this chat</legend>
       <p className="text-muted">Applies to the next answer. Each call needs your approval.</p>
       {problem && (
         <p role="alert" className="text-error">
