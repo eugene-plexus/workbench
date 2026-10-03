@@ -15,7 +15,18 @@ try {
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto(`${cfg.url}/#signin=${cfg.secret}`);
   await page.getByRole("button", { name: "Toolbox · Tools", exact: true }).click();
-  if (cfg.local) {
+  const connection = cfg.folder ? "Browser files" : "Browser echo";
+  const prompt = cfg.folder ? "Please use files." : "Please use echo.";
+  if (cfg.folder) {
+    await page.getByLabel("Folder name", { exact: true }).fill(connection);
+    await page.getByLabel("Full folder path on Workbench's host").fill(cfg.folder);
+    await page.getByLabel("Person who can use it").selectOption("operator");
+    await page.getByLabel("Allow creating and editing text files").check();
+    await page.getByRole("button", { name: "Grant folder access", exact: true }).click();
+    await page.getByRole("heading", { name: connection }).waitFor();
+    await page.getByRole("heading", { name: "Folders · File tools" }).scrollIntoViewIfNeeded();
+    await page.screenshot({ path: cfg.screenshot.replace("phone", "folders"), fullPage: true });
+  } else if (cfg.local) {
     await page.getByLabel("Local server name").fill("Browser echo");
     await page.getByLabel("Full executable path").fill(cfg.local.command);
     await page.getByLabel("Arguments (JSON array)").fill(JSON.stringify(cfg.local.args));
@@ -28,20 +39,22 @@ try {
     await page.getByLabel("MCP address").fill(cfg.mcp);
     await page.getByRole("button", { name: "Add server" }).click();
   }
-  await page.getByRole("heading", { name: "Browser echo" }).waitFor();
-  await page
-    .getByRole("button", { name: cfg.local ? "Start and check" : "Check connection" })
-    .click();
-  await page.getByText("Available tools: echo").waitFor();
+  if (!cfg.folder) {
+    await page.getByRole("heading", { name: "Browser echo" }).waitFor();
+    await page
+      .getByRole("button", { name: cfg.local ? "Start and check" : "Check connection" })
+      .click();
+    await page.getByText("Available tools: echo").waitFor();
+  }
   await page.getByRole("button", { name: "Back to chat" }).click();
   await page.getByTestId("new-chat").click();
   await page.getByRole("button", { name: "This chat's settings" }).click();
-  await page.getByRole("checkbox", { name: "Browser echo" }).check();
+  await page.getByRole("checkbox", { name: connection }).check();
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await page.getByText("Saved. The next answer uses these.").waitFor();
   await page.getByRole("button", { name: "Close", exact: true }).click();
   await page.getByTestId("model-picker").selectOption(cfg.model);
-  await page.getByTestId("composer").fill("Please use echo.");
+  await page.getByTestId("composer").fill(prompt);
   await page.getByTestId("send").click();
   await page.getByRole("button", { name: "Approve call" }).waitFor();
   const chat = page.url();
@@ -55,7 +68,7 @@ try {
   await page.getByText("Finished", { exact: true }).waitFor();
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole("button", { name: "Chats", exact: true }).click();
-  await page.getByRole("button", { name: "Please use echo.", exact: true }).click();
+  await page.getByRole("button", { name: prompt, exact: true }).click();
   await page.screenshot({ path: cfg.screenshot, fullPage: true });
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
   if (overflow) throw new Error("Chat overflows the phone viewport");

@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { api, del, post } from "../lib/api";
 import type { ToolServer, ToolServers } from "../lib/types";
 import { LocalToolForm } from "./LocalToolForm";
+import { Folders } from "./Folders";
 
 const problemOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
@@ -47,8 +48,9 @@ export function Tools({ owner, onClose }: { owner: boolean; onClose: () => void 
         </p>
         <p className="text-sm text-muted">
           Network connections are shared with everyone signed into this Workbench. Local servers are
-          available only to the owner. Folder grants are not available yet.
+          available only to the owner. Folder access is assigned separately below.
         </p>
+        <Folders owner={owner} />
         {problem && (
           <p role="alert" className="text-error">
             {problem}

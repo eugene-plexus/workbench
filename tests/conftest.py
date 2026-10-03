@@ -279,6 +279,7 @@ class FakeGateway:
     draft_phases: tuple[str | None, ...] = ("started", "finished")
     release: asyncio.Event | None = None
     tool_arguments: str = '{"text":"hello"}'
+    tool_name: str | None = None
     search: dict[str, Any] = field(default_factory=lambda: {"available": True, "reason": None})
 
     def app(self) -> FastAPI:
@@ -336,6 +337,12 @@ class FakeGateway:
             async def frames() -> AsyncIterator[str]:
                 if self.mode.startswith("tools") and body["messages"][-1]["role"] != "tool":
                     name = body["tools"][0]["function"]["name"]
+                    if self.tool_name:
+                        name = next(
+                            t["function"]["name"]
+                            for t in body["tools"]
+                            if f": {self.tool_name}." in t["function"]["description"]
+                        )
                     if self.mode == "tools-unknown":
                         name = "not_offered"
                     yield chunk({"content": "I will use the tool."})
@@ -480,9 +487,14 @@ class World:
     workbench: str
     data: Path
     settings: Settings
+    server: ServerThread
 
     def browser(self) -> Browser:
         return Browser(self.workbench, self.eugene)
+
+    def restart_workbench(self) -> None:
+        self.server.stop()
+        self.server = ServerThread(create_app(self.settings), self.server.port).start()
 
 
 @pytest.fixture
@@ -506,10 +518,11 @@ def world(tmp_path: Path) -> Iterator[World]:
         static_dir=_static(tmp_path),
     )
     workbench = ServerThread(create_app(settings)).start()
+    world = World(eugene, gateway, workbench.url, tmp_path / "data", settings, workbench)
     try:
-        yield World(eugene, gateway, workbench.url, tmp_path / "data", settings)
+        yield world
     finally:
-        workbench.stop()
+        world.server.stop()
         gateway_server.stop()
         eugene_server.stop()
 

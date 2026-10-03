@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -97,6 +97,10 @@ CREATE TABLE IF NOT EXISTS tool_servers (
     transport TEXT NOT NULL DEFAULT 'http', command TEXT NOT NULL DEFAULT '',
     args TEXT NOT NULL DEFAULT '[]', environment TEXT NOT NULL DEFAULT '{}'
 );
+CREATE TABLE IF NOT EXISTS folder_grants (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL,
+    identity TEXT NOT NULL, subject TEXT NOT NULL, writable INTEGER NOT NULL
+);
 """
 
 #: What brings a store written at version N-1 to N. `_SCHEMA` already holds
@@ -117,6 +121,10 @@ _MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE tool_servers ADD COLUMN command TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE tool_servers ADD COLUMN args TEXT NOT NULL DEFAULT '[]'",
         "ALTER TABLE tool_servers ADD COLUMN environment TEXT NOT NULL DEFAULT '{}'",
+    ],
+    5: [
+        "CREATE TABLE folder_grants (id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL, "
+        "identity TEXT NOT NULL, subject TEXT NOT NULL, writable INTEGER NOT NULL)",
     ],
 }
 
@@ -730,6 +738,25 @@ class Store:
     async def delete_tool_server(self, server_id: str) -> None:
         await self._run(
             lambda: self._conn().execute("DELETE FROM tool_servers WHERE id = ?", (server_id,))
+        )
+
+    async def folder_grants(self) -> list[dict[str, Any]]:
+        return await self._run(
+            lambda: [dict(row) for row in self._conn().execute("SELECT * FROM folder_grants")]
+        )
+
+    async def add_folder_grant(self, grant: dict[str, Any]) -> None:
+        await self._run(
+            lambda: self._conn().execute(
+                "INSERT INTO folder_grants (id, name, path, identity, subject, writable) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                tuple(grant[k] for k in ("id", "name", "path", "identity", "subject", "writable")),
+            )
+        )
+
+    async def delete_folder_grant(self, grant_id: str) -> None:
+        await self._run(
+            lambda: self._conn().execute("DELETE FROM folder_grants WHERE id = ?", (grant_id,))
         )
 
     async def setting(self, key: str) -> Any:

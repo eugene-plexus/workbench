@@ -8,6 +8,7 @@ import { useState } from "react";
 
 import type { ChatSettings as Settings } from "../lib/types";
 import { ToolSelection } from "./Tools";
+import { FolderSelection } from "./Folders";
 
 const FIELDS: {
   key: "temperature" | "topP" | "maxTokens";
@@ -61,9 +62,14 @@ export function ChatSettings({
   const [problem, setProblem] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [toolServers, setToolServers] = useState(settings.toolServers ?? []);
+  const [folderGrants, setFolderGrants] = useState(settings.folderGrants ?? []);
 
   async function save() {
-    const next: Settings = { instructions: instructions.trim() ? instructions : null, toolServers };
+    const next: Settings = {
+      instructions: instructions.trim() ? instructions : null,
+      toolServers,
+      folderGrants,
+    };
     for (const field of FIELDS) {
       const raw = values[field.key]?.trim() ?? "";
       if (!raw) {
@@ -130,6 +136,13 @@ export function ChatSettings({
           selected={toolServers}
           onChange={(ids) => {
             setToolServers(ids);
+            setSaved(false);
+          }}
+        />
+        <FolderSelection
+          selected={folderGrants}
+          onChange={(ids) => {
+            setFolderGrants(ids);
             setSaved(false);
           }}
         />

@@ -4,6 +4,7 @@ import { api, post } from "../lib/api";
 import { Tools, ToolSelection } from "./Tools";
 
 vi.mock("../lib/api", () => ({ api: vi.fn(), post: vi.fn(), del: vi.fn() }));
+vi.mock("./Folders", () => ({ Folders: () => null }));
 
 const server = {
   id: "one",

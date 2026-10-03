@@ -1,4 +1,4 @@
-"""Prove the C5 guards are observed; restore exact working bytes, never Git.
+"""Prove the C5/C6 guards are observed; restore exact working bytes, never Git.
 
 Run alone, after the ordinary test suite. Each mutation must make its
 behavioral test fail; syntax/import errors do not count as a caught defect.
@@ -15,6 +15,41 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "src" / "eugene_plexus_workbench"
 CASES = [
+    (
+        "a folder grant leaks to another person",
+        "folders.py",
+        '    return person is not None and grant["subject"] == person.sub',
+        "    return True",
+        "tests/test_folders.py::test_grants_belong_to_the_named_person_and_read_only_is_enforced",
+    ),
+    (
+        "revoking a folder does nothing",
+        "folders.py",
+        "            await self.store.delete_folder_grant(grant_id)",
+        "            return",
+        "tests/test_folders.py::test_pending_writes_cannot_outlive_permission_or_version[remove]",
+    ),
+    (
+        "an edit overwrites changed content",
+        "folder_io.py",
+        "                if digest != before:",
+        "                if False:",
+        "tests/test_folders.py::test_pending_writes_cannot_outlive_permission_or_version[changed]",
+    ),
+    (
+        "a hard link exposes an outside file",
+        "folder_io.py",
+        "    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:",
+        "    if not stat.S_ISREG(info.st_mode):",
+        "tests/test_folders.py::test_hard_links_and_create_over_existing_are_refused",
+    ),
+    (
+        "a replaced folder inherits the old grant",
+        "folder_io.py",
+        "        if expected is not None and identity(folder.fd) != expected:",
+        "        if False:",
+        "tests/test_folders.py::test_directory_links_and_replaced_roots_are_refused",
+    ),
     (
         "another person approves",
         "tools_api.py",

@@ -24,6 +24,7 @@ from mcp.client.streamable_http import streamable_http_client
 from referencing import Registry
 from referencing.exceptions import NoSuchResource
 
+from . import folder_io, folders
 from .local_tools import LocalProcesses, LocalToolError, unavailable
 from .settings import Settings
 from .store import Person, Store
@@ -187,11 +188,12 @@ class Tools:
     def __init__(self, store: Store, settings: Settings) -> None:
         self.store = store
         self.local = LocalProcesses(settings)
+        self.folders = folders.Folders(store, settings)
         self.tls = ssl.create_default_context()
 
     @asynccontextmanager
     async def connect(
-        self, ids: list[str], person: Person | None = None
+        self, ids: list[str], person: Person | None = None, folder_ids: list[str] | None = None
     ) -> AsyncIterator[ToolSession]:
         servers = {s["id"]: s for s in await self.store.tool_servers()}
         if any(i not in servers for i in ids):
@@ -202,6 +204,18 @@ class Tools:
             raise ToolError("Only the install owner can use local tool servers.")
         async with AsyncExitStack() as stack:
             session = ToolSession(self, person)
+            grants = {
+                g["id"]: g for g in await self.store.folder_grants() if folders.visible(g, person)
+            }
+            if folder_ids and (reason := self.folders.unavailable()):
+                raise ToolError(reason)
+            for grant_id in dict.fromkeys(folder_ids or []):
+                if grant_id not in grants:
+                    raise ToolError("A selected folder grant was removed or is unavailable to you.")
+                grant = grants[grant_id]
+                server = {"id": grant_id, "name": grant["name"], "transport": "folder"}
+                for name, description, schema in folders.definitions(bool(grant["writable"])):
+                    session.add(server, None, name, schema, description)
             for server_id in dict.fromkeys(ids):
                 server = servers[server_id]
                 try:
@@ -242,29 +256,7 @@ class Tools:
                                     "A tool has an unsupported input schema. "
                                     "Ask the server owner to check it."
                                 )
-                            name = (
-                                "mcp_"
-                                + hashlib.sha256(f"{server_id}:{tool.name}".encode()).hexdigest()[
-                                    :48
-                                ]
-                            )
-                            if name in session.tools or len(session.tools) >= MAX_TOOLS:
-                                raise ToolError(
-                                    "The selected servers list too many or duplicate tools. "
-                                    "Select fewer servers."
-                                )
-                            session.tools[name] = (server, client, tool.name, schema)
-                            description = f"{server['name']}: {tool.name}. {tool.description or ''}"
-                            session.definitions.append(
-                                {
-                                    "type": "function",
-                                    "function": {
-                                        "name": name,
-                                        "description": description[:4000],
-                                        "parameters": schema,
-                                    },
-                                }
-                            )
+                            session.add(server, client, tool.name, schema, tool.description or "")
                         cursor = page.next_cursor
                         if cursor is None:
                             break
@@ -326,9 +318,36 @@ class ToolSession:
     def __init__(self, tools: Tools, person: Person | None) -> None:
         self.store = tools.store
         self.local = tools.local
+        self.folders = tools.folders
         self.person = person
         self.definitions: list[dict[str, Any]] = []
         self.tools: dict[str, tuple[dict[str, Any], Any, str, dict[str, Any]]] = {}
+
+    def add(
+        self,
+        server: dict[str, Any],
+        client: Any,
+        tool: str,
+        schema: dict[str, Any],
+        description: str,
+    ) -> None:
+        prefix = "files_" if server["transport"] == "folder" else "mcp_"
+        name = prefix + hashlib.sha256(f"{server['id']}:{tool}".encode()).hexdigest()[:48]
+        if name in self.tools or len(self.tools) >= MAX_TOOLS:
+            raise ToolError(
+                "The selected connections offer too many or duplicate tools. Select fewer."
+            )
+        self.tools[name] = (server, client, tool, schema)
+        self.definitions.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": f"{server['name']}: {tool}. {description}"[:4000],
+                    "parameters": schema,
+                },
+            }
+        )
 
     def prepare(self, call: dict[str, Any]) -> dict[str, Any]:
         name = call["function"]["name"]
@@ -360,10 +379,21 @@ class ToolSession:
         }
 
     async def execute(self, call: dict[str, Any]) -> None:
+        server, client, tool, _ = self.tools[call["name"]]
+        if server["transport"] == "folder":
+            try:
+                file_result = await self.folders.execute(
+                    server["id"], self.person, tool, call["arguments"]
+                )
+                call.update(status="done", result=json.dumps(file_result, ensure_ascii=False))
+            except folder_io.WriteUncertain as exc:
+                call.update(status="uncertain", result=str(exc))
+            except folder_io.FolderError as exc:
+                call.update(status="failed", result=str(exc))
+            return
         if call["serverId"] not in {s["id"] for s in await self.store.tool_servers()}:
             call.update(status="cancelled", result="The server was removed. This call did not run.")
             return
-        server, client, tool, _ = self.tools[call["name"]]
         if server["transport"] == "stdio":
             person = await self.store.person(self.person.sub) if self.person else None
             reason = unavailable(self.local.settings)
