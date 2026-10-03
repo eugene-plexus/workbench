@@ -13,6 +13,7 @@ import {
   statusWords,
 } from "../lib/words";
 import { Markdown } from "./Markdown";
+import { ToolCalls } from "./ToolCalls";
 
 export function MessageView({
   chatId,
@@ -104,6 +105,11 @@ export function MessageView({
   const thoughts = reasoningParts(message);
   const waiting = message.status === "running" && !answer;
   const status = statusWords(message);
+  const hasTools = Boolean(message.toolRounds?.length);
+  const draftLabel = hasTools ? "Written before using tools" : DRAFT_LABEL;
+  const draftHint = hasTools
+    ? "The model wrote this before it received the tool results."
+    : DRAFT_HINT;
   return (
     <article className="flex flex-col gap-2" data-testid="answer" data-status={message.status}>
       {message.reasoning && (
@@ -113,7 +119,7 @@ export function MessageView({
             <div key={i}>
               {i > 0 && (
                 <p className="mt-1 border-t border-line pt-1 text-xs" data-testid="searched-mark">
-                  {SEARCHED_MARK}
+                  {hasTools ? "Used tools" : SEARCHED_MARK}
                 </p>
               )}
               <div className="whitespace-pre-wrap pt-1">{thought}</div>
@@ -126,15 +132,16 @@ export function MessageView({
           className="rounded-plexus border border-line px-3 py-1.5 text-sm text-muted"
           data-testid="draft"
         >
-          <summary className="cursor-pointer" title={DRAFT_HINT}>
-            {DRAFT_LABEL}
+          <summary className="cursor-pointer" title={draftHint}>
+            {draftLabel}
           </summary>
-          <p className="pt-1 text-xs">{DRAFT_HINT}</p>
+          <p className="pt-1 text-xs">{draftHint}</p>
           <div className="pt-1">
             <Markdown text={draft} />
           </div>
         </details>
       )}
+      <ToolCalls chatId={chatId} message={message} readOnly={readOnly} onChanged={onChanged} />
       {waiting && (
         <p aria-live="polite" className="text-muted" data-testid="progress">
           {progressWords(progress)}

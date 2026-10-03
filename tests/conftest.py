@@ -278,6 +278,7 @@ class FakeGateway:
     #: The "draft" mode's progress marks around its search.
     draft_phases: tuple[str | None, ...] = ("started", "finished")
     release: asyncio.Event | None = None
+    tool_arguments: str = '{"text":"hello"}'
     search: dict[str, Any] = field(default_factory=lambda: {"available": True, "reason": None})
 
     def app(self) -> FastAPI:
@@ -333,6 +334,40 @@ class FakeGateway:
                 )
 
             async def frames() -> AsyncIterator[str]:
+                if self.mode.startswith("tools") and body["messages"][-1]["role"] != "tool":
+                    name = body["tools"][0]["function"]["name"]
+                    if self.mode == "tools-unknown":
+                        name = "not_offered"
+                    yield chunk({"content": "I will use the tool."})
+                    yield chunk(
+                        {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": name,
+                                        "arguments": self.tool_arguments[:5],
+                                    },
+                                }
+                            ]
+                        }
+                    )
+                    yield chunk(
+                        {
+                            "tool_calls": [
+                                {"index": 0, "function": {"arguments": self.tool_arguments[5:]}}
+                            ]
+                        }
+                    )
+                    yield chunk(
+                        {},
+                        finish="length" if self.mode == "tools-cut" else "tool_calls",
+                        extension={"web_searches": 1 if "web_search_options" in body else 0},
+                    )
+                    yield "data: [DONE]\n\n"
+                    return
                 yield chunk(
                     choices=False, extension={"progress": {"stage": "prompt", "prompt_tokens": 10}}
                 )

@@ -34,9 +34,28 @@ export interface Message {
    * string length; null when no search marked one (workbench#1). */
   answerFrom?: number | null;
   reasoningFrom?: number | null;
+  toolRounds?: { calls: ToolCall[] }[];
+}
+
+export interface ToolCall {
+  id: string;
+  serverId: string;
+  serverName: string;
+  tool: string;
+  arguments: Record<string, unknown>;
+  status: "pending" | "running" | "done" | "declined" | "cancelled" | "failed" | "uncertain";
+  result: string | null;
+}
+
+export interface ToolServer {
+  id: string;
+  name: string;
+  url: string;
+  hasToken: boolean;
 }
 
 export interface ChatSettings {
+  toolServers?: string[] | null;
   instructions?: string | null;
   temperature?: number | null;
   topP?: number | null;
@@ -94,7 +113,7 @@ export interface Progress {
   stage: "prompt" | "working" | "tool";
   tool?: string;
   /** On `tool`: absent from a gateway before alpha.6, which sends only the start. */
-  phase?: "started" | "finished";
+  phase?: "started" | "finished" | "approval";
   prompt_tokens?: number;
   cached_tokens?: number;
   processed_tokens?: number;

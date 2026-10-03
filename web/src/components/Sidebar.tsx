@@ -1,4 +1,4 @@
-import { Eye, LogOut, Plus } from "lucide-react";
+import { Eye, LogOut, Plus, X } from "lucide-react";
 import { useState } from "react";
 
 import { api } from "../lib/api";
@@ -11,6 +11,7 @@ export function Sidebar({
   chats,
   current,
   onOpen,
+  onClose,
   onNew,
   onSignOut,
 }: {
@@ -18,17 +19,26 @@ export function Sidebar({
   chats: Chat[];
   current: string | null;
   onOpen: (id: string) => void;
+  onClose: () => void;
   onNew: () => void;
   onSignOut: () => void;
 }) {
   return (
     <nav
+      id="chat-navigation"
       aria-label="Chats"
-      className="flex w-72 shrink-0 flex-col border-r border-line bg-panel max-md:w-56"
+      className="flex w-full shrink-0 flex-col border-r border-line bg-panel md:w-72"
     >
       <div className="flex items-center gap-2 px-4 py-3">
         <Logo />
         <span className="text-lg font-semibold">Workbench</span>
+        <button
+          onClick={onClose}
+          aria-label="Back to chat"
+          className="ml-auto rounded-plexus p-2 md:hidden"
+        >
+          <X size={18} />
+        </button>
       </div>
       <div className="px-3">
         <button

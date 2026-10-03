@@ -33,6 +33,7 @@ export function takes(model: Model): string[] {
 export function progressWords(progress: Progress | null | undefined): string {
   if (!progress) return "Waiting for the model…";
   if (progress.stage === "tool") {
+    if (progress.phase === "approval") return "Review the tool calls to continue.";
     if (progress.tool !== "web_search") return `Using ${progress.tool}…`;
     return progress.phase === "finished" ? "Reading what the search found…" : "Searching the web…";
   }

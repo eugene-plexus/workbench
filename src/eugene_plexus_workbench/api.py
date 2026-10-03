@@ -243,6 +243,7 @@ class ChatCreate(BaseModel):
 
 
 class ChatSettings(BaseModel):
+    toolServers: list[str] = Field(default_factory=list, max_length=8)
     instructions: str | None = Field(default=None, max_length=20000)
     temperature: float | None = Field(default=None, ge=0, le=2)
     topP: float | None = Field(default=None, gt=0, le=1)
@@ -273,7 +274,7 @@ def chat_view(chat: Chat, *, running: bool, read_only: bool = False) -> dict[str
         "title": chat.title,
         "model": chat.model,
         "search": chat.search,
-        "settings": {k: chat.settings.get(k) for k in ("instructions", *SAMPLING)},
+        "settings": {k: chat.settings.get(k) for k in ("instructions", "toolServers", *SAMPLING)},
         "createdAt": chat.created_at,
         "updatedAt": chat.updated_at,
         "running": running,
@@ -367,6 +368,10 @@ async def update_chat(request: Request, chat_id: str, body: ChatUpdate) -> dict[
     if body.search is not None:
         values["search"] = body.search
     if body.settings is not None:
+        if "toolServers" in body.settings.model_fields_set:
+            servers = {s["id"] for s in await _state(request).store.tool_servers()}
+            if any(i not in servers for i in body.settings.toolServers):
+                raise _problem(400, "A selected tool server was removed. Choose tools again.")
         # Only the fields sent change; a `null` returns one to the model's own.
         merged = dict(chat.settings)
         merged.update(body.settings.model_dump(exclude_unset=True))
@@ -468,7 +473,7 @@ async def _ask(
     def build() -> dict[str, Any]:
         return request_for(fresh, history, records, root=root, model=model, search=search)
 
-    _answers(request).start(chat.id, answer, build)
+    _answers(request).start(chat.id, answer, build, list(fresh.settings.get("toolServers") or []))
     return answer
 
 

@@ -29,6 +29,10 @@ dependencies = [
     "pydantic-settings>=2.6,<3",
     # Every model and every search is an HTTP call to the gateway.
     "httpx>=0.27,<1",
+    "mcp>=2.3,<2.4",
+    "httpx2>=2.10,<3",
+    "jsonschema>=4.20,<5",
+    "referencing>=0.37,<1",
     # Signing in with Eugene (C2) is OpenID Connect; Authlib is the client
     # library Open WebUI uses, and joserfc (its JOSE half) checks ID tokens.
     "authlib>=1.8,<2",
@@ -115,7 +119,7 @@ module = "eugene_plexus_workbench._generated.*"
 ignore_errors = true
 
 [[tool.mypy.overrides]]
-module = ["authlib.*"]
+module = ["authlib.*", "jsonschema.*"]
 ignore_missing_imports = true
 
 # -----------------------------------------------------------------------------

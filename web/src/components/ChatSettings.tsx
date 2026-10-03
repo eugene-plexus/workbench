@@ -7,6 +7,7 @@
 import { useState } from "react";
 
 import type { ChatSettings as Settings } from "../lib/types";
+import { ToolSelection } from "./Tools";
 
 const FIELDS: {
   key: "temperature" | "topP" | "maxTokens";
@@ -59,9 +60,10 @@ export function ChatSettings({
   );
   const [problem, setProblem] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [toolServers, setToolServers] = useState(settings.toolServers ?? []);
 
   async function save() {
-    const next: Settings = { instructions: instructions.trim() ? instructions : null };
+    const next: Settings = { instructions: instructions.trim() ? instructions : null, toolServers };
     for (const field of FIELDS) {
       const raw = values[field.key]?.trim() ?? "";
       if (!raw) {
@@ -89,7 +91,7 @@ export function ChatSettings({
   return (
     <section
       aria-label="This chat's settings"
-      className="border-b border-line bg-panel px-4 py-3"
+      className="max-h-[60vh] shrink-0 overflow-y-auto border-b border-line bg-panel px-4 py-3"
       data-testid="chat-settings"
     >
       <div className="mx-auto flex max-w-3xl flex-col gap-3">
@@ -124,6 +126,13 @@ export function ChatSettings({
             </label>
           ))}
         </div>
+        <ToolSelection
+          selected={toolServers}
+          onChange={(ids) => {
+            setToolServers(ids);
+            setSaved(false);
+          }}
+        />
         {problem && (
           <p role="alert" className="text-sm text-error">
             {problem}
