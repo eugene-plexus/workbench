@@ -104,6 +104,67 @@ _MIGRATIONS: dict[int, list[str]] = {
 }
 
 
+def _initialize_schema(db: sqlite3.Connection, path: Path) -> None:
+    """Commit schema changes and their version together, including first boot.
+
+    Do not use executescript here: it commits an existing transaction. The
+    schema contains only individual DDL statements, with no triggers or scripts.
+    Version 2 also accepts the partial additions left by the old autocommit
+    migration runner; subsequent migrations must be transactional.
+    """
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        has_meta = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
+        ).fetchone()
+        found = (
+            db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
+            if has_meta
+            else None
+        )
+        version = int(found[0]) if found is not None else None
+        if version is not None and (version < 1 or version > SCHEMA_VERSION):
+            origin = " from a newer Workbench" if version > SCHEMA_VERSION else ""
+            raise RuntimeError(
+                f"{path} has unsupported schema {version}{origin}; this Workbench knows "
+                f"schemas 1 through {SCHEMA_VERSION}. Restore matching software and state."
+            )
+        for statement in _SCHEMA.split(";"):
+            if statement.strip():
+                db.execute(statement)
+        if version is not None:
+            for target in range(version + 1, SCHEMA_VERSION + 1):
+                for statement in _MIGRATIONS[target]:
+                    if target == 2:
+                        columns = {
+                            row[1]: row[2] for row in db.execute("PRAGMA table_info(messages)")
+                        }
+                        partial = next(
+                            (
+                                name
+                                for name in ("answer_from", "reasoning_from")
+                                if statement == f"ALTER TABLE messages ADD COLUMN {name} INTEGER"
+                                and name in columns
+                            ),
+                            None,
+                        )
+                        if partial is not None:
+                            if columns[partial].upper() != "INTEGER":
+                                raise RuntimeError(
+                                    f"{path}: incompatible partial migration: {partial}"
+                                )
+                            continue
+                    db.execute(statement)
+        db.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?)",
+            (str(SCHEMA_VERSION),),
+        )
+        db.execute("COMMIT")
+    except BaseException:
+        db.execute("ROLLBACK")
+        raise
+
+
 @dataclass
 class Person:
     sub: str
@@ -272,22 +333,11 @@ class Store:
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA journal_mode=WAL")
             db.execute("PRAGMA foreign_keys=ON")
-            db.executescript(_SCHEMA)
-            found = db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
-            if found is not None and int(found["value"]) < SCHEMA_VERSION:
-                for version in range(int(found["value"]) + 1, SCHEMA_VERSION + 1):
-                    for statement in _MIGRATIONS[version]:
-                        db.execute(statement)
-                db.execute("UPDATE meta SET value = ? WHERE key = 'schema'", (str(SCHEMA_VERSION),))
-            elif found is None:
-                db.execute(
-                    "INSERT INTO meta (key, value) VALUES ('schema', ?)", (str(SCHEMA_VERSION),)
-                )
-            elif int(found["value"]) > SCHEMA_VERSION:
-                raise RuntimeError(
-                    f"{self._path} was written by a newer Workbench (schema {found['value']}, "
-                    f"this one knows {SCHEMA_VERSION}); install that version again"
-                )
+            try:
+                _initialize_schema(db, self._path)
+            except BaseException:
+                db.close()
+                raise
             self._db = db
         return self._db
 

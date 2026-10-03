@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from eugene_plexus_workbench import store as storage
 from eugene_plexus_workbench.answers import answer_text, message_view
 from eugene_plexus_workbench.store import SCHEMA_VERSION, Message, Store
 
@@ -74,6 +75,57 @@ def test_a_new_store_starts_at_the_current_schema(tmp_path: Path) -> None:
         columns = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
     assert int(version) == SCHEMA_VERSION
     assert {"answer_from", "reasoning_from"} <= columns
+
+
+def test_interrupted_legacy_migration_recovers(tmp_path: Path) -> None:
+    path = tmp_path / "partial.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.executescript(_V1_MESSAGES)
+        db.execute("ALTER TABLE messages ADD COLUMN answer_from INTEGER")
+    store = Store(path)
+    try:
+        db = store._conn()
+        assert (
+            db.execute("SELECT content FROM messages WHERE id = 'm1'").fetchone()[0]
+            == "An answer from before."
+        )
+        assert db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()[0] == "2"
+    finally:
+        asyncio.run(store.close())
+
+
+def test_failed_migration_rolls_back_columns_and_version(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "failed.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.executescript(_V1_MESSAGES)
+    monkeypatch.setitem(storage._MIGRATIONS, 2, [storage._MIGRATIONS[2][0], "INVALID SQL"])
+    store = Store(path)
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            store._conn()
+    finally:
+        asyncio.run(store.close())
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()[0] == "1"
+        assert "answer_from" not in {row[1] for row in db.execute("PRAGMA table_info(messages)")}
+
+
+def test_future_schema_is_refused_before_creating_tables(tmp_path: Path) -> None:
+    path = tmp_path / "future.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.executescript(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT); INSERT INTO meta VALUES ('schema', '999');"
+        )
+    store = Store(path)
+    try:
+        with pytest.raises(RuntimeError, match="unsupported schema 999"):
+            store._conn()
+    finally:
+        asyncio.run(store.close())
+    with sqlite3.connect(path) as db:
+        assert [
+            r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        ] == ["meta"]
 
 
 @pytest.mark.parametrize(
