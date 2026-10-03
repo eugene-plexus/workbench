@@ -264,7 +264,9 @@ export function Composer({
               ))}
             </select>
           </label>
-          <span className="text-muted">Tools:</span>
+          <span className="text-muted" title="Tools the model can use">
+            Toolbox · Tools:
+          </span>
           <label className="flex items-center gap-1" title={searchOff ?? SEARCH_HINT}>
             <input
               type="checkbox"

@@ -14,7 +14,7 @@ try {
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto(`${cfg.url}/#signin=${cfg.secret}`);
-  await page.getByRole("button", { name: "Tools", exact: true }).click();
+  await page.getByRole("button", { name: "Toolbox · Tools", exact: true }).click();
   await page.getByLabel("Name", { exact: true }).fill("Browser echo");
   await page.getByLabel("MCP address").fill(cfg.mcp);
   await page.getByRole("button", { name: "Add server" }).click();
