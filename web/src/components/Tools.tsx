@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 
 import { api, del, post } from "../lib/api";
-import type { ToolServer } from "../lib/types";
+import type { ToolServer, ToolServers } from "../lib/types";
+import { LocalToolForm } from "./LocalToolForm";
 
 const problemOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
@@ -14,12 +15,16 @@ export function Tools({ owner, onClose }: { owner: boolean; onClose: () => void 
   const [busy, setBusy] = useState(false);
   const [remove, setRemove] = useState<string | null>(null);
   const [checks, setChecks] = useState<Record<string, string>>({});
+  const [local, setLocal] = useState<ToolServers["localProcesses"] | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    void api<{ servers: ToolServer[] }>("/api/tools/servers")
+    void api<ToolServers>("/api/tools/servers")
       .then((result) => {
-        if (!cancelled) setServers(result.servers);
+        if (!cancelled) {
+          setServers(result.servers);
+          setLocal(result.localProcesses);
+        }
       })
       .catch((error) => {
         if (!cancelled) setProblem(problemOf(error));
@@ -41,8 +46,8 @@ export function Tools({ owner, onClose }: { owner: boolean; onClose: () => void 
           will send and waits for your approval.
         </p>
         <p className="text-sm text-muted">
-          These connections are shared with everyone signed into this Workbench. Local server
-          commands and folder access are not available yet.
+          Network connections are shared with everyone signed into this Workbench. Local servers are
+          available only to the owner. Folder grants are not available yet.
         </p>
         {problem && (
           <p role="alert" className="text-error">
@@ -55,13 +60,32 @@ export function Tools({ owner, onClose }: { owner: boolean; onClose: () => void 
             className="flex flex-col gap-2 rounded-plexus border border-line p-3"
           >
             <h2 className="font-semibold">{server.name}</h2>
-            <p className="break-all text-sm text-muted">{server.url}</p>
-            <p className="text-sm">
-              {server.hasToken ? "A credential is stored." : "No credential is stored."}
-            </p>
+            {server.transport === "stdio" ? (
+              <>
+                <p className="text-sm">Local server · Owner only</p>
+                <p className="break-all text-sm text-muted">{server.command}</p>
+                <pre className="whitespace-pre-wrap break-all text-sm">
+                  {JSON.stringify(server.args)}
+                </pre>
+                <p className="text-sm">
+                  Stored environment names: {server.environmentKeys.join(", ") || "none"}
+                </p>
+                <p className="text-sm text-muted">
+                  Checking starts the program, then closes it. A chat starts its own process for
+                  each answer.
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="break-all text-sm text-muted">{server.url}</p>
+                <p className="text-sm">
+                  {server.hasToken ? "A credential is stored." : "No credential is stored."}
+                </p>
+              </>
+            )}
             <div className="flex flex-wrap gap-3 text-sm">
               <button
-                disabled={busy}
+                disabled={busy || (server.transport === "stdio" && !local?.available)}
                 onClick={async () => {
                   setBusy(true);
                   try {
@@ -81,12 +105,15 @@ export function Tools({ owner, onClose }: { owner: boolean; onClose: () => void 
                   }
                 }}
               >
-                Check connection
+                {server.transport === "stdio" ? "Start and check" : "Check connection"}
               </button>
               {owner &&
                 (remove === server.id ? (
                   <>
-                    <span>Remove this shared connection? Pending calls will not run.</span>
+                    <span>
+                      Remove this connection? Pending calls will not run. Saved server files will
+                      remain.
+                    </span>
                     <button
                       disabled={busy}
                       onClick={async () => {
@@ -117,6 +144,13 @@ export function Tools({ owner, onClose }: { owner: boolean; onClose: () => void 
             )}
           </article>
         ))}
+        {owner &&
+          local &&
+          (local.available ? (
+            <LocalToolForm onAdded={(server) => setServers((old) => [...old, server])} />
+          ) : (
+            <p className="text-sm text-muted">{local.reason}</p>
+          ))}
         {owner ? (
           <form
             className="flex flex-col gap-3 rounded-plexus border border-line p-3"
@@ -137,7 +171,7 @@ export function Tools({ owner, onClose }: { owner: boolean; onClose: () => void 
               }
             }}
           >
-            <h2 className="font-semibold">Add a shared server</h2>
+            <h2 className="font-semibold">Add a shared network server</h2>
             <label className="flex flex-col gap-1 text-sm">
               Name
               <input
@@ -227,7 +261,7 @@ export function ToolSelection({
         </p>
       )}
       {servers === null && !problem && <p>Loading servers…</p>}
-      {servers?.length === 0 && <p>No shared servers. The owner can add one in Tools.</p>}
+      {servers?.length === 0 && <p>No servers available. The owner can add one in Tools.</p>}
       {servers?.map((server) => (
         <label key={server.id} className="flex items-center gap-2">
           <input
@@ -242,6 +276,7 @@ export function ToolSelection({
             }
           />
           {server.name}
+          {server.transport === "stdio" ? " · Local, owner only" : ""}
         </label>
       ))}
       {servers &&
@@ -254,7 +289,7 @@ export function ToolSelection({
                 checked
                 onChange={() => onChange(selected.filter((i) => i !== id))}
               />
-              Removed server — uncheck to clear it
+              Removed or unavailable server — uncheck to clear it
             </label>
           ))}
     </fieldset>

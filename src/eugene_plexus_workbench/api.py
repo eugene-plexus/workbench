@@ -369,9 +369,19 @@ async def update_chat(request: Request, chat_id: str, body: ChatUpdate) -> dict[
         values["search"] = body.search
     if body.settings is not None:
         if "toolServers" in body.settings.model_fields_set:
-            servers = {s["id"] for s in await _state(request).store.tool_servers()}
+            from .tools import visible_server
+
+            servers = {
+                s["id"]
+                for s in await _state(request).store.tool_servers()
+                if visible_server(s, person)
+            }
             if any(i not in servers for i in body.settings.toolServers):
-                raise _problem(400, "A selected tool server was removed. Choose tools again.")
+                raise _problem(
+                    400,
+                    "A selected tool server was removed or is unavailable to you. "
+                    "Choose tools again.",
+                )
         # Only the fields sent change; a `null` returns one to the model's own.
         merged = dict(chat.settings)
         merged.update(body.settings.model_dump(exclude_unset=True))
