@@ -270,6 +270,22 @@ def test_path_replacement_cannot_change_the_opened_file(
     outside = tmp_path / "private.txt"
     outside.write_text("Private", encoding="utf-8")
     original = folder_io._read
+    move, moved = threading.Event(), threading.Event()
+    host_errors: list[BaseException] = []
+
+    def host_replace() -> None:
+        try:
+            assert move.wait(5)
+            file.rename(folder / "old.txt")
+            file.symlink_to(outside)
+        except BaseException as exc:
+            host_errors.append(exc)
+        finally:
+            moved.set()
+
+    host = threading.Thread(target=host_replace) if os.name != "nt" else None
+    if host:
+        host.start()  # Host editor is outside the file worker's Landlock domain.
 
     def replace_after_open(fd: int) -> tuple[str, str]:
         if os.name == "nt":
@@ -277,16 +293,78 @@ def test_path_replacement_cannot_change_the_opened_file(
             with pytest.raises(PermissionError):
                 file.rename(folder / "old.txt")
         else:
-            file.rename(folder / "old.txt")
-            file.symlink_to(outside)
+            move.set()
+            assert moved.wait(5)
+            assert not host_errors
         return original(fd)
 
     monkeypatch.setattr(folder_io, "_read", replace_after_open)
-    got = folder_io.operate(
-        str(folder), folder_io.inspect(str(folder), []), "read_text", {"path": "read.txt"}, []
-    )
+    try:
+        got = folder_io.operate(
+            str(folder), folder_io.inspect(str(folder), []), "read_text", {"path": "read.txt"}, []
+        )
+    finally:
+        move.set()
+        if host:
+            host.join()
     assert got["text"] == "Granted"
     assert outside.read_text() == "Private"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Linux Landlock boundary")
+@pytest.mark.parametrize("write", [False, True])
+def test_moved_parent_cannot_read_or_create_outside_the_grant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, write: bool
+) -> None:
+    from eugene_plexus_workbench import folder_linux
+
+    folder = tmp_path / "grant"
+    child = folder / "child"
+    child.mkdir(parents=True)
+    outside = tmp_path / "moved"
+    move, moved = threading.Event(), threading.Event()
+    host_errors: list[BaseException] = []
+
+    def host_move() -> None:
+        try:
+            assert move.wait(5)
+            child.rename(outside)
+            (outside / "private.txt").write_text("Private", encoding="utf-8")
+        except BaseException as exc:
+            host_errors.append(exc)
+        finally:
+            moved.set()
+
+    host = threading.Thread(target=host_move)
+    host.start()
+    opening = folder_linux._open
+    name = "new.txt" if write else "private.txt"
+
+    def move_before_open(parent: int | None, value: str, flags: int) -> int:
+        if value == name:
+            move.set()
+            assert moved.wait(5)
+            assert not host_errors
+        return opening(parent, value, flags)
+
+    monkeypatch.setattr(folder_linux, "_open", move_before_open)
+    arguments = {"path": f"child/{name}"}
+    if write:
+        arguments.update(text="Must not be written", expectedSha256="")
+    try:
+        with pytest.raises(PermissionError):
+            folder_io.operate(
+                str(folder),
+                folder_io.inspect(str(folder), []),
+                "write_text" if write else "read_text",
+                arguments,
+                [],
+            )
+    finally:
+        move.set()
+        host.join()
+    assert not (outside / "new.txt").exists()
+    assert (outside / "private.txt").read_text() == "Private"
 
 
 def test_flush_failure_is_uncertain_and_does_not_continue_the_model(

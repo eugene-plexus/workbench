@@ -1,6 +1,6 @@
 """Bounded text operations on held file handles, never a checked-then-opened path.
 
-Linux uses openat2's kernel-enforced beneath/no-link resolution. Windows
+Linux uses Landlock and one-component no-link traversal on held handles. Windows
 walks one name at a time relative to retained directory handles, refusing
 reparse points and holding parents against rename. Only regular, singly
 linked files are used. No shell, recursive traversal or automatic retries.
@@ -114,7 +114,7 @@ def root(path: str, expected: str | None = None) -> Iterator[Any]:
     elif sys.platform.startswith("linux"):
         from .folder_linux import Root
     else:
-        raise FolderError("Folder tools require Windows or Linux with openat2 support.")
+        raise FolderError("Folder tools require Windows or Linux with Landlock support.")
     with Root(path) as folder:
         if expected is not None and identity(folder.fd) != expected:
             raise FolderError(
@@ -132,9 +132,21 @@ def inspect(path: str, protected: list[Path]) -> str:
 def operate(
     path: str, expected: str, tool: str, arguments: dict[str, Any], protected: list[Path]
 ) -> dict[str, Any]:
+    if sys.platform.startswith("linux"):
+        from .folder_linux import isolated
+
+        return isolated(lambda: _operate(path, expected, tool, arguments, protected))
+    return _operate(path, expected, tool, arguments, protected)
+
+
+def _operate(
+    path: str, expected: str, tool: str, arguments: dict[str, Any], protected: list[Path]
+) -> dict[str, Any]:
     names = parts(arguments["path"], directory=tool == "list_directory")
     with root(path, expected) as folder:
         check_root_path(folder.path, protected)
+        if sys.platform.startswith("linux"):
+            folder.restrict(tool == "write_text")
         if tool == "list_directory":
             entries = folder.names(names, MAX_ENTRIES + 1)
             for entry in entries:
