@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .hub import Hub, HubError
-from .store import Message, Store, interrupt_tools
+from .store import Message, Person, Store, interrupt_tools
 from .tools import Calls, ToolError, Tools, transcript
 
 log = logging.getLogger(__name__)
@@ -117,6 +117,7 @@ class Running:
     shutting_down: bool = False
     watchers: set[asyncio.Queue[dict[str, Any]]] = field(default_factory=set)
     approvals: dict[str, asyncio.Future[bool]] = field(default_factory=dict)
+    person: Person | None = None
 
 
 class Watch:
@@ -186,12 +187,13 @@ class Answers:
         build: Callable[[], Any],
         tool_servers: list[str] | None = None,
         folder_grants: list[str] | None = None,
+        person: Person | None = None,
     ) -> None:
         """Run the answer `message` holds. `build` makes the request body
         (in a thread: it reads the attachments' bytes)."""
         if chat_id in self._running:
             raise RuntimeError(f"an answer is already being written in chat {chat_id}")
-        running = Running(chat_id=chat_id, message=message)
+        running = Running(chat_id=chat_id, message=message, person=person)
         self._running[chat_id] = running
         running.task = asyncio.create_task(
             self._run(running, build, tool_servers or [], folder_grants or []),
@@ -341,7 +343,7 @@ class Answers:
             raise ToolError("Tools are unavailable. Restart Workbench and try again.")
         m = running.message
         chat = await self._store.chat(running.chat_id)
-        person = await self._store.person(chat.owner) if chat else None
+        person = running.person or (await self._store.person(chat.owner) if chat else None)
         async with self._tools.connect(server_ids, person, folder_ids) as session:
             if not session.definitions:
                 raise ToolError("The selected servers offer no tools. Check them in Tools.")

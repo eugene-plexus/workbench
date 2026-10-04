@@ -196,6 +196,8 @@ class Person:
     name: str
     role: str
     username: str | None = None
+    # Request-only context. Never persisted with the person or sent to a browser.
+    session_id: str | None = None
 
     @property
     def is_owner(self) -> bool:

@@ -25,7 +25,7 @@ import hashlib
 import hmac
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from fastapi import HTTPException, Request, status
 
@@ -124,7 +124,7 @@ class Sessions:
         person = await self._store.person(row.sub)
         if person is None:
             raise SignedOut("none", "Sign in with Eugene to use Workbench.")
-        return person
+        return replace(person, session_id=row.id_hash)
 
     async def _refresh(self, row: SessionRow) -> None:
         lock = self._locks.setdefault(row.id_hash, asyncio.Lock())

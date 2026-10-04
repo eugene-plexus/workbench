@@ -379,6 +379,16 @@ async def update_chat(request: Request, chat_id: str, body: ChatUpdate) -> dict[
             grants = {
                 g["id"] for g in await _state(request).store.folder_grants() if visible(g, person)
             }
+            if any(i.startswith("node:") for i in body.settings.folderGrants):
+                from .folder_io import FolderError
+
+                remote = _state(request).tools.node_folders
+                if remote is None:
+                    raise _problem(503, "Node folders are unavailable in this Workbench.")
+                try:
+                    grants.update(g["id"] for g in await remote.listing(person))
+                except FolderError as exc:
+                    raise _problem(503, str(exc)) from None
             if any(i not in grants for i in body.settings.folderGrants):
                 raise _problem(400, "A selected folder grant was removed or is unavailable to you.")
         if "toolServers" in body.settings.model_fields_set:
@@ -502,6 +512,7 @@ async def _ask(
         build,
         list(fresh.settings.get("toolServers") or []),
         list(fresh.settings.get("folderGrants") or []),
+        person=await _person(request),
     )
     return answer
 

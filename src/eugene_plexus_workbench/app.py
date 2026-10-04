@@ -13,6 +13,7 @@ from . import api, config, folders_api, tools_api, web
 from ._build import commit
 from .answers import Answers
 from .hub import Hub
+from .node_folders import NodeFolders
 from .sessions import Sessions
 from .settings import Settings
 from .signin import Provider
@@ -46,6 +47,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         hub = Hub(settings.gateway_url, settings.key_file)
         tools = Tools(store, settings)
+        tools.node_folders = NodeFolders(store, provider, http)
         answers = Answers(store, hub, tools)
         app.state.tools = tools
         app.state.store = store

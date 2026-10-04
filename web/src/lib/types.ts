@@ -90,12 +90,19 @@ export interface FolderGrant {
   writable: boolean;
   usable: boolean;
   path?: string;
+  source?: "local" | "node";
+  node?: string;
+  available?: boolean;
+  reason?: string | null;
 }
 
 export interface FolderGrants {
   grants: FolderGrant[];
   available: boolean;
   reason: string | null;
+  localAvailable?: boolean;
+  nodeReason?: string | null;
+  manageUrl?: string | null;
 }
 
 export interface Chat {

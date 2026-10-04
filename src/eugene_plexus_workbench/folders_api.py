@@ -35,10 +35,30 @@ async def listing(request: Request) -> dict[str, Any]:
     folders = _state(request).tools.folders
     grants = await folders.store.folder_grants()
     reason = folders.unavailable()
+    local_grants = [
+        dict(public(g, person), source="local", available=reason is None, reason=reason)
+        for g in grants
+        if person.is_owner or visible(g, person)
+    ]
+    remote = _state(request).tools.node_folders
+    node_grants: list[dict[str, Any]] = []
+    node_reason = None
+    if remote is not None and person.session_id:
+        try:
+            node_grants = await remote.listing(person)
+        except FolderError as exc:
+            node_reason = str(exc)
     return {
-        "grants": [public(g, person) for g in grants if person.is_owner or visible(g, person)],
-        "available": reason is None,
+        "grants": [*local_grants, *node_grants],
+        "available": reason is None or bool(node_grants),
+        "localAvailable": reason is None,
         "reason": reason,
+        "nodeReason": node_reason,
+        "manageUrl": (
+            _state(request).provider.issuer.removesuffix("/oidc") + "/people#node-files"
+            if person.is_owner and _state(request).provider.issuer
+            else None
+        ),
     }
 
 

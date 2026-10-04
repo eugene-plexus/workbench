@@ -7,7 +7,7 @@ Workbench is an *app* (a spoke), not part of the hub. It reaches Eugene the same
 - one client key, used at the gateway's public OpenAI-compatible endpoints;
 - sign-in with Eugene over OpenID Connect.
 
-It holds nothing in the hub that another app could not be given. The design is [`specs/docs/design/workbench-v1.md`](https://github.com/eugene-plexus/specs/blob/main/docs/design/workbench-v1.md).
+It holds no operator or node-enrollment credential. Node folder tools additionally use Workbench's sign-in registration and the initiating person's session, checked by Eugene for each operation. The core design is [`specs/docs/design/workbench-v1.md`](https://github.com/eugene-plexus/specs/blob/main/docs/design/workbench-v1.md); [node file helpers](https://github.com/eugene-plexus/specs/blob/main/docs/design/node-file-helpers.md) describe central hosting and per-person access.
 
 ## Installing
 
@@ -15,9 +15,11 @@ Install Workbench from **Apps** in Eugene's console. The install does three thin
 
 - it makes Workbench's key;
 - it registers Workbench to sign people in with Eugene;
-- it runs Workbench in an OS account of its own. The current catalogue requires a Windows service install or a Linux system install; per-user installs keep their earlier chat-only version until moved to a supported install.
+- it uses a separate OS account where the node supports one. The core can also run on Docker, macOS and per-user installations. Its own local file and subprocess tools still require the isolated Windows/Linux service account; remote node folders run in the helper's account on their machine.
 
 Open it from the same page.
+
+For a central Workbench, enroll each file-serving machine as an ordinary Eugene node. In **People → Files on your machines**, enable file support, register existing folders, and assign each person read or text-write access. The node prepares its bundled helper automatically; no model or separate Workbench installation is needed there. Windows service and Linux system installations currently support file helpers. Select these folders per chat in Workbench; the browser needs no route to the desktop. See the [setup and platform guide](https://github.com/eugene-plexus/specs/blob/main/docs/design/node-file-helpers.md#using-it).
 
 Workbench's one setting is on its page in the console. It controls whether the owner may read the chats of the people the owner gives Workbench to. It is off by default.
 
@@ -33,7 +35,7 @@ Workbench's one setting is on its page in the console. It controls whether the o
 - **Attachments**: images (PNG or JPEG), PDFs and audio (WAV or MP3). Each goes to a model that takes that kind of file.
 - **Tools: Search the web**: this runs on the install's search account. When a search cannot run, the switch says why.
 - **MCP tools**: the owner adds shared Streamable HTTP servers in **Toolbox · Tools**. Choose servers in a chat's settings, then approve or decline each proposed call. Credentials stay on the server. Pending approvals expire after 30 minutes; interrupted calls are never automatically repeated.
-- **Folder tools**: the owner grants an existing host folder to a named person in **Toolbox · Tools**. Read-only is the default; text creation and editing are optional. Select folders per chat and approve each listing, read or write. File contents go to the selected model and remain in the chat.
+- **Folder tools**: use node folders assigned in Eugene's People page, or existing Workbench-host grants managed in **Toolbox · Tools**. Read-only is the default; text creation and editing are optional. Select folders per chat and approve each listing, read or write. File contents go to the selected model and remain in the chat.
 - **Answers keep going with no tab open**: an answer is saved as it arrives. Close the tab and come back, and it is there.
 
 Network MCP connections use HTTPS, except for loopback HTTP, with an optional bearer credential. They are shared with everyone signed into this Workbench. Tool results and arguments stay with the answer. Stopping or editing a chat does not undo actions already taken.
