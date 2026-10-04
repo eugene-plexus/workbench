@@ -108,6 +108,39 @@ def test_a_second_question_waits_for_the_first_answer(world: World) -> None:
     assert busy.status_code == 409 and "still being written" in busy.json()["detail"]["message"]
 
 
+def test_repetition_stop_keeps_partial_answer_and_settings_override(world: World) -> None:
+    world.gateway.mode = "repetition"
+    ada = world.browser()
+    ada.sign_in("p-ada")
+    chat = ada.new_chat()
+    configured = ada.patch(f"/api/chats/{chat}", json={"settings": {"repetitionMode": "stop"}})
+    assert configured.status_code == 200
+    ada.post(f"/api/chats/{chat}/messages", json={"content": "Tell me about tools"})
+    answer = ada.wait_answer(chat)
+    assert answer["status"] == "stopped" and answer["finish"] == "repetition_detected"
+    assert answer["content"] == "Hello from the model."
+    assert "appears to be repeating" in answer["error"]
+    assert len(world.gateway.requests) == 1
+    assert world.gateway.repetition_modes == ["stop"]
+    assert "_repetition_mode" not in world.gateway.requests[-1]
+    reloaded = ada.get(f"/api/chats/{chat}").json()
+    assert reloaded["messages"][-1] == answer
+    assert reloaded["chat"]["settings"]["repetitionMode"] == "stop"
+
+    # A manual retry can opt out, and clearing the override restores inheritance.
+    world.gateway.mode = "normal"
+    ada.patch(f"/api/chats/{chat}", json={"settings": {"repetitionMode": "off"}})
+    ada.post(f"/api/chats/{chat}/retry")
+    assert ada.wait_answer(chat)["status"] == "done"
+    assert world.gateway.repetition_modes[-1] == "off"
+    ada.patch(f"/api/chats/{chat}", json={"settings": {"repetitionMode": None}})
+    ada.post(f"/api/chats/{chat}/retry")
+    assert ada.wait_answer(chat)["status"] == "done"
+    assert world.gateway.repetition_modes[-1] is None
+    refused = ada.patch(f"/api/chats/{chat}", json={"settings": {"repetitionMode": "typo"}})
+    assert refused.status_code == 422
+
+
 def test_the_whole_conversation_and_the_instructions_are_sent(world: World) -> None:
     ada = world.browser()
     ada.sign_in("p-ada")

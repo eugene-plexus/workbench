@@ -63,12 +63,16 @@ export function ChatSettings({
   const [saved, setSaved] = useState(false);
   const [toolServers, setToolServers] = useState(settings.toolServers ?? []);
   const [folderGrants, setFolderGrants] = useState(settings.folderGrants ?? []);
+  const [repetitionMode, setRepetitionMode] = useState<
+    NonNullable<Settings["repetitionMode"]> | ""
+  >(settings.repetitionMode ?? "");
 
   async function save() {
     const next: Settings = {
       instructions: instructions.trim() ? instructions : null,
       toolServers,
       folderGrants,
+      repetitionMode: repetitionMode || null,
     };
     for (const field of FIELDS) {
       const raw = values[field.key]?.trim() ?? "";
@@ -132,6 +136,26 @@ export function ChatSettings({
             </label>
           ))}
         </div>
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="font-medium">Repeated response protection</span>
+          <span className="text-muted">
+            Stop substantial repeated passages, or allow intentional repetition. Reasoning and tool
+            arguments are never stopped by this check. Time and length limits still apply.
+          </span>
+          <select
+            value={repetitionMode}
+            onChange={(e) => {
+              setRepetitionMode(e.target.value as typeof repetitionMode);
+              setSaved(false);
+            }}
+            className="rounded-plexus border border-line bg-soft px-2 py-1"
+          >
+            <option value="">Use Eugene's setting</option>
+            <option value="stop">Stop repeated responses</option>
+            <option value="observe">Observe without stopping</option>
+            <option value="off">Off — allow intentional repetition</option>
+          </select>
+        </label>
         <ToolSelection
           selected={toolServers}
           onChange={(ids) => {

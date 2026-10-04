@@ -16,7 +16,7 @@ import logging
 import secrets
 import time
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile, status
@@ -249,6 +249,7 @@ class ChatSettings(BaseModel):
     temperature: float | None = Field(default=None, ge=0, le=2)
     topP: float | None = Field(default=None, gt=0, le=1)
     maxTokens: int | None = Field(default=None, ge=1, le=1_000_000)
+    repetitionMode: Literal["off", "observe", "stop"] | None = None
 
 
 class ChatUpdate(BaseModel):
@@ -277,7 +278,7 @@ def chat_view(chat: Chat, *, running: bool, read_only: bool = False) -> dict[str
         "search": chat.search,
         "settings": {
             k: chat.settings.get(k)
-            for k in ("instructions", "toolServers", "folderGrants", *SAMPLING)
+            for k in ("instructions", "toolServers", "folderGrants", "repetitionMode", *SAMPLING)
         },
         "createdAt": chat.created_at,
         "updatedAt": chat.updated_at,

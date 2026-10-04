@@ -96,4 +96,7 @@ def request_for(
             body[theirs] = value
     if search:
         body["web_search_options"] = {}
+    if chat.settings.get("repetitionMode") is not None:
+        # Hub turns this internal option into the public request header.
+        body["_repetition_mode"] = chat.settings["repetitionMode"]
     return body

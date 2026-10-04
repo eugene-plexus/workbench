@@ -78,6 +78,9 @@ export const SEARCHED_MARK = "Searched the web";
 export function statusWords(message: Message): string | null {
   switch (message.status) {
     case "stopped":
+      if (message.finish === "repetition_detected") {
+        return "Stopped because the response appears to be repeating. Your partial answer is kept. To request intentional repetition, turn protection off in Chat settings.";
+      }
       return "Stopped.";
     case "interrupted":
       return "Workbench restarted while this was being written, so it ends here.";
