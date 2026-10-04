@@ -1,4 +1,4 @@
-import { Copy, FileText, Music, Pencil, RotateCcw } from "lucide-react";
+import { FileText, Music, Pencil, RotateCcw } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { fileUrl, post } from "../lib/api";
@@ -13,6 +13,7 @@ import {
   statusWords,
 } from "../lib/words";
 import { Markdown } from "./Markdown";
+import { CopyButton } from "./CopyButton";
 import { ToolCalls } from "./ToolCalls";
 
 export function MessageView({
@@ -34,6 +35,7 @@ export function MessageView({
 }) {
   const [editing, setEditing] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  const [acting, setActing] = useState(false);
 
   if (message.role === "user") {
     return (
@@ -50,6 +52,9 @@ export function MessageView({
             className="flex w-full max-w-2xl flex-col gap-2"
             onSubmit={async (e) => {
               e.preventDefault();
+              if (acting) return;
+              setActing(true);
+              setProblem(null);
               try {
                 await post(`/api/chats/${chatId}/messages/${message.id}/edit`, {
                   content: editing,
@@ -58,6 +63,8 @@ export function MessageView({
                 onChanged();
               } catch (error) {
                 setProblem(error instanceof Error ? error.message : String(error));
+              } finally {
+                setActing(false);
               }
             }}
           >
@@ -66,37 +73,59 @@ export function MessageView({
               value={editing}
               onChange={(e) => setEditing(e.target.value)}
               rows={4}
+              disabled={acting}
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === "Escape" && !acting) setEditing(null);
+              }}
               className="rounded-plexus border border-line bg-soft p-2"
             />
             <p className="text-xs text-muted">
               Asking again replaces everything after this message.
             </p>
             <div className="flex justify-end gap-2">
-              <button type="button" onClick={() => setEditing(null)} className="px-3 py-1">
+              <button
+                type="button"
+                disabled={acting}
+                onClick={() => setEditing(null)}
+                className="px-3 py-1"
+              >
                 Cancel
               </button>
-              <button type="submit" className="rounded-plexus bg-accent px-3 py-1 text-on-accent">
+              <button
+                type="submit"
+                disabled={acting || (!editing.trim() && message.attachments.length === 0)}
+                className="rounded-plexus bg-accent px-3 py-1 text-on-accent"
+              >
                 Save and ask again
               </button>
             </div>
           </form>
         ) : (
           message.content && (
-            <div className="max-w-2xl whitespace-pre-wrap rounded-plexus bg-soft px-3 py-2">
+            <div className="max-w-full whitespace-pre-wrap break-words rounded-plexus bg-soft px-3 py-2 sm:max-w-2xl">
               {message.content}
             </div>
           )
         )}
-        {problem && <p className="text-sm text-error">{problem}</p>}
-        {!readOnly && editing === null && !busy && (
-          <button
-            type="button"
-            onClick={() => setEditing(message.content)}
-            className="flex items-center gap-1 text-xs text-muted hover:text-fg"
-          >
-            <Pencil size={12} aria-hidden /> Edit
-          </button>
+        {problem && (
+          <p role="alert" className="text-sm text-error">
+            {problem}
+          </p>
         )}
+        <div className="flex flex-wrap items-center justify-end gap-3 text-xs text-muted">
+          <MessageTime message={message} />
+          {editing === null && message.content && <CopyButton text={message.content} />}
+          {!readOnly && editing === null && !busy && (
+            <button
+              type="button"
+              onClick={() => setEditing(message.content)}
+              className="flex items-center gap-1 text-xs text-muted hover:text-fg"
+            >
+              <Pencil size={12} aria-hidden /> Edit
+            </button>
+          )}
+        </div>
       </div>
     );
   }
@@ -191,26 +220,25 @@ export function MessageView({
         </p>
       )}
       {message.status !== "running" && (
-        <div className="flex gap-3 text-xs text-muted">
-          {answer && (
-            <button
-              type="button"
-              onClick={() => void navigator.clipboard?.writeText(answer)}
-              className="flex items-center gap-1 hover:text-fg"
-            >
-              <Copy size={12} aria-hidden /> Copy
-            </button>
-          )}
+        <div className="flex flex-wrap items-center gap-3 break-all text-xs text-muted">
+          <MessageTime message={message} />
+          {answer && <CopyButton text={answer} />}
           {last && !readOnly && !busy && (
             <button
               type="button"
               data-testid="try-again"
+              disabled={acting}
               onClick={async () => {
+                if (acting) return;
+                setActing(true);
+                setProblem(null);
                 try {
                   await post(`/api/chats/${chatId}/retry`);
                   onChanged();
                 } catch (error) {
                   setProblem(error instanceof Error ? error.message : String(error));
+                } finally {
+                  setActing(false);
                 }
               }}
               className="flex items-center gap-1 hover:text-fg"
@@ -221,8 +249,21 @@ export function MessageView({
           {message.model && <span>{message.model}</span>}
         </div>
       )}
-      {problem && <p className="text-sm text-error">{problem}</p>}
+      {problem && (
+        <p role="alert" className="text-sm text-error">
+          {problem}
+        </p>
+      )}
     </article>
+  );
+}
+
+function MessageTime({ message }: { message: Message }) {
+  const date = new Date(message.createdAt * 1000);
+  return (
+    <time dateTime={date.toISOString()} title={date.toLocaleString()}>
+      {date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+    </time>
   );
 }
 

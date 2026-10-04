@@ -12,10 +12,10 @@
  *   no opener and no referrer.
  */
 
-import { Check, Copy } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { CopyButton } from "./CopyButton";
 
 const SAFE = /^(https?:|mailto:)/i;
 
@@ -26,23 +26,12 @@ export function safeHref(href: string | undefined | null): string | null {
 }
 
 function CodeBlock({ children }: { children: ReactNode }) {
-  const [copied, setCopied] = useState(false);
   const text = textOf(children);
   return (
     <div className="relative">
-      <button
-        type="button"
-        className="absolute right-2 top-2 flex items-center gap-1 rounded-plexus border border-line bg-soft px-2 py-0.5 text-xs text-muted hover:bg-hover"
-        onClick={() => {
-          void navigator.clipboard?.writeText(text).then(() => {
-            setCopied(true);
-            window.setTimeout(() => setCopied(false), 1500);
-          });
-        }}
-      >
-        {copied ? <Check size={12} aria-hidden /> : <Copy size={12} aria-hidden />}
-        {copied ? "Copied" : "Copy"}
-      </button>
+      <div className="flex justify-end rounded-t-plexus border border-b-0 border-line bg-soft px-2 py-1 text-xs text-muted">
+        <CopyButton text={text} />
+      </div>
       <pre className="overflow-x-auto rounded-plexus border border-line bg-soft p-3 pr-20 font-mono text-sm">
         {children}
       </pre>

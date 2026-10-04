@@ -9,6 +9,8 @@
  * cleared from the address bar at once.
  */
 
+import { clearDrafts } from "./conveniences";
+
 export const SECRET_KEY = "workbench-secret";
 export const SECRET_HEADER = "X-Workbench-Secret";
 
@@ -29,6 +31,7 @@ export function secret(): string | null {
 }
 
 export function forget(): void {
+  clearDrafts();
   try {
     storage()?.removeItem(SECRET_KEY);
   } catch {
@@ -49,6 +52,7 @@ export function takeFragment(): { signedIn: boolean; error: string | null } {
   if (given === null && error === null) return { signedIn: false, error: null };
   window.history.replaceState(null, "", window.location.pathname + window.location.search);
   if (given) {
+    clearDrafts();
     try {
       storage()?.setItem(SECRET_KEY, given);
     } catch {

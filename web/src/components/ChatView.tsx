@@ -1,7 +1,8 @@
-import { Check, Pencil, SlidersHorizontal, Trash2, X } from "lucide-react";
+import { ArrowDown, Check, Download, Pencil, SlidersHorizontal, Trash2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { del, patch } from "../lib/api";
+import { exportChat, saveDraft } from "../lib/conveniences";
 import type { ChatSettings as Settings, Me, Message, Models } from "../lib/types";
 import { useChat } from "../lib/useChat";
 import { ChatSettings } from "./ChatSettings";
@@ -28,6 +29,9 @@ export function ChatView({
   const [showSettings, setShowSettings] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [acting, setActing] = useState(false);
+  const [away, setAway] = useState(false);
   const box = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
   // Follow the bottom until the reader scrolls up, and again once they
@@ -63,10 +67,18 @@ export function ChatView({
       <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
         <Mascot pose="curious" size={120} />
         <p role="alert">{error}</p>
+        <button onClick={() => void reload()} className="text-accent underline">
+          Try loading this chat again
+        </button>
       </div>
     );
   }
-  if (!detail) return <div className="flex-1" />;
+  if (!detail)
+    return (
+      <div role="status" className="flex-1 p-6 text-muted">
+        Loading chat…
+      </div>
+    );
 
   const { chat, messages } = detail;
 
@@ -76,20 +88,29 @@ export function ChatView({
   }
 
   async function rename(title: string) {
-    const updated = await patch<typeof chat>(`/api/chats/${chat.id}`, { title });
-    update((shown) => ({ ...shown, chat: { ...updated, running: shown.chat.running } }));
-    setRenaming(null);
-    onChanged();
+    if (!title.trim() || acting) return;
+    setActing(true);
+    setActionError(null);
+    try {
+      const updated = await patch<typeof chat>(`/api/chats/${chat.id}`, { title: title.trim() });
+      update((shown) => ({ ...shown, chat: { ...updated, running: shown.chat.running } }));
+      setRenaming(null);
+      onChanged();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setActing(false);
+    }
   }
 
   const lastAnswer = [...messages].reverse().find((m) => m.role === "assistant");
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <header className="flex items-center gap-2 border-b border-line px-4 py-2">
+      <header className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-2">
         {renaming !== null ? (
           <form
-            className="flex flex-1 items-center gap-2"
+            className="flex min-w-0 flex-1 items-center gap-2"
             onSubmit={(e) => {
               e.preventDefault();
               void rename(renaming);
@@ -99,15 +120,26 @@ export function ChatView({
               autoFocus
               aria-label="Chat name"
               value={renaming}
+              maxLength={200}
+              disabled={acting}
+              onKeyDown={(e) => {
+                if (e.key === "Escape" && !acting) setRenaming(null);
+              }}
               onChange={(e) => setRenaming(e.target.value)}
-              className="flex-1 rounded-plexus border border-line bg-soft px-2 py-1"
+              className="min-w-0 flex-1 rounded-plexus border border-line bg-soft px-2 py-1"
             />
-            <button type="submit" aria-label="Save the name" className="p-1 hover:text-accent">
+            <button
+              type="submit"
+              disabled={acting || !renaming.trim()}
+              aria-label="Save the name"
+              className="p-1 hover:text-accent"
+            >
               <Check size={16} />
             </button>
             <button
               type="button"
               aria-label="Keep the old name"
+              disabled={acting}
               onClick={() => setRenaming(null)}
               className="p-1"
             >
@@ -115,11 +147,32 @@ export function ChatView({
             </button>
           </form>
         ) : (
-          <h1 className="flex-1 truncate text-base font-semibold" data-testid="chat-title">
+          <h1
+            title={chat.title}
+            className="min-w-0 flex-1 truncate text-base font-semibold"
+            data-testid="chat-title"
+          >
             {chat.title}
           </h1>
         )}
-        {!chat.readOnly && renaming === null && (
+        {renaming === null && !confirmDelete && (
+          <button
+            type="button"
+            title="Export chat as Markdown (attachment contents are not included)"
+            aria-label="Export chat as Markdown"
+            onClick={() => {
+              try {
+                exportChat(detail);
+              } catch (error) {
+                setActionError(error instanceof Error ? error.message : String(error));
+              }
+            }}
+            className="rounded-plexus p-1.5 text-muted hover:bg-hover"
+          >
+            <Download size={16} />
+          </button>
+        )}
+        {!chat.readOnly && renaming === null && !confirmDelete && (
           <>
             <button
               type="button"
@@ -140,42 +193,70 @@ export function ChatView({
             >
               <SlidersHorizontal size={16} />
             </button>
-            {confirmDelete ? (
-              <span className="flex items-center gap-2 text-sm">
-                Delete this chat and its files?
-                <button
-                  type="button"
-                  data-testid="confirm-delete"
-                  onClick={async () => {
-                    await del(`/api/chats/${chat.id}`);
-                    onDeleted();
-                  }}
-                  className="rounded-plexus border border-error-line bg-error-bg px-2 py-0.5 text-error"
-                >
-                  Delete
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setConfirmDelete(false)}
-                  className="px-2 py-0.5"
-                >
-                  Keep it
-                </button>
-              </span>
-            ) : (
-              <button
-                type="button"
-                title="Delete this chat"
-                aria-label="Delete this chat"
-                onClick={() => setConfirmDelete(true)}
-                className="rounded-plexus p-1.5 text-muted hover:bg-hover"
-              >
-                <Trash2 size={16} />
-              </button>
-            )}
+            <button
+              type="button"
+              title="Delete this chat"
+              aria-label="Delete this chat"
+              onClick={() => setConfirmDelete(true)}
+              className="rounded-plexus p-1.5 text-muted hover:bg-hover"
+            >
+              <Trash2 size={16} />
+            </button>
           </>
         )}
+        {confirmDelete && !chat.readOnly && (
+          <div className="flex w-full flex-wrap items-center gap-2 text-sm">
+            Delete this chat and its files?
+            <button
+              type="button"
+              data-testid="confirm-delete"
+              disabled={acting}
+              onClick={async () => {
+                if (acting) return;
+                setActing(true);
+                setActionError(null);
+                try {
+                  await del(`/api/chats/${chat.id}`);
+                  saveDraft(me.sub, chat.id, "");
+                  onDeleted();
+                } catch (error) {
+                  setActionError(error instanceof Error ? error.message : String(error));
+                } finally {
+                  setActing(false);
+                }
+              }}
+              className="rounded-plexus border border-error-line bg-error-bg px-2 py-0.5 text-error"
+            >
+              Delete
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirmDelete(false)}
+              disabled={acting}
+              className="px-2 py-0.5"
+            >
+              Keep it
+            </button>
+          </div>
+        )}
       </header>
+      {(actionError || error) && (
+        <p
+          role="alert"
+          className="border-b border-error-line bg-error-bg px-4 py-2 text-sm text-error"
+        >
+          {actionError ?? error}{" "}
+          <button
+            onClick={() => {
+              setActionError(null);
+              void reload();
+            }}
+            className="underline"
+          >
+            Reload chat
+          </button>
+        </p>
+      )}
       {chat.readOnly && (
         <p
           data-testid="read-only"
@@ -199,6 +280,7 @@ export function ChatView({
           const atBottom = outer.scrollHeight - outer.scrollTop - outer.clientHeight < 80;
           if (atBottom) pinned.current = true;
           else if (outer.scrollTop < lastTop.current) pinned.current = false;
+          setAway(!pinned.current);
           lastTop.current = outer.scrollTop;
         }}
         className="min-h-0 flex-1 overflow-y-auto px-4 py-4"
@@ -225,6 +307,21 @@ export function ChatView({
           ))}
         </div>
       </div>
+      {away && (
+        <div className="flex justify-center border-t border-line bg-panel py-1">
+          <button
+            className="flex items-center gap-1 rounded-plexus px-3 py-1 text-sm text-accent"
+            onClick={() => {
+              pinned.current = true;
+              setAway(false);
+              if (box.current) box.current.scrollTop = box.current.scrollHeight;
+            }}
+          >
+            <ArrowDown size={14} aria-hidden />
+            Jump to latest
+          </button>
+        </div>
+      )}
       {!chat.readOnly && (
         <Composer
           chat={chat}
@@ -233,6 +330,8 @@ export function ChatView({
           modelsError={modelsError}
           running={running}
           onSent={(user, answer) => {
+            pinned.current = true;
+            setAway(false);
             update((shown) => ({
               ...shown,
               chat: { ...shown.chat, running: true },

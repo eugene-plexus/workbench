@@ -24,6 +24,11 @@ Workbench's one setting is on its page in the console. It controls whether the o
 ## What it does
 
 - **Chats**: answers stream as they arrive. You can Stop an answer, Try again, or edit a message.
+- **Finding chats**: search chat names and browse Today, Yesterday, Previous 7 days and Older groups.
+- **Text drafts**: unsent text survives chat switches and refreshes in the same tab. Drafts belong to the signed-in person and clear on send, deletion or sign-out. Attachments must be selected again after leaving a chat.
+- **Writing**: the message box grows with your text. Drop files onto it or paste an image; upload progress says what is arriving and Send waits until it is ready.
+- **Reading and saving**: Jump to latest returns to the newest answer, messages show their local time (hover for the date), and Copy confirms success or explains a blocked clipboard. Export chat saves a Markdown snapshot with text, reasoning, tool records, sources and attachment names; file contents are not included.
+- **Keyboard shortcuts**: Ctrl+Alt+N starts a chat, Ctrl+Alt+F searches chat names, and Ctrl+Alt+M focuses the message box. On Mac, use Control+Option. The shortcuts are also listed in the page.
 - **Markdown and code**: the model's reasoning is shown folded away.
 - **Attachments**: images (PNG or JPEG), PDFs and audio (WAV or MP3). Each goes to a model that takes that kind of file.
 - **Tools: Search the web**: this runs on the install's search account. When a search cannot run, the switch says why.
