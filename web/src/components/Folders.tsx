@@ -54,19 +54,37 @@ export function Folders({ owner }: { owner: boolean }) {
         </p>
       )}
       {data && !data.available && <p className="text-sm">{data.reason}</p>}
+      {data?.nodeReason && <p className="text-sm text-muted">Node folders: {data.nodeReason}</p>}
+      {owner && data?.manageUrl && (
+        <a
+          className="self-start text-sm underline"
+          href={data.manageUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Manage node folders and people in Eugene ↗
+        </a>
+      )}
       {data?.grants.length === 0 && <p className="text-sm">No folders granted yet.</p>}
       {data?.grants.map((grant) => (
         <article
           key={grant.id}
           className="flex flex-col gap-2 rounded-plexus border border-line p-3 text-sm"
         >
-          <h3 className="font-semibold">{grant.name}</h3>
+          <h3 className="font-semibold">
+            {grant.node ? `${grant.node} · ` : ""}
+            {grant.name}
+          </h3>
           <p>
             {grant.writable ? "Read and write text" : "Read only"}
             {owner && ` · ${people.find((p) => p.sub === grant.subject)?.name ?? grant.subject}`}
           </p>
           {grant.path && <p className="break-all text-muted">{grant.path}</p>}
+          {grant.available === false && (
+            <p>{grant.reason || "This folder is currently unavailable."}</p>
+          )}
           {owner &&
+            grant.source !== "node" &&
             (removing === grant.id ? (
               <div className="flex flex-wrap gap-3">
                 <p>Remove access? Pending calls will fail. Files and saved chat results remain.</p>
@@ -186,7 +204,7 @@ export function Folders({ owner }: { owner: boolean }) {
             they are not automatically undone.
           </p>
           <button
-            disabled={busy || !data?.available}
+            disabled={busy || !(data?.localAvailable ?? data?.available)}
             className="self-start rounded-plexus bg-accent px-3 py-1 text-on-accent"
           >
             Grant folder access
@@ -232,15 +250,19 @@ export function FolderSelection({
         </p>
       )}
       {data && !data.available && <p>{data.reason}</p>}
+      {data?.nodeReason && <p className="text-muted">Node folders: {data.nodeReason}</p>}
       {grants?.length === 0 && (
-        <p>No folders assigned to you. The owner can grant access in Tools.</p>
+        <p>
+          No folders assigned to you. The owner can assign node folders in Eugene&apos;s People
+          page, or local folders in Tools.
+        </p>
       )}
       {grants?.map((grant) => (
         <label key={grant.id} className="flex items-center gap-2">
           <input
             type="checkbox"
             checked={selected.includes(grant.id)}
-            disabled={!data?.available}
+            disabled={!(grant.available ?? data?.available) && !selected.includes(grant.id)}
             onChange={(e) =>
               onChange(
                 e.target.checked
@@ -249,7 +271,11 @@ export function FolderSelection({
               )
             }
           />
+          {grant.node ? `${grant.node} · ` : ""}
           {grant.name} · {grant.writable ? "Read and write text" : "Read only"}
+          {grant.available === false && (
+            <span className="text-muted"> · {grant.reason || "Unavailable"}</span>
+          )}
         </label>
       ))}
       {grants &&

@@ -26,6 +26,8 @@ from referencing.exceptions import NoSuchResource
 
 from . import folder_io, folders
 from .local_tools import LocalProcesses, LocalToolError, unavailable
+from .node_folders import PREFIX as NODE_FOLDER_PREFIX
+from .node_folders import NodeFolders
 from .settings import Settings
 from .store import Person, Store
 
@@ -189,6 +191,7 @@ class Tools:
         self.store = store
         self.local = LocalProcesses(settings)
         self.folders = folders.Folders(store, settings)
+        self.node_folders: NodeFolders | None = None
         self.tls = ssl.create_default_context()
 
     @asynccontextmanager
@@ -207,13 +210,31 @@ class Tools:
             grants = {
                 g["id"]: g for g in await self.store.folder_grants() if folders.visible(g, person)
             }
-            if folder_ids and (reason := self.folders.unavailable()):
+            local_ids = [i for i in folder_ids or [] if not i.startswith(NODE_FOLDER_PREFIX)]
+            node_ids = [i for i in folder_ids or [] if i.startswith(NODE_FOLDER_PREFIX)]
+            if local_ids and (reason := self.folders.unavailable()):
                 raise ToolError(reason)
+            if node_ids:
+                if self.node_folders is None:
+                    raise ToolError("Node folder support is unavailable in this Workbench.")
+                try:
+                    grants.update({g["id"]: g for g in await self.node_folders.listing(person)})
+                except folder_io.FolderError as exc:
+                    raise ToolError(str(exc)) from None
             for grant_id in dict.fromkeys(folder_ids or []):
                 if grant_id not in grants:
                     raise ToolError("A selected folder grant was removed or is unavailable to you.")
                 grant = grants[grant_id]
-                server = {"id": grant_id, "name": grant["name"], "transport": "folder"}
+                remote = grant_id.startswith(NODE_FOLDER_PREFIX)
+                if remote and not grant.get("available"):
+                    raise ToolError(
+                        f"{grant['node']}: {grant.get('reason') or 'File helper is unavailable.'}"
+                    )
+                server = {
+                    "id": grant_id,
+                    "name": f"{grant['node']} · {grant['name']}" if remote else grant["name"],
+                    "transport": "node_folder" if remote else "folder",
+                }
                 for name, description, schema in folders.definitions(bool(grant["writable"])):
                     session.add(server, None, name, schema, description)
             for server_id in dict.fromkeys(ids):
@@ -319,6 +340,7 @@ class ToolSession:
         self.store = tools.store
         self.local = tools.local
         self.folders = tools.folders
+        self.node_folders = tools.node_folders
         self.person = person
         self.definitions: list[dict[str, Any]] = []
         self.tools: dict[str, tuple[dict[str, Any], Any, str, dict[str, Any]]] = {}
@@ -331,7 +353,7 @@ class ToolSession:
         schema: dict[str, Any],
         description: str,
     ) -> None:
-        prefix = "files_" if server["transport"] == "folder" else "mcp_"
+        prefix = "files_" if server["transport"] in {"folder", "node_folder"} else "mcp_"
         name = prefix + hashlib.sha256(f"{server['id']}:{tool}".encode()).hexdigest()[:48]
         if name in self.tools or len(self.tools) >= MAX_TOOLS:
             raise ToolError(
@@ -380,9 +402,14 @@ class ToolSession:
 
     async def execute(self, call: dict[str, Any]) -> None:
         server, client, tool, _ = self.tools[call["name"]]
-        if server["transport"] == "folder":
+        if server["transport"] in {"folder", "node_folder"}:
             try:
-                file_result = await self.folders.execute(
+                executor = (
+                    self.node_folders if server["transport"] == "node_folder" else self.folders
+                )
+                if executor is None:
+                    raise folder_io.FolderError("Node folder support is unavailable.")
+                file_result = await executor.execute(
                     server["id"], self.person, tool, call["arguments"]
                 )
                 call.update(status="done", result=json.dumps(file_result, ensure_ascii=False))

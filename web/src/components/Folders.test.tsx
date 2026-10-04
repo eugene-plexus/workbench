@@ -7,6 +7,35 @@ vi.mock("../lib/api", () => ({ api: vi.fn(), post: vi.fn(), del: vi.fn() }));
 
 const grant = { id: "notes", name: "Project notes", subject: "ada", writable: false, usable: true };
 
+it("lets a central host select online node folders and clear offline selections", async () => {
+  vi.mocked(api).mockResolvedValue({
+    available: true,
+    localAvailable: false,
+    reason: "Local file accounts unavailable",
+    grants: [
+      { ...grant, id: "node:online", source: "node", node: "Desktop", available: true },
+      {
+        ...grant,
+        id: "node:offline",
+        source: "node",
+        node: "Laptop",
+        available: false,
+        reason: "Offline",
+      },
+    ],
+  });
+  const change = vi.fn();
+  render(<FolderSelection selected={["node:offline"]} onChange={change} />);
+  const online = await screen.findByRole("checkbox", { name: /Desktop.*Project notes/ });
+  expect(online).toBeEnabled();
+  fireEvent.click(online);
+  expect(change).toHaveBeenLastCalledWith(["node:offline", "node:online"]);
+  const offline = screen.getByRole("checkbox", { name: /Laptop.*Project notes/ });
+  expect(offline).toBeChecked();
+  fireEvent.click(offline);
+  expect(change).toHaveBeenLastCalledWith([]);
+});
+
 beforeEach(() => {
   vi.resetAllMocks();
 });
