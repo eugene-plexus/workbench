@@ -33,6 +33,7 @@ def main() -> None:
         port=settings.bind_port,
         log_level="info",
         access_log=False,
+        forwarded_allow_ips=[],
     )
 
 

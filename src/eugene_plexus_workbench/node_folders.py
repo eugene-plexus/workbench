@@ -39,7 +39,7 @@ class NodeFolders:
             raise FolderError("Workbench is not connected to Eugene's sign-in service.")
         try:
             response = await self.http.post(
-                f"{self.provider.issuer}/node-helpers/{path}",
+                self.provider.transport_url(f"{self.provider.issuer}/node-helpers/{path}"),
                 json={**body, "refreshToken": row.refresh_token},
                 auth=self.provider._auth(),
                 timeout=28.0,
@@ -51,7 +51,7 @@ class NodeFolders:
                     httpx.HTTPError, SignInUnavailable, asyncio.CancelledError
                 ):
                     await self.http.post(
-                        f"{self.provider.issuer}/node-helpers/cancel",
+                        self.provider.transport_url(f"{self.provider.issuer}/node-helpers/cancel"),
                         json={
                             "refreshToken": row.refresh_token,
                             "operationId": body["operationId"],

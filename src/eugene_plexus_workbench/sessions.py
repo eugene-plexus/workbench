@@ -63,7 +63,18 @@ class SignedOut(HTTPException):
 
 
 def own_origin(request: Request) -> str:
+    configured = getattr(request.app.state.settings, "public_origin", None)
+    if configured:
+        return str(configured)
     return f"{request.url.scheme}://{request.headers.get('host', '')}"
+
+
+def cookie_name(request: Request, name: str) -> str:
+    return "__Host-" + name if request.url.scheme == "https" else name
+
+
+def signin_path(request: Request) -> str:
+    return "/" if request.url.scheme == "https" else "/oidc"
 
 
 class Sessions:
@@ -91,7 +102,7 @@ class Sessions:
         return NewSession(cookie=cookie, secret=secret)
 
     async def end(self, request: Request) -> None:
-        cookie = request.cookies.get(SESSION_COOKIE)
+        cookie = request.cookies.get(cookie_name(request, SESSION_COOKIE))
         if not cookie:
             return
         row = await self._store.session(digest(cookie))
@@ -108,7 +119,7 @@ class Sessions:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={"message": "This request did not come from Workbench's own page."},
             )
-        cookie = request.cookies.get(SESSION_COOKIE)
+        cookie = request.cookies.get(cookie_name(request, SESSION_COOKIE))
         secret = request.headers.get(SECRET_HEADER)
         if not cookie or not secret:
             raise SignedOut("none", "Sign in with Eugene to use Workbench.")

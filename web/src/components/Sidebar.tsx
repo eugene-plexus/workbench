@@ -138,6 +138,16 @@ export function Sidebar({
         ))}
       </ul>
       {me.owner && me.ownerReadsChats && <PeoplesChats onOpen={onOpen} />}
+      {me.owner && me.consoleUrl && (
+        <a
+          href={me.consoleUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="border-t border-line px-4 py-3 text-sm text-muted hover:underline"
+        >
+          Open Eugene console ↗
+        </a>
+      )}
       <div className="flex items-center justify-between gap-2 border-t border-line px-4 py-3 text-sm">
         <span className="truncate" data-testid="me">
           {me.name}
