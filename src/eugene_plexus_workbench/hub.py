@@ -136,6 +136,10 @@ class Hub:
     async def stream_chat(self, body: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         """The chunks of one streamed answer, parsed. Raises `HubError`."""
         headers = self._headers()
+        body = dict(body)
+        repetition_mode = body.pop("_repetition_mode", None)
+        if repetition_mode is not None:
+            headers["X-Eugene-Repetition-Mode"] = repetition_mode
         url = f"{self.gateway_url}/v1/chat/completions"
         try:
             async with self._http.stream("POST", url, json=body, headers=headers) as response:
@@ -156,7 +160,9 @@ class Hub:
                         error = chunk["error"]
                         raise HubError(
                             str(error.get("message") or "the answer stopped part-way"),
-                            kind="stream",
+                            kind="repetition"
+                            if error.get("code") == "repetition_detected"
+                            else "stream",
                         )
                     if isinstance(chunk, dict):
                         yield chunk

@@ -91,6 +91,18 @@ def setup(world: World, remote: Remote) -> tuple[Browser, Browser, str, str]:
     return owner, ada, chat, server
 
 
+def test_repetition_stop_with_connected_tools_keeps_reason_and_runs_no_tool(
+    world: World, remote: Remote
+) -> None:
+    _, ada, chat, _ = setup(world, remote)
+    world.gateway.mode = "repetition"
+    ada.post(f"/api/chats/{chat}/messages", json={"content": "Describe your tools"})
+    answer = ada.wait_answer(chat)
+    assert answer["content"] == "Hello from the model."
+    assert answer["status"] == "stopped" and answer["finish"] == "repetition_detected"
+    assert not remote.calls and len(world.gateway.requests) == 1
+
+
 def pending(browser: Browser, chat: str) -> dict[str, Any]:
     deadline = time.perf_counter() + 10
     last: dict[str, Any] = {}

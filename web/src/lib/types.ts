@@ -80,6 +80,7 @@ export interface ChatSettings {
   temperature?: number | null;
   topP?: number | null;
   maxTokens?: number | null;
+  repetitionMode?: "off" | "observe" | "stop" | null;
 }
 
 export interface FolderGrant {

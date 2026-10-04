@@ -280,6 +280,7 @@ class FakeGateway:
     release: asyncio.Event | None = None
     tool_arguments: str = '{"text":"hello"}'
     tool_name: str | None = None
+    repetition_modes: list[str | None] = field(default_factory=list)
     search: dict[str, Any] = field(default_factory=lambda: {"available": True, "reason": None})
 
     def app(self) -> FastAPI:
@@ -316,6 +317,7 @@ class FakeGateway:
         async def chat(request: Request) -> Any:
             body = await request.json()
             self.requests.append(body)
+            self.repetition_modes.append(request.headers.get("X-Eugene-Repetition-Mode"))
             if (
                 request.headers.get("authorization") != f"Bearer {APP_KEY}"
                 or self.mode == "refuse_key"
@@ -398,6 +400,10 @@ class FakeGateway:
                         await asyncio.sleep(self.delay)
                     yield chunk({"content": word})
                 if self.mode == "cut":
+                    return
+                if self.mode == "repetition":
+                    yield 'data: {"error":{"code":"repetition_detected","message":"Stopped because the response appears to be repeating."}}\n\n'
+                    yield "data: [DONE]\n\n"
                     return
                 annotations = []
                 if "web_search_options" in body:

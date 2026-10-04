@@ -5,7 +5,7 @@ it as it arrives, and sends it to every tab watching that chat. So:
 
 - a tab that opens mid-answer gets what has arrived so far, then the rest;
 - **an answer keeps going when every tab is closed** (Troy, C3 call 2), and
-  is saved as it arrives. Only Stop ends it;
+  is saved as it arrives. Stop, a gateway safeguard or a failure can end it;
 - a restart of Workbench mid-answer keeps what had arrived and marks the
   answer `interrupted` (`Store.mark_interrupted`, at boot).
 
@@ -49,6 +49,14 @@ def _tool_problem(exc: BaseException) -> str:
         f"The MCP connection failed ({type(exc).__name__}). "
         "Check the server in Tools; interrupted calls are not retried."
     )
+
+
+def _only_repetition(exc: BaseException) -> bool:
+    if isinstance(exc, HubError):
+        return exc.kind == "repetition"
+    if isinstance(exc, BaseExceptionGroup):
+        return all(_only_repetition(child) for child in exc.exceptions)
+    return False
 
 
 def _js_length(text: str) -> int:
@@ -255,11 +263,17 @@ class Answers:
         except asyncio.CancelledError:
             m.status = "interrupted" if running.shutting_down else "stopped"
         except HubError as exc:
-            m.status, m.error = "failed", exc.message
+            m.status, m.error = "stopped" if exc.kind == "repetition" else "failed", exc.message
+            if exc.kind == "repetition":
+                m.finish = "repetition_detected"
         except ToolError as exc:
             m.status, m.error = "failed", str(exc)
         except Exception as exc:
-            if tool_servers or folder_grants:
+            if _only_repetition(exc):
+                # MCP task groups can wrap the gateway's intentional stop.
+                # A mixed group with a real tool/transport failure stays failed.
+                m.status, m.error, m.finish = "stopped", _tool_problem(exc), "repetition_detected"
+            elif tool_servers or folder_grants:
                 # SDK task groups wrap exceptions. Never expose raw transport
                 # errors, which may include a credential or server response.
                 m.status, m.error = "failed", _tool_problem(exc)

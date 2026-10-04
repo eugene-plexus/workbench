@@ -36,6 +36,16 @@ function show(message: Message) {
   );
 }
 
+it("keeps a repetition-stopped answer and explains the intentional repetition override", () => {
+  show(
+    answer({ content: "The partial answer.", status: "stopped", finish: "repetition_detected" }),
+  );
+  expect(screen.getByText("The partial answer.")).toBeInTheDocument();
+  expect(screen.getByTestId("answer-status")).toHaveTextContent("appears to be repeating");
+  expect(screen.getByTestId("answer-status")).toHaveTextContent("Chat settings");
+  expect(screen.getByTestId("try-again")).toBeInTheDocument();
+});
+
 describe("a searched answer (W6)", () => {
   it("lists what it cites as links", () => {
     show(answer({ searches: 1, sources: [{ url: "https://example.org/a", title: "A page" }] }));
