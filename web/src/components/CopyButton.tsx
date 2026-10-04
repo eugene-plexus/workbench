@@ -35,7 +35,7 @@ export function CopyButton({ text }: { text: string }) {
   const timer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(timer.current), []);
   return (
-    <span className="inline-flex flex-wrap items-center gap-2">
+    <span className="relative inline-flex flex-wrap items-center gap-2">
       <button
         type="button"
         className="flex items-center gap-1 rounded-plexus px-1 py-0.5 hover:text-fg"

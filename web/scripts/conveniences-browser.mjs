@@ -1,4 +1,4 @@
-/* global process, document, innerWidth, console, sessionStorage */
+/* global process, document, innerWidth, innerHeight, console, sessionStorage, getComputedStyle */
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import assert from "node:assert/strict";
@@ -72,6 +72,23 @@ try {
   await page.getByRole("button", { name: "Delete this chat", exact: true }).click();
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   await page.getByRole("button", { name: "Keep it" }).click();
+  const layout = await page.evaluate(() => ({
+    height: innerHeight,
+    page: document.documentElement.scrollHeight,
+    boxes: [
+      ...document.querySelectorAll(
+        "body, #root, main, [data-testid=messages], [data-testid=user-message], [data-testid=composer-area]",
+      ),
+    ].map((node) => ({
+      tag: node.tagName,
+      test: node.getAttribute("data-testid"),
+      height: node.clientHeight,
+      scroll: node.scrollHeight,
+      bottom: node.getBoundingClientRect().bottom,
+      overflow: getComputedStyle(node).overflow,
+    })),
+  }));
+  assert.ok(layout.page <= layout.height + 1, JSON.stringify(layout));
   await page.screenshot({ path: cfg.screenshot, fullPage: true });
   await composer.fill("A private draft");
   await page.getByRole("button", { name: "Chats", exact: true }).click();
