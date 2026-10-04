@@ -129,6 +129,7 @@ export interface Me {
   username: string | null;
   owner: boolean;
   ownerReadsChats: boolean;
+  consoleUrl?: string | null;
 }
 
 export interface Model {

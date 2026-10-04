@@ -94,17 +94,35 @@ class Provider:
         client_id: str | None,
         secret_file: Path | None,
         http: httpx.AsyncClient,
+        backchannel: str | None = None,
     ) -> None:
         self.issuer = issuer.rstrip("/") if issuer else None
         self.client_id = client_id
         self._secret_file = secret_file
         self._http = http
+        self._backchannel = backchannel
         self._metadata: dict[str, Any] | None = None
         self._metadata_at = 0.0
         self._keys: KeySet | None = None
         self._keys_at = 0.0
         self._pending: dict[str, Pending] = {}
         self._lock = asyncio.Lock()
+
+    def transport_url(self, url: str) -> str:
+        """Keep the public issuer identity while using a fixed local transport.
+
+        Never translate a different authority, a sibling path or a traversal.
+        Browser authorization URLs do not pass through this method.
+        """
+        if not self._backchannel:
+            return url
+        prefix = (self.issuer or "") + "/"
+        if not url.startswith(prefix):
+            raise SignInUnavailable("Eugene's sign-in endpoint is outside its configured issuer.")
+        suffix = url[len(prefix) :]
+        if "\\" in suffix or "%" in suffix or any(p in (".", "..") for p in suffix.split("/")):
+            raise SignInUnavailable("Eugene's sign-in endpoint has an invalid path.")
+        return self._backchannel + "/" + suffix
 
     # --- what is configured ----------------------------------------------
 
@@ -139,7 +157,7 @@ class Provider:
             return self._metadata
         url = f"{self.issuer}/.well-known/openid-configuration"
         try:
-            response = await self._http.get(url)
+            response = await self._http.get(self.transport_url(url))
         except httpx.HTTPError as exc:
             raise SignInUnavailable(
                 f"Workbench cannot reach Eugene's sign-in at {self.issuer}: "
@@ -165,7 +183,7 @@ class Provider:
             return self._keys
         meta = await self.metadata()
         try:
-            response = await self._http.get(meta["jwks_uri"])
+            response = await self._http.get(self.transport_url(meta["jwks_uri"]))
             response.raise_for_status()
         except (httpx.HTTPError, KeyError) as exc:
             raise SignInUnavailable(f"Eugene's sign-in keys could not be read: {exc}") from exc
@@ -259,14 +277,16 @@ class Provider:
         with contextlib.suppress(SignInUnavailable, httpx.HTTPError, KeyError):
             meta = await self.metadata()
             await self._http.post(
-                meta["revocation_endpoint"],
+                self.transport_url(meta["revocation_endpoint"]),
                 data={"token": refresh_token, "token_type_hint": "refresh_token"},
                 auth=self._auth(),
             )
 
     async def _token(self, meta: dict[str, Any], form: dict[str, str]) -> dict[str, Any]:
         try:
-            response = await self._http.post(meta["token_endpoint"], data=form, auth=self._auth())
+            response = await self._http.post(
+                self.transport_url(meta["token_endpoint"]), data=form, auth=self._auth()
+            )
         except httpx.HTTPError as exc:
             raise SignInUnavailable(
                 f"Workbench cannot reach Eugene's sign-in: {str(exc) or type(exc).__name__}"

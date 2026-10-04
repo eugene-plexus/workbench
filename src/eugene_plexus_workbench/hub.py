@@ -20,6 +20,8 @@ from typing import Any
 
 import httpx
 
+from ._http import ssl_context
+
 
 class HubError(Exception):
     """The gateway could not give an answer, in words a person reads."""
@@ -76,7 +78,9 @@ class Hub:
         # through a proxy the person's environment names. A stream may go
         # quiet while a model reads a long prompt, but not for 15 minutes:
         # past that the gateway's own deadline (600 s) has long fired.
-        self._http = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=900.0), trust_env=False)
+        self._http = httpx.AsyncClient(
+            timeout=httpx.Timeout(30.0, read=900.0), trust_env=False, verify=ssl_context()
+        )
 
     async def aclose(self) -> None:
         await self._http.aclose()

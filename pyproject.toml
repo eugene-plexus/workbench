@@ -29,6 +29,7 @@ dependencies = [
     "pydantic-settings>=2.6,<3",
     # Every model and every search is an HTTP call to the gateway.
     "httpx>=0.27,<1",
+    "truststore>=0.10,<1",
     "mcp>=2.3,<2.4",
     "httpx2>=2.10,<3",
     "jsonschema>=4.20,<5",

@@ -33,7 +33,9 @@ from .sessions import (
     SIGNIN_COOKIE,
     Sessions,
     SignedOut,
+    cookie_name,
     own_origin,
+    signin_path,
 )
 from .signin import PENDING_SECONDS, Provider, SignInRefused, SignInUnavailable
 from .store import Chat, FileRecord, Message, Person, Store
@@ -70,8 +72,9 @@ def _new_id() -> str:
 
 
 @router.get("/healthz")
-async def healthz() -> dict[str, str]:
-    return {"status": "ok"}
+async def healthz(request: Request) -> dict[str, Any]:
+    origin = _state(request).settings.public_origin
+    return {"status": "ok", **({"publicOrigin": origin, "originIsolation": 1} if origin else {})}
 
 
 @router.get("/api/status")
@@ -93,9 +96,15 @@ def _to_page(fragment: str) -> RedirectResponse:
     return response
 
 
-def _sign_in_failed(message: str) -> RedirectResponse:
+def _sign_in_failed(request: Request, message: str) -> RedirectResponse:
     response = _to_page("signin-error=" + quote(message, safe=""))
-    response.delete_cookie(SIGNIN_COOKIE, path="/oidc")
+    response.delete_cookie(
+        cookie_name(request, SIGNIN_COOKIE),
+        path=signin_path(request),
+        secure=request.url.scheme == "https",
+        httponly=True,
+        samesite="lax",
+    )
     return response
 
 
@@ -105,15 +114,15 @@ async def sign_in(request: Request) -> Response:
     try:
         url, pending = await provider.start(f"{own_origin(request)}/oidc/callback")
     except SignInUnavailable as exc:
-        return _sign_in_failed(str(exc))
+        return _sign_in_failed(request, str(exc))
     response = RedirectResponse(url, status_code=status.HTTP_302_FOUND)
     # Ties the callback to the browser that started it, so a code from
     # someone else's sign-in cannot be finished in this one (login CSRF).
     response.set_cookie(
-        SIGNIN_COOKIE,
+        cookie_name(request, SIGNIN_COOKIE),
         pending.binding,
         max_age=int(PENDING_SECONDS),
-        path="/oidc",
+        path=signin_path(request),
         httponly=True,
         samesite="lax",
         secure=request.url.scheme == "https",
@@ -130,22 +139,22 @@ async def sign_in_callback(request: Request) -> Response:
     query = request.query_params
     pending = provider.take(query.get("state"))
     if pending is None or not secrets.compare_digest(
-        request.cookies.get(SIGNIN_COOKIE, ""), pending.binding
+        request.cookies.get(cookie_name(request, SIGNIN_COOKIE), ""), pending.binding
     ):
         return _sign_in_failed(
-            "This sign-in was started in another browser or has expired. Sign in again."
+            request, "This sign-in was started in another browser or has expired. Sign in again."
         )
     if query.get("error"):
         return _sign_in_failed(
-            str(query.get("error_description") or query.get("error") or "Eugene said no.")
+            request, str(query.get("error_description") or query.get("error") or "Eugene said no.")
         )
     code = query.get("code")
     if not code:
-        return _sign_in_failed("Eugene sent no sign-in code back. Sign in again.")
+        return _sign_in_failed(request, "Eugene sent no sign-in code back. Sign in again.")
     try:
         identity = await provider.finish(pending, code, query.get("iss"))
     except (SignInRefused, SignInUnavailable) as exc:
-        return _sign_in_failed(str(exc))
+        return _sign_in_failed(request, str(exc))
     await store.upsert_person(
         Person(sub=identity.sub, name=identity.name, role=identity.role, username=identity.username)
     )
@@ -153,9 +162,15 @@ async def sign_in_callback(request: Request) -> Response:
     log.info("%s signed in", identity.name)
     # The secret goes in the fragment, which no server is ever sent (W3).
     response = _to_page("signin=" + created.secret)
-    response.delete_cookie(SIGNIN_COOKIE, path="/oidc")
+    response.delete_cookie(
+        cookie_name(request, SIGNIN_COOKIE),
+        path=signin_path(request),
+        secure=request.url.scheme == "https",
+        httponly=True,
+        samesite="lax",
+    )
     response.set_cookie(
-        SESSION_COOKIE,
+        cookie_name(request, SESSION_COOKIE),
         created.cookie,
         max_age=SESSION_SECONDS,
         path="/",
@@ -172,7 +187,13 @@ async def sign_out(request: Request) -> Response:
     await _person(request)
     await sessions.end(request)
     response = Response(status_code=status.HTTP_204_NO_CONTENT)
-    response.delete_cookie(SESSION_COOKIE, path="/")
+    response.delete_cookie(
+        cookie_name(request, SESSION_COOKIE),
+        path="/",
+        secure=request.url.scheme == "https",
+        httponly=True,
+        samesite="lax",
+    )
     return response
 
 
@@ -185,6 +206,11 @@ async def me(request: Request) -> dict[str, Any]:
         "name": person.name,
         "username": person.username,
         "owner": person.is_owner,
+        "consoleUrl": (
+            str(_state(request).settings.oidc_issuer).removesuffix("/oidc")
+            if person.is_owner and _state(request).settings.oidc_issuer
+            else None
+        ),
         # The standing line (W4) is for everyone the owner can read.
         "ownerReadsChats": reads,
     }
