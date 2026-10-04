@@ -1,7 +1,8 @@
 import { Paperclip, Send, Square, X } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { api, patch, post } from "../lib/api";
+import { readDraft, saveDraft } from "../lib/conveniences";
 import type { Chat, Me, Message, Model, Models } from "../lib/types";
 import { modelLabel, SEARCH_HINT, SEARCH_LABEL, takes } from "../lib/words";
 
@@ -15,17 +16,17 @@ interface Pending {
   mediaType: string;
 }
 
-function remembered(): string | null {
+function remembered(person: string): string | null {
   try {
-    return window.localStorage.getItem(MODEL_KEY);
+    return window.localStorage.getItem(`${MODEL_KEY}:${person}`);
   } catch {
     return null;
   }
 }
 
-function remember(model: string): void {
+function remember(person: string, model: string): void {
   try {
-    window.localStorage.setItem(MODEL_KEY, model);
+    window.localStorage.setItem(`${MODEL_KEY}:${person}`, model);
   } catch {
     // Remembering the last model is a convenience.
   }
@@ -73,6 +74,7 @@ async function asSendable(file: File): Promise<File> {
   canvas.width = bitmap.width;
   canvas.height = bitmap.height;
   canvas.getContext("2d")!.drawImage(bitmap, 0, 0);
+  bitmap.close();
   const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
   if (!blob) throw new Error(`${file.name} could not be turned into a PNG.`);
   return new File([blob], file.name.replace(/\.[^.]+$/, "") + ".png", { type: "image/png" });
@@ -80,6 +82,7 @@ async function asSendable(file: File): Promise<File> {
 
 export function Composer({
   chat,
+  me,
   models,
   modelsError,
   running,
@@ -94,7 +97,8 @@ export function Composer({
   onSent: (user: Message, answer: Message) => void;
   onChat: (chat: Chat) => void;
 }) {
-  const [text, setText] = useState("");
+  const [text, setText] = useState(() => readDraft(me.sub, chat.id));
+  const [draftSaved, setDraftSaved] = useState(true);
   const [pending, setPending] = useState<Pending[]>([]);
   const [problem, setProblem] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
@@ -103,11 +107,29 @@ export function Composer({
   const [searchWanted, setSearchWanted] = useState(chat.search);
   const [picked, setPicked] = useState<string | null>(chat.model);
   const files = useRef<HTMLInputElement>(null);
+  const textarea = useRef<HTMLTextAreaElement>(null);
+  const sendPending = useRef(false);
+  const uploadPending = useRef(false);
+  const [uploading, setUploading] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const dragDepth = useRef(0);
+
+  function changeText(value: string) {
+    setText(value);
+    setDraftSaved(saveDraft(me.sub, chat.id, value));
+  }
+
+  useLayoutEffect(() => {
+    const field = textarea.current;
+    if (!field) return;
+    field.style.height = "auto";
+    field.style.height = `${Math.min(240, Math.max(80, field.scrollHeight))}px`;
+  }, [text]);
 
   const available = useMemo(() => models?.models ?? [], [models]);
   const chosenId =
     picked ??
-    available.find((m) => m.id === remembered())?.id ??
+    available.find((m) => m.id === remembered(me.sub))?.id ??
     available.find((m) => m.ready)?.id ??
     available[0]?.id ??
     null;
@@ -119,9 +141,9 @@ export function Composer({
   async function setModel(id: string) {
     const before = picked;
     setPicked(id);
-    remember(id);
     try {
       onChat(await patch<Chat>(`/api/chats/${chat.id}`, { model: id }));
+      remember(me.sub, id);
     } catch (error) {
       setPicked(before);
       setProblem(error instanceof Error ? error.message : String(error));
@@ -138,9 +160,14 @@ export function Composer({
     }
   }
 
-  async function attach(list: FileList | null) {
+  async function attach(list: FileList | File[] | null) {
+    if (sendPending.current || uploadPending.current || !list?.length) return;
+    uploadPending.current = true;
     setProblem(null);
-    for (const original of Array.from(list ?? [])) {
+    const originals = Array.from(list);
+    const failures: string[] = [];
+    for (const [index, original] of originals.entries()) {
+      setUploading(`Uploading ${index + 1} of ${originals.length}: ${original.name}`);
       try {
         const file = await asSendable(original);
         const form = new FormData();
@@ -151,15 +178,21 @@ export function Composer({
         });
         setPending((current) => [...current, stored]);
       } catch (error) {
-        setProblem(error instanceof Error ? error.message : String(error));
+        failures.push(
+          `${original.name}: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
     }
+    if (failures.length) setProblem(failures.join(" "));
+    uploadPending.current = false;
+    setUploading(null);
     if (files.current) files.current.value = "";
   }
 
   async function send() {
-    if (!chosenId || sending || running) return;
+    if (!chosen || sendPending.current || uploadPending.current || running || cannotTake) return;
     if (!text.trim() && pending.length === 0) return;
+    sendPending.current = true;
     setSending(true);
     setProblem(null);
     try {
@@ -172,14 +205,16 @@ export function Composer({
           search: searchOn,
         },
       );
-      remember(chosenId);
+      remember(me.sub, chosen.id);
       onSent({ ...sent.user, files: pending }, sent.answer);
-      setText("");
+      changeText("");
       setPending([]);
     } catch (error) {
       setProblem(error instanceof Error ? error.message : String(error));
     } finally {
       setSending(false);
+      sendPending.current = false;
+      textarea.current?.focus();
     }
   }
 
@@ -191,22 +226,63 @@ export function Composer({
     }
   }
 
-  const blocked = !chosenId ? "There is no model to send to." : cannotTake;
+  const blocked = !chosenId
+    ? "There is no model to send to."
+    : !chosen
+      ? "This model is no longer available. Pick another model."
+      : cannotTake;
 
   return (
-    <div className="border-t border-line bg-panel px-4 py-3">
+    <div
+      onDragEnter={(e) => {
+        if (!e.dataTransfer.types.includes("Files")) return;
+        e.preventDefault();
+        dragDepth.current += 1;
+        setDragging(true);
+      }}
+      onDragOver={(e) => {
+        if (!e.dataTransfer.types.includes("Files")) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = uploading || sending ? "none" : "copy";
+      }}
+      onDragLeave={() => {
+        dragDepth.current = Math.max(0, dragDepth.current - 1);
+        if (!dragDepth.current) setDragging(false);
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        dragDepth.current = 0;
+        setDragging(false);
+        void attach(e.dataTransfer.files);
+      }}
+      className={`border-t bg-panel px-4 py-3 ${dragging ? "border-accent ring-2 ring-inset ring-accent" : "border-line"}`}
+      data-testid="composer-area"
+    >
       <div className="mx-auto flex max-w-3xl flex-col gap-2">
+        {dragging && (
+          <p role="status" className="text-sm text-accent">
+            {uploading || sending
+              ? "Wait for the current upload or send to finish."
+              : "Drop files to attach them."}
+          </p>
+        )}
+        {uploading && (
+          <p role="status" className="break-words text-sm text-muted">
+            {uploading}
+          </p>
+        )}
         {pending.length > 0 && (
           <ul className="flex flex-wrap gap-2" aria-label="Attached">
             {pending.map((file) => (
               <li
                 key={file.id}
-                className="flex items-center gap-1 rounded-plexus border border-line bg-soft px-2 py-0.5 text-sm"
+                className="flex max-w-full items-center gap-1 break-all rounded-plexus border border-line bg-soft px-2 py-0.5 text-sm"
               >
                 {file.name}
                 <button
                   type="button"
                   aria-label={`Remove ${file.name}`}
+                  disabled={sending}
                   onClick={() => setPending((current) => current.filter((p) => p.id !== file.id))}
                 >
                   <X size={12} />
@@ -216,10 +292,25 @@ export function Composer({
           </ul>
         )}
         <textarea
+          id="message-composer"
+          ref={textarea}
+          autoFocus
+          disabled={sending}
+          aria-keyshortcuts="Control+Alt+M"
+          aria-describedby="composer-hint"
           aria-label="Your message"
           data-testid="composer"
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => changeText(e.target.value)}
+          onPaste={(e) => {
+            const images = Array.from(e.clipboardData.files).filter((file) =>
+              file.type.startsWith("image/"),
+            );
+            if (images.length && !sending && !uploading) {
+              e.preventDefault();
+              void attach(images);
+            }
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
@@ -228,8 +319,16 @@ export function Composer({
           }}
           rows={3}
           placeholder="Ask anything. Enter sends; Shift+Enter starts a new line."
-          className="w-full resize-y rounded-plexus border border-line bg-soft p-2"
+          className="w-full resize-none overflow-y-auto rounded-plexus border border-line bg-soft p-2"
         />
+        <p id="composer-hint" className="text-xs text-muted">
+          Drop files here or paste an image.{" "}
+          {text
+            ? draftSaved
+              ? "Text draft kept in this tab until you send or sign out."
+              : "This browser cannot save your draft after you leave this chat."
+            : "Enter sends; Shift+Enter adds a line."}
+        </p>
         <div className="flex flex-wrap items-center gap-3 text-sm">
           <input
             ref={files}
@@ -243,6 +342,7 @@ export function Composer({
           <button
             type="button"
             onClick={() => files.current?.click()}
+            disabled={uploading !== null || sending}
             className="flex items-center gap-1 rounded-plexus border border-line px-2 py-1 hover:bg-hover"
           >
             <Paperclip size={14} aria-hidden /> Attach
@@ -252,10 +352,12 @@ export function Composer({
             <select
               data-testid="model-picker"
               value={chosenId ?? ""}
+              disabled={sending}
               onChange={(e) => void setModel(e.target.value)}
-              className="max-w-72 rounded-plexus border border-line bg-soft px-1 py-1"
+              className="min-w-0 max-w-52 rounded-plexus border border-line bg-soft px-1 py-1 sm:max-w-72"
             >
               {available.length === 0 && <option value="">No models</option>}
+              {chosenId && !chosen && <option value={chosenId}>{chosenId} (unavailable)</option>}
               {available.map((model) => (
                 <option key={model.id} value={model.id}>
                   {modelLabel(model)}
@@ -273,7 +375,7 @@ export function Composer({
               role="switch"
               data-testid="search-switch"
               checked={searchOn}
-              disabled={searchOff !== null}
+              disabled={searchOff !== null || sending}
               onChange={(e) => void setSearch(e.target.checked)}
             />
             {SEARCH_LABEL}
@@ -292,7 +394,12 @@ export function Composer({
             <button
               type="button"
               data-testid="send"
-              disabled={blocked !== null || sending || (!text.trim() && pending.length === 0)}
+              disabled={
+                blocked !== null ||
+                sending ||
+                uploading !== null ||
+                (!text.trim() && pending.length === 0)
+              }
               onClick={() => void send()}
               className="flex items-center gap-1 rounded-plexus bg-accent px-3 py-1.5 font-medium text-on-accent disabled:opacity-50"
             >

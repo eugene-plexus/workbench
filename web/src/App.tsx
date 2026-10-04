@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ChatView } from "./components/ChatView";
 import { Mascot } from "./components/Mascot";
@@ -6,7 +6,7 @@ import { Sidebar } from "./components/Sidebar";
 import { SignIn } from "./components/SignIn";
 import { Tools } from "./components/Tools";
 import { api, onSignedOut, post, SignedOut } from "./lib/api";
-import { takeFragment } from "./lib/session";
+import { forget, takeFragment } from "./lib/session";
 import type { Chat, Me, Models } from "./lib/types";
 
 /** The chat an address names: `/chats/<id>`, or none. */
@@ -28,6 +28,19 @@ export default function App() {
   const [modelsError, setModelsError] = useState<string | null>(null);
   const [showTools, setShowTools] = useState(false);
   const [showChats, setShowChats] = useState(false);
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  const [chatsError, setChatsError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  const newPending = useRef(false);
+  const focusTarget = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (focusTarget.current) {
+      document.getElementById(focusTarget.current)?.focus();
+      focusTarget.current = null;
+    }
+  });
 
   const open = useCallback((id: string | null) => {
     const path = id ? `/chats/${id}` : "/";
@@ -38,7 +51,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const back = () => setChatId(chatFromPath(window.location.pathname));
+    const back = () => {
+      setChatId(chatFromPath(window.location.pathname));
+      setShowTools(false);
+      setShowChats(false);
+    };
     window.addEventListener("popstate", back);
     return () => window.removeEventListener("popstate", back);
   }, []);
@@ -84,8 +101,10 @@ export default function App() {
   const refreshChats = useCallback(async () => {
     try {
       setChats((await api<{ chats: Chat[] }>("/api/chats")).chats);
-    } catch {
-      // A sign-out is handled by its listener; anything else waits for the next try.
+      setChatsError(null);
+    } catch (error) {
+      if (!(error instanceof SignedOut))
+        setChatsError(error instanceof Error ? error.message : String(error));
     }
   }, []);
 
@@ -112,10 +131,53 @@ export default function App() {
   }, [phase.kind, refreshChats, refreshModels]);
 
   const newChat = useCallback(async () => {
-    const chat = await post<Chat>("/api/chats", {});
-    setChats((current) => [chat, ...current]);
-    open(chat.id);
+    if (newPending.current) return;
+    newPending.current = true;
+    setCreating(true);
+    setActionError(null);
+    try {
+      const chat = await post<Chat>("/api/chats", {});
+      setChats((current) => [chat, ...current]);
+      open(chat.id);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      newPending.current = false;
+      setCreating(false);
+    }
   }, [open]);
+
+  useEffect(() => {
+    if (phase.kind !== "ready") return;
+    const shortcuts = (event: KeyboardEvent) => {
+      if (event.isComposing || event.repeat || event.getModifierState("AltGraph")) return;
+      if (event.key === "Escape") {
+        setShowShortcuts(false);
+        return;
+      }
+      if (!event.ctrlKey || !event.altKey || event.metaKey || event.shiftKey) return;
+      const key = event.code;
+      if (key === "KeyN") {
+        event.preventDefault();
+        void newChat();
+      }
+      if (key === "KeyF") {
+        event.preventDefault();
+        focusTarget.current = "chat-search";
+        setShowChats(true);
+        document.getElementById("chat-search")?.focus();
+      }
+      if (key === "KeyM") {
+        event.preventDefault();
+        focusTarget.current = "message-composer";
+        setShowChats(false);
+        setShowTools(false);
+        document.getElementById("message-composer")?.focus();
+      }
+    };
+    window.addEventListener("keydown", shortcuts);
+    return () => window.removeEventListener("keydown", shortcuts);
+  }, [phase.kind, newChat]);
 
   if (phase.kind === "loading") return null;
   if (phase.kind === "signed-out") {
@@ -123,7 +185,7 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-full">
+    <div className="relative flex h-full">
       <div className={`${showChats ? "flex" : "hidden"} w-full shrink-0 md:flex md:w-auto`}>
         <Sidebar
           me={phase.me}
@@ -132,16 +194,19 @@ export default function App() {
           onOpen={open}
           onClose={() => setShowChats(false)}
           onNew={() => void newChat()}
+          creating={creating}
+          error={chatsError}
+          onRetry={() => void refreshChats()}
           onSignOut={async () => {
             await post("/api/signout").catch(() => undefined);
+            forget();
+            setChats([]);
             setPhase({ kind: "signed-out", message: "You signed out.", unavailable: null });
           }}
         />
       </div>
       <main className={`${showChats ? "hidden md:flex" : "flex"} min-w-0 flex-1 flex-col`}>
-        <div
-          className={`flex justify-between border-b border-line px-4 py-2 ${showTools ? "md:hidden" : ""}`}
-        >
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-2">
           <button
             onClick={() => setShowChats(true)}
             className="text-sm text-accent md:hidden"
@@ -154,7 +219,32 @@ export default function App() {
               Toolbox · Tools
             </button>
           )}
+          <button
+            onClick={() => setShowShortcuts((shown) => !shown)}
+            aria-expanded={showShortcuts}
+            aria-controls="keyboard-shortcuts"
+            className="ml-auto text-sm text-muted"
+          >
+            Keyboard shortcuts
+          </button>
         </div>
+        {showShortcuts && (
+          <aside
+            id="keyboard-shortcuts"
+            className="border-b border-line bg-panel px-4 py-3 text-sm"
+          >
+            <p>
+              Ctrl + Alt + N: New chat · Ctrl + Alt + F: Search chats · Ctrl + Alt + M: Write a
+              message
+            </p>
+            <p className="mt-1 text-muted">
+              On Mac, use Control + Option. Enter sends; Shift + Enter adds a line.
+            </p>
+            <button className="mt-2 text-accent" onClick={() => setShowShortcuts(false)}>
+              Close shortcuts
+            </button>
+          </aside>
+        )}
         {showTools ? (
           <Tools owner={phase.me.owner} onClose={() => setShowTools(false)} />
         ) : chatId ? (
@@ -176,9 +266,21 @@ export default function App() {
             modelsError={modelsError}
             noModels={models !== null && models.models.length === 0}
             onNew={() => void newChat()}
+            creating={creating}
           />
         )}
       </main>
+      {actionError && (
+        <div
+          role="alert"
+          className="absolute inset-x-3 bottom-3 z-10 rounded-plexus border border-error-line bg-panel p-3 text-sm text-error"
+        >
+          {actionError}{" "}
+          <button className="ml-2 underline" onClick={() => setActionError(null)}>
+            Dismiss
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -188,11 +290,13 @@ function Empty({
   modelsError,
   noModels,
   onNew,
+  creating,
 }: {
   hasChats: boolean;
   modelsError: string | null;
   noModels: boolean;
   onNew: () => void;
+  creating: boolean;
 }) {
   return (
     <div className="flex flex-1 items-center justify-center p-6">
@@ -217,9 +321,10 @@ function Empty({
           type="button"
           data-testid="new-chat-empty"
           onClick={onNew}
+          disabled={creating}
           className="rounded-plexus bg-accent px-4 py-2 font-medium text-on-accent hover:opacity-90"
         >
-          New chat
+          {creating ? "Creating…" : "New chat"}
         </button>
       </div>
     </div>

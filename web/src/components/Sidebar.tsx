@@ -1,7 +1,8 @@
-import { Eye, LogOut, Plus, X } from "lucide-react";
+import { Eye, LogOut, Plus, Search, X } from "lucide-react";
 import { useState } from "react";
 
 import { api } from "../lib/api";
+import { chatGroups } from "../lib/conveniences";
 import type { Chat, Me, Person } from "../lib/types";
 import { OWNER_READS } from "../lib/words";
 import { Logo } from "./Mascot";
@@ -14,6 +15,9 @@ export function Sidebar({
   onClose,
   onNew,
   onSignOut,
+  creating,
+  error,
+  onRetry,
 }: {
   me: Me;
   chats: Chat[];
@@ -22,7 +26,12 @@ export function Sidebar({
   onClose: () => void;
   onNew: () => void;
   onSignOut: () => void;
+  creating: boolean;
+  error: string | null;
+  onRetry: () => void;
 }) {
+  const [query, setQuery] = useState("");
+  const groups = chatGroups(chats, query);
   return (
     <nav
       id="chat-navigation"
@@ -45,9 +54,11 @@ export function Sidebar({
           type="button"
           data-testid="new-chat"
           onClick={onNew}
+          disabled={creating}
+          aria-keyshortcuts="Control+Alt+N"
           className="flex w-full items-center justify-center gap-2 rounded-plexus border border-line bg-soft px-3 py-2 hover:bg-hover"
         >
-          <Plus size={16} aria-hidden /> New chat
+          <Plus size={16} aria-hidden /> {creating ? "Creating…" : "New chat"}
         </button>
       </div>
       {!me.owner && me.ownerReadsChats && (
@@ -61,26 +72,68 @@ export function Sidebar({
       <h2 className="px-4 pb-1 pt-4 text-xs font-semibold uppercase tracking-wide text-muted">
         Chats
       </h2>
+      <div className="mx-3 mb-2 flex items-center gap-1 rounded-plexus border border-line bg-soft px-2">
+        <Search size={14} aria-hidden className="shrink-0 text-muted" />
+        <input
+          id="chat-search"
+          type="search"
+          aria-label="Search chat names"
+          aria-keyshortcuts="Control+Alt+F"
+          placeholder="Search chat names"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setQuery("");
+          }}
+          className="min-w-0 flex-1 bg-transparent py-2 text-sm"
+        />
+        {query && (
+          <button aria-label="Clear chat search" onClick={() => setQuery("")} className="p-1">
+            <X size={14} />
+          </button>
+        )}
+      </div>
+      {error && (
+        <div role="alert" className="px-4 py-2 text-sm text-error">
+          {error}{" "}
+          <button onClick={onRetry} className="underline">
+            Try again
+          </button>
+        </div>
+      )}
       <ul className="flex-1 overflow-y-auto px-2" data-testid="chat-list">
         {chats.length === 0 && <li className="px-2 py-1 text-sm text-muted">No chats yet.</li>}
-        {chats.map((chat) => (
-          <li key={chat.id}>
-            <button
-              type="button"
-              onClick={() => onOpen(chat.id)}
-              aria-current={chat.id === current ? "page" : undefined}
-              className={`flex w-full items-center gap-2 truncate rounded-plexus px-2 py-1.5 text-left text-sm hover:bg-hover ${
-                chat.id === current ? "bg-soft font-medium" : ""
-              }`}
-            >
-              {chat.running && (
-                <span
-                  className="h-2 w-2 shrink-0 rounded-full bg-accent"
-                  title="An answer is being written"
-                />
-              )}
-              <span className="truncate">{chat.title}</span>
-            </button>
+        {chats.length > 0 && groups.length === 0 && (
+          <li role="status" className="px-2 py-2 text-sm text-muted">
+            No chats match “{query}”.
+          </li>
+        )}
+        {groups.map((group) => (
+          <li key={group.label}>
+            <h3 className="px-2 pb-1 pt-3 text-xs text-muted">{group.label}</h3>
+            <ul>
+              {group.chats.map((chat) => (
+                <li key={chat.id}>
+                  <button
+                    type="button"
+                    onClick={() => onOpen(chat.id)}
+                    aria-current={chat.id === current ? "page" : undefined}
+                    title={chat.title}
+                    className={`flex w-full items-center gap-2 truncate rounded-plexus px-2 py-1.5 text-left text-sm hover:bg-hover ${
+                      chat.id === current ? "bg-soft font-medium" : ""
+                    }`}
+                  >
+                    {chat.running && (
+                      <span
+                        className="h-2 w-2 shrink-0 rounded-full bg-accent"
+                        title="An answer is being written"
+                      />
+                    )}
+                    <span className="truncate">{chat.title}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
           </li>
         ))}
       </ul>
