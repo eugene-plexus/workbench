@@ -197,11 +197,30 @@ async def sign_out(request: Request) -> Response:
     return response
 
 
+async def install_mode(request: Request) -> dict[str, Any]:
+    remote = _state(request).tools.node_folders
+    if remote is None:
+        return {"mode": "production", "changedAt": None, "known": False}
+    value: dict[str, Any] = await remote.install_mode()
+    return value
+
+
+def _mode_seen_key(sub: str) -> str:
+    return f"installModeSeen:{sub}"
+
+
 @router.get("/api/me")
 async def me(request: Request) -> dict[str, Any]:
     person = await _person(request)
     reads = await config.owner_reads_chats(_state(request).store)
+    mode = await install_mode(request)
+    seen = await _state(request).store.setting(_mode_seen_key(person.sub))
     return {
+        # Every person sees the install's mode, and is told when it changed
+        # since they last acknowledged it (J18).
+        "installMode": mode["mode"],
+        "installModeChangedAt": mode["changedAt"],
+        "installModeNotice": bool(mode["changedAt"] and mode["changedAt"] != seen),
         "sub": person.sub,
         "name": person.name,
         "username": person.username,
@@ -214,6 +233,16 @@ async def me(request: Request) -> dict[str, Any]:
         # The standing line (W4) is for everyone the owner can read.
         "ownerReadsChats": reads,
     }
+
+
+@router.post("/api/me/mode-seen", status_code=status.HTTP_204_NO_CONTENT)
+async def mode_seen(request: Request) -> Response:
+    """The person read the notice that the mode changed."""
+    person = await _person(request)
+    mode = await install_mode(request)
+    if mode["changedAt"]:
+        await _state(request).store.put_setting(_mode_seen_key(person.sub), mode["changedAt"])
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # --------------------------------------------------------------------------- #
@@ -380,11 +409,66 @@ async def get_chat(request: Request, chat_id: str) -> dict[str, Any]:
         ]
         views.append(view)
     owner = await store.person(chat.owner) if read_only else None
+    if read_only:
+        views = redact_for_owner(views, (await install_mode(request))["mode"])
     return {
         "chat": chat_view(chat, running=running is not None, read_only=read_only),
         "messages": views,
         "ownerName": owner.name if owner else None,
     }
+
+
+def _hidden_call(call: dict[str, Any], mode: str) -> bool:
+    """A job-site call the owner may not read: everything unless it was made
+    in dev mode and the install is still in dev mode (J13, J18)."""
+    return bool(call.get("jobSite")) and not (mode == "dev" and call.get("mode") == "dev")
+
+
+def redact_for_owner(views: list[dict[str, Any]], mode: str) -> list[dict[str, Any]]:
+    """Production mode hides a chat from its first job-site result on (J13a).
+
+    The model's later replies quote what it read, so the result alone is not
+    enough; the owner sees the chat up to that point, then one line saying
+    which machine's files the rest used."""
+    out: list[dict[str, Any]] = []
+    site: str | None = None
+    for view in views:
+        if site is None:
+            for round_ in view.get("toolRounds") or []:
+                for call in round_.get("calls") or []:
+                    if _hidden_call(call, mode):
+                        site = str(call.get("site") or "a job site")
+                        break
+                if site is not None:
+                    break
+        if site is None:
+            out.append(view)
+            continue
+        out.append(
+            {
+                "content": "",
+                "reasoning": "",
+                "sources": [],
+                "searches": 0,
+                "search": False,
+                "id": view["id"],
+                "seq": view["seq"],
+                "role": view["role"],
+                "status": view["status"],
+                "createdAt": view["createdAt"],
+                "finishedAt": view["finishedAt"],
+                "attachments": [],
+                "files": [],
+                "toolRounds": [],
+                "error": None,
+                "model": view.get("model"),
+                "finish": view.get("finish"),
+                "answerFrom": None,
+                "reasoningFrom": None,
+                "redacted": {"site": site},
+            }
+        )
+    return out
 
 
 @router.patch("/api/chats/{chat_id}")
@@ -654,6 +738,15 @@ def _sse(event: dict[str, Any]) -> str:
     return f"data: {json.dumps(event)}\n\n"
 
 
+async def _settle(queue: asyncio.Queue[Any], quiet: float = 1.0) -> None:
+    """Drain events until none has arrived for `quiet` seconds."""
+    while True:
+        try:
+            await asyncio.wait_for(queue.get(), quiet)
+        except TimeoutError:
+            return
+
+
 @router.get("/api/chats/{chat_id}/events")
 async def events(request: Request, chat_id: str) -> StreamingResponse:
     """Every tab watching a chat gets its answers as they arrive (W1).
@@ -663,7 +756,7 @@ async def events(request: Request, chat_id: str) -> StreamingResponse:
     open.
     """
     person = await _person(request)
-    chat, _ = await _readable_chat(request, person, chat_id)
+    chat, read_only = await _readable_chat(request, person, chat_id)
     answers = _answers(request)
     sessions: Sessions = _state(request).sessions
 
@@ -671,11 +764,19 @@ async def events(request: Request, chat_id: str) -> StreamingResponse:
         watch, snapshot = answers.watch(chat.id)
         try:
             yield ": watching\n\n"
-            if snapshot is not None:
+            if snapshot is not None and not read_only:
                 yield _sse(snapshot)
             while True:
                 try:
                     event = await asyncio.wait_for(watch.queue.get(), _KEEPALIVE_SECONDS)
+                    if read_only:
+                        # The owner reading someone's chat is told only that it
+                        # changed, so the page re-reads it through the
+                        # redaction: a live answer's content never reaches them
+                        # before production mode could hide it (J13a).
+                        await _settle(watch.queue)
+                        yield _sse({"type": "reload"})
+                        continue
                 except TimeoutError:
                     try:
                         await sessions.person(request)

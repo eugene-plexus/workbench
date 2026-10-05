@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ChatView } from "./components/ChatView";
+import { JobSites } from "./components/JobSites";
 import { Mascot } from "./components/Mascot";
 import { Sidebar } from "./components/Sidebar";
 import { SignIn } from "./components/SignIn";
@@ -8,6 +9,7 @@ import { Tools } from "./components/Tools";
 import { api, onSignedOut, post, SignedOut } from "./lib/api";
 import { forget, takeFragment } from "./lib/session";
 import type { Chat, Me, Models } from "./lib/types";
+import { modeChanged } from "./lib/words";
 
 /** The chat an address names: `/chats/<id>`, or none. */
 export function chatFromPath(path: string): string | null {
@@ -27,6 +29,7 @@ export default function App() {
   const [models, setModels] = useState<Models | null>(null);
   const [modelsError, setModelsError] = useState<string | null>(null);
   const [showTools, setShowTools] = useState(false);
+  const [showSites, setShowSites] = useState(false);
   const [showChats, setShowChats] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [chatsError, setChatsError] = useState<string | null>(null);
@@ -47,6 +50,7 @@ export default function App() {
     if (window.location.pathname !== path) window.history.pushState(null, "", path);
     setChatId(id);
     setShowTools(false);
+    setShowSites(false);
     setShowChats(false);
   }, []);
 
@@ -215,8 +219,25 @@ export default function App() {
             Chats
           </button>
           {!showTools && (
-            <button onClick={() => setShowTools(true)} className="text-sm text-accent">
+            <button
+              onClick={() => {
+                setShowSites(false);
+                setShowTools(true);
+              }}
+              className="text-sm text-accent"
+            >
               Toolbox · Tools
+            </button>
+          )}
+          {!showSites && !phase.me.owner && (
+            <button
+              onClick={() => {
+                setShowTools(false);
+                setShowSites(true);
+              }}
+              className="text-sm text-accent"
+            >
+              Job sites (your machines)
             </button>
           )}
           <button
@@ -245,7 +266,27 @@ export default function App() {
             </button>
           </aside>
         )}
-        {showTools ? (
+        {phase.me.installModeNotice && phase.me.installMode && phase.me.installModeChangedAt && (
+          <aside
+            role="status"
+            data-testid="install-mode-notice"
+            className="border-b border-warn-line bg-warn-bg px-4 py-3 text-sm text-warn"
+          >
+            {modeChanged(phase.me.installMode, phase.me.installModeChangedAt)}{" "}
+            <button
+              className="ml-2 underline"
+              onClick={async () => {
+                await post("/api/me/mode-seen").catch(() => undefined);
+                setPhase({ kind: "ready", me: { ...phase.me, installModeNotice: false } });
+              }}
+            >
+              OK
+            </button>
+          </aside>
+        )}
+        {showSites ? (
+          <JobSites onClose={() => setShowSites(false)} />
+        ) : showTools ? (
           <Tools owner={phase.me.owner} onClose={() => setShowTools(false)} />
         ) : chatId ? (
           <ChatView

@@ -35,6 +35,9 @@ export interface Message {
   answerFrom?: number | null;
   reasoningFrom?: number | null;
   toolRounds?: { calls: ToolCall[] }[];
+  /** The owner reading someone's chat in production mode: from the first
+   * job-site result on, nothing but which machine it used (J13a). */
+  redacted?: { site: string };
 }
 
 export interface ToolCall {
@@ -45,6 +48,9 @@ export interface ToolCall {
   arguments: Record<string, unknown>;
   status: "pending" | "running" | "done" | "declined" | "cancelled" | "failed" | "uncertain";
   result: string | null;
+  jobSite?: boolean;
+  site?: string | null;
+  mode?: "production" | "dev";
 }
 
 interface ServerIdentity {
@@ -130,6 +136,40 @@ export interface Me {
   owner: boolean;
   ownerReadsChats: boolean;
   consoleUrl?: string | null;
+  installMode?: "production" | "dev";
+  installModeChangedAt?: string | null;
+  installModeNotice?: boolean;
+}
+
+export interface JobSiteFolder {
+  id: string;
+  name: string;
+  path: string;
+  writable: boolean;
+  people: { person: string; name: string; writable: boolean }[];
+}
+
+export interface JobSite {
+  node: string;
+  enabled: boolean;
+  online: boolean;
+  ready: boolean;
+  supported: boolean | null;
+  reason: string | null;
+  account: string | null;
+  lastContactAt: string | null;
+  folders: JobSiteFolder[];
+}
+
+export interface JobSiteList {
+  sites: JobSite[];
+  canInvite: boolean;
+}
+
+export interface JobSiteInvite {
+  expiresAt: string;
+  nodeName: string | null;
+  commands: { windows: string; posix: string };
 }
 
 export interface Model {

@@ -4,7 +4,7 @@ import { useState } from "react";
 import { api } from "../lib/api";
 import { chatGroups } from "../lib/conveniences";
 import type { Chat, Me, Person } from "../lib/types";
-import { OWNER_READS } from "../lib/words";
+import { DEV_MODE, OWNER_READS, PRODUCTION_MODE } from "../lib/words";
 import { Logo } from "./Mascot";
 
 export function Sidebar({
@@ -61,6 +61,18 @@ export function Sidebar({
           <Plus size={16} aria-hidden /> {creating ? "Creating…" : "New chat"}
         </button>
       </div>
+      {me.installMode && (
+        <p
+          data-testid="install-mode"
+          className={`mx-3 mt-3 rounded-plexus border px-3 py-2 text-sm ${
+            me.installMode === "dev"
+              ? "border-warn-line bg-warn-bg text-warn"
+              : "border-line text-muted"
+          }`}
+        >
+          {me.installMode === "dev" ? DEV_MODE : PRODUCTION_MODE}
+        </p>
+      )}
       {!me.owner && me.ownerReadsChats && (
         <p
           data-testid="owner-reads"
