@@ -8,6 +8,7 @@ import {
   DRAFT_HINT,
   DRAFT_LABEL,
   progressWords,
+  redactedNote,
   reasoningParts,
   SEARCHED_MARK,
   statusWords,
@@ -36,6 +37,17 @@ export function MessageView({
   const [editing, setEditing] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [acting, setActing] = useState(false);
+
+  if (message.redacted) {
+    return (
+      <p
+        data-testid="redacted-message"
+        className="rounded-plexus border border-line px-3 py-2 text-sm text-muted"
+      >
+        {redactedNote(message.redacted.site)}
+      </p>
+    );
+  }
 
   if (message.role === "user") {
     return (

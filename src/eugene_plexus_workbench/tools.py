@@ -234,6 +234,10 @@ class Tools:
                     "id": grant_id,
                     "name": f"{grant['node']} · {grant['name']}" if remote else grant["name"],
                     "transport": "node_folder" if remote else "folder",
+                    # A job site's results are hidden from the owner's
+                    # reading in production mode (remote-nodes.md J13a).
+                    "jobSite": bool(remote and grant.get("jobSite")),
+                    "site": grant.get("node") if remote else None,
                 }
                 for name, description, schema in folders.definitions(bool(grant["writable"])):
                     session.add(server, None, name, schema, description)
@@ -398,20 +402,33 @@ class ToolSession:
             "arguments": arguments,
             "status": "pending",
             "result": None,
+            **(
+                {"jobSite": True, "site": server.get("site"), "mode": "production"}
+                if server.get("jobSite")
+                else {}
+            ),
         }
 
     async def execute(self, call: dict[str, Any]) -> None:
         server, client, tool, _ = self.tools[call["name"]]
         if server["transport"] in {"folder", "node_folder"}:
             try:
-                executor = (
-                    self.node_folders if server["transport"] == "node_folder" else self.folders
-                )
-                if executor is None:
-                    raise folder_io.FolderError("Node folder support is unavailable.")
-                file_result = await executor.execute(
-                    server["id"], self.person, tool, call["arguments"]
-                )
+                if server["transport"] == "node_folder":
+                    if self.node_folders is None:
+                        raise folder_io.FolderError("Node folder support is unavailable.")
+                    file_result, meta = await self.node_folders.execute_meta(
+                        server["id"], self.person, tool, call["arguments"]
+                    )
+                    if meta["jobSite"]:
+                        # Kept with the result: whether the owner may ever read it
+                        # depends on the mode it was made in (J18, not retroactive).
+                        call.update(jobSite=True, site=server.get("site"), mode=meta["mode"])
+                else:
+                    if self.folders is None:
+                        raise folder_io.FolderError("Node folder support is unavailable.")
+                    file_result = await self.folders.execute(
+                        server["id"], self.person, tool, call["arguments"]
+                    )
                 call.update(status="done", result=json.dumps(file_result, ensure_ascii=False))
             except folder_io.WriteUncertain as exc:
                 call.update(status="uncertain", result=str(exc))
