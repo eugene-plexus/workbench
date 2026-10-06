@@ -85,8 +85,8 @@ async def test_only_the_canonical_issuer_can_use_the_local_backchannel(tmp_path)
     )
     assert provider.transport_url(ISSUER + "/token") == "http://127.0.0.1:8079/oidc/token"
     assert (
-        provider.transport_url(ISSUER + "/node-helpers/folders")
-        == "http://127.0.0.1:8079/oidc/node-helpers/folders"
+        provider.transport_url(ISSUER + "/sites/servers")
+        == "http://127.0.0.1:8079/oidc/sites/servers"
     )
     for url in (
         "https://attacker.example/token",

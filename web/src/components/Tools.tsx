@@ -62,7 +62,13 @@ export function Tools({ owner, onClose }: { owner: boolean; onClose: () => void 
             className="flex flex-col gap-2 rounded-plexus border border-line p-3"
           >
             <h2 className="font-semibold">{server.name}</h2>
-            {server.transport === "stdio" ? (
+            {server.transport === "site" ? (
+              <p className="text-sm">
+                On your job site {server.node}. Added at the machine by its administrator; its owner
+                says who may use which of its tools.
+                {!server.available && server.reason ? ` ${server.reason}` : ""}
+              </p>
+            ) : server.transport === "stdio" ? (
               <>
                 <p className="text-sm">Local server · Owner only</p>
                 <p className="break-all text-sm text-muted">{server.command}</p>
@@ -92,7 +98,7 @@ export function Tools({ owner, onClose }: { owner: boolean; onClose: () => void 
                   setBusy(true);
                   try {
                     const result = await post<{ tools: { name: string }[] }>(
-                      `/api/tools/servers/${server.id}/check`,
+                      `/api/tools/servers/${encodeURIComponent(server.id)}/check`,
                     );
                     setChecks((old) => ({
                       ...old,
@@ -110,6 +116,7 @@ export function Tools({ owner, onClose }: { owner: boolean; onClose: () => void 
                 {server.transport === "stdio" ? "Start and check" : "Check connection"}
               </button>
               {owner &&
+                server.transport !== "site" &&
                 (remove === server.id ? (
                   <>
                     <span>
@@ -279,6 +286,7 @@ export function ToolSelection({
           />
           {server.name}
           {server.transport === "stdio" ? " · Local, owner only" : ""}
+          {server.transport === "site" && !server.available ? " · Unavailable now" : ""}
         </label>
       ))}
       {servers &&

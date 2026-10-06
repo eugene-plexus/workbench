@@ -17,6 +17,7 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from . import fake_sites
 from .conftest import ADMIN_TOKEN, CLIENT_ID, CLIENT_SECRET, FakeEugene, World
 from .test_folders import finish, offer
 
@@ -28,7 +29,24 @@ def site_world(
     monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> tuple[World, dict[str, Any]]:
     original = FakeEugene.app
-    state: dict[str, Any] = {"mode": "production", "changedAt": None, "calls": [], "sites": []}
+    state: dict[str, Any] = {
+        "mode": "production",
+        "changedAt": None,
+        "calls": [],
+        "sites": [],
+        "managed": [],
+        "jobSite": True,
+        "content": "SITE-SECRET",
+        "folders": [
+            {
+                "id": "site-notes",
+                "node": "desk",
+                "name": "Notes",
+                "writable": False,
+                "people": {"p-ada": False},
+            }
+        ],
+    }
 
     def app(fake: FakeEugene) -> FastAPI:
         server = original(fake)
@@ -43,36 +61,27 @@ def site_world(
                 return JSONResponse({}, status_code=401)
             return {"mode": state["mode"], "changedAt": state["changedAt"]}
 
-        @server.post("/oidc/node-helpers/{action}")
-        async def helper(action: str, request: Request) -> Any:
+        fake_sites.install(server, fake, state)
+
+        @server.post("/oidc/job-sites/{node}/{what}/{ident}/{action}")
+        async def relayed(node: str, what: str, ident: str, action: str, request: Request) -> Any:
             body = await request.json()
-            sub = fake.refresh_tokens.get(body["refreshToken"])
-            if action == "folders":
-                return {
-                    "grants": [
-                        {
-                            "id": "site-notes",
-                            "node": "desk",
-                            "name": "Notes",
-                            "subject": sub,
-                            "writable": False,
-                            "usable": True,
-                            "available": True,
-                            "reason": None,
-                            "jobSite": True,
-                        }
-                    ]
-                    if sub == "p-ada"
-                    else [],
-                    "installMode": {"mode": state["mode"], "changedAt": state["changedAt"]},
-                }
-            state["calls"].append(body)
-            return {
-                "status": "done",
-                "result": {"text": "SITE-SECRET"},
-                "jobSite": True,
-                "installMode": state["mode"],
-            }
+            if fake.refresh_tokens.get(body["refreshToken"]) != "p-ada":
+                return JSONResponse({"detail": {"detail": "No such job site."}}, status_code=404)
+            state["managed"].append((what, ident, action, body))
+            return {"server": {"id": ident}, "people": body.get("people", [])}
+
+        @server.post("/oidc/job-sites/{node}/{action}")
+        async def site_action(node: str, action: str, request: Request) -> Any:
+            body = await request.json()
+            if action == "leave":
+                return JSONResponse(None, status_code=204)
+            if fake.refresh_tokens.get(body["refreshToken"]) != "p-ada":
+                return JSONResponse({"detail": {"detail": "No such job site."}}, status_code=404)
+            state["managed"].append((action, body))
+            if action == "audit":
+                return {"entries": [{"at": CHANGED, "subject": "p-bo", "decision": "refused"}]}
+            return {"node": node, "ownerInDevMode": body.get("ownerInDevMode")}
 
         @server.post("/oidc/job-sites")
         async def mine(request: Request) -> Any:
@@ -99,10 +108,6 @@ def site_world(
                 "rootKey": "ROOTKEY",
                 "owner": "ada o'neil",
             }
-
-        @server.post("/oidc/job-sites/{node}/leave")
-        async def leave(node: str) -> Any:
-            return JSONResponse(None, status_code=204)
 
         return server
 
@@ -133,7 +138,7 @@ def _chat_with_a_site_read(world: World) -> tuple[Any, Any, str]:
     )
     assert chosen.status_code == 200, chosen.text
     world.gateway.mode = "tools"
-    reading = offer(world, ada, chat, "read_text", path="note.txt")
+    reading = offer(world, ada, chat, "read_text", folder="Notes", path="note.txt")
     call = finish(ada, chat, reading)
     assert json.loads(call["result"])["text"] == "SITE-SECRET"
     world.gateway.mode = "text"
@@ -223,3 +228,90 @@ def test_a_person_adds_their_own_machine_and_no_password_is_in_the_command(
     assert refused.status_code == 409 and "belong to people" in refused.text
     assert ada.post("/api/job-sites/invite", json={"nodeName": "bad name"}).status_code == 422
     assert ada.post("/api/job-sites/laptop/leave").status_code == 204
+
+
+def test_the_owner_manages_a_sites_servers_settings_and_reads_its_audit(
+    site_world: tuple[World, dict[str, Any]],
+) -> None:
+    """Each change is relayed to the site, which keeps the list (J6b)."""
+    world, state = site_world
+    ada, bo = world.browser(), world.browser()
+    ada.sign_in("p-ada")
+    bo.sign_in("p-bo")
+    access = ada.post(
+        "/api/job-sites/desk/servers/notes-tool/access",
+        json={"people": [{"name": "bo", "tools": [{"name": "search"}]}]},
+    )
+    assert access.status_code == 200, access.text
+    assert state["managed"][-1][:3] == ("servers", "notes-tool", "access")
+    assert state["managed"][-1][3]["people"] == [
+        {"name": "bo", "tools": [{"name": "search", "standing": False}]}
+    ]
+    assert (
+        ada.post("/api/job-sites/desk/servers/notes-tool/enabled", json={"enabled": True})
+    ).status_code == 200
+    assert (
+        ada.post("/api/job-sites/desk/servers/files/enabled", json={"enabled": False}).status_code
+        == 404
+    )
+    opted = ada.post("/api/job-sites/desk/settings", json={"ownerInDevMode": True})
+    assert opted.status_code == 200 and state["managed"][-1] == (
+        "settings",
+        {"ownerInDevMode": True, "refreshToken": state["managed"][-1][1]["refreshToken"]},
+    )
+    log = ada.post("/api/job-sites/desk/audit", json={"limit": 5})
+    assert log.status_code == 200 and log.json()["entries"][0]["decision"] == "refused"
+    assert bo.post("/api/job-sites/desk/audit", json={}).status_code == 409
+
+
+def test_a_sites_local_server_is_a_tool_like_any_other(
+    site_world: tuple[World, dict[str, Any]],
+) -> None:
+    """A fifth tool, added at the machine, reaches a chat with no change to
+    Workbench: it is listed, chosen and run through Eugene like the files."""
+    world, state = site_world
+    state["local"] = [
+        {
+            "node": "desk",
+            "server": "notes-tool",
+            "name": "Notes tool",
+            "people": ["p-ada"],
+            "tools": [
+                {
+                    "name": "search",
+                    "description": "Search notes.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"q": {"type": "string"}},
+                        "required": ["q"],
+                    },
+                }
+            ],
+        }
+    ]
+    ada, bo = world.browser(), world.browser()
+    ada.sign_in("p-ada")
+    bo.sign_in("p-bo")
+    listed = ada.get("/api/tools/servers").json()["servers"]
+    assert {"id": "site:desk:notes-tool", "name": "desk · Notes tool"}.items() <= next(
+        s for s in listed if s["id"] == "site:desk:notes-tool"
+    ).items()
+    assert all(
+        s["id"] != "site:desk:notes-tool" for s in bo.get("/api/tools/servers").json()["servers"]
+    )
+    chat = ada.new_chat()
+    chosen = ada.patch(
+        f"/api/chats/{chat}", json={"settings": {"toolServers": ["site:desk:notes-tool"]}}
+    )
+    assert chosen.status_code == 200, chosen.text
+    bo_chat = bo.new_chat()
+    refused = bo.patch(
+        f"/api/chats/{bo_chat}", json={"settings": {"toolServers": ["site:desk:notes-tool"]}}
+    )
+    assert refused.status_code == 400
+    world.gateway.mode = "tools"
+    searching = offer(world, ada, chat, "search", q="plans")
+    call = finish(ada, chat, searching)
+    assert call["status"] == "done" and call["result"] == 'search: {"q": "plans"}'
+    assert call["jobSite"] is True and call["site"] == "desk"
+    assert state["calls"][-1]["server"] == "notes-tool"

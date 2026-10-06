@@ -1,10 +1,12 @@
 """Job sites (your machines): a person's own machines, from Workbench.
 
-`specs/docs/design/remote-nodes.md` §3.2-§3.3. A person adds a machine of their
-own (J9), turns its file helper on, registers its folders and says who may use
-them, themselves included (J11). Eugene checks every call against the person's
-own sign-in; Workbench holds no authority of its own here and passes the
-answers through.
+`specs/docs/design/remote-nodes.md` §3.2-§3.4. A person adds a machine of their
+own (J9), turns its file support on, registers its folders and says who may use
+them, themselves included, and who may change files without asking (J11, J6g);
+turns its local servers on and says who may use which of their tools; lets
+Eugene's owner in for dev mode or not (J6e); and reads its audit log (J8).
+Eugene relays each change to the machine, whose own list is final (J6b).
+Workbench holds no authority of its own here and passes the answers through.
 """
 
 from __future__ import annotations
@@ -70,6 +72,44 @@ class Grant(BaseModel):
 class People(BaseModel):
     model_config = ConfigDict(extra="forbid")
     people: list[Grant] = Field(max_length=256)
+
+
+class ToolGrant(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=128)
+    standing: StrictBool = False
+
+
+class PersonTools(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=256)
+    tools: list[ToolGrant] = Field(max_length=64)
+
+    _clean = field_validator("name")(classmethod(lambda cls, v: _clean(v)))
+
+
+class Access(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    people: list[PersonTools] = Field(max_length=256)
+
+
+class Settings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ownerInDevMode: StrictBool
+
+
+class AuditRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    limit: int = Field(default=50, ge=1, le=200)
+
+
+_SERVER = re.compile(r"^[a-z][a-z0-9-]{0,39}$")
+
+
+def _server(server: str) -> str:
+    if not _SERVER.fullmatch(server) or server.startswith("files"):
+        raise _problem(status.HTTP_404_NOT_FOUND, "There is no such server on this machine.")
+    return server
 
 
 def _node(node: str) -> str:
@@ -173,6 +213,40 @@ async def people(request: Request, node: str, folder_id: str, body: People) -> d
         {"people": [g.model_dump() for g in body.people]},
     )
     return answer or {}
+
+
+@router.post("/api/job-sites/{node}/servers/{server}/access")
+async def access(request: Request, node: str, server: str, body: Access) -> dict[str, Any]:
+    answer = await _call(
+        request,
+        f"job-sites/{_node(node)}/servers/{_server(server)}/access",
+        {"people": [p.model_dump() for p in body.people]},
+    )
+    return answer or {}
+
+
+@router.post("/api/job-sites/{node}/servers/{server}/enabled")
+async def server_enabled(request: Request, node: str, server: str, body: Enable) -> dict[str, Any]:
+    answer = await _call(
+        request,
+        f"job-sites/{_node(node)}/servers/{_server(server)}/enabled",
+        {"enabled": body.enabled},
+    )
+    return answer or {}
+
+
+@router.post("/api/job-sites/{node}/settings")
+async def settings(request: Request, node: str, body: Settings) -> dict[str, Any]:
+    answer = await _call(
+        request, f"job-sites/{_node(node)}/settings", {"ownerInDevMode": body.ownerInDevMode}
+    )
+    return answer or {}
+
+
+@router.post("/api/job-sites/{node}/audit")
+async def audit(request: Request, node: str, body: AuditRead) -> dict[str, Any]:
+    answer = await _call(request, f"job-sites/{_node(node)}/audit", {"limit": body.limit})
+    return answer or {"entries": []}
 
 
 @router.post("/api/job-sites/{node}/leave")

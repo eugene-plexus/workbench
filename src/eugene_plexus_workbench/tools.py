@@ -26,8 +26,9 @@ from referencing.exceptions import NoSuchResource
 
 from . import folder_io, folders
 from .local_tools import LocalProcesses, LocalToolError, unavailable
+from .node_folders import FILES as SITE_FILES
 from .node_folders import PREFIX as NODE_FOLDER_PREFIX
-from .node_folders import NodeFolders
+from .node_folders import SITE_PREFIX, NodeFolders, site_server_id
 from .settings import Settings
 from .store import Person, Store
 
@@ -198,6 +199,8 @@ class Tools:
     async def connect(
         self, ids: list[str], person: Person | None = None, folder_ids: list[str] | None = None
     ) -> AsyncIterator[ToolSession]:
+        site_ids = [i for i in dict.fromkeys(ids) if i.startswith(SITE_PREFIX)]
+        ids = [i for i in ids if not i.startswith(SITE_PREFIX)]
         servers = {s["id"]: s for s in await self.store.tool_servers()}
         if any(i not in servers for i in ids):
             raise ToolError(
@@ -211,36 +214,20 @@ class Tools:
                 g["id"]: g for g in await self.store.folder_grants() if folders.visible(g, person)
             }
             local_ids = [i for i in folder_ids or [] if not i.startswith(NODE_FOLDER_PREFIX)]
-            node_ids = [i for i in folder_ids or [] if i.startswith(NODE_FOLDER_PREFIX)]
+            node_ids = [
+                i for i in dict.fromkeys(folder_ids or []) if i.startswith(NODE_FOLDER_PREFIX)
+            ]
             if local_ids and (reason := self.folders.unavailable()):
                 raise ToolError(reason)
-            if node_ids:
-                if self.node_folders is None:
-                    raise ToolError("Node folder support is unavailable in this Workbench.")
-                try:
-                    grants.update({g["id"]: g for g in await self.node_folders.listing(person)})
-                except folder_io.FolderError as exc:
-                    raise ToolError(str(exc)) from None
-            for grant_id in dict.fromkeys(folder_ids or []):
+            for grant_id in dict.fromkeys(local_ids):
                 if grant_id not in grants:
                     raise ToolError("A selected folder grant was removed or is unavailable to you.")
                 grant = grants[grant_id]
-                remote = grant_id.startswith(NODE_FOLDER_PREFIX)
-                if remote and not grant.get("available"):
-                    raise ToolError(
-                        f"{grant['node']}: {grant.get('reason') or 'File helper is unavailable.'}"
-                    )
-                server = {
-                    "id": grant_id,
-                    "name": f"{grant['node']} · {grant['name']}" if remote else grant["name"],
-                    "transport": "node_folder" if remote else "folder",
-                    # A job site's results are hidden from the owner's
-                    # reading in production mode (remote-nodes.md J13a).
-                    "jobSite": bool(remote and grant.get("jobSite")),
-                    "site": grant.get("node") if remote else None,
-                }
+                server = {"id": grant_id, "name": grant["name"], "transport": "folder"}
                 for name, description, schema in folders.definitions(bool(grant["writable"])):
                     session.add(server, None, name, schema, description)
+            if node_ids or site_ids:
+                await self._connect_sites(session, person, node_ids, site_ids)
             for server_id in dict.fromkeys(ids):
                 server = servers[server_id]
                 try:
@@ -312,6 +299,97 @@ class Tools:
                     ) from None
             yield session
 
+    async def _connect_sites(
+        self,
+        session: ToolSession,
+        person: Person | None,
+        node_ids: list[str],
+        site_ids: list[str],
+    ) -> None:
+        """Each machine's servers, through Eugene (J6): one file server per
+        machine, its `folder` argument narrowed to the folders this chat
+        selected there (J6g), and the job sites' local servers this chat chose.
+        A job site's results are hidden from the owner's reading in
+        production mode (remote-nodes.md J13a)."""
+        if self.node_folders is None:
+            raise ToolError("Machines' tools are unavailable in this Workbench.")
+        try:
+            remote = await self.node_folders.servers(person)
+        except folder_io.FolderError as exc:
+            raise ToolError(str(exc)) from None
+        folders_by_id: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
+            NODE_FOLDER_PREFIX + str(f["id"]): (entry, f)
+            for entry in remote
+            if entry["server"] == SITE_FILES
+            for f in entry["folders"]
+        }
+        chosen: dict[str, tuple[dict[str, Any], set[str]]] = {}
+        for grant_id in node_ids:
+            if grant_id not in folders_by_id:
+                raise ToolError("A selected folder grant was removed or is unavailable to you.")
+            entry, folder = folders_by_id[grant_id]
+            chosen.setdefault(entry["node"], (entry, set()))[1].add(str(folder["name"]))
+        targets: list[tuple[dict[str, Any], set[str] | None]] = list(chosen.values())
+        by_id = {site_server_id(e["node"], e["server"]): e for e in remote}
+        for ident in site_ids:
+            if ident not in by_id or by_id[ident]["server"] == SITE_FILES:
+                raise ToolError(
+                    "A selected machine's server was removed or is unavailable to you. "
+                    "Choose tools again."
+                )
+            targets.append((by_id[ident], None))
+        for entry, names in targets:
+            node = entry["node"]
+            if not entry.get("available"):
+                raise ToolError(f"{node}: {entry.get('reason') or 'its tools are unavailable.'}")
+            files = entry["server"] == SITE_FILES
+            server = {
+                "id": site_server_id(node, entry["server"]),
+                "name": f"{node} · {'Files' if files else entry.get('name') or entry['server']}",
+                "transport": "site",
+                "node": node,
+                "server": entry["server"],
+                "jobSite": bool(entry.get("jobSite")),
+                "site": node,
+            }
+            try:
+                listed = await self.node_folders.list_tools(person, node, entry["server"])
+            except folder_io.FolderError as exc:
+                raise ToolError(f"{node}: {exc}") from None
+            for tool in listed:
+                schema = tool.get("inputSchema")
+                try:
+                    if not isinstance(schema, dict):
+                        raise ValueError
+                    Draft202012Validator.check_schema(schema)
+                    if schema.get("type") != "object" or len(json.dumps(schema)) > 32_768:
+                        raise ValueError
+                except Exception:
+                    raise ToolError(
+                        f"{node}: a tool has an unsupported input schema. "
+                        "Ask the machine's owner to check it."
+                    ) from None
+                if names is not None:
+                    schema = _narrowed(schema, names)
+                    if schema is None:
+                        continue
+                session.add(server, None, tool["name"], schema, str(tool.get("description") or ""))
+
+
+def _narrowed(schema: dict[str, Any], names: set[str]) -> dict[str, Any] | None:
+    """The file server's schema with its `folder` argument cut to the folders
+    this chat selected; None when the tool offers none of them."""
+    folder = (schema.get("properties") or {}).get("folder")
+    if not isinstance(folder, dict) or not isinstance(folder.get("enum"), list):
+        return None
+    kept = [name for name in folder["enum"] if name in names]
+    if not kept:
+        return None
+    return {
+        **schema,
+        "properties": {**schema["properties"], "folder": {**folder, "enum": kept}},
+    }
+
 
 async def _check_response(response: httpx2.Response) -> None:
     if response.is_redirect:
@@ -357,7 +435,8 @@ class ToolSession:
         schema: dict[str, Any],
         description: str,
     ) -> None:
-        prefix = "files_" if server["transport"] in {"folder", "node_folder"} else "mcp_"
+        files = server["transport"] == "folder" or server.get("server") == SITE_FILES
+        prefix = "files_" if files else "mcp_"
         name = prefix + hashlib.sha256(f"{server['id']}:{tool}".encode()).hexdigest()[:48]
         if name in self.tools or len(self.tools) >= MAX_TOOLS:
             raise ToolError(
@@ -411,24 +490,32 @@ class ToolSession:
 
     async def execute(self, call: dict[str, Any]) -> None:
         server, client, tool, _ = self.tools[call["name"]]
-        if server["transport"] in {"folder", "node_folder"}:
+        if server["transport"] == "site":
             try:
-                if server["transport"] == "node_folder":
-                    if self.node_folders is None:
-                        raise folder_io.FolderError("Node folder support is unavailable.")
-                    file_result, meta = await self.node_folders.execute_meta(
-                        server["id"], self.person, tool, call["arguments"]
-                    )
-                    if meta["jobSite"]:
-                        # Kept with the result: whether the owner may ever read it
-                        # depends on the mode it was made in (J18, not retroactive).
-                        call.update(jobSite=True, site=server.get("site"), mode=meta["mode"])
-                else:
-                    if self.folders is None:
-                        raise folder_io.FolderError("Node folder support is unavailable.")
-                    file_result = await self.folders.execute(
-                        server["id"], self.person, tool, call["arguments"]
-                    )
+                if self.node_folders is None:
+                    raise folder_io.FolderError("Machines' tools are unavailable.")
+                text, is_error, meta = await self.node_folders.call_tool(
+                    self.person, server["node"], server["server"], tool, call["arguments"]
+                )
+                if meta["jobSite"]:
+                    # Kept with the result: whether the owner may ever read it
+                    # depends on the mode it was made in (J18, not retroactive).
+                    call.update(jobSite=True, site=server.get("site"), mode=meta["mode"])
+                if len(text) > MAX_RESULT:
+                    text = text[:MAX_RESULT] + "\n[Tool result truncated at 65536 characters.]"
+                call.update(status="failed" if is_error else "done", result=text)
+            except folder_io.WriteUncertain as exc:
+                call.update(status="uncertain", result=str(exc))
+            except folder_io.FolderError as exc:
+                call.update(status="failed", result=str(exc))
+            return
+        if server["transport"] == "folder":
+            try:
+                if self.folders is None:
+                    raise folder_io.FolderError("Folder support is unavailable.")
+                file_result = await self.folders.execute(
+                    server["id"], self.person, tool, call["arguments"]
+                )
                 call.update(status="done", result=json.dumps(file_result, ensure_ascii=False))
             except folder_io.WriteUncertain as exc:
                 call.update(status="uncertain", result=str(exc))
