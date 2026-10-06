@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { api, del, post } from "../lib/api";
 import type { FolderGrants } from "../lib/types";
+import { SiteLinkNote } from "./SiteLinkNote";
 
 const problemOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
 type Recipient = { sub: string; name: string; username: string | null };
@@ -16,6 +17,7 @@ export function Folders({ owner }: { owner: boolean }) {
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
+  const [reload, setReload] = useState(0);
 
   useEffect(() => {
     let stopped = false;
@@ -35,7 +37,7 @@ export function Folders({ owner }: { owner: boolean }) {
     return () => {
       stopped = true;
     };
-  }, [owner]);
+  }, [owner, reload]);
 
   return (
     <section aria-label="Folder access" className="flex flex-col gap-3 border-t border-line pt-4">
@@ -72,7 +74,7 @@ export function Folders({ owner }: { owner: boolean }) {
           className="flex flex-col gap-2 rounded-plexus border border-line p-3 text-sm"
         >
           <h3 className="font-semibold">
-            {grant.node ? `${grant.node} · ` : ""}
+            {grant.label ? `${grant.label} · ` : ""}
             {grant.name}
           </h3>
           <p>
@@ -83,6 +85,16 @@ export function Folders({ owner }: { owner: boolean }) {
           {grant.available === false && (
             <p>{grant.reason || "This folder is currently unavailable."}</p>
           )}
+          {grant.source === "node" &&
+            grant.site &&
+            data.grants.find((g) => g.source === "node" && g.site === grant.site) === grant && (
+              <SiteLinkNote
+                site={grant.site}
+                label={grant.label ?? "that machine"}
+                linking={grant}
+                onChanged={() => setReload((n) => n + 1)}
+              />
+            )}
           {owner &&
             grant.source !== "node" &&
             (removing === grant.id ? (
@@ -271,7 +283,7 @@ export function FolderSelection({
               )
             }
           />
-          {grant.node ? `${grant.node} · ` : ""}
+          {grant.label ? `${grant.label} · ` : ""}
           {grant.name} · {grant.writable ? "Read and write text" : "Read only"}
           {grant.available === false && (
             <span className="text-muted"> · {grant.reason || "Unavailable"}</span>

@@ -50,6 +50,7 @@ export interface ToolCall {
   result: string | null;
   jobSite?: boolean;
   site?: string | null;
+  label?: string | null;
   mode?: "production" | "dev";
 }
 
@@ -72,15 +73,16 @@ export type ToolServer = ServerIdentity &
         environmentKeys: string[];
         access: "owner";
       }
-    | {
+    | ({
         /** A local server on one of the person's job sites, reached through Eugene. */
         transport: "site";
-        node: string;
+        site: string;
+        label: string;
         server: string;
         available: boolean;
         reason: string | null;
         jobSite: boolean;
-      }
+      } & SiteLinking)
   );
 
 export interface ToolServers {
@@ -106,9 +108,13 @@ export interface FolderGrant {
   usable: boolean;
   path?: string;
   source?: "local" | "node";
-  node?: string;
+  site?: string;
+  label?: string;
   available?: boolean;
   reason?: string | null;
+  linked?: boolean;
+  account?: string;
+  linkPage?: string;
 }
 
 export interface FolderGrants {
@@ -197,11 +203,13 @@ export interface SiteAuditEntry {
 }
 
 export interface JobSite {
-  node: string;
-  enabled: boolean;
+  /** The site's own id (`s-` and 26 characters), never its label. */
+  id: string;
+  /** The machine's name; not unique. */
+  label: string;
+  hostNode?: string | null;
   online: boolean;
   ready: boolean;
-  supported: boolean | null;
   reason: string | null;
   account: string | null;
   lastContactAt: string | null;
@@ -210,6 +218,27 @@ export interface JobSite {
   servers?: JobSiteServer[];
   /** Whether Eugene's owner may use folders here while Eugene is in dev mode (J6e). */
   ownerInDevMode?: boolean | null;
+  /** Who has linked their own OS account on the machine (no person names). */
+  links?: SiteLink[];
+  /** Where people link at the machine; null when they link another way. */
+  linkPage?: string | null;
+  /** False where only the machine's owner is served (macOS). */
+  sharing?: boolean;
+}
+
+export interface SiteLink {
+  subject: string;
+  accountName: string;
+  available: boolean;
+  reason?: string | null;
+}
+
+/** What Eugene says about whose account a person's calls run as on a machine.
+ * Absent for a machine that predates linking. */
+export interface SiteLinking {
+  linked?: boolean;
+  account?: string;
+  linkPage?: string;
 }
 
 export interface JobSiteList {
@@ -219,7 +248,7 @@ export interface JobSiteList {
 
 export interface JobSiteInvite {
   expiresAt: string;
-  nodeName: string | null;
+  label: string | null;
   commands: { windows: string; posix: string };
 }
 

@@ -14,7 +14,7 @@ const problemOf = (error: unknown) => (error instanceof Error ? error.message : 
 
 /** Job sites (your machines): the machines whose files you use from here.
  * Yours alone: only you say who may use their folders, yourself included. */
-export function JobSites({ onClose }: { onClose: () => void }) {
+export function JobSites({ onClose, sub }: { onClose: () => void; sub?: string }) {
   const [data, setData] = useState<JobSiteList | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [invite, setInvite] = useState<JobSiteInvite | null>(null);
@@ -72,7 +72,7 @@ export function JobSites({ onClose }: { onClose: () => void }) {
       )}
       {data?.sites.length === 0 && <p className="text-sm">You have no job sites yet.</p>}
       {data?.sites.map((site) => (
-        <Site key={site.node} site={site} busy={busy} act={act} />
+        <Site key={site.id} site={site} sub={sub} busy={busy} act={act} />
       ))}
       <section
         aria-label="Add a job site"
@@ -81,8 +81,8 @@ export function JobSites({ onClose }: { onClose: () => void }) {
         <h2 className="font-semibold">Add a job site</h2>
         {data && !data.canInvite ? (
           <p>
-            Eugene&apos;s owner has not opened a route for machines outside its network yet, so a
-            machine can be added only from Eugene&apos;s console.
+            Eugene does not know an address that machines join through yet, so a machine can be
+            added only from Eugene&apos;s console.
           </p>
         ) : (
           <form
@@ -92,7 +92,7 @@ export function JobSites({ onClose }: { onClose: () => void }) {
               void act(async () =>
                 setInvite(
                   await post<JobSiteInvite>("/api/job-sites/invite", {
-                    nodeName: machine.trim() || null,
+                    label: machine.trim() || null,
                   }),
                 ),
               );
@@ -115,9 +115,11 @@ export function JobSites({ onClose }: { onClose: () => void }) {
         {invite && (
           <div className="flex flex-col gap-2" data-testid="job-site-invite">
             <p>
-              Run one of these on the machine, within 15 minutes. It asks for your Eugene password
-              there: that is how Eugene knows the machine is yours. The service install needs an
-              administrator (Windows) or root (Linux).
+              The machine must already have Eugene installed and joined as a node; the command adds
+              the job site there (a standalone install comes later). Run one of these on the
+              machine, within 15 minutes. It asks for your Eugene password there: that is how Eugene
+              knows the machine is yours. The service install needs an administrator (Windows) or
+              root (Linux).
             </p>
             <h3 className="font-semibold">Windows (PowerShell)</h3>
             <pre className="whitespace-pre-wrap break-all rounded-plexus bg-soft p-2 text-xs">
@@ -146,92 +148,188 @@ function since(iso: string | null): string {
 
 type Act = (work: () => Promise<unknown>) => Promise<void>;
 
-function Site({ site, busy, act }: { site: JobSite; busy: boolean; act: Act }) {
+const LINUX_LINK =
+  "curl -fsSL https://raw.githubusercontent.com/eugene-plexus/specs/main/scripts/install.sh | " +
+  "sudo sh -s -- --site-link --person NAME";
+
+/** Who runs as whom on a machine: the owner's own line, the others' links with
+ * a way to take each away, and how a person links their own account. */
+function Linking({
+  site,
+  sub,
+  base,
+  busy,
+  act,
+}: {
+  site: JobSite;
+  sub?: string;
+  base: string;
+  busy: boolean;
+  act: Act;
+}) {
+  const solo = site.sharing === false;
+  const links = site.links;
+  const names = new Map<string, string>();
+  for (const folder of site.folders) for (const p of folder.people) names.set(p.person, p.name);
+  for (const entry of site.servers ?? []) for (const p of entry.people) names.set(p.person, p.name);
+  const own = links?.find((l) => l.subject === sub);
+  const others = (links ?? []).filter((l) => l.subject !== sub);
+  const notThere = (l: { reason?: string | null }) => l.reason || "not signed in there now";
+  return (
+    <div className="flex flex-col gap-2" data-testid={`linking-${site.id}`}>
+      {solo && <p>This machine serves only you (macOS has no folder boundary yet).</p>}
+      {!solo && links && own && (
+        <div className="flex flex-wrap items-center gap-3">
+          <p>
+            Your calls here run as <strong>{own.accountName}</strong>
+            {own.available ? "" : ` · ${notThere(own)}`}
+          </p>
+          <button
+            type="button"
+            disabled={busy}
+            className="text-error"
+            onClick={() => void act(() => post(`${base}/links/remove`, {}))}
+          >
+            Remove my link
+          </button>
+        </div>
+      )}
+      {!solo && links && !own && sub && (
+        <p>
+          You have not linked your own account on {site.label} yet.
+          {site.linkPage
+            ? ` To link it, open ${site.linkPage} at the machine and sign in.`
+            : site.linkPage === null
+              ? " To link it, run the command below on the machine."
+              : ""}
+        </p>
+      )}
+      {!solo && others.length > 0 && (
+        <ul className="flex flex-col gap-1" aria-label={`Who else has linked on ${site.label}`}>
+          {others.map((link) => {
+            const who = names.get(link.subject) ?? "Someone";
+            return (
+              <li key={link.subject} className="flex flex-wrap items-center gap-3">
+                <span>
+                  {who} runs as {link.accountName}
+                  {link.available ? "" : ` · ${notThere(link)}`}
+                </span>
+                <button
+                  type="button"
+                  disabled={busy}
+                  aria-label={`Remove link for ${who} (${link.accountName})`}
+                  className="text-error"
+                  onClick={() =>
+                    void act(() => post(`${base}/links/remove`, { person: link.subject }))
+                  }
+                >
+                  Remove link
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {!solo && site.linkPage && (
+        <p className="text-muted">
+          People link their own account at the machine: on {site.label}, open {site.linkPage} and
+          sign in.
+        </p>
+      )}
+      {!solo && links && site.linkPage === null && (
+        <div className="flex flex-col gap-1 text-muted">
+          <p>On a Linux machine, people link with:</p>
+          <pre className="whitespace-pre-wrap break-all rounded-plexus bg-soft p-2 text-xs">
+            {LINUX_LINK}
+          </pre>
+          <p>Run it on the machine as an administrator, naming the person as they sign in.</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Site({ site, sub, busy, act }: { site: JobSite; sub?: string; busy: boolean; act: Act }) {
   const [name, setName] = useState("");
   const [path, setPath] = useState("");
   const [writable, setWritable] = useState(false);
   const [leaving, setLeaving] = useState(false);
-  const base = `/api/job-sites/${encodeURIComponent(site.node)}`;
+  const base = `/api/job-sites/${encodeURIComponent(site.id)}`;
   return (
     <article
       className="flex flex-col gap-3 rounded-plexus border border-line p-3 text-sm"
-      data-testid={`job-site-${site.node}`}
+      data-testid={`job-site-${site.id}`}
     >
-      <h2 className="font-semibold">{site.node}</h2>
+      <h2 className="font-semibold">{site.label}</h2>
       <p>
         {site.online ? "Online" : "Offline"} · last contact {since(site.lastContactAt)}
-        {site.enabled && !site.ready && site.reason ? ` · ${site.reason}` : ""}
+        {!site.ready && site.reason ? ` · ${site.reason}` : ""}
       </p>
-      <label className="flex items-center gap-2">
-        <input
-          type="checkbox"
-          checked={site.enabled}
-          disabled={busy}
-          onChange={(event) =>
-            void act(() => post(`${base}/enabled`, { enabled: event.target.checked }))
-          }
-        />
-        File support on this machine
-      </label>
-      {site.enabled && site.account && (
-        <p className="text-muted">
-          Give the OS account <strong>{site.account}</strong> permission to a folder on the machine,
-          then add it here.
-        </p>
-      )}
+      <Linking site={site} sub={sub} base={base} busy={busy} act={act} />
       {site.folders.map((folder) => (
-        <Folder key={folder.id} base={base} folder={folder} busy={busy} act={act} />
+        <Folder
+          key={folder.id}
+          base={base}
+          folder={folder}
+          busy={busy}
+          act={act}
+          solo={site.sharing === false}
+        />
       ))}
-      {site.enabled && (
-        <form
-          aria-label={`Add a folder on ${site.node}`}
-          className="flex flex-wrap items-end gap-3"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void act(async () => {
-              await post(`${base}/folders`, { name, path, writable });
-              setName("");
-              setPath("");
-              setWritable(false);
-            });
-          }}
-        >
-          <label className="flex flex-col gap-1">
-            Folder name
-            <input
-              required
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              className="rounded-plexus border border-line bg-transparent px-2 py-1"
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            Path on the machine
-            <input
-              required
-              value={path}
-              onChange={(event) => setPath(event.target.value)}
-              className="rounded-plexus border border-line bg-transparent px-2 py-1"
-            />
-          </label>
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={writable}
-              onChange={(event) => setWritable(event.target.checked)}
-            />
-            Allow text writes
-          </label>
-          <button disabled={busy} className="rounded-plexus border border-line px-3 py-1">
-            Add folder
-          </button>
-        </form>
-      )}
-      {site.enabled &&
-        (site.servers ?? []).map((entry) => (
-          <LocalServer key={entry.server.id} base={base} entry={entry} busy={busy} act={act} />
-        ))}
-      {site.enabled && site.ownerInDevMode !== undefined && site.ownerInDevMode !== null && (
+      <form
+        aria-label={`Add a folder on ${site.label}`}
+        className="flex flex-wrap items-end gap-3"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void act(async () => {
+            await post(`${base}/folders`, { name, path, writable });
+            setName("");
+            setPath("");
+            setWritable(false);
+          });
+        }}
+      >
+        <label className="flex flex-col gap-1">
+          Folder name
+          <input
+            required
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            className="rounded-plexus border border-line bg-transparent px-2 py-1"
+          />
+        </label>
+        <label className="flex flex-col gap-1">
+          Path on the machine
+          <input
+            required
+            value={path}
+            onChange={(event) => setPath(event.target.value)}
+            className="rounded-plexus border border-line bg-transparent px-2 py-1"
+          />
+        </label>
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={writable}
+            onChange={(event) => setWritable(event.target.checked)}
+          />
+          Allow text writes
+        </label>
+        <button disabled={busy} className="rounded-plexus border border-line px-3 py-1">
+          Add folder
+        </button>
+      </form>
+      {(site.servers ?? []).map((entry) => (
+        <LocalServer
+          key={entry.server.id}
+          base={base}
+          entry={entry}
+          busy={busy}
+          act={act}
+          solo={site.sharing === false}
+        />
+      ))}
+      {site.ownerInDevMode !== undefined && site.ownerInDevMode !== null && (
         <label className="flex items-center gap-2">
           <input
             type="checkbox"
@@ -244,11 +342,11 @@ function Site({ site, busy, act }: { site: JobSite; busy: boolean; act: Act }) {
           Let Eugene&apos;s owner use folders they give themselves here, while Eugene is in dev mode
         </label>
       )}
-      {site.enabled && <Audit base={base} node={site.node} />}
+      <Audit base={base} label={site.label} />
       {leaving ? (
         <div className="flex flex-wrap gap-3">
           <p>
-            Take {site.node} out of Eugene? Its files stay on it; Workbench stops reaching them.
+            Take {site.label} out of Eugene? Its files stay on it; Workbench stops reaching them.
           </p>
           <button
             disabled={busy}
@@ -278,11 +376,13 @@ function Folder({
   folder,
   busy,
   act,
+  solo,
 }: {
   base: string;
   folder: JobSite["folders"][number];
   busy: boolean;
   act: Act;
+  solo: boolean;
 }) {
   const [people, setPeople] = useState(() =>
     folder.people.map((p) => ({ name: p.name, access: p.writable ? CHANGE : READ })),
@@ -324,29 +424,31 @@ function Folder({
           </button>
         </div>
       ))}
-      <div className="flex flex-wrap items-end gap-2">
-        <label className="flex flex-col gap-1">
-          Add a person (how they sign in)
-          <input
-            value={adding}
-            onChange={(event) => setAdding(event.target.value)}
-            className="rounded-plexus border border-line bg-transparent px-2 py-1"
-          />
-        </label>
-        <button
-          type="button"
-          className="rounded-plexus border border-line px-3 py-1"
-          onClick={() => {
-            const name = adding.trim();
-            if (name && !people.some((p) => p.name.toLowerCase() === name.toLowerCase())) {
-              setPeople((old) => [...old, { name, access: READ }]);
-            }
-            setAdding("");
-          }}
-        >
-          Add
-        </button>
-      </div>
+      {!solo && (
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="flex flex-col gap-1">
+            Add a person (how they sign in)
+            <input
+              value={adding}
+              onChange={(event) => setAdding(event.target.value)}
+              className="rounded-plexus border border-line bg-transparent px-2 py-1"
+            />
+          </label>
+          <button
+            type="button"
+            className="rounded-plexus border border-line px-3 py-1"
+            onClick={() => {
+              const name = adding.trim();
+              if (name && !people.some((p) => p.name.toLowerCase() === name.toLowerCase())) {
+                setPeople((old) => [...old, { name, access: READ }]);
+              }
+              setAdding("");
+            }}
+          >
+            Add
+          </button>
+        </div>
+      )}
       <div className="flex flex-wrap gap-3">
         <button
           disabled={busy}
@@ -386,11 +488,13 @@ function LocalServer({
   entry,
   busy,
   act,
+  solo,
 }: {
   base: string;
   entry: JobSiteServer;
   busy: boolean;
   act: Act;
+  solo: boolean;
 }) {
   const { server } = entry;
   const [people, setPeople] = useState(() =>
@@ -460,29 +564,31 @@ function LocalServer({
               </button>
             </fieldset>
           ))}
-          <div className="flex flex-wrap items-end gap-2">
-            <label className="flex flex-col gap-1">
-              Add a person (how they sign in)
-              <input
-                value={adding}
-                onChange={(event) => setAdding(event.target.value)}
-                className="rounded-plexus border border-line bg-transparent px-2 py-1"
-              />
-            </label>
-            <button
-              type="button"
-              className="rounded-plexus border border-line px-3 py-1"
-              onClick={() => {
-                const name = adding.trim();
-                if (name && !people.some((p) => p.name.toLowerCase() === name.toLowerCase())) {
-                  setPeople((old) => [...old, { name, tools: new Set<string>() }]);
-                }
-                setAdding("");
-              }}
-            >
-              Add
-            </button>
-          </div>
+          {!solo && (
+            <div className="flex flex-wrap items-end gap-2">
+              <label className="flex flex-col gap-1">
+                Add a person (how they sign in)
+                <input
+                  value={adding}
+                  onChange={(event) => setAdding(event.target.value)}
+                  className="rounded-plexus border border-line bg-transparent px-2 py-1"
+                />
+              </label>
+              <button
+                type="button"
+                className="rounded-plexus border border-line px-3 py-1"
+                onClick={() => {
+                  const name = adding.trim();
+                  if (name && !people.some((p) => p.name.toLowerCase() === name.toLowerCase())) {
+                    setPeople((old) => [...old, { name, tools: new Set<string>() }]);
+                  }
+                  setAdding("");
+                }}
+              >
+                Add
+              </button>
+            </div>
+          )}
           <button
             disabled={busy}
             className="self-start rounded-plexus border border-line px-3 py-1"
@@ -508,7 +614,7 @@ function LocalServer({
 }
 
 /** The machine's own audit log: who asked for what, and what it decided. */
-function Audit({ base, node }: { base: string; node: string }) {
+function Audit({ base, label }: { base: string; label: string }) {
   const [entries, setEntries] = useState<SiteAuditEntry[] | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   return (
@@ -528,7 +634,7 @@ function Audit({ base, node }: { base: string; node: string }) {
           }
         }}
       >
-        Show what {node} was asked
+        Show what {label} was asked
       </button>
       {problem && (
         <p role="alert" className="text-error">
@@ -537,7 +643,7 @@ function Audit({ base, node }: { base: string; node: string }) {
       )}
       {entries?.length === 0 && <p className="text-muted">Nothing has been asked of it yet.</p>}
       {entries && entries.length > 0 && (
-        <ul className="flex flex-col gap-1 text-xs" aria-label={`What ${node} was asked`}>
+        <ul className="flex flex-col gap-1 text-xs" aria-label={`What ${label} was asked`}>
           {entries.map((entry, index) => (
             <li key={`${entry.at}-${index}`}>
               {new Date(entry.at).toLocaleString()} · {entry.subject} ·{" "}

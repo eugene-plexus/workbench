@@ -13,12 +13,12 @@ it("lets a central host select online node folders and clear offline selections"
     localAvailable: false,
     reason: "Local file accounts unavailable",
     grants: [
-      { ...grant, id: "node:online", source: "node", node: "Desktop", available: true },
+      { ...grant, id: "node:online", source: "node", label: "Desktop", available: true },
       {
         ...grant,
         id: "node:offline",
         source: "node",
-        node: "Laptop",
+        label: "Laptop",
         available: false,
         reason: "Offline",
       },

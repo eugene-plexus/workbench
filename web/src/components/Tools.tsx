@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { api, del, post } from "../lib/api";
 import type { ToolServer, ToolServers } from "../lib/types";
 import { LocalToolForm } from "./LocalToolForm";
+import { SiteLinkNote } from "./SiteLinkNote";
 import { Folders } from "./Folders";
 
 const problemOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -17,6 +18,7 @@ export function Tools({ owner, onClose }: { owner: boolean; onClose: () => void 
   const [remove, setRemove] = useState<string | null>(null);
   const [checks, setChecks] = useState<Record<string, string>>({});
   const [local, setLocal] = useState<ToolServers["localProcesses"] | null>(null);
+  const [reload, setReload] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -33,7 +35,7 @@ export function Tools({ owner, onClose }: { owner: boolean; onClose: () => void 
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [reload]);
 
   return (
     <section aria-label="Tools" className="min-h-0 flex-1 overflow-y-auto p-4">
@@ -63,11 +65,19 @@ export function Tools({ owner, onClose }: { owner: boolean; onClose: () => void 
           >
             <h2 className="font-semibold">{server.name}</h2>
             {server.transport === "site" ? (
-              <p className="text-sm">
-                On your job site {server.node}. Added at the machine by its administrator; its owner
-                says who may use which of its tools.
-                {!server.available && server.reason ? ` ${server.reason}` : ""}
-              </p>
+              <>
+                <p className="text-sm">
+                  On your job site {server.label}. Added at the machine by its administrator; its
+                  owner says who may use which of its tools.
+                  {!server.available && server.reason ? ` ${server.reason}` : ""}
+                </p>
+                <SiteLinkNote
+                  site={server.site}
+                  label={server.label}
+                  linking={server}
+                  onChanged={() => setReload((n) => n + 1)}
+                />
+              </>
             ) : server.transport === "stdio" ? (
               <>
                 <p className="text-sm">Local server · Owner only</p>

@@ -32,7 +32,8 @@ def remote_world(
         "folders": [
             {
                 "id": "remote-notes",
-                "node": "Ada's desktop",
+                "site": fake_sites.DESK,
+                "label": "Ada's desktop",
                 "name": "Notes",
                 "writable": True,
                 "people": {"p-ada": True},
@@ -195,7 +196,7 @@ async def test_session_binding_and_uncertain_write_handling(tmp_path: Path, scen
             )
             remote = NodeFolders(store, provider, http)
             run = remote.call_tool(
-                person, "desk", "files", "write_text", {"folder": "Notes", "path": "n.txt"}
+                person, fake_sites.DESK, "files", "write_text", {"folder": "Notes", "path": "n.txt"}
             )
             if scenario == "cancel":
                 task = asyncio.create_task(run)
@@ -229,7 +230,8 @@ def test_one_server_per_machine_narrowed_to_the_chats_folders(
     remote["folders"].append(
         {
             "id": "remote-private",
-            "node": "Ada's desktop",
+            "site": fake_sites.DESK,
+            "label": "Ada's desktop",
             "name": "Private",
             "writable": True,
             "people": {"p-ada": True},
