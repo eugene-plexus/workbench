@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import time
 from pathlib import Path
@@ -11,15 +10,15 @@ from typing import Any
 
 import httpx
 import pytest
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI
 
 from eugene_plexus_workbench.folder_io import FolderError, WriteUncertain
 from eugene_plexus_workbench.node_folders import NodeFolders
 from eugene_plexus_workbench.signin import Provider
 from eugene_plexus_workbench.store import Person, SessionRow, Store
 
-from .conftest import CLIENT_ID, CLIENT_SECRET, FakeEugene, World
+from . import fake_sites
+from .conftest import FakeEugene, World
 from .test_folders import finish, offer
 from .test_tools import decide
 
@@ -30,50 +29,21 @@ def remote_world(
 ) -> tuple[World, dict[str, Any]]:
     original = FakeEugene.app
     state: dict[str, Any] = {
-        "allowed": True,
-        "available": True,
-        "calls": [],
+        "folders": [
+            {
+                "id": "remote-notes",
+                "node": "Ada's desktop",
+                "name": "Notes",
+                "writable": True,
+                "people": {"p-ada": True},
+            }
+        ],
         "content": "Desktop notes",
     }
 
     def app(fake: FakeEugene) -> FastAPI:
         server = original(fake)
-
-        @server.post("/oidc/node-helpers/{action}")
-        async def helper(action: str, request: Request) -> Any:
-            expected = base64.b64encode(f"{CLIENT_ID}:{CLIENT_SECRET}".encode()).decode()
-            assert request.headers["authorization"] == "Basic " + expected
-            body = await request.json()
-            sub = fake.refresh_tokens.get(body["refreshToken"])
-            authorized = state["allowed"] and sub == "p-ada" and sub not in fake.disabled
-            if action == "folders":
-                return {
-                    "grants": [
-                        {
-                            "id": "remote-notes",
-                            "node": "Ada's desktop",
-                            "name": "Notes",
-                            "subject": sub,
-                            "writable": True,
-                            "usable": True,
-                            "available": state["available"],
-                            "reason": None if state["available"] else "Desktop is offline.",
-                        }
-                    ]
-                    if authorized
-                    else []
-                }
-            if action == "cancel":
-                return JSONResponse({}, status_code=204)
-            if not authorized:
-                return JSONResponse(
-                    {"detail": {"detail": "This folder is no longer granted."}}, status_code=403
-                )
-            state["calls"].append(body)
-            if body["tool"] == "write_text":
-                state["content"] = body["arguments"]["text"]
-            return {"status": "done", "result": {"text": state["content"], "sha256": "a" * 64}}
-
+        fake_sites.install(server, fake, state)
         return server
 
     monkeypatch.setattr(FakeEugene, "app", app)
@@ -111,19 +81,30 @@ def test_central_host_needs_no_local_file_account_and_each_call_requires_approva
         ).status_code
         == 400
     )
-    reading = offer(world, ada, chat, "read_text", path="note.txt")
+    reading = offer(world, ada, chat, "read_text", folder="Notes", path="note.txt")
     assert remote["calls"] == []
     assert decide(bo, chat, reading, True).status_code == 404
     result = finish(ada, chat, reading)
     assert json.loads(result["result"])["text"] == "Desktop notes"
     writing = offer(
-        world, ada, chat, "write_text", path="note.txt", text="Changed", expectedSha256="a" * 64
+        world,
+        ada,
+        chat,
+        "write_text",
+        folder="Notes",
+        path="note.txt",
+        text="Changed",
+        expectedSha256="a" * 64,
     )
     assert remote["content"] == "Desktop notes"
     assert finish(ada, chat, writing)["status"] == "done"
     assert remote["content"] == "Changed"
     saved = ada.get(f"/api/chats/{chat}").text
     tokens = [call["refreshToken"] for call in remote["calls"]]
+    assert [c["request"]["params"]["arguments"]["folder"] for c in remote["calls"]] == [
+        "Notes",
+        "Notes",
+    ]
     assert all(
         token not in saved and token not in json.dumps(world.gateway.requests) for token in tokens
     )
@@ -137,7 +118,14 @@ def test_remote_write_cannot_outlive_approval_or_access(
     world, remote = remote_world
     ada, _, chat = select(world)
     writing = offer(
-        world, ada, chat, "write_text", path="note.txt", text="Wrong", expectedSha256="a" * 64
+        world,
+        ada,
+        chat,
+        "write_text",
+        folder="Notes",
+        path="note.txt",
+        text="Wrong",
+        expectedSha256="a" * 64,
     )
     if reason == "grant-removed":
         remote["allowed"] = False
@@ -206,7 +194,9 @@ async def test_session_binding_and_uncertain_write_handling(tmp_path: Path, scen
                 issuer="http://eugene/oidc", client_id="wb", secret_file=secret, http=http
             )
             remote = NodeFolders(store, provider, http)
-            run = remote.execute("node:f1", person, "write_text", {"path": "n.txt"})
+            run = remote.call_tool(
+                person, "desk", "files", "write_text", {"folder": "Notes", "path": "n.txt"}
+            )
             if scenario == "cancel":
                 task = asyncio.create_task(run)
                 await asyncio.wait_for(started.wait(), 2)
@@ -228,3 +218,44 @@ async def test_session_binding_and_uncertain_write_handling(tmp_path: Path, scen
                 assert not calls
     finally:
         await store.close()
+
+
+def test_one_server_per_machine_narrowed_to_the_chats_folders(
+    remote_world: tuple[World, dict[str, Any]],
+) -> None:
+    """J6g: a machine's file server is one, its `folder` argument listing only
+    the folders this chat selected there; a call cannot name another."""
+    world, remote = remote_world
+    remote["folders"].append(
+        {
+            "id": "remote-private",
+            "node": "Ada's desktop",
+            "name": "Private",
+            "writable": True,
+            "people": {"p-ada": True},
+        }
+    )
+    ada, _, chat = select(world)
+    listed = [g["name"] for g in ada.get("/api/folders").json()["grants"]]
+    assert listed == ["Notes", "Private"]
+    reading = offer(world, ada, chat, "read_text", folder="Notes", path="note.txt")
+    tools = world.gateway.requests[-1]["tools"]
+    enums = {
+        t["function"]["description"].split(": ")[1].split(".")[0]: t["function"]["parameters"][
+            "properties"
+        ]["folder"]["enum"]
+        for t in tools
+    }
+    assert enums == {
+        "list_directory": ["Notes"],
+        "read_text": ["Notes"],
+        "write_text": ["Notes"],
+    }
+    assert all("Ada's desktop · Files" in t["function"]["description"] for t in tools)
+    assert finish(ada, chat, reading)["status"] == "done"
+    world.gateway.tool_name = "read_text"
+    world.gateway.tool_arguments = json.dumps({"folder": "Private", "path": "note.txt"})
+    ada.post(f"/api/chats/{chat}/messages", json={"content": "Read the private one."})
+    sneaking = ada.wait_answer(chat)
+    assert sneaking["status"] == "failed" and not sneaking["toolRounds"]
+    assert all(c["request"]["params"]["arguments"]["folder"] == "Notes" for c in remote["calls"])

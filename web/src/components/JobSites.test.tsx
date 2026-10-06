@@ -35,18 +35,103 @@ it("shows a site's folders and who may use them, and saves the list its owner wr
   vi.mocked(api).mockResolvedValue({ sites: [site], canInvite: true });
   vi.mocked(post).mockResolvedValue({});
   render(<JobSites onClose={() => undefined} />);
-  const people = await screen.findByDisplayValue("bo (write)");
-  fireEvent.change(people, { target: { value: "ada, bo (write)" } });
+  const bo = await screen.findByLabelText("What bo may do in Notes");
+  expect(bo).toHaveValue("change");
+  expect(screen.getByRole("option", { name: "May change files without asking you" })).toBeTruthy();
+  fireEvent.change(screen.getByLabelText("Add a person (how they sign in)"), {
+    target: { value: "ada" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Add" }));
+  fireEvent.change(bo, { target: { value: "read" } });
   fireEvent.click(screen.getByRole("button", { name: "Save who may use it" }));
   await waitFor(() =>
     expect(post).toHaveBeenCalledWith("/api/job-sites/desk/folders/f1/people", {
       people: [
+        { name: "bo", writable: false },
         { name: "ada", writable: false },
-        { name: "bo", writable: true },
       ],
     }),
   );
   expect(screen.getByText(/NT SERVICE/)).toBeInTheDocument();
+});
+
+it("offers only reading in a read-only folder", async () => {
+  const readOnly = { ...site, folders: [{ ...site.folders[0], writable: false }] };
+  vi.mocked(api).mockResolvedValue({ sites: [readOnly], canInvite: true });
+  render(<JobSites onClose={() => undefined} />);
+  await screen.findByLabelText("What bo may do in Notes");
+  expect(screen.queryByRole("option", { name: "May change files without asking you" })).toBeNull();
+});
+
+it("turns a local server on and says who may use which of its tools", async () => {
+  const withServer = {
+    ...site,
+    ownerInDevMode: false,
+    servers: [
+      {
+        server: {
+          id: "notes-tool",
+          name: "Notes tool",
+          kind: "local",
+          system: false,
+          enabled: true,
+          available: true,
+          reason: null,
+          tools: [
+            { name: "search", readOnly: true, destructive: false },
+            { name: "tidy", readOnly: false, destructive: true },
+          ],
+        },
+        people: [{ person: "p-bo", name: "bo", tools: [{ name: "search", standing: false }] }],
+      },
+    ],
+  };
+  vi.mocked(api).mockResolvedValue({ sites: [withServer], canInvite: true });
+  vi.mocked(post).mockResolvedValue({});
+  render(<JobSites onClose={() => undefined} />);
+  const tidy = await screen.findByLabelText("bo may use tidy");
+  expect(screen.getByRole("option", { name: "Yes, without asking you" })).toBeTruthy();
+  fireEvent.change(tidy, { target: { value: "yes" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save who may use Notes tool" }));
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith("/api/job-sites/desk/servers/notes-tool/access", {
+      people: [
+        {
+          name: "bo",
+          tools: [
+            { name: "search", standing: false },
+            { name: "tidy", standing: true },
+          ],
+        },
+      ],
+    }),
+  );
+  fireEvent.click(screen.getByLabelText(/while Eugene is in dev mode/));
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith("/api/job-sites/desk/settings", { ownerInDevMode: true }),
+  );
+});
+
+it("shows the machine's own audit log to its owner", async () => {
+  vi.mocked(api).mockResolvedValue({ sites: [site], canInvite: true });
+  vi.mocked(post).mockResolvedValue({
+    entries: [
+      {
+        at: "2026-10-05T12:00:00Z",
+        subject: "p-bo",
+        kind: "mcp",
+        tool: "read_text",
+        decision: "refused",
+        reason: "Not on the list.",
+      },
+    ],
+  });
+  render(<JobSites onClose={() => undefined} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Show what desk was asked" }));
+  expect(await screen.findByLabelText("What desk was asked")).toHaveTextContent(
+    /p-bo · read_text · refused · Not on the list\./,
+  );
+  expect(post).toHaveBeenCalledWith("/api/job-sites/desk/audit", { limit: 50 });
 });
 
 it("makes the join command for a machine of the person's own, and asks for no password", async () => {

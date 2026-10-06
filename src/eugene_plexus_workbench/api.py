@@ -494,7 +494,7 @@ async def update_chat(request: Request, chat_id: str, body: ChatUpdate) -> dict[
 
                 remote = _state(request).tools.node_folders
                 if remote is None:
-                    raise _problem(503, "Node folders are unavailable in this Workbench.")
+                    raise _problem(503, "Machines' folders are unavailable in this Workbench.")
                 try:
                     grants.update(g["id"] for g in await remote.listing(person))
                 except FolderError as exc:
@@ -509,6 +509,16 @@ async def update_chat(request: Request, chat_id: str, body: ChatUpdate) -> dict[
                 for s in await _state(request).store.tool_servers()
                 if visible_server(s, person)
             }
+            if any(i.startswith("site:") for i in body.settings.toolServers):
+                from .folder_io import FolderError
+
+                remote = _state(request).tools.node_folders
+                if remote is None:
+                    raise _problem(503, "Machines' tools are unavailable in this Workbench.")
+                try:
+                    servers.update(s["id"] for s in await remote.local_servers(person))
+                except FolderError as exc:
+                    raise _problem(503, str(exc)) from None
             if any(i not in servers for i in body.settings.toolServers):
                 raise _problem(
                     400,

@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { api, post } from "../lib/api";
-import type { JobSite, JobSiteInvite, JobSiteList } from "../lib/types";
+import type {
+  JobSite,
+  JobSiteInvite,
+  JobSiteList,
+  JobSiteServer,
+  SiteAuditEntry,
+} from "../lib/types";
 import { CopyButton } from "./CopyButton";
 
 const problemOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -56,7 +62,8 @@ export function JobSites({ onClose }: { onClose: () => void }) {
       <p className="text-sm text-muted">
         A job site is a machine of yours that Workbench can work on from anywhere: its folders,
         chosen by you, and each listing, read or write with your approval. The machine connects out
-        to Eugene and nothing connects to it. Only you say who may use its folders, you included.
+        to Eugene and nothing connects to it. Only you say who may use its folders and its tools,
+        you included, and the machine itself keeps that list.
       </p>
       {problem && (
         <p role="alert" className="text-sm text-error">
@@ -137,15 +144,9 @@ function since(iso: string | null): string {
   return `${Math.round(seconds / 3600)} h ago`;
 }
 
-function Site({
-  site,
-  busy,
-  act,
-}: {
-  site: JobSite;
-  busy: boolean;
-  act: (work: () => Promise<unknown>) => Promise<void>;
-}) {
+type Act = (work: () => Promise<unknown>) => Promise<void>;
+
+function Site({ site, busy, act }: { site: JobSite; busy: boolean; act: Act }) {
   const [name, setName] = useState("");
   const [path, setPath] = useState("");
   const [writable, setWritable] = useState(false);
@@ -226,6 +227,24 @@ function Site({
           </button>
         </form>
       )}
+      {site.enabled &&
+        (site.servers ?? []).map((entry) => (
+          <LocalServer key={entry.server.id} base={base} entry={entry} busy={busy} act={act} />
+        ))}
+      {site.enabled && site.ownerInDevMode !== undefined && site.ownerInDevMode !== null && (
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={site.ownerInDevMode}
+            disabled={busy}
+            onChange={(event) =>
+              void act(() => post(`${base}/settings`, { ownerInDevMode: event.target.checked }))
+            }
+          />
+          Let Eugene&apos;s owner use folders they give themselves here, while Eugene is in dev mode
+        </label>
+      )}
+      {site.enabled && <Audit base={base} node={site.node} />}
       {leaving ? (
         <div className="flex flex-wrap gap-3">
           <p>
@@ -251,6 +270,9 @@ function Site({
   );
 }
 
+const READ = "read";
+const CHANGE = "change";
+
 function Folder({
   base,
   folder,
@@ -260,35 +282,71 @@ function Folder({
   base: string;
   folder: JobSite["folders"][number];
   busy: boolean;
-  act: (work: () => Promise<unknown>) => Promise<void>;
+  act: Act;
 }) {
   const [people, setPeople] = useState(() =>
-    folder.people.map((p) => `${p.name}${p.writable ? " (write)" : ""}`).join(", "),
+    folder.people.map((p) => ({ name: p.name, access: p.writable ? CHANGE : READ })),
   );
-  const parse = () =>
-    people
-      .split(",")
-      .map((entry) => entry.trim())
-      .filter(Boolean)
-      .map((entry) => {
-        const write = /\(write\)$/i.test(entry);
-        return { name: entry.replace(/\s*\(write\)$/i, "").trim(), writable: write };
-      });
+  const [adding, setAdding] = useState("");
   return (
-    <div className="flex flex-col gap-2 rounded-plexus border border-line p-2">
+    <div
+      className="flex flex-col gap-2 rounded-plexus border border-line p-2"
+      data-testid={`folder-${folder.id}`}
+    >
       <h3 className="font-semibold">
         {folder.name} · {folder.writable ? "read and write text" : "read only"}
       </h3>
       <p className="break-all text-muted">{folder.path}</p>
-      <label className="flex flex-col gap-1">
-        Who may use it (sign-in names, comma-separated; add &quot;(write)&quot; to let someone
-        write). Include yourself to use it.
-        <input
-          value={people}
-          onChange={(event) => setPeople(event.target.value)}
-          className="rounded-plexus border border-line bg-transparent px-2 py-1"
-        />
-      </label>
+      <p>Who may use it. Include yourself to use it.</p>
+      {people.length === 0 && <p className="text-muted">Nobody yet.</p>}
+      {people.map((person, index) => (
+        <div key={person.name} className="flex flex-wrap items-center gap-2">
+          <span className="min-w-24">{person.name}</span>
+          <select
+            aria-label={`What ${person.name} may do in ${folder.name}`}
+            value={person.access}
+            onChange={(event) =>
+              setPeople((old) =>
+                old.map((p, i) => (i === index ? { ...p, access: event.target.value } : p)),
+              )
+            }
+            className="rounded-plexus border border-line bg-soft px-2 py-1"
+          >
+            <option value={READ}>Read</option>
+            {folder.writable && <option value={CHANGE}>May change files without asking you</option>}
+          </select>
+          <button
+            type="button"
+            className="text-error"
+            onClick={() => setPeople((old) => old.filter((_, i) => i !== index))}
+          >
+            Remove {person.name}
+          </button>
+        </div>
+      ))}
+      <div className="flex flex-wrap items-end gap-2">
+        <label className="flex flex-col gap-1">
+          Add a person (how they sign in)
+          <input
+            value={adding}
+            onChange={(event) => setAdding(event.target.value)}
+            className="rounded-plexus border border-line bg-transparent px-2 py-1"
+          />
+        </label>
+        <button
+          type="button"
+          className="rounded-plexus border border-line px-3 py-1"
+          onClick={() => {
+            const name = adding.trim();
+            if (name && !people.some((p) => p.name.toLowerCase() === name.toLowerCase())) {
+              setPeople((old) => [...old, { name, access: READ }]);
+            }
+            setAdding("");
+          }}
+        >
+          Add
+        </button>
+      </div>
       <div className="flex flex-wrap gap-3">
         <button
           disabled={busy}
@@ -296,7 +354,7 @@ function Folder({
           onClick={() =>
             void act(() =>
               post(`${base}/folders/${encodeURIComponent(folder.id)}/people`, {
-                people: parse(),
+                people: people.map((p) => ({ name: p.name, writable: p.access === CHANGE })),
               }),
             )
           }
@@ -313,6 +371,183 @@ function Folder({
           Remove folder
         </button>
       </div>
+    </div>
+  );
+}
+
+const NO = "no";
+const YES = "yes";
+
+/** A local server its administrator added at the machine: on or off, and who
+ * may use which of its tools. A tool that can change things is a standing
+ * pre-approval or nothing. */
+function LocalServer({
+  base,
+  entry,
+  busy,
+  act,
+}: {
+  base: string;
+  entry: JobSiteServer;
+  busy: boolean;
+  act: Act;
+}) {
+  const { server } = entry;
+  const [people, setPeople] = useState(() =>
+    entry.people.map((p) => ({ name: p.name, tools: new Set(p.tools.map((t) => t.name)) })),
+  );
+  const [adding, setAdding] = useState("");
+  const path = `${base}/servers/${encodeURIComponent(server.id)}`;
+  return (
+    <div
+      className="flex flex-col gap-2 rounded-plexus border border-line p-2"
+      data-testid={`server-${server.id}`}
+    >
+      <h3 className="font-semibold">
+        {server.name}
+        {server.system ? " · can change this machine's settings" : ""}
+      </h3>
+      <label className="flex items-center gap-2">
+        <input
+          type="checkbox"
+          checked={server.enabled}
+          disabled={busy}
+          onChange={(event) =>
+            void act(() => post(`${path}/enabled`, { enabled: event.target.checked }))
+          }
+        />
+        On
+      </label>
+      {server.reason && <p className="text-muted">{server.reason}</p>}
+      {server.enabled && server.tools.length > 0 && (
+        <>
+          <p>Who may use which tools. A tool that can change things runs without asking you.</p>
+          {people.map((person, index) => (
+            <fieldset key={person.name} className="flex flex-wrap items-center gap-3">
+              <legend>{person.name}</legend>
+              {server.tools.map((tool) => (
+                <label key={tool.name} className="flex items-center gap-1">
+                  <select
+                    aria-label={`${person.name} may use ${tool.name}`}
+                    value={person.tools.has(tool.name) ? YES : NO}
+                    onChange={(event) =>
+                      setPeople((old) =>
+                        old.map((p, i) => {
+                          if (i !== index) return p;
+                          const tools = new Set(p.tools);
+                          if (event.target.value === YES) tools.add(tool.name);
+                          else tools.delete(tool.name);
+                          return { ...p, tools };
+                        }),
+                      )
+                    }
+                    className="rounded-plexus border border-line bg-soft px-1"
+                  >
+                    <option value={NO}>No</option>
+                    <option value={YES}>
+                      {tool.destructive ? "Yes, without asking you" : "Yes"}
+                    </option>
+                  </select>
+                  {tool.title || tool.name}
+                </label>
+              ))}
+              <button
+                type="button"
+                className="text-error"
+                onClick={() => setPeople((old) => old.filter((_, i) => i !== index))}
+              >
+                Remove {person.name}
+              </button>
+            </fieldset>
+          ))}
+          <div className="flex flex-wrap items-end gap-2">
+            <label className="flex flex-col gap-1">
+              Add a person (how they sign in)
+              <input
+                value={adding}
+                onChange={(event) => setAdding(event.target.value)}
+                className="rounded-plexus border border-line bg-transparent px-2 py-1"
+              />
+            </label>
+            <button
+              type="button"
+              className="rounded-plexus border border-line px-3 py-1"
+              onClick={() => {
+                const name = adding.trim();
+                if (name && !people.some((p) => p.name.toLowerCase() === name.toLowerCase())) {
+                  setPeople((old) => [...old, { name, tools: new Set<string>() }]);
+                }
+                setAdding("");
+              }}
+            >
+              Add
+            </button>
+          </div>
+          <button
+            disabled={busy}
+            className="self-start rounded-plexus border border-line px-3 py-1"
+            onClick={() =>
+              void act(() =>
+                post(`${path}/access`, {
+                  people: people.map((p) => ({
+                    name: p.name,
+                    tools: server.tools
+                      .filter((t) => p.tools.has(t.name))
+                      .map((t) => ({ name: t.name, standing: t.destructive })),
+                  })),
+                }),
+              )
+            }
+          >
+            Save who may use {server.name}
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** The machine's own audit log: who asked for what, and what it decided. */
+function Audit({ base, node }: { base: string; node: string }) {
+  const [entries, setEntries] = useState<SiteAuditEntry[] | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+  return (
+    <div className="flex flex-col gap-2">
+      <button
+        type="button"
+        className="self-start text-accent"
+        onClick={async () => {
+          setProblem(null);
+          try {
+            const page = await post<{ entries: SiteAuditEntry[] }>(`${base}/audit`, {
+              limit: 50,
+            });
+            setEntries(page.entries);
+          } catch (error) {
+            setProblem(problemOf(error));
+          }
+        }}
+      >
+        Show what {node} was asked
+      </button>
+      {problem && (
+        <p role="alert" className="text-error">
+          {problem}
+        </p>
+      )}
+      {entries?.length === 0 && <p className="text-muted">Nothing has been asked of it yet.</p>}
+      {entries && entries.length > 0 && (
+        <ul className="flex flex-col gap-1 text-xs" aria-label={`What ${node} was asked`}>
+          {entries.map((entry, index) => (
+            <li key={`${entry.at}-${index}`}>
+              {new Date(entry.at).toLocaleString()} · {entry.subject} ·{" "}
+              {entry.tool ?? entry.action ?? entry.method ?? ""} ·{" "}
+              {entry.decision === "allowed" ? "allowed" : "refused"}
+              {entry.reason ? ` · ${entry.reason}` : ""}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

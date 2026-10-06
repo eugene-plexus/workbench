@@ -72,6 +72,15 @@ export type ToolServer = ServerIdentity &
         environmentKeys: string[];
         access: "owner";
       }
+    | {
+        /** A local server on one of the person's job sites, reached through Eugene. */
+        transport: "site";
+        node: string;
+        server: string;
+        available: boolean;
+        reason: string | null;
+        jobSite: boolean;
+      }
   );
 
 export interface ToolServers {
@@ -149,6 +158,44 @@ export interface JobSiteFolder {
   people: { person: string; name: string; writable: boolean }[];
 }
 
+export interface SiteTool {
+  name: string;
+  title?: string | null;
+  description?: string | null;
+  readOnly: boolean;
+  destructive: boolean;
+}
+
+export interface SiteServer {
+  id: string;
+  name: string;
+  kind: "files" | "local";
+  system: boolean;
+  enabled: boolean;
+  available: boolean;
+  reason: string | null;
+  tools: SiteTool[];
+}
+
+export interface JobSiteServer {
+  server: SiteServer;
+  people: { person: string; name: string; tools: { name: string; standing?: boolean }[] }[];
+}
+
+export interface SiteAuditEntry {
+  at: string;
+  subject: string;
+  kind: "mcp" | "manage";
+  server?: string | null;
+  method?: string | null;
+  tool?: string | null;
+  action?: string | null;
+  arguments?: string | null;
+  decision: "allowed" | "refused";
+  outcome?: string | null;
+  reason?: string | null;
+}
+
 export interface JobSite {
   node: string;
   enabled: boolean;
@@ -159,6 +206,10 @@ export interface JobSite {
   account: string | null;
   lastContactAt: string | null;
   folders: JobSiteFolder[];
+  /** The local servers its administrator added at the machine. */
+  servers?: JobSiteServer[];
+  /** Whether Eugene's owner may use folders here while Eugene is in dev mode (J6e). */
+  ownerInDevMode?: boolean | null;
 }
 
 export interface JobSiteList {

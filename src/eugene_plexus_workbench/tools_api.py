@@ -8,6 +8,7 @@ from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 
 from .api import _answers, _new_id, _own_chat, _person, _problem, _state
+from .folder_io import FolderError
 from .local_tools import unavailable, validate_process
 from .tools import public_server, validate_url, visible_server
 
@@ -60,13 +61,27 @@ async def servers(request: Request) -> dict[str, Any]:
     reason = unavailable(_state(request).settings)
     if not person.is_owner:
         reason = "Only the install owner can use local tool servers."
+    # A job site's local servers this person may use: added at the machine
+    # by its administrator, opened to them by the site's owner (J6b).
+    remote = _state(request).tools.node_folders
+    sites: list[dict[str, Any]] = []
+    sites_reason = None
+    if remote is not None and person.session_id:
+        try:
+            sites = await remote.local_servers(person)
+        except FolderError as exc:
+            sites_reason = str(exc)
     return {
         "servers": [
-            public_server(s)
-            for s in await _state(request).store.tool_servers()
-            if visible_server(s, person)
+            *(
+                public_server(s)
+                for s in await _state(request).store.tool_servers()
+                if visible_server(s, person)
+            ),
+            *sites,
         ],
         "localProcesses": {"available": reason is None, "reason": reason},
+        "sitesReason": sites_reason,
     }
 
 
@@ -98,6 +113,8 @@ async def check(request: Request, server_id: str) -> dict[str, Any]:
     server = next(
         (s for s in await _state(request).store.tool_servers() if s["id"] == server_id), None
     )
+    if server is None and not server_id.startswith("site:"):
+        raise _problem(404, "There is no such tool server.")
     if server is not None and not visible_server(server, person):
         raise _problem(403, "Only the install owner can start local tool servers.")
     # The answer runner uses this same discovery path.
