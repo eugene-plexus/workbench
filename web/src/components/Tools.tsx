@@ -64,8 +64,8 @@ export function Tools({ owner, onClose }: { owner: boolean; onClose: () => void 
             <h2 className="font-semibold">{server.name}</h2>
             {server.transport === "site" ? (
               <p className="text-sm">
-                On your job site {server.node}. Added at the machine by its administrator; its owner
-                says who may use which of its tools.
+                On your job site {server.label}. Added at the machine by its administrator; its
+                owner says who may use which of its tools.
                 {!server.available && server.reason ? ` ${server.reason}` : ""}
               </p>
             ) : server.transport === "stdio" ? (

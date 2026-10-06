@@ -8,7 +8,7 @@ each one MCP request of the 2026-07-28 revision (`/oidc/sites/mcp`); the
 machine's own policy decides, and on a job site it is final (J8).
 
 A chat selects folders by id (`node:<folder id>`, unique in the install) and
-site servers by id (`site:<node>:<server>`).
+site servers by id (`site:<site id>:<server>`).
 """
 
 from __future__ import annotations
@@ -55,17 +55,17 @@ def rpc(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
     }
 
 
-def site_server_id(node: str, server: str) -> str:
-    return f"{SITE_PREFIX}{node}:{server}"
+def site_server_id(site: str, server: str) -> str:
+    return f"{SITE_PREFIX}{site}:{server}"
 
 
 def parse_site_server_id(ident: str) -> tuple[str, str]:
     if not ident.startswith(SITE_PREFIX) or ident.count(":") < 2:
         raise FolderError("This is not a machine's server.")
-    node, _, server = ident[len(SITE_PREFIX) :].rpartition(":")
-    if not node or not server:
+    site, _, server = ident[len(SITE_PREFIX) :].rpartition(":")
+    if not site or not server:
         raise FolderError("This is not a machine's server.")
-    return node, server
+    return site, server
 
 
 class NodeFolders:
@@ -190,7 +190,8 @@ class NodeFolders:
             listed = response.json()["servers"]
             if not isinstance(listed, list) or any(
                 not isinstance(s, dict)
-                or not isinstance(s.get("node"), str)
+                or not isinstance(s.get("site"), str)
+                or not isinstance(s.get("label"), str)
                 or not isinstance(s.get("server"), str)
                 or not isinstance(s.get("folders"), list)
                 for s in listed
@@ -210,13 +211,13 @@ class NodeFolders:
                 out.append(
                     {
                         "id": PREFIX + str(folder["id"]),
-                        "node": server["node"],
+                        "site": server["site"],
+                        "label": server["label"],
                         "name": str(folder["name"]),
                         "writable": bool(folder.get("writable")),
                         "usable": True,
                         "available": bool(server.get("available")),
                         "reason": server.get("reason"),
-                        "jobSite": bool(server.get("jobSite")),
                         "source": "node",
                     }
                 )
@@ -226,14 +227,15 @@ class NodeFolders:
         """The local servers on job sites this person may use, as tools."""
         return [
             {
-                "id": site_server_id(s["node"], s["server"]),
-                "name": f"{s['node']} · {s.get('name') or s['server']}",
+                "id": site_server_id(s["site"], s["server"]),
+                "name": f"{s['label']} · {s.get('name') or s['server']}",
                 "transport": "site",
-                "node": s["node"],
+                "site": s["site"],
+                "label": s["label"],
                 "server": s["server"],
                 "available": bool(s.get("available")),
                 "reason": s.get("reason"),
-                "jobSite": bool(s.get("jobSite")),
+                "jobSite": True,
             }
             for s in await self.servers(person)
             if s["server"] != FILES
@@ -244,7 +246,7 @@ class NodeFolders:
     async def mcp(
         self,
         person: Person | None,
-        node: str,
+        site: str,
         server: str,
         request: dict[str, Any],
         *,
@@ -260,7 +262,7 @@ class NodeFolders:
                 self.provider.transport_url(f"{self.provider.issuer}/sites/mcp"),
                 json={
                     "refreshToken": token,
-                    "node": node,
+                    "site": site,
                     "server": server,
                     "request": request,
                     "operationId": operation,
@@ -320,12 +322,13 @@ class NodeFolders:
         return value
 
     async def list_tools(
-        self, person: Person | None, node: str, server: str
+        self, person: Person | None, site: str, server: str, label: str | None = None
     ) -> list[dict[str, Any]]:
         """A machine's server's tools for this person, as its own policy lists them."""
-        answer = await self.mcp(person, node, server, rpc("tools/list"))
+        label = label or site
+        answer = await self.mcp(person, site, server, rpc("tools/list"))
         if answer["status"] != "done":
-            raise FolderError(answer.get("message") or f"{node} did not list its tools.")
+            raise FolderError(answer.get("message") or f"{label} did not list its tools.")
         response = answer["response"]
         if response.get("error"):
             raise FolderError(str(response["error"].get("message") or "The tool listing failed."))
@@ -333,34 +336,35 @@ class NodeFolders:
         if not isinstance(tools, list) or any(
             not isinstance(t, dict) or not isinstance(t.get("name"), str) for t in tools
         ):
-            raise FolderError(f"{node} answered a tool listing Workbench could not read.")
+            raise FolderError(f"{label} answered a tool listing Workbench could not read.")
         return tools
 
     async def call_tool(
         self,
         person: Person | None,
-        node: str,
+        site: str,
         server: str,
         tool: str,
         arguments: dict[str, Any],
     ) -> tuple[str, bool, dict[str, Any]]:
         """Run one tool: its result as text, whether it is an error, and what
-        Eugene said about it (a job site's, and the install's mode, J13a)."""
+        Eugene said about it (the install's mode, J13a; every site's result is
+        a job-site result)."""
         answer = await self.mcp(
             person,
-            node,
+            site,
             server,
             rpc("tools/call", {"name": tool, "arguments": arguments}),
             acting=True,
         )
         mode = answer.get("installMode") if answer.get("installMode") == "dev" else PRODUCTION
-        meta = {"jobSite": bool(answer.get("jobSite")), "mode": mode}
+        meta = {"jobSite": True, "mode": mode}
         if answer["status"] == "uncertain":
             raise WriteUncertain(
                 answer.get("message") or "This call may have acted. Check before trying again."
             )
         if answer["status"] != "done":
-            raise FolderError(answer.get("message") or f"{node} did not run {tool}.")
+            raise FolderError(answer.get("message") or f"{site} did not run {tool}.")
         response = answer["response"]
         if response.get("error"):
             raise FolderError(str(response["error"].get("message") or f"{tool} failed."))

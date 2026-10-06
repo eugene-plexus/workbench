@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 from .conftest import CLIENT_ID, CLIENT_SECRET
 
 PATH = {"type": "string", "minLength": 1}
+DESK = "s-deskdeskdeskdeskdeskdeskde"  # a site id: s- and 26 of a-z2-7
 
 
 def file_tools(readable: list[str], writable: list[str]) -> list[dict[str, Any]]:
@@ -52,9 +53,9 @@ def file_tools(readable: list[str], writable: list[str]) -> list[dict[str, Any]]
 
 def install(server: FastAPI, fake: Any, state: dict[str, Any]) -> None:
     """`state`:
-    - `folders`: [{id, node, name, writable, people: {sub: may write}}];
-    - `local`: [{node, server, name, people: [sub], tools: [Tool]}];
-    - `available`, `reason`, `jobSite`, `mode`, `allowed`;
+    - `folders`: [{id, site, label, name, writable, people: {sub: may write}}];
+    - `local`: [{site, label, server, name, people: [sub], tools: [Tool]}];
+    - `available`, `reason`, `mode`, `allowed`;
     - `content`: the one file's text; `calls`: every tools/call body.
     """
     state.setdefault("local", [])
@@ -72,14 +73,13 @@ def install(server: FastAPI, fake: Any, state: dict[str, Any]) -> None:
             return None
         return str(sub) if sub else None
 
-    def mine(sub: str | None, node: str) -> list[dict[str, Any]]:
-        return [f for f in state["folders"] if f["node"] == node and sub in f["people"]]
+    def mine(sub: str | None, site: str) -> list[dict[str, Any]]:
+        return [f for f in state["folders"] if f["site"] == site and sub in f["people"]]
 
     def answer(response: dict[str, Any]) -> dict[str, Any]:
         return {
             "status": "done",
             "response": {"jsonrpc": "2.0", "id": 1, **response},
-            "jobSite": bool(state.get("jobSite")),
             "installMode": state.get("mode", "production"),
         }
 
@@ -89,21 +89,22 @@ def install(server: FastAPI, fake: Any, state: dict[str, Any]) -> None:
         body = await request.json()
         sub = who(body)
         listed = []
-        for node in sorted({f["node"] for f in state["folders"]}):
+        for site in sorted({f["site"] for f in state["folders"]}):
+            label = next(f.get("label", site) for f in state["folders"] if f["site"] == site)
             folders = [
                 {"id": f["id"], "name": f["name"], "writable": f["people"][sub] and f["writable"]}
-                for f in mine(sub, node)
+                for f in mine(sub, site)
             ]
             if folders:
                 listed.append(
                     {
-                        "node": node,
+                        "site": site,
+                        "label": label,
                         "server": "files",
                         "name": "Files",
                         "kind": "files",
-                        "jobSite": bool(state.get("jobSite")),
                         "available": state["available"],
-                        "reason": None if state["available"] else f"{node} is offline.",
+                        "reason": None if state["available"] else f"{label} is offline.",
                         "folders": folders,
                     }
                 )
@@ -111,11 +112,11 @@ def install(server: FastAPI, fake: Any, state: dict[str, Any]) -> None:
             if sub in local["people"]:
                 listed.append(
                     {
-                        "node": local["node"],
+                        "site": local["site"],
+                        "label": local.get("label", local["site"]),
                         "server": local["server"],
                         "name": local["name"],
                         "kind": "local",
-                        "jobSite": True,
                         "available": state["available"],
                         "reason": None,
                         "folders": [],
@@ -137,13 +138,13 @@ def install(server: FastAPI, fake: Any, state: dict[str, Any]) -> None:
         # The 2026-07-28 envelope: the SDK refuses a request without them.
         assert isinstance(meta.get("io.modelcontextprotocol/clientCapabilities"), dict)
         method = body["request"]["method"]
-        node, server_id = body["node"], body["server"]
+        site, server_id = body["site"], body["server"]
         if server_id != "files":
             local = next(
                 (
                     s
                     for s in state["local"]
-                    if s["node"] == node and s["server"] == server_id and sub in s["people"]
+                    if s["site"] == site and s["server"] == server_id and sub in s["people"]
                 ),
                 None,
             )
@@ -156,7 +157,7 @@ def install(server: FastAPI, fake: Any, state: dict[str, Any]) -> None:
             args = body["request"]["params"].get("arguments") or {}
             text = f"{name}: {json.dumps(args, sort_keys=True)}"
             return answer({"result": {"content": [{"type": "text", "text": text}]}})
-        folders = mine(sub, node)
+        folders = mine(sub, site)
         if not folders:
             return JSONResponse(
                 {"detail": {"detail": "This folder is no longer granted."}}, status_code=403
@@ -174,7 +175,6 @@ def install(server: FastAPI, fake: Any, state: dict[str, Any]) -> None:
             return {
                 "status": "failed",
                 "message": f"You have not been given a folder named {folder!r}.",
-                "jobSite": bool(state.get("jobSite")),
                 "installMode": state.get("mode", "production"),
             }
         if params["name"] == "write_text":

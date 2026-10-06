@@ -50,6 +50,7 @@ export interface ToolCall {
   result: string | null;
   jobSite?: boolean;
   site?: string | null;
+  label?: string | null;
   mode?: "production" | "dev";
 }
 
@@ -75,7 +76,8 @@ export type ToolServer = ServerIdentity &
     | {
         /** A local server on one of the person's job sites, reached through Eugene. */
         transport: "site";
-        node: string;
+        site: string;
+        label: string;
         server: string;
         available: boolean;
         reason: string | null;
@@ -106,7 +108,8 @@ export interface FolderGrant {
   usable: boolean;
   path?: string;
   source?: "local" | "node";
-  node?: string;
+  site?: string;
+  label?: string;
   available?: boolean;
   reason?: string | null;
 }
@@ -197,11 +200,13 @@ export interface SiteAuditEntry {
 }
 
 export interface JobSite {
-  node: string;
-  enabled: boolean;
+  /** The site's own id (`s-` and 26 characters), never its label. */
+  id: string;
+  /** The machine's name; not unique. */
+  label: string;
+  hostNode?: string | null;
   online: boolean;
   ready: boolean;
-  supported: boolean | null;
   reason: string | null;
   account: string | null;
   lastContactAt: string | null;
@@ -219,7 +224,7 @@ export interface JobSiteList {
 
 export interface JobSiteInvite {
   expiresAt: string;
-  nodeName: string | null;
+  label: string | null;
   commands: { windows: string; posix: string };
 }
 

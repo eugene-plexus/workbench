@@ -437,7 +437,7 @@ def redact_for_owner(views: list[dict[str, Any]], mode: str) -> list[dict[str, A
             for round_ in view.get("toolRounds") or []:
                 for call in round_.get("calls") or []:
                     if _hidden_call(call, mode):
-                        site = str(call.get("site") or "a job site")
+                        site = str(call.get("label") or call.get("site") or "a job site")
                         break
                 if site is not None:
                     break

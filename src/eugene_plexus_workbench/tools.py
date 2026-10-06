@@ -328,9 +328,9 @@ class Tools:
             if grant_id not in folders_by_id:
                 raise ToolError("A selected folder grant was removed or is unavailable to you.")
             entry, folder = folders_by_id[grant_id]
-            chosen.setdefault(entry["node"], (entry, set()))[1].add(str(folder["name"]))
+            chosen.setdefault(entry["site"], (entry, set()))[1].add(str(folder["name"]))
         targets: list[tuple[dict[str, Any], set[str] | None]] = list(chosen.values())
-        by_id = {site_server_id(e["node"], e["server"]): e for e in remote}
+        by_id = {site_server_id(e["site"], e["server"]): e for e in remote}
         for ident in site_ids:
             if ident not in by_id or by_id[ident]["server"] == SITE_FILES:
                 raise ToolError(
@@ -339,23 +339,24 @@ class Tools:
                 )
             targets.append((by_id[ident], None))
         for entry, names in targets:
-            node = entry["node"]
+            site = entry["site"]
+            label = entry["label"]
             if not entry.get("available"):
-                raise ToolError(f"{node}: {entry.get('reason') or 'its tools are unavailable.'}")
+                raise ToolError(f"{label}: {entry.get('reason') or 'its tools are unavailable.'}")
             files = entry["server"] == SITE_FILES
             server = {
-                "id": site_server_id(node, entry["server"]),
-                "name": f"{node} · {'Files' if files else entry.get('name') or entry['server']}",
+                "id": site_server_id(site, entry["server"]),
+                "name": f"{label} · {'Files' if files else entry.get('name') or entry['server']}",
                 "transport": "site",
-                "node": node,
+                "site": site,
+                "label": label,
                 "server": entry["server"],
-                "jobSite": bool(entry.get("jobSite")),
-                "site": node,
+                "jobSite": True,
             }
             try:
-                listed = await self.node_folders.list_tools(person, node, entry["server"])
+                listed = await self.node_folders.list_tools(person, site, entry["server"], label)
             except folder_io.FolderError as exc:
-                raise ToolError(f"{node}: {exc}") from None
+                raise ToolError(f"{label}: {exc}") from None
             for tool in listed:
                 schema = tool.get("inputSchema")
                 try:
@@ -366,7 +367,7 @@ class Tools:
                         raise ValueError
                 except Exception:
                     raise ToolError(
-                        f"{node}: a tool has an unsupported input schema. "
+                        f"{label}: a tool has an unsupported input schema. "
                         "Ask the machine's owner to check it."
                     ) from None
                 if names is not None:
@@ -482,7 +483,12 @@ class ToolSession:
             "status": "pending",
             "result": None,
             **(
-                {"jobSite": True, "site": server.get("site"), "mode": "production"}
+                {
+                    "jobSite": True,
+                    "site": server.get("site"),
+                    "label": server.get("label"),
+                    "mode": "production",
+                }
                 if server.get("jobSite")
                 else {}
             ),
@@ -495,12 +501,17 @@ class ToolSession:
                 if self.node_folders is None:
                     raise folder_io.FolderError("Machines' tools are unavailable.")
                 text, is_error, meta = await self.node_folders.call_tool(
-                    self.person, server["node"], server["server"], tool, call["arguments"]
+                    self.person, server["site"], server["server"], tool, call["arguments"]
                 )
                 if meta["jobSite"]:
                     # Kept with the result: whether the owner may ever read it
                     # depends on the mode it was made in (J18, not retroactive).
-                    call.update(jobSite=True, site=server.get("site"), mode=meta["mode"])
+                    call.update(
+                        jobSite=True,
+                        site=server.get("site"),
+                        label=server.get("label"),
+                        mode=meta["mode"],
+                    )
                 if len(text) > MAX_RESULT:
                     text = text[:MAX_RESULT] + "\n[Tool result truncated at 65536 characters.]"
                 call.update(status="failed" if is_error else "done", result=text)

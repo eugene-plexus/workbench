@@ -8,11 +8,10 @@ import { MessageView } from "./MessageView";
 vi.mock("../lib/api", () => ({ api: vi.fn(), post: vi.fn(), del: vi.fn() }));
 
 const site = {
-  node: "desk",
-  enabled: true,
+  id: "s-deskdeskdeskdeskdeskdeskde",
+  label: "desk",
   online: true,
   ready: true,
-  supported: true,
   reason: null,
   account: "NT SERVICE\\eugene-plexus-app-node-files",
   lastContactAt: new Date().toISOString(),
@@ -45,12 +44,15 @@ it("shows a site's folders and who may use them, and saves the list its owner wr
   fireEvent.change(bo, { target: { value: "read" } });
   fireEvent.click(screen.getByRole("button", { name: "Save who may use it" }));
   await waitFor(() =>
-    expect(post).toHaveBeenCalledWith("/api/job-sites/desk/folders/f1/people", {
-      people: [
-        { name: "bo", writable: false },
-        { name: "ada", writable: false },
-      ],
-    }),
+    expect(post).toHaveBeenCalledWith(
+      "/api/job-sites/s-deskdeskdeskdeskdeskdeskde/folders/f1/people",
+      {
+        people: [
+          { name: "bo", writable: false },
+          { name: "ada", writable: false },
+        ],
+      },
+    ),
   );
   expect(screen.getByText(/NT SERVICE/)).toBeInTheDocument();
 });
@@ -94,21 +96,26 @@ it("turns a local server on and says who may use which of its tools", async () =
   fireEvent.change(tidy, { target: { value: "yes" } });
   fireEvent.click(screen.getByRole("button", { name: "Save who may use Notes tool" }));
   await waitFor(() =>
-    expect(post).toHaveBeenCalledWith("/api/job-sites/desk/servers/notes-tool/access", {
-      people: [
-        {
-          name: "bo",
-          tools: [
-            { name: "search", standing: false },
-            { name: "tidy", standing: true },
-          ],
-        },
-      ],
-    }),
+    expect(post).toHaveBeenCalledWith(
+      "/api/job-sites/s-deskdeskdeskdeskdeskdeskde/servers/notes-tool/access",
+      {
+        people: [
+          {
+            name: "bo",
+            tools: [
+              { name: "search", standing: false },
+              { name: "tidy", standing: true },
+            ],
+          },
+        ],
+      },
+    ),
   );
   fireEvent.click(screen.getByLabelText(/while Eugene is in dev mode/));
   await waitFor(() =>
-    expect(post).toHaveBeenCalledWith("/api/job-sites/desk/settings", { ownerInDevMode: true }),
+    expect(post).toHaveBeenCalledWith("/api/job-sites/s-deskdeskdeskdeskdeskdeskde/settings", {
+      ownerInDevMode: true,
+    }),
   );
 });
 
@@ -131,14 +138,16 @@ it("shows the machine's own audit log to its owner", async () => {
   expect(await screen.findByLabelText("What desk was asked")).toHaveTextContent(
     /p-bo · read_text · refused · Not on the list\./,
   );
-  expect(post).toHaveBeenCalledWith("/api/job-sites/desk/audit", { limit: 50 });
+  expect(post).toHaveBeenCalledWith("/api/job-sites/s-deskdeskdeskdeskdeskdeskde/audit", {
+    limit: 50,
+  });
 });
 
 it("makes the join command for a machine of the person's own, and asks for no password", async () => {
   vi.mocked(api).mockResolvedValue({ sites: [], canInvite: true });
   vi.mocked(post).mockResolvedValue({
     expiresAt: "2026-10-05T12:15:00Z",
-    nodeName: "laptop",
+    label: "laptop",
     commands: { windows: "WINDOWS-COMMAND -JobSite", posix: "POSIX-COMMAND --job-site" },
   });
   render(<JobSites onClose={() => undefined} />);
@@ -147,14 +156,14 @@ it("makes the join command for a machine of the person's own, and asks for no pa
   });
   fireEvent.click(screen.getByRole("button", { name: "Make the command" }));
   expect(await screen.findByText("WINDOWS-COMMAND -JobSite")).toBeInTheDocument();
-  expect(post).toHaveBeenCalledWith("/api/job-sites/invite", { nodeName: "laptop" });
+  expect(post).toHaveBeenCalledWith("/api/job-sites/invite", { label: "laptop" });
   expect(screen.getByTestId("job-site-invite")).toHaveTextContent(/asks for your Eugene password/);
 });
 
 it("says why nobody can add a machine before the owner opens the route", async () => {
   vi.mocked(api).mockResolvedValue({ sites: [], canInvite: false });
   render(<JobSites onClose={() => undefined} />);
-  expect(await screen.findByText(/has not opened a route/)).toBeInTheDocument();
+  expect(await screen.findByText(/does not know an address/)).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Make the command" })).toBeNull();
 });
 

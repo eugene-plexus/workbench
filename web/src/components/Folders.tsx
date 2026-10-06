@@ -72,7 +72,7 @@ export function Folders({ owner }: { owner: boolean }) {
           className="flex flex-col gap-2 rounded-plexus border border-line p-3 text-sm"
         >
           <h3 className="font-semibold">
-            {grant.node ? `${grant.node} · ` : ""}
+            {grant.label ? `${grant.label} · ` : ""}
             {grant.name}
           </h3>
           <p>
@@ -271,7 +271,7 @@ export function FolderSelection({
               )
             }
           />
-          {grant.node ? `${grant.node} · ` : ""}
+          {grant.label ? `${grant.label} · ` : ""}
           {grant.name} · {grant.writable ? "Read and write text" : "Read only"}
           {grant.available === false && (
             <span className="text-muted"> · {grant.reason || "Unavailable"}</span>

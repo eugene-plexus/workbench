@@ -72,7 +72,7 @@ export function JobSites({ onClose }: { onClose: () => void }) {
       )}
       {data?.sites.length === 0 && <p className="text-sm">You have no job sites yet.</p>}
       {data?.sites.map((site) => (
-        <Site key={site.node} site={site} busy={busy} act={act} />
+        <Site key={site.id} site={site} busy={busy} act={act} />
       ))}
       <section
         aria-label="Add a job site"
@@ -81,8 +81,8 @@ export function JobSites({ onClose }: { onClose: () => void }) {
         <h2 className="font-semibold">Add a job site</h2>
         {data && !data.canInvite ? (
           <p>
-            Eugene&apos;s owner has not opened a route for machines outside its network yet, so a
-            machine can be added only from Eugene&apos;s console.
+            Eugene does not know an address that machines join through yet, so a machine can be
+            added only from Eugene&apos;s console.
           </p>
         ) : (
           <form
@@ -92,7 +92,7 @@ export function JobSites({ onClose }: { onClose: () => void }) {
               void act(async () =>
                 setInvite(
                   await post<JobSiteInvite>("/api/job-sites/invite", {
-                    nodeName: machine.trim() || null,
+                    label: machine.trim() || null,
                   }),
                 ),
               );
@@ -115,9 +115,11 @@ export function JobSites({ onClose }: { onClose: () => void }) {
         {invite && (
           <div className="flex flex-col gap-2" data-testid="job-site-invite">
             <p>
-              Run one of these on the machine, within 15 minutes. It asks for your Eugene password
-              there: that is how Eugene knows the machine is yours. The service install needs an
-              administrator (Windows) or root (Linux).
+              The machine must already have Eugene installed and joined as a node; the command adds
+              the job site there (a standalone install comes later). Run one of these on the
+              machine, within 15 minutes. It asks for your Eugene password there: that is how Eugene
+              knows the machine is yours. The service install needs an administrator (Windows) or
+              root (Linux).
             </p>
             <h3 className="font-semibold">Windows (PowerShell)</h3>
             <pre className="whitespace-pre-wrap break-all rounded-plexus bg-soft p-2 text-xs">
@@ -151,29 +153,18 @@ function Site({ site, busy, act }: { site: JobSite; busy: boolean; act: Act }) {
   const [path, setPath] = useState("");
   const [writable, setWritable] = useState(false);
   const [leaving, setLeaving] = useState(false);
-  const base = `/api/job-sites/${encodeURIComponent(site.node)}`;
+  const base = `/api/job-sites/${encodeURIComponent(site.id)}`;
   return (
     <article
       className="flex flex-col gap-3 rounded-plexus border border-line p-3 text-sm"
-      data-testid={`job-site-${site.node}`}
+      data-testid={`job-site-${site.id}`}
     >
-      <h2 className="font-semibold">{site.node}</h2>
+      <h2 className="font-semibold">{site.label}</h2>
       <p>
         {site.online ? "Online" : "Offline"} · last contact {since(site.lastContactAt)}
-        {site.enabled && !site.ready && site.reason ? ` · ${site.reason}` : ""}
+        {!site.ready && site.reason ? ` · ${site.reason}` : ""}
       </p>
-      <label className="flex items-center gap-2">
-        <input
-          type="checkbox"
-          checked={site.enabled}
-          disabled={busy}
-          onChange={(event) =>
-            void act(() => post(`${base}/enabled`, { enabled: event.target.checked }))
-          }
-        />
-        File support on this machine
-      </label>
-      {site.enabled && site.account && (
+      {site.account && (
         <p className="text-muted">
           Give the OS account <strong>{site.account}</strong> permission to a folder on the machine,
           then add it here.
@@ -182,56 +173,53 @@ function Site({ site, busy, act }: { site: JobSite; busy: boolean; act: Act }) {
       {site.folders.map((folder) => (
         <Folder key={folder.id} base={base} folder={folder} busy={busy} act={act} />
       ))}
-      {site.enabled && (
-        <form
-          aria-label={`Add a folder on ${site.node}`}
-          className="flex flex-wrap items-end gap-3"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void act(async () => {
-              await post(`${base}/folders`, { name, path, writable });
-              setName("");
-              setPath("");
-              setWritable(false);
-            });
-          }}
-        >
-          <label className="flex flex-col gap-1">
-            Folder name
-            <input
-              required
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              className="rounded-plexus border border-line bg-transparent px-2 py-1"
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            Path on the machine
-            <input
-              required
-              value={path}
-              onChange={(event) => setPath(event.target.value)}
-              className="rounded-plexus border border-line bg-transparent px-2 py-1"
-            />
-          </label>
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={writable}
-              onChange={(event) => setWritable(event.target.checked)}
-            />
-            Allow text writes
-          </label>
-          <button disabled={busy} className="rounded-plexus border border-line px-3 py-1">
-            Add folder
-          </button>
-        </form>
-      )}
-      {site.enabled &&
-        (site.servers ?? []).map((entry) => (
-          <LocalServer key={entry.server.id} base={base} entry={entry} busy={busy} act={act} />
-        ))}
-      {site.enabled && site.ownerInDevMode !== undefined && site.ownerInDevMode !== null && (
+      <form
+        aria-label={`Add a folder on ${site.label}`}
+        className="flex flex-wrap items-end gap-3"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void act(async () => {
+            await post(`${base}/folders`, { name, path, writable });
+            setName("");
+            setPath("");
+            setWritable(false);
+          });
+        }}
+      >
+        <label className="flex flex-col gap-1">
+          Folder name
+          <input
+            required
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            className="rounded-plexus border border-line bg-transparent px-2 py-1"
+          />
+        </label>
+        <label className="flex flex-col gap-1">
+          Path on the machine
+          <input
+            required
+            value={path}
+            onChange={(event) => setPath(event.target.value)}
+            className="rounded-plexus border border-line bg-transparent px-2 py-1"
+          />
+        </label>
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={writable}
+            onChange={(event) => setWritable(event.target.checked)}
+          />
+          Allow text writes
+        </label>
+        <button disabled={busy} className="rounded-plexus border border-line px-3 py-1">
+          Add folder
+        </button>
+      </form>
+      {(site.servers ?? []).map((entry) => (
+        <LocalServer key={entry.server.id} base={base} entry={entry} busy={busy} act={act} />
+      ))}
+      {site.ownerInDevMode !== undefined && site.ownerInDevMode !== null && (
         <label className="flex items-center gap-2">
           <input
             type="checkbox"
@@ -244,11 +232,11 @@ function Site({ site, busy, act }: { site: JobSite; busy: boolean; act: Act }) {
           Let Eugene&apos;s owner use folders they give themselves here, while Eugene is in dev mode
         </label>
       )}
-      {site.enabled && <Audit base={base} node={site.node} />}
+      <Audit base={base} label={site.label} />
       {leaving ? (
         <div className="flex flex-wrap gap-3">
           <p>
-            Take {site.node} out of Eugene? Its files stay on it; Workbench stops reaching them.
+            Take {site.label} out of Eugene? Its files stay on it; Workbench stops reaching them.
           </p>
           <button
             disabled={busy}
@@ -508,7 +496,7 @@ function LocalServer({
 }
 
 /** The machine's own audit log: who asked for what, and what it decided. */
-function Audit({ base, node }: { base: string; node: string }) {
+function Audit({ base, label }: { base: string; label: string }) {
   const [entries, setEntries] = useState<SiteAuditEntry[] | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   return (
@@ -528,7 +516,7 @@ function Audit({ base, node }: { base: string; node: string }) {
           }
         }}
       >
-        Show what {node} was asked
+        Show what {label} was asked
       </button>
       {problem && (
         <p role="alert" className="text-error">
@@ -537,7 +525,7 @@ function Audit({ base, node }: { base: string; node: string }) {
       )}
       {entries?.length === 0 && <p className="text-muted">Nothing has been asked of it yet.</p>}
       {entries && entries.length > 0 && (
-        <ul className="flex flex-col gap-1 text-xs" aria-label={`What ${node} was asked`}>
+        <ul className="flex flex-col gap-1 text-xs" aria-label={`What ${label} was asked`}>
           {entries.map((entry, index) => (
             <li key={`${entry.at}-${index}`}>
               {new Date(entry.at).toLocaleString()} · {entry.subject} ·{" "}
