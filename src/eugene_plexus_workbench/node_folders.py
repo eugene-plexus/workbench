@@ -37,7 +37,9 @@ MAX_ANSWER = 100_000
 
 
 def rpc(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-    """One MCP request of the 2026-07-28 revision: whole, with no session."""
+    """One MCP request of the 2026-07-28 revision: whole, with no session, so
+    its envelope says who asks and what it can take (the SDK refuses one
+    without `clientCapabilities`)."""
     return {
         "jsonrpc": "2.0",
         "id": uuid.uuid4().hex,
@@ -47,6 +49,7 @@ def rpc(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
             "_meta": {
                 "io.modelcontextprotocol/protocolVersion": PROTOCOL,
                 "io.modelcontextprotocol/clientInfo": {"name": "Workbench", "version": "1"},
+                "io.modelcontextprotocol/clientCapabilities": {},
             },
         },
     }

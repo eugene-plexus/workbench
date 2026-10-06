@@ -134,6 +134,8 @@ def install(server: FastAPI, fake: Any, state: dict[str, Any]) -> None:
         sub = who(body)
         meta = body["request"]["params"]["_meta"]
         assert meta["io.modelcontextprotocol/protocolVersion"] == "2026-07-28"
+        # The 2026-07-28 envelope: the SDK refuses a request without them.
+        assert isinstance(meta.get("io.modelcontextprotocol/clientCapabilities"), dict)
         method = body["request"]["method"]
         node, server_id = body["node"], body["server"]
         if server_id != "files":
