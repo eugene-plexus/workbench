@@ -285,7 +285,7 @@ export default function App() {
           </aside>
         )}
         {showSites ? (
-          <JobSites onClose={() => setShowSites(false)} />
+          <JobSites onClose={() => setShowSites(false)} sub={phase.me.sub} />
         ) : showTools ? (
           <Tools owner={phase.me.owner} onClose={() => setShowTools(false)} />
         ) : chatId ? (

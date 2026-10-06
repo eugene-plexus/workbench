@@ -24,7 +24,13 @@ MAX_ENTRIES = 200
 
 
 class FolderError(Exception):
-    """Safe to return to the person and model; contains no host path."""
+    """Safe to return to the person and model; contains no host path.
+
+    `status` is the HTTP status Eugene answered with, when this is its refusal."""
+
+    def __init__(self, message: str = "", status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 class WriteUncertain(FolderError):

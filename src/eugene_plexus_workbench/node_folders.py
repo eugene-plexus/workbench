@@ -55,6 +55,18 @@ def rpc(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
     }
 
 
+def _linking(entry: dict[str, Any]) -> dict[str, Any]:
+    """What Eugene says about whose account a person's calls run as on a
+    machine (`linked`, `account`, `linkPage`); absent for an older Eugene."""
+    out: dict[str, Any] = {}
+    if isinstance(entry.get("linked"), bool):
+        out["linked"] = entry["linked"]
+    for key in ("account", "linkPage"):
+        if isinstance(entry.get(key), str):
+            out[key] = entry[key]
+    return out
+
+
 def site_server_id(site: str, server: str) -> str:
     return f"{SITE_PREFIX}{site}:{server}"
 
@@ -153,7 +165,7 @@ class NodeFolders:
                 if response.status_code == 404
                 else f"Eugene refused this (HTTP {response.status_code})."
             )
-            raise FolderError(self._refusal(response, fallback))
+            raise FolderError(self._refusal(response, fallback), response.status_code)
         try:
             value = response.json()
         except ValueError:
@@ -219,6 +231,7 @@ class NodeFolders:
                         "available": bool(server.get("available")),
                         "reason": server.get("reason"),
                         "source": "node",
+                        **_linking(server),
                     }
                 )
         return out
@@ -236,6 +249,7 @@ class NodeFolders:
                 "available": bool(s.get("available")),
                 "reason": s.get("reason"),
                 "jobSite": True,
+                **_linking(s),
             }
             for s in await self.servers(person)
             if s["server"] != FILES

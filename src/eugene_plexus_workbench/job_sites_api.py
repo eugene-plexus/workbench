@@ -96,6 +96,19 @@ class Access(BaseModel):
     people: list[PersonTools] = Field(max_length=256)
 
 
+class LinkRemove(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    person: str | None = Field(default=None, min_length=1, max_length=256)
+
+
+_LINK_REFUSALS = {
+    status.HTTP_403_FORBIDDEN,
+    status.HTTP_404_NOT_FOUND,
+    status.HTTP_409_CONFLICT,
+    status.HTTP_503_SERVICE_UNAVAILABLE,
+}
+
+
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     ownerInDevMode: StrictBool
@@ -244,6 +257,29 @@ async def settings(request: Request, site: str, body: Settings) -> dict[str, Any
 async def audit(request: Request, site: str, body: AuditRead) -> dict[str, Any]:
     answer = await _call(request, f"job-sites/{_site(site)}/audit", {"limit": body.limit})
     return answer or {"entries": []}
+
+
+@router.post("/api/job-sites/{site}/links/remove", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_link(request: Request, site: str, body: LinkRemove | None = None) -> Response:
+    """A person removes their own link on a machine; the machine's owner may
+    name anyone's. Eugene's refusal is passed through in its own words."""
+    _site(site)
+    payload: dict[str, Any] = {"site": site}
+    if body is not None and body.person:
+        payload["person"] = body.person
+    person = await _person(request)
+    remote = _state(request).tools.node_folders
+    if remote is None or not person.session_id:
+        raise _problem(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Job sites need Workbench to be signed in with Eugene.",
+        )
+    try:
+        await remote.call(person, "sites/link/remove", payload)
+    except FolderError as exc:
+        code = exc.status if exc.status in _LINK_REFUSALS else status.HTTP_409_CONFLICT
+        raise _problem(code, str(exc)) from None
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/api/job-sites/{site}/leave")

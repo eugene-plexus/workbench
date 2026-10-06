@@ -37,6 +37,7 @@ def site_world(
         "calls": [],
         "sites": [],
         "managed": [],
+        "links_removed": [],
         "content": "SITE-SECRET",
         "folders": [
             {
@@ -64,6 +65,16 @@ def site_world(
             return {"mode": state["mode"], "changedAt": state["changedAt"]}
 
         fake_sites.install(server, fake, state)
+
+        @server.post("/oidc/sites/link/remove")
+        async def link_remove(request: Request) -> Any:
+            assert client_ok(request)
+            body = await request.json()
+            state["links_removed"].append(body)
+            refusal = state.get("link_refusal")
+            if refusal:
+                return JSONResponse({"detail": {"detail": refusal[1]}}, status_code=refusal[0])
+            return JSONResponse(None, status_code=204)
 
         @server.post("/oidc/job-sites/{site}/{what}/{ident}/{action}")
         async def relayed(site: str, what: str, ident: str, action: str, request: Request) -> Any:
@@ -315,3 +326,67 @@ def test_a_sites_local_server_is_a_tool_like_any_other(
     assert call["status"] == "done" and call["result"] == 'search: {"q": "plans"}'
     assert call["jobSite"] is True and call["site"] == DESK
     assert state["calls"][-1]["server"] == "notes-tool"
+
+
+def test_a_person_removes_their_own_link_and_the_owner_names_anyones(
+    site_world: tuple[World, dict[str, Any]],
+) -> None:
+    world, state = site_world
+    ada = world.browser()
+    ada.sign_in("p-ada")
+    assert ada.post(f"/api/job-sites/{DESK}/links/remove", json={}).status_code == 204
+    named = ada.post(f"/api/job-sites/{DESK}/links/remove", json={"person": "p-bo"})
+    assert named.status_code == 204
+    assert [(c["site"], c.get("person")) for c in state["links_removed"]] == [
+        (DESK, None),
+        (DESK, "p-bo"),
+    ]
+    assert all(c["refreshToken"] for c in state["links_removed"])
+    assert ada.post("/api/job-sites/not-a-site/links/remove", json={}).status_code == 404
+
+
+@pytest.mark.parametrize("code", [403, 404, 409, 503])
+def test_a_refused_link_removal_keeps_eugenes_words_and_status(
+    site_world: tuple[World, dict[str, Any]], code: int
+) -> None:
+    world, state = site_world
+    state["link_refusal"] = (code, f"Eugene said {code} in its own words.")
+    ada = world.browser()
+    ada.sign_in("p-ada")
+    refused = ada.post(f"/api/job-sites/{DESK}/links/remove", json={})
+    assert refused.status_code == code, refused.text
+    assert f"Eugene said {code} in its own words." in refused.text
+
+
+def test_what_runs_as_whom_reaches_the_folders_and_tools_a_person_sees(
+    site_world: tuple[World, dict[str, Any]],
+) -> None:
+    world, state = site_world
+    owner_account = "DESK-owner"
+    state["linking"] = {"linked": False, "account": owner_account, "linkPage": "http://h/link"}
+    state["local"] = [
+        {
+            "site": DESK,
+            "label": "desk",
+            "server": "notes-tool",
+            "name": "Notes tool",
+            "people": ["p-ada"],
+            "tools": [],
+        }
+    ]
+    ada = world.browser()
+    ada.sign_in("p-ada")
+    expected = (False, owner_account, "http://h/link")
+
+    def node_grant() -> dict[str, Any]:
+        grants = ada.get("/api/folders").json()["grants"]
+        return next(g for g in grants if g.get("source") == "node")
+
+    grant = node_grant()
+    assert (grant["linked"], grant["account"], grant["linkPage"]) == expected
+    servers = ada.get("/api/tools/servers").json()["servers"]
+    tool = next(s for s in servers if s["id"] == TOOL)
+    assert (tool["linked"], tool["account"], tool["linkPage"]) == expected
+    state["linking"] = {}  # a machine that predates linking says nothing
+    grant = node_grant()
+    assert "linked" not in grant and "linkPage" not in grant

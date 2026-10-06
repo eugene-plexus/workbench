@@ -54,7 +54,72 @@ it("shows a site's folders and who may use them, and saves the list its owner wr
       },
     ),
   );
-  expect(screen.getByText(/NT SERVICE/)).toBeInTheDocument();
+  expect(screen.queryByText(/permission to a folder/)).toBeNull();
+  expect(screen.queryByText(/NT SERVICE/)).toBeNull();
+});
+
+const linked = {
+  ...site,
+  links: [
+    { subject: "p-ada", accountName: "DESK\\ada", available: true },
+    { subject: "p-bo", accountName: "DESK\\bo", available: false, reason: "bo is not signed in" },
+  ],
+  linkPage: "http://127.0.0.1:8079/link",
+  sharing: true,
+};
+
+it("says who runs as whom, and lets the owner remove anyone's link", async () => {
+  vi.mocked(api).mockResolvedValue({ sites: [linked], canInvite: true });
+  vi.mocked(post).mockResolvedValue(null);
+  render(<JobSites onClose={() => undefined} sub="p-ada" />);
+  const box = await screen.findByTestId(`linking-${site.id}`);
+  expect(box).toHaveTextContent("Your calls here run as DESK\\ada");
+  expect(box).toHaveTextContent("bo runs as DESK\\bo · bo is not signed in");
+  expect(box).toHaveTextContent(
+    "People link their own account at the machine: on desk, open http://127.0.0.1:8079/link and sign in.",
+  );
+  fireEvent.click(screen.getByRole("button", { name: /Remove link for bo/ }));
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith(`/api/job-sites/${site.id}/links/remove`, {
+      person: "p-bo",
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Remove my link" }));
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith(`/api/job-sites/${site.id}/links/remove`, {}),
+  );
+});
+
+it("says when the owner's own account is linked but not signed in there", async () => {
+  const away = {
+    ...linked,
+    links: [{ subject: "p-ada", accountName: "DESK\\ada", available: false, reason: null }],
+  };
+  vi.mocked(api).mockResolvedValue({ sites: [away], canInvite: true });
+  render(<JobSites onClose={() => undefined} sub="p-ada" />);
+  expect(await screen.findByTestId(`linking-${site.id}`)).toHaveTextContent(
+    "Your calls here run as DESK\\ada · not signed in there now",
+  );
+});
+
+it("says the owner has not linked yet, and how a Linux machine links", async () => {
+  const none = { ...site, links: [], linkPage: null, sharing: true };
+  vi.mocked(api).mockResolvedValue({ sites: [none], canInvite: true });
+  render(<JobSites onClose={() => undefined} sub="p-ada" />);
+  const box = await screen.findByTestId(`linking-${site.id}`);
+  expect(box).toHaveTextContent("You have not linked your own account on desk yet.");
+  expect(box).toHaveTextContent("On a Linux machine, people link with:");
+  expect(box).toHaveTextContent("sudo sh -s -- --site-link --person NAME");
+  expect(screen.queryByRole("button", { name: "Remove my link" })).toBeNull();
+});
+
+it("serves only the owner where there is no folder boundary", async () => {
+  const mac = { ...site, links: [], linkPage: null, sharing: false };
+  vi.mocked(api).mockResolvedValue({ sites: [mac], canInvite: true });
+  render(<JobSites onClose={() => undefined} sub="p-ada" />);
+  expect(await screen.findByText(/This machine serves only you/)).toBeInTheDocument();
+  expect(screen.queryByLabelText("Add a person (how they sign in)")).toBeNull();
+  expect(screen.queryByText(/On a Linux machine/)).toBeNull();
 });
 
 it("offers only reading in a read-only folder", async () => {

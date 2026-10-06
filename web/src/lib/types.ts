@@ -73,7 +73,7 @@ export type ToolServer = ServerIdentity &
         environmentKeys: string[];
         access: "owner";
       }
-    | {
+    | ({
         /** A local server on one of the person's job sites, reached through Eugene. */
         transport: "site";
         site: string;
@@ -82,7 +82,7 @@ export type ToolServer = ServerIdentity &
         available: boolean;
         reason: string | null;
         jobSite: boolean;
-      }
+      } & SiteLinking)
   );
 
 export interface ToolServers {
@@ -112,6 +112,9 @@ export interface FolderGrant {
   label?: string;
   available?: boolean;
   reason?: string | null;
+  linked?: boolean;
+  account?: string;
+  linkPage?: string;
 }
 
 export interface FolderGrants {
@@ -215,6 +218,27 @@ export interface JobSite {
   servers?: JobSiteServer[];
   /** Whether Eugene's owner may use folders here while Eugene is in dev mode (J6e). */
   ownerInDevMode?: boolean | null;
+  /** Who has linked their own OS account on the machine (no person names). */
+  links?: SiteLink[];
+  /** Where people link at the machine; null when they link another way. */
+  linkPage?: string | null;
+  /** False where only the machine's owner is served (macOS). */
+  sharing?: boolean;
+}
+
+export interface SiteLink {
+  subject: string;
+  accountName: string;
+  available: boolean;
+  reason?: string | null;
+}
+
+/** What Eugene says about whose account a person's calls run as on a machine.
+ * Absent for a machine that predates linking. */
+export interface SiteLinking {
+  linked?: boolean;
+  account?: string;
+  linkPage?: string;
 }
 
 export interface JobSiteList {

@@ -14,7 +14,7 @@ const problemOf = (error: unknown) => (error instanceof Error ? error.message : 
 
 /** Job sites (your machines): the machines whose files you use from here.
  * Yours alone: only you say who may use their folders, yourself included. */
-export function JobSites({ onClose }: { onClose: () => void }) {
+export function JobSites({ onClose, sub }: { onClose: () => void; sub?: string }) {
   const [data, setData] = useState<JobSiteList | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [invite, setInvite] = useState<JobSiteInvite | null>(null);
@@ -72,7 +72,7 @@ export function JobSites({ onClose }: { onClose: () => void }) {
       )}
       {data?.sites.length === 0 && <p className="text-sm">You have no job sites yet.</p>}
       {data?.sites.map((site) => (
-        <Site key={site.id} site={site} busy={busy} act={act} />
+        <Site key={site.id} site={site} sub={sub} busy={busy} act={act} />
       ))}
       <section
         aria-label="Add a job site"
@@ -148,7 +148,108 @@ function since(iso: string | null): string {
 
 type Act = (work: () => Promise<unknown>) => Promise<void>;
 
-function Site({ site, busy, act }: { site: JobSite; busy: boolean; act: Act }) {
+const LINUX_LINK =
+  "curl -fsSL https://raw.githubusercontent.com/eugene-plexus/specs/main/scripts/install.sh | " +
+  "sudo sh -s -- --site-link --person NAME";
+
+/** Who runs as whom on a machine: the owner's own line, the others' links with
+ * a way to take each away, and how a person links their own account. */
+function Linking({
+  site,
+  sub,
+  base,
+  busy,
+  act,
+}: {
+  site: JobSite;
+  sub?: string;
+  base: string;
+  busy: boolean;
+  act: Act;
+}) {
+  const solo = site.sharing === false;
+  const links = site.links;
+  const names = new Map<string, string>();
+  for (const folder of site.folders) for (const p of folder.people) names.set(p.person, p.name);
+  for (const entry of site.servers ?? []) for (const p of entry.people) names.set(p.person, p.name);
+  const own = links?.find((l) => l.subject === sub);
+  const others = (links ?? []).filter((l) => l.subject !== sub);
+  const notThere = (l: { reason?: string | null }) => l.reason || "not signed in there now";
+  return (
+    <div className="flex flex-col gap-2" data-testid={`linking-${site.id}`}>
+      {solo && <p>This machine serves only you (macOS has no folder boundary yet).</p>}
+      {!solo && links && own && (
+        <div className="flex flex-wrap items-center gap-3">
+          <p>
+            Your calls here run as <strong>{own.accountName}</strong>
+            {own.available ? "" : ` · ${notThere(own)}`}
+          </p>
+          <button
+            type="button"
+            disabled={busy}
+            className="text-error"
+            onClick={() => void act(() => post(`${base}/links/remove`, {}))}
+          >
+            Remove my link
+          </button>
+        </div>
+      )}
+      {!solo && links && !own && sub && (
+        <p>
+          You have not linked your own account on {site.label} yet.
+          {site.linkPage
+            ? ` To link it, open ${site.linkPage} at the machine and sign in.`
+            : site.linkPage === null
+              ? " To link it, run the command below on the machine."
+              : ""}
+        </p>
+      )}
+      {!solo && others.length > 0 && (
+        <ul className="flex flex-col gap-1" aria-label={`Who else has linked on ${site.label}`}>
+          {others.map((link) => {
+            const who = names.get(link.subject) ?? "Someone";
+            return (
+              <li key={link.subject} className="flex flex-wrap items-center gap-3">
+                <span>
+                  {who} runs as {link.accountName}
+                  {link.available ? "" : ` · ${notThere(link)}`}
+                </span>
+                <button
+                  type="button"
+                  disabled={busy}
+                  aria-label={`Remove link for ${who} (${link.accountName})`}
+                  className="text-error"
+                  onClick={() =>
+                    void act(() => post(`${base}/links/remove`, { person: link.subject }))
+                  }
+                >
+                  Remove link
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {!solo && site.linkPage && (
+        <p className="text-muted">
+          People link their own account at the machine: on {site.label}, open {site.linkPage} and
+          sign in.
+        </p>
+      )}
+      {!solo && links && site.linkPage === null && (
+        <div className="flex flex-col gap-1 text-muted">
+          <p>On a Linux machine, people link with:</p>
+          <pre className="whitespace-pre-wrap break-all rounded-plexus bg-soft p-2 text-xs">
+            {LINUX_LINK}
+          </pre>
+          <p>Run it on the machine as an administrator, naming the person as they sign in.</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Site({ site, sub, busy, act }: { site: JobSite; sub?: string; busy: boolean; act: Act }) {
   const [name, setName] = useState("");
   const [path, setPath] = useState("");
   const [writable, setWritable] = useState(false);
@@ -164,14 +265,16 @@ function Site({ site, busy, act }: { site: JobSite; busy: boolean; act: Act }) {
         {site.online ? "Online" : "Offline"} · last contact {since(site.lastContactAt)}
         {!site.ready && site.reason ? ` · ${site.reason}` : ""}
       </p>
-      {site.account && (
-        <p className="text-muted">
-          Give the OS account <strong>{site.account}</strong> permission to a folder on the machine,
-          then add it here.
-        </p>
-      )}
+      <Linking site={site} sub={sub} base={base} busy={busy} act={act} />
       {site.folders.map((folder) => (
-        <Folder key={folder.id} base={base} folder={folder} busy={busy} act={act} />
+        <Folder
+          key={folder.id}
+          base={base}
+          folder={folder}
+          busy={busy}
+          act={act}
+          solo={site.sharing === false}
+        />
       ))}
       <form
         aria-label={`Add a folder on ${site.label}`}
@@ -217,7 +320,14 @@ function Site({ site, busy, act }: { site: JobSite; busy: boolean; act: Act }) {
         </button>
       </form>
       {(site.servers ?? []).map((entry) => (
-        <LocalServer key={entry.server.id} base={base} entry={entry} busy={busy} act={act} />
+        <LocalServer
+          key={entry.server.id}
+          base={base}
+          entry={entry}
+          busy={busy}
+          act={act}
+          solo={site.sharing === false}
+        />
       ))}
       {site.ownerInDevMode !== undefined && site.ownerInDevMode !== null && (
         <label className="flex items-center gap-2">
@@ -266,11 +376,13 @@ function Folder({
   folder,
   busy,
   act,
+  solo,
 }: {
   base: string;
   folder: JobSite["folders"][number];
   busy: boolean;
   act: Act;
+  solo: boolean;
 }) {
   const [people, setPeople] = useState(() =>
     folder.people.map((p) => ({ name: p.name, access: p.writable ? CHANGE : READ })),
@@ -312,29 +424,31 @@ function Folder({
           </button>
         </div>
       ))}
-      <div className="flex flex-wrap items-end gap-2">
-        <label className="flex flex-col gap-1">
-          Add a person (how they sign in)
-          <input
-            value={adding}
-            onChange={(event) => setAdding(event.target.value)}
-            className="rounded-plexus border border-line bg-transparent px-2 py-1"
-          />
-        </label>
-        <button
-          type="button"
-          className="rounded-plexus border border-line px-3 py-1"
-          onClick={() => {
-            const name = adding.trim();
-            if (name && !people.some((p) => p.name.toLowerCase() === name.toLowerCase())) {
-              setPeople((old) => [...old, { name, access: READ }]);
-            }
-            setAdding("");
-          }}
-        >
-          Add
-        </button>
-      </div>
+      {!solo && (
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="flex flex-col gap-1">
+            Add a person (how they sign in)
+            <input
+              value={adding}
+              onChange={(event) => setAdding(event.target.value)}
+              className="rounded-plexus border border-line bg-transparent px-2 py-1"
+            />
+          </label>
+          <button
+            type="button"
+            className="rounded-plexus border border-line px-3 py-1"
+            onClick={() => {
+              const name = adding.trim();
+              if (name && !people.some((p) => p.name.toLowerCase() === name.toLowerCase())) {
+                setPeople((old) => [...old, { name, access: READ }]);
+              }
+              setAdding("");
+            }}
+          >
+            Add
+          </button>
+        </div>
+      )}
       <div className="flex flex-wrap gap-3">
         <button
           disabled={busy}
@@ -374,11 +488,13 @@ function LocalServer({
   entry,
   busy,
   act,
+  solo,
 }: {
   base: string;
   entry: JobSiteServer;
   busy: boolean;
   act: Act;
+  solo: boolean;
 }) {
   const { server } = entry;
   const [people, setPeople] = useState(() =>
@@ -448,29 +564,31 @@ function LocalServer({
               </button>
             </fieldset>
           ))}
-          <div className="flex flex-wrap items-end gap-2">
-            <label className="flex flex-col gap-1">
-              Add a person (how they sign in)
-              <input
-                value={adding}
-                onChange={(event) => setAdding(event.target.value)}
-                className="rounded-plexus border border-line bg-transparent px-2 py-1"
-              />
-            </label>
-            <button
-              type="button"
-              className="rounded-plexus border border-line px-3 py-1"
-              onClick={() => {
-                const name = adding.trim();
-                if (name && !people.some((p) => p.name.toLowerCase() === name.toLowerCase())) {
-                  setPeople((old) => [...old, { name, tools: new Set<string>() }]);
-                }
-                setAdding("");
-              }}
-            >
-              Add
-            </button>
-          </div>
+          {!solo && (
+            <div className="flex flex-wrap items-end gap-2">
+              <label className="flex flex-col gap-1">
+                Add a person (how they sign in)
+                <input
+                  value={adding}
+                  onChange={(event) => setAdding(event.target.value)}
+                  className="rounded-plexus border border-line bg-transparent px-2 py-1"
+                />
+              </label>
+              <button
+                type="button"
+                className="rounded-plexus border border-line px-3 py-1"
+                onClick={() => {
+                  const name = adding.trim();
+                  if (name && !people.some((p) => p.name.toLowerCase() === name.toLowerCase())) {
+                    setPeople((old) => [...old, { name, tools: new Set<string>() }]);
+                  }
+                  setAdding("");
+                }}
+              >
+                Add
+              </button>
+            </div>
+          )}
           <button
             disabled={busy}
             className="self-start rounded-plexus border border-line px-3 py-1"

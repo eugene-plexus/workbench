@@ -106,6 +106,7 @@ def install(server: FastAPI, fake: Any, state: dict[str, Any]) -> None:
                         "available": state["available"],
                         "reason": None if state["available"] else f"{label} is offline.",
                         "folders": folders,
+                        **state.get("linking", {}),
                     }
                 )
         for local in state["local"]:
@@ -120,6 +121,7 @@ def install(server: FastAPI, fake: Any, state: dict[str, Any]) -> None:
                         "available": state["available"],
                         "reason": None,
                         "folders": [],
+                        **state.get("linking", {}),
                     }
                 )
         return {"servers": listed, "installMode": {"mode": state.get("mode", "production")}}
