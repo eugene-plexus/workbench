@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import { api, post } from "../lib/api";
 import type { Message } from "../lib/types";
@@ -313,4 +313,206 @@ it("shows a held change as waiting at the machine, not as a refusal", async () =
   fireEvent.click(screen.getByRole("button", { name: "Save who may use it" }));
   expect(await screen.findByTestId("job-site-held")).toHaveTextContent(words);
   expect(screen.queryByRole("alert")).toBeNull();
+});
+
+describe("passkeys from here (J14a.3)", () => {
+  const linux = {
+    ...site,
+    linkPage: null,
+    signing: { state: "unsigned", held: 0, approvePage: null, passkeys: true },
+  };
+  const context = { rpId: "workbench.example", person: "p-ada", name: "ada" };
+  const passkey = {
+    id: "c".repeat(32),
+    credentialId: "Y3JlZA",
+    alg: -7,
+    rpId: "workbench.example",
+    label: "Passkey from Workbench, added 2026-10-07",
+    addedAt: "2026-10-07T12:00:00+00:00",
+  };
+  const restore: Array<() => void> = [];
+
+  function webauthn(): { create: ReturnType<typeof vi.fn>; get: ReturnType<typeof vi.fn> } {
+    const create = vi.fn().mockResolvedValue({
+      rawId: new Uint8Array([1, 2, 3]).buffer,
+      response: {
+        getPublicKey: () => new Uint8Array([4, 5, 6]).buffer,
+        getPublicKeyAlgorithm: () => -7,
+      },
+    });
+    const get = vi.fn().mockResolvedValue({
+      rawId: new Uint8Array([9]).buffer,
+      response: {
+        authenticatorData: new Uint8Array([7]).buffer,
+        clientDataJSON: new Uint8Array([8]).buffer,
+        signature: new Uint8Array([6]).buffer,
+      },
+    });
+    const secure = Object.getOwnPropertyDescriptor(window, "isSecureContext");
+    Object.defineProperty(window, "isSecureContext", { value: true, configurable: true });
+    vi.stubGlobal("PublicKeyCredential", function PublicKeyCredential() {});
+    Object.defineProperty(navigator, "credentials", {
+      value: { create, get },
+      configurable: true,
+    });
+    restore.push(() => {
+      if (secure) Object.defineProperty(window, "isSecureContext", secure);
+      vi.unstubAllGlobals();
+    });
+    return { create, get };
+  }
+
+  afterEach(() => {
+    while (restore.length) restore.pop()?.();
+    window.localStorage.clear();
+  });
+
+  it("points a Linux system install at a passkey, and a plain address at https", async () => {
+    vi.mocked(api).mockResolvedValue({
+      sites: [linux],
+      canInvite: true,
+      passkeys: { ...context, rpId: null },
+    });
+    render(<JobSites onClose={() => undefined} sub="p-ada" />);
+    expect(await screen.findByTestId(`signing-${site.id}`)).toHaveTextContent(
+      "Pair a passkey with it below",
+    );
+    expect(screen.getByTestId(`passkeys-${site.id}`)).toHaveTextContent(
+      "open Workbench at its https address",
+    );
+  });
+
+  it("offers nothing for a machine that does not take passkeys", async () => {
+    vi.mocked(api).mockResolvedValue({ sites: [site], canInvite: true, passkeys: context });
+    render(<JobSites onClose={() => undefined} sub="p-ada" />);
+    await screen.findByLabelText("What bo may do in Notes");
+    expect(screen.queryByTestId(`passkeys-${site.id}`)).toBeNull();
+  });
+
+  it("pairs a passkey with the MAC, and never sends the code", async () => {
+    const { create } = webauthn();
+    vi.mocked(api).mockResolvedValue({ sites: [linux], canInvite: true, passkeys: context });
+    vi.mocked(post).mockImplementation(async (path: string) => {
+      if (path.endsWith("/held")) return { subject: "p-ada", keys: [], passkeys: [], items: [] };
+      if (path.endsWith("/passkeys")) return passkey;
+      return {};
+    });
+    render(<JobSites onClose={() => undefined} sub="p-ada" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Add a passkey" }));
+    // Where to get the code, in plain words: no page at a Linux system install.
+    expect(screen.getByTestId(`passkeys-${site.id}`)).toHaveTextContent(
+      "run Eugene's installer on desk again with --site-pair",
+    );
+    const pairButton = screen.getByRole("button", { name: "Make and pair a passkey" });
+    expect(pairButton).toBeDisabled();
+    fireEvent.change(screen.getByTestId("passkey-code"), { target: { value: "k7qf3-mzd9t" } });
+    fireEvent.click(pairButton);
+    await waitFor(
+      () =>
+        expect(vi.mocked(post).mock.calls.some(([p]) => String(p).endsWith("/passkeys"))).toBe(
+          true,
+        ),
+      { timeout: 10_000 },
+    );
+    const options = create.mock.calls[0]?.[0].publicKey;
+    expect(options.rp.id).toBe("workbench.example");
+    expect(options.authenticatorSelection.userVerification).toBe("required");
+    const sent = vi.mocked(post).mock.calls.find(([p]) => String(p).endsWith("/passkeys"))?.[1];
+    expect(sent).toMatchObject({ credentialId: "AQID", publicKey: "BAUG", alg: -7 });
+    expect((sent as { mac: string }).mac).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    for (const [, body] of vi.mocked(post).mock.calls) {
+      expect(JSON.stringify(body ?? {})).not.toContain("MZD9T");
+      expect(JSON.stringify(body ?? {}).toUpperCase()).not.toContain("K7QF3");
+    }
+    expect(window.localStorage.getItem(`eugene.passkey.${site.id}`)).toBe(passkey.id);
+  }, 20_000);
+
+  it("approves a held change with the passkey over the machine's envelope", async () => {
+    const { get } = webauthn();
+    const envelope = '{"act":"rules.confirm"}';
+    const unconfirmed = { ...linux, signing: { ...linux.signing, state: "unconfirmed" } };
+    vi.mocked(api).mockResolvedValue({ sites: [unconfirmed], canInvite: true, passkeys: context });
+    vi.mocked(post).mockImplementation(async (path: string, body?: unknown) => {
+      if (path.endsWith("/held")) {
+        const key = (body as { key: string | null } | undefined)?.key;
+        return {
+          subject: "p-ada",
+          keys: [passkey.id],
+          passkeys: [passkey],
+          items: [
+            {
+              id: "rules",
+              action: "rules.confirm",
+              words: ["Notes: you"],
+              heldAt: null,
+              envelope: key ? envelope : null,
+            },
+          ],
+        };
+      }
+      return {};
+    });
+    render(<JobSites onClose={() => undefined} sub="p-ada" />);
+    expect(await screen.findByTestId(`signing-${site.id}`)).toHaveTextContent(
+      "Approve them here with your passkey.",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Review changes waiting" }));
+    expect(await screen.findByTestId("held-rules")).toHaveTextContent("Notes: you");
+    fireEvent.click(screen.getByRole("button", { name: "Approve with your passkey" }));
+    await waitFor(() =>
+      expect(
+        vi.mocked(post).mock.calls.some(([p]) => String(p).endsWith("/held/rules/approve")),
+      ).toBe(true),
+    );
+    const request = get.mock.calls[0]?.[0].publicKey;
+    expect(request.userVerification).toBe("required");
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(envelope));
+    expect(new Uint8Array(request.challenge)).toEqual(new Uint8Array(digest));
+    const sent = vi.mocked(post).mock.calls.find(([p]) => String(p).endsWith("/approve"))?.[1];
+    expect(sent).toEqual({
+      envelope,
+      key: passkey.id,
+      credentialId: "CQ",
+      authenticatorData: "Bw",
+      clientDataJSON: "CA",
+      signature: "Bg",
+    });
+  });
+
+  it("says where the code is on a machine with a page", async () => {
+    webauthn();
+    const withPage = { ...linux, linkPage: "http://127.0.0.1:8079/link" };
+    vi.mocked(api).mockResolvedValue({ sites: [withPage], canInvite: true, passkeys: context });
+    render(<JobSites onClose={() => undefined} sub="p-ada" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Add a passkey" }));
+    expect(screen.getByTestId(`passkeys-${site.id}`)).toHaveTextContent(
+      "open http://127.0.0.1:8079/link on desk and choose Show a code for a passkey",
+    );
+  });
+
+  it.each([
+    { keys: ["c".repeat(32)], says: "It is your last key for desk" },
+    { keys: ["c".repeat(32), "d".repeat(32)], says: "What it approved stays." },
+  ])("removes a lost passkey without signing ($says)", async ({ keys, says }) => {
+    const { get } = webauthn();
+    vi.mocked(api).mockResolvedValue({ sites: [linux], canInvite: true, passkeys: context });
+    vi.mocked(post).mockImplementation(async (path: string) => {
+      if (path.endsWith("/held")) return { subject: "p-ada", keys, passkeys: [passkey], items: [] };
+      return {};
+    });
+    render(<JobSites onClose={() => undefined} sub="p-ada" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Review changes waiting" }));
+    const row = await screen.findByTestId(`passkey-${passkey.id}`);
+    fireEvent.click(within(row).getByRole("button", { name: "Remove" }));
+    expect(row).toHaveTextContent(says);
+    fireEvent.click(within(row).getByRole("button", { name: "Remove it" }));
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(post)
+          .mock.calls.some(([p]) => String(p).endsWith(`/passkeys/${passkey.id}/remove`)),
+      ).toBe(true),
+    );
+    expect(get).not.toHaveBeenCalled();
+  });
 });

@@ -237,6 +237,42 @@ export interface SiteSigning {
   held: number;
   /** Where to add a key and approve changes, at the machine. */
   approvePage?: string | null;
+  /** The machine takes a passkey from here, paired with a code it shows (J14a.3). */
+  passkeys?: boolean;
+}
+
+/** What this Workbench needs to make a passkey (J14a.3): its relying party,
+ * null where it has no https address, and who is signed in. */
+export interface PasskeyContext {
+  rpId: string | null;
+  person: string;
+  name: string | null;
+}
+
+export interface SitePasskey {
+  id: string;
+  credentialId: string;
+  alg: number;
+  rpId: string;
+  label: string;
+  addedAt: string;
+}
+
+export interface HeldItem {
+  id: string;
+  action: string;
+  words: string[];
+  heldAt: string | null;
+  expiresAt?: string | null;
+  envelope?: string | null;
+}
+
+export interface HeldList {
+  subject: string;
+  keys: string[];
+  passkeys?: SitePasskey[];
+  state?: "unsigned" | "unconfirmed" | "signed" | null;
+  items: HeldItem[];
 }
 
 /** A change a machine holds until its owner approves it there (J14a). */
@@ -265,6 +301,7 @@ export interface SiteLinking {
 export interface JobSiteList {
   sites: JobSite[];
   canInvite: boolean;
+  passkeys?: PasskeyContext;
 }
 
 export interface JobSiteInvite {
