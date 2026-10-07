@@ -3,12 +3,24 @@ import { useCallback, useEffect, useState } from "react";
 import { api, post } from "../lib/api";
 import type {
   HeldChange,
+  HeldList,
   JobSite,
   JobSiteInvite,
   JobSiteList,
   JobSiteServer,
+  PasskeyContext,
   SiteAuditEntry,
 } from "../lib/types";
+import {
+  looksLikeCode,
+  makePasskey,
+  pairingMac,
+  passkeyProblem,
+  passkeysHere,
+  rememberPasskey,
+  rememberedPasskey,
+  signEnvelope,
+} from "../lib/passkeys";
 import { CopyButton } from "./CopyButton";
 
 const problemOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -85,7 +97,7 @@ export function JobSites({ onClose, sub }: { onClose: () => void; sub?: string }
       )}
       {data?.sites.length === 0 && <p className="text-sm">You have no job sites yet.</p>}
       {data?.sites.map((site) => (
-        <Site key={site.id} site={site} sub={sub} busy={busy} act={act} />
+        <Site key={site.id} site={site} sub={sub} busy={busy} act={act} passkeys={data.passkeys} />
       ))}
       <section
         aria-label="Add a job site"
@@ -262,7 +274,19 @@ function Linking({
   );
 }
 
-function Site({ site, sub, busy, act }: { site: JobSite; sub?: string; busy: boolean; act: Act }) {
+function Site({
+  site,
+  sub,
+  busy,
+  act,
+  passkeys,
+}: {
+  site: JobSite;
+  sub?: string;
+  busy: boolean;
+  act: Act;
+  passkeys?: PasskeyContext;
+}) {
   const [name, setName] = useState("");
   const [path, setPath] = useState("");
   const [writable, setWritable] = useState(false);
@@ -280,6 +304,9 @@ function Site({ site, sub, busy, act }: { site: JobSite; sub?: string; busy: boo
       </p>
       <Linking site={site} sub={sub} base={base} busy={busy} act={act} />
       <Signing site={site} />
+      {site.signing?.passkeys && passkeys && (
+        <Passkeys site={site} base={base} context={passkeys} busy={busy} act={act} />
+      )}
       {site.folders.map((folder) => (
         <Folder
           key={folder.id}
@@ -396,7 +423,9 @@ function Signing({ site }: { site: JobSite }) {
         No tool runs on {site.label} until you add your own key there.{" "}
         {there
           ? `${there} and make a key. Changes that give access then wait there for you to approve them.`
-          : `Eugene on ${site.label} cannot take a key yet: this kind of install gets it in a later update.`}
+          : signing.passkeys
+            ? `Pair a passkey with it below, with the code its owner's command shows there.`
+            : `Eugene on ${site.label} cannot take a key yet: this kind of install gets it in a later update.`}
       </p>
     );
   }
@@ -404,7 +433,11 @@ function Signing({ site }: { site: JobSite }) {
     return (
       <p data-testid={`signing-${site.id}`}>
         No tool runs on {site.label} until you approve its rules with your key.{" "}
-        {there ? `${there} to approve them.` : "Approve them at the machine."}
+        {there
+          ? `${there} to approve them${signing.passkeys ? ", or approve them here with your passkey" : ""}.`
+          : signing.passkeys
+            ? "Approve them here with your passkey."
+            : "Approve them at the machine."}
       </p>
     );
   }
@@ -415,6 +448,316 @@ function Signing({ site }: { site: JobSite }) {
         ? ` ${signing.held} ${signing.held === 1 ? "change is" : "changes are"} waiting${page ? `: open ${page} there` : ""}.`
         : ""}
     </p>
+  );
+}
+
+/** A passkey from here (J14a.3): pair one with the code the machine shows,
+ * then review and approve what the machine holds, with it. The code stays in
+ * this browser; the machine checks everything. */
+function Passkeys({
+  site,
+  base,
+  context,
+  busy,
+  act,
+}: {
+  site: JobSite;
+  base: string;
+  context: PasskeyContext;
+  busy: boolean;
+  act: Act;
+}) {
+  const [code, setCode] = useState("");
+  const [pairing, setPairing] = useState(false);
+  const [held, setHeld] = useState<HeldList | null>(null);
+  const [chosen, setChosen] = useState<string | null>(() => rememberedPasskey(site.id));
+  const [problem, setProblem] = useState<string | null>(null);
+  const [working, setWorking] = useState(false);
+  const [removing, setRemoving] = useState<string | null>(null);
+  const rpId = context.rpId;
+  const usable = rpId !== null && passkeysHere();
+
+  const run = async (work: () => Promise<void>) => {
+    setWorking(true);
+    setProblem(null);
+    try {
+      await work();
+    } catch (error) {
+      setProblem(passkeyProblem(error));
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const list = async (key: string | null) => {
+    const value = await post<HeldList>(`${base}/held`, { key });
+    setHeld(value);
+    return value;
+  };
+
+  const pair = () =>
+    run(async () => {
+      if (!rpId) return;
+      const before = await list(null);
+      const made = await makePasskey({
+        rpId,
+        person: context.person,
+        name: context.name || context.person,
+        exclude: (before.passkeys ?? []).map((p) => p.credentialId),
+      });
+      const label = `Passkey from Workbench, added ${new Date().toISOString().slice(0, 10)}`;
+      const mac = await pairingMac(code, {
+        site: site.id,
+        person: context.person,
+        credentialId: made.credentialId,
+        publicKey: made.publicKey,
+        alg: made.alg,
+        rpId,
+      });
+      await act(async () => {
+        const pinned = await post<{ id: string }>(`${base}/passkeys`, {
+          ...made,
+          rpId,
+          label,
+          mac,
+        });
+        rememberPasskey(site.id, pinned.id);
+        setChosen(pinned.id);
+        setCode("");
+        setPairing(false);
+      });
+      await list(null);
+    });
+
+  const passkeys = held?.passkeys ?? [];
+  const key =
+    passkeys.find((p) => p.id === chosen)?.id ??
+    (passkeys.length === 1 ? (passkeys[0]?.id ?? null) : null);
+
+  const review = () =>
+    run(async () => {
+      const first = await list(null);
+      const only = first.passkeys?.length === 1 ? (first.passkeys[0]?.id ?? null) : null;
+      const wanted = first.passkeys?.find((p) => p.id === chosen)?.id ?? only;
+      if (wanted) await list(wanted);
+    });
+
+  const approve = (ident: string) =>
+    run(async () => {
+      if (!key || !rpId) return;
+      // A fresh envelope each time: an approval spends its sequence number.
+      const fresh = await list(key);
+      const item = fresh.items.find((i) => i.id === ident);
+      const passkey = passkeys.find((p) => p.id === key);
+      if (!item?.envelope || !passkey) throw new Error("That is no longer waiting.");
+      const signed = await signEnvelope(item.envelope, passkey.credentialId, passkey.rpId);
+      await act(() =>
+        post(`${base}/held/${encodeURIComponent(ident)}/approve`, {
+          envelope: item.envelope,
+          key,
+          ...signed,
+        }),
+      );
+      await list(key);
+    });
+
+  const reject = (ident: string) =>
+    run(async () => {
+      await act(() => post(`${base}/held/${encodeURIComponent(ident)}/reject`));
+      await list(key);
+    });
+
+  // A lost phone (J60): removing a key only takes it away, so it needs no
+  // passkey and no visit to the machine.
+  const remove = (ident: string) =>
+    run(async () => {
+      await act(() => post(`${base}/passkeys/${encodeURIComponent(ident)}/remove`));
+      setRemoving(null);
+      if (chosen === ident) setChosen(null);
+      await list(null);
+    });
+  const lastKey = (held?.keys.length ?? 0) <= 1;
+
+  if (!usable) {
+    return (
+      <p className="text-muted" data-testid={`passkeys-${site.id}`}>
+        {rpId
+          ? "This browser cannot use a passkey here."
+          : "To approve changes from here with a passkey, open Workbench at its https address."}
+      </p>
+    );
+  }
+  return (
+    <section
+      aria-label={`Passkeys for ${site.label}`}
+      className="flex flex-col gap-2 rounded-plexus border border-line p-2"
+      data-testid={`passkeys-${site.id}`}
+    >
+      <div className="flex flex-wrap gap-3">
+        <button
+          type="button"
+          disabled={busy || working}
+          className="rounded-plexus border border-line px-3 py-1"
+          onClick={() => void review()}
+        >
+          Review changes waiting
+        </button>
+        <button
+          type="button"
+          disabled={busy || working}
+          className="rounded-plexus border border-line px-3 py-1"
+          onClick={() => setPairing(!pairing)}
+        >
+          Add a passkey
+        </button>
+      </div>
+      {pairing && (
+        <form
+          className="flex flex-wrap items-end gap-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void pair();
+          }}
+        >
+          <label className="flex flex-col gap-1">
+            The code {site.label} shows
+            <input
+              required
+              autoComplete="off"
+              spellCheck={false}
+              value={code}
+              placeholder="XXXXX-XXXXX"
+              onChange={(event) => setCode(event.target.value)}
+              className="rounded-plexus border border-line bg-transparent px-2 py-1 font-mono"
+              data-testid="passkey-code"
+            />
+          </label>
+          <button
+            disabled={busy || working || !looksLikeCode(code)}
+            className="rounded-plexus border border-line px-3 py-1"
+          >
+            Make and pair a passkey
+          </button>
+          <p className="w-full text-muted">
+            {site.linkPage
+              ? `To get the code, open ${site.linkPage} on ${site.label} and choose Show a code for a passkey.`
+              : site.linkPage === null
+                ? `To get the code, run Eugene's installer on ${site.label} again with --site-pair.`
+                : `${site.label} shows the code on its key page.`}{" "}
+            The code stays in this browser: Eugene never sees it.
+          </p>
+        </form>
+      )}
+      {problem && (
+        <p role="alert" className="text-error">
+          {problem}
+        </p>
+      )}
+      {passkeys.length > 1 && (
+        <label className="flex items-center gap-2">
+          Approve with
+          <select
+            value={key ?? ""}
+            onChange={(event) => {
+              setChosen(event.target.value);
+              rememberPasskey(site.id, event.target.value);
+            }}
+            className="rounded-plexus border border-line bg-transparent px-2 py-1"
+          >
+            <option value="" disabled>
+              choose a passkey
+            </option>
+            {passkeys.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      {held && passkeys.length === 0 && (
+        <p>No passkey is paired with {site.label} yet. Add one with the code it shows.</p>
+      )}
+      {passkeys.length > 0 && (
+        <ul className="flex flex-col gap-1" aria-label={`Your passkeys for ${site.label}`}>
+          {passkeys.map((p) => (
+            <li
+              key={p.id}
+              className="flex flex-wrap items-center gap-3"
+              data-testid={`passkey-${p.id}`}
+            >
+              <span>{p.label}</span>
+              {removing === p.id ? (
+                <>
+                  <span className="text-muted">
+                    {lastKey
+                      ? `It is your last key for ${site.label}: no tool runs there until you add one and approve its rules.`
+                      : "What it approved stays."}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={busy || working}
+                    className="text-error"
+                    onClick={() => void remove(p.id)}
+                  >
+                    Remove it
+                  </button>
+                  <button type="button" disabled={working} onClick={() => setRemoving(null)}>
+                    Keep it
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  disabled={busy || working}
+                  className="text-error"
+                  onClick={() => setRemoving(p.id)}
+                >
+                  Remove
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {held && held.items.length === 0 && passkeys.length > 0 && <p>Nothing is waiting.</p>}
+      {held?.items.map((item) => (
+        <div key={item.id} className="flex flex-col gap-1" data-testid={`held-${item.id}`}>
+          <p className="font-semibold">
+            {item.id === "rules" ? `${site.label}'s rules, as a whole` : "A change waiting"}
+          </p>
+          <ul className="list-disc pl-5">
+            {item.words.map((line, index) => (
+              <li key={index}>{line}</li>
+            ))}
+          </ul>
+          <p className="text-muted">
+            These words come from {site.label}. Your passkey signs exactly what {site.label} wrote,
+            and it checks the signature itself.
+          </p>
+          <div className="flex gap-3">
+            <button
+              type="button"
+              disabled={busy || working || !key}
+              className="rounded-plexus border border-line px-3 py-1"
+              onClick={() => void approve(item.id)}
+            >
+              Approve with your passkey
+            </button>
+            {item.id !== "rules" && (
+              <button
+                type="button"
+                disabled={busy || working}
+                className="text-error"
+                onClick={() => void reject(item.id)}
+              >
+                Turn down
+              </button>
+            )}
+          </div>
+        </div>
+      ))}
+    </section>
   );
 }
 

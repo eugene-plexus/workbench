@@ -9,13 +9,21 @@ turns its local servers on and says who may use which of their tools; lets
 Eugene's owner in for dev mode or not (J6e); and reads its audit log (J8).
 Eugene relays each change to the machine, whose own list is final (J6b).
 Workbench holds no authority of its own here and passes the answers through.
+
+**Passkeys** (J14a.3, `person-held-keys.md` §4.2, §12.5). At its HTTPS address
+Workbench is a WebAuthn relying party, and a person may pair a passkey with
+their machine and approve what it holds from here. The browser makes the
+passkey and computes the pairing MAC from the code the person typed; this
+server never sees the code, and only carries the passkey's public half, the
+MAC and each approval to Eugene, which carries them to the machine. Without an
+HTTPS address there is no relying party, so no passkey: the list says so.
 """
 
 from __future__ import annotations
 
 import re
-from typing import Any
-from urllib.parse import quote
+from typing import Any, Literal
+from urllib.parse import quote, urlsplit
 
 from fastapi import APIRouter, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -122,6 +130,54 @@ class AuditRead(BaseModel):
 
 
 _SERVER = re.compile(r"^[a-z][a-z0-9-]{0,39}$")
+_B64URL = r"^[A-Za-z0-9_-]+$"
+_KEY = r"^[a-f0-9]{32}$"
+_HELD = re.compile(r"^[a-z0-9]{1,32}$")
+_PASSKEY = re.compile(r"^[a-f0-9]{32}$")
+
+
+class PasskeyPair(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    credentialId: str = Field(min_length=1, max_length=1366, pattern=_B64URL)
+    publicKey: str = Field(min_length=1, max_length=1100)
+    alg: Literal[-8, -7, -257]
+    rpId: str = Field(min_length=1, max_length=253)
+    label: str | None = Field(default=None, max_length=128)
+    mac: str = Field(pattern=r"^[A-Za-z0-9_-]{43}$")
+
+
+class HeldList(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    key: str | None = Field(default=None, pattern=_KEY)
+
+
+class PasskeyApproval(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    envelope: str = Field(min_length=2, max_length=262144)
+    key: str = Field(pattern=_KEY)
+    credentialId: str = Field(min_length=1, max_length=1366, pattern=_B64URL)
+    authenticatorData: str = Field(min_length=1, max_length=4096, pattern=_B64URL)
+    clientDataJSON: str = Field(min_length=1, max_length=8192, pattern=_B64URL)
+    signature: str = Field(min_length=1, max_length=1024, pattern=_B64URL)
+
+
+def _relying_party(request: Request) -> str | None:
+    """Workbench's WebAuthn RP ID: the host of its HTTPS address, or None
+    where it has none (a plain-HTTP address can hold no passkey)."""
+    origin = _state(request).settings.public_origin
+    return urlsplit(origin).hostname if origin else None
+
+
+def _held(ident: str) -> str:
+    if not _HELD.fullmatch(ident):
+        raise _problem(status.HTTP_404_NOT_FOUND, "Nothing is waiting under that name.")
+    return ident
+
+
+def _passkey(ident: str) -> str:
+    if not _PASSKEY.fullmatch(ident):
+        raise _problem(status.HTTP_404_NOT_FOUND, "There is no such passkey.")
+    return ident
 
 
 def _server(server: str) -> str:
@@ -194,7 +250,10 @@ def _sh(value: str) -> str:
 @router.get("/api/job-sites")
 async def sites(request: Request) -> dict[str, Any]:
     answer = await _call(request, "job-sites", {})
-    return answer or {}
+    person = await _person(request)
+    # What the browser needs to make a passkey here (J14a.3).
+    passkeys = {"rpId": _relying_party(request), "person": person.sub, "name": person.username}
+    return {**(answer or {}), "passkeys": passkeys}
 
 
 @router.post("/api/job-sites/invite")
@@ -291,6 +350,52 @@ async def remove_link(request: Request, site: str, body: LinkRemove | None = Non
     except FolderError as exc:
         code = exc.status if exc.status in _LINK_REFUSALS else status.HTTP_409_CONFLICT
         raise _problem(code, str(exc)) from None
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/api/job-sites/{site}/passkeys", status_code=status.HTTP_201_CREATED)
+async def pair_passkey(request: Request, site: str, body: PasskeyPair) -> dict[str, Any]:
+    """A passkey this page made, with the MAC its browser computed from the
+    code shown at the machine. The code is not here: only the MAC is."""
+    rp = _relying_party(request)
+    if rp is None or body.rpId != rp:
+        raise _problem(
+            status.HTTP_409_CONFLICT,
+            "A passkey is made at Workbench's https address. Open Workbench there.",
+        )
+    answer = await _call(request, f"job-sites/{_site(site)}/passkeys", body.model_dump())
+    return answer or {}
+
+
+@router.post("/api/job-sites/{site}/passkeys/{ident}/remove")
+async def remove_passkey(request: Request, site: str, ident: str) -> Response:
+    """A lost phone (J60): removing a key only takes it away, so it needs no
+    passkey, no https and no visit to the machine."""
+    await _call(request, f"job-sites/{_site(site)}/passkeys/{_passkey(ident)}/remove", {})
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/api/job-sites/{site}/held")
+async def held(request: Request, site: str, body: HeldList) -> dict[str, Any]:
+    answer = await _call(
+        request, f"job-sites/{_site(site)}/held", {"key": body.key} if body.key else {}
+    )
+    return answer or {}
+
+
+@router.post("/api/job-sites/{site}/held/{ident}/approve")
+async def approve_held(
+    request: Request, site: str, ident: str, body: PasskeyApproval
+) -> dict[str, Any]:
+    answer = await _call(
+        request, f"job-sites/{_site(site)}/held/{_held(ident)}/approve", body.model_dump()
+    )
+    return answer or {}
+
+
+@router.post("/api/job-sites/{site}/held/{ident}/reject")
+async def reject_held(request: Request, site: str, ident: str) -> Response:
+    await _call(request, f"job-sites/{_site(site)}/held/{_held(ident)}/reject", {})
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

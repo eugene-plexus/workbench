@@ -413,3 +413,79 @@ def test_a_change_the_machine_holds_reaches_the_page_as_202_with_its_words(
     assert held.json() == {"held": True, "message": words}
     assert held.headers["cache-control"] == "no-store"
     assert state["managed"][-1][:3] == ("folders", "site-notes", "people")
+
+
+# --- passkeys (J14a.3) --------------------------------------------------------------------
+
+PAIR = {
+    "credentialId": "Y3JlZA",
+    "publicKey": "cHVibGlj",
+    "alg": -7,
+    "rpId": "workbench.example",
+    "label": "Passkey from Workbench",
+    "mac": "m" * 43,
+}
+APPROVAL = {
+    "envelope": "{}x",
+    "key": "c" * 32,
+    "credentialId": "Y3JlZA",
+    "authenticatorData": "YXV0aA",
+    "clientDataJSON": "Y2xpZW50",
+    "signature": "c2ln",
+}
+
+
+def test_without_an_https_address_there_is_no_relying_party(
+    site_world: tuple[World, dict[str, Any]],
+) -> None:
+    """A plain-HTTP Workbench can hold no passkey: the list says so, and a
+    pairing is refused before anything reaches Eugene."""
+    world, state = site_world
+    ada = world.browser()
+    ada.sign_in("p-ada")
+    listed = ada.get("/api/job-sites").json()
+    assert listed["passkeys"] == {
+        "rpId": None,
+        "person": "p-ada",
+        "name": listed["passkeys"]["name"],
+    }
+    refused = ada.post(f"/api/job-sites/{DESK}/passkeys", json=PAIR)
+    assert refused.status_code == 409 and "https address" in refused.text
+    assert state["managed"] == []
+
+
+def test_a_passkey_and_its_approvals_are_carried_and_the_code_never_is(
+    site_world: tuple[World, dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from eugene_plexus_workbench import job_sites_api
+
+    monkeypatch.setattr(job_sites_api, "_relying_party", lambda _request: "workbench.example")
+    world, state = site_world
+    ada = world.browser()
+    ada.sign_in("p-ada")
+    assert ada.get("/api/job-sites").json()["passkeys"]["rpId"] == "workbench.example"
+    other_rp = ada.post(f"/api/job-sites/{DESK}/passkeys", json={**PAIR, "rpId": "evil.example"})
+    assert other_rp.status_code == 409
+    with_code = ada.post(f"/api/job-sites/{DESK}/passkeys", json={**PAIR, "code": "ABCDE-FGHJK"})
+    assert with_code.status_code == 422
+    paired = ada.post(f"/api/job-sites/{DESK}/passkeys", json=PAIR)
+    assert paired.status_code == 201, paired.text
+    action, body = state["managed"][-1]
+    assert action == "passkeys" and {k: body[k] for k in PAIR} == PAIR
+    assert set(body) == {*PAIR, "refreshToken"}
+    assert ada.post(f"/api/job-sites/{DESK}/held", json={"key": "c" * 32}).status_code == 200
+    assert state["managed"][-1] == ("held", {"key": "c" * 32, "refreshToken": body["refreshToken"]})
+    approved = ada.post(f"/api/job-sites/{DESK}/held/rules/approve", json=APPROVAL)
+    assert approved.status_code == 200, approved.text
+    what, ident, act, sent = state["managed"][-1]
+    assert (what, ident, act) == ("held", "rules", "approve")
+    assert {k: sent[k] for k in APPROVAL} == APPROVAL
+    rejected = ada.post(f"/api/job-sites/{DESK}/held/abc123/reject")
+    assert rejected.status_code == 204
+    assert state["managed"][-1][:3] == ("held", "abc123", "reject")
+    bad = ada.post(f"/api/job-sites/{DESK}/held/NOT-AN-ID/reject")
+    assert bad.status_code == 404
+    removed = ada.post(f"/api/job-sites/{DESK}/passkeys/{'c' * 32}/remove")
+    assert removed.status_code == 204
+    assert state["managed"][-1][:3] == ("passkeys", "c" * 32, "remove")
+    assert ada.post(f"/api/job-sites/{DESK}/passkeys/abc123/remove").status_code == 404
