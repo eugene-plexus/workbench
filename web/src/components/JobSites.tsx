@@ -81,8 +81,8 @@ export function JobSites({ onClose, sub }: { onClose: () => void; sub?: string }
         </button>
       </div>
       <p className="text-sm text-muted">
-        A job site is a machine of yours that Workbench can work on from anywhere: its folders,
-        chosen by you, and each listing, read or write with your approval. The machine connects out
+        A job site is a machine of yours that Workbench can work on from anywhere: the folders you
+        choose, under your rules for what may run there without asking you. The machine connects out
         to Eugene and nothing connects to it. Only you say who may use its folders and its tools,
         you included, and the machine itself keeps that list.
       </p>

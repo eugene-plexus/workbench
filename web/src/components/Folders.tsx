@@ -250,11 +250,19 @@ export function FolderSelection({
     };
   }, []);
   const grants = data?.grants.filter((g) => g.usable);
+  // A job site's workspace runs what its rules allow without asking (J70);
+  // Workbench's own folders still ask each time (J75).
+  const onSites = grants?.some((g) => g.source === "node") ?? false;
+  const local = grants?.some((g) => g.source !== "node") ?? false;
   return (
     <fieldset className="flex flex-col gap-2 text-sm">
       <legend className="font-medium">Folders for this chat</legend>
       <p className="text-muted">
-        Each file operation waits for approval. Read contents go to this chat&apos;s model.
+        {onSites
+          ? `${local ? "Workbench's own folders ask before each file operation. " : ""}On a job ` +
+            "site, your rules there say which operations run without asking."
+          : "Each file operation waits for approval."}{" "}
+        Read contents go to this chat&apos;s model.
       </p>
       {problem && (
         <p role="alert" className="text-error">

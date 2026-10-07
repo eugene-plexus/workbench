@@ -85,11 +85,13 @@ export function Workspaces({
 }) {
   const [details, setDetails] = useState<Map<string, JobSiteWorkspaceDetail> | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  const [reads, setReads] = useState(0);
   const workspaces = site.workspaces ?? [];
   const ids = workspaces.map((w) => w.id).join(",");
 
   // Paths and hidden patterns are read live from the machine, never kept by
-  // Eugene (J76): once each time the set of workspaces changes.
+  // Eugene (J76): each time the set of workspaces changes, and after a save,
+  // so the page shows what is in effect there, not what was asked for.
   useEffect(() => {
     if (!ids) return;
     let current = true;
@@ -104,7 +106,7 @@ export function Workspaces({
     return () => {
       current = false;
     };
-  }, [base, ids]);
+  }, [base, ids, reads]);
 
   return (
     <section
@@ -133,6 +135,7 @@ export function Workspaces({
           act={act}
           owner={owner}
           solo={site.sharing === false}
+          onSaved={() => setReads((n) => n + 1)}
         />
       ))}
       <AddWorkspace base={base} label={site.label} busy={busy} act={act} />
@@ -148,6 +151,7 @@ function Workspace({
   act,
   owner,
   solo,
+  onSaved,
 }: {
   base: string;
   workspace: JobSiteWorkspace;
@@ -156,12 +160,25 @@ function Workspace({
   act: Act;
   owner: boolean;
   solo: boolean;
+  onSaved: () => void;
 }) {
-  const [read, setRead] = useState<Decision>(workspace.rules.read);
-  const [change, setChange] = useState<Decision>(workspace.rules.change);
+  // A person's edits until they save; otherwise the rules in effect, read
+  // live from the machine. A change that gives more waits for their key
+  // (J68), so it is shown only once the machine applies it.
+  const [read, setRead] = useState<Decision | null>(null);
+  const [change, setChange] = useState<Decision | null>(null);
   const [patterns, setPatterns] = useState<string | null>(null);
+  const rules = detail?.rules ?? workspace.rules;
+  const shownRead = read ?? rules.read;
+  const shownChange = change ?? rules.change;
   const path = `${base}/workspaces/${encodeURIComponent(workspace.id)}`;
   const deny = patterns ?? (detail?.deny ?? []).join("\n");
+  const saved = () => {
+    setRead(null);
+    setChange(null);
+    setPatterns(null);
+    onSaved();
+  };
   const parsed = parsePatterns(deny);
   const bad = patternProblem(parsed);
   return (
@@ -174,10 +191,10 @@ function Workspace({
         {workspace.writable ? "" : " · read only"}
       </h4>
       {detail && <p className="break-all text-muted">{detail.path}</p>}
-      <DecisionSelect label="Read and search" value={read} onChange={setRead} />
+      <DecisionSelect label="Read and search" value={shownRead} onChange={setRead} />
       <DecisionSelect
         label="Change files"
-        value={change}
+        value={shownChange}
         onChange={setChange}
         only={workspace.writable ? undefined : "deny"}
       />
@@ -201,10 +218,10 @@ function Workspace({
           onClick={() =>
             void act(() =>
               post(`${path}/rules`, {
-                rules: { read, change: workspace.writable ? change : "deny" },
+                rules: { read: shownRead, change: workspace.writable ? shownChange : "deny" },
                 deny: parsed,
               }),
-            )
+            ).then(saved)
           }
         >
           Save rules
@@ -217,7 +234,17 @@ function Workspace({
           Remove workspace
         </button>
       </div>
-      {owner && !solo && <Sharing base={path} workspace={workspace} busy={busy} act={act} />}
+      {owner && !solo && (
+        <Sharing
+          base={path}
+          shared={detail?.people ?? workspace.people}
+          writable={workspace.writable}
+          workspaceId={workspace.id}
+          busy={busy}
+          act={act}
+          onSaved={onSaved}
+        />
+      )}
     </div>
   );
 }
@@ -225,21 +252,32 @@ function Workspace({
 /** Whom the machine's owner shares a workspace with, and each one's rules. */
 function Sharing({
   base,
-  workspace,
+  shared,
+  writable,
+  workspaceId,
   busy,
   act,
+  onSaved,
 }: {
   base: string;
-  workspace: JobSiteWorkspace;
+  shared: JobSiteWorkspace["people"];
+  writable: boolean;
+  workspaceId: string;
   busy: boolean;
   act: Act;
+  onSaved: () => void;
 }) {
-  const [people, setPeople] = useState(() =>
-    workspace.people.map((p) => ({ name: p.name, read: p.read, change: p.change })),
-  );
+  type Entry = { name: string; read: Decision; change: Decision };
+  // The owner's edits until they save; otherwise whom it is shared with now,
+  // read live from the machine (a share that gives more waits for the key).
+  const [edited, setEdited] = useState<Entry[] | null>(null);
+  const inEffect = shared.map((p) => ({ name: p.name, read: p.read, change: p.change }));
+  const people = edited ?? inEffect;
+  const setPeople = (change: (old: Entry[]) => Entry[]) =>
+    setEdited((old) => change(old ?? inEffect));
   const [adding, setAdding] = useState("");
   return (
-    <div className="flex flex-col gap-2" data-testid={`sharing-${workspace.id}`}>
+    <div className="flex flex-col gap-2" data-testid={`sharing-${workspaceId}`}>
       <p>Shared with:</p>
       {people.length === 0 && <p className="text-muted">Nobody.</p>}
       {people.map((person, index) => (
@@ -255,7 +293,7 @@ function Sharing({
           <DecisionSelect
             label={`${person.name} changes files`}
             value={person.change}
-            only={workspace.writable ? undefined : "deny"}
+            only={writable ? undefined : "deny"}
             onChange={(change) =>
               setPeople((old) => old.map((p, i) => (i === index ? { ...p, change } : p)))
             }
@@ -300,10 +338,13 @@ function Sharing({
             post(`${base}/people`, {
               people: people.map((p) => ({
                 ...p,
-                change: workspace.writable ? p.change : "deny",
+                change: writable ? p.change : "deny",
               })),
             }),
-          )
+          ).then(() => {
+            setEdited(null);
+            onSaved();
+          })
         }
       >
         Save whom it is shared with

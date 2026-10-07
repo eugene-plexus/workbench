@@ -576,6 +576,47 @@ it("shows a site you are linked to with only your own: your workspaces and your 
   );
 });
 
+it("shows the rules in effect after a change held for the key, never the change asked for", async () => {
+  const workspace = {
+    id: "c".repeat(32),
+    name: "Notes",
+    writable: true,
+    rules: { read: "allow", change: "deny" },
+    people: [{ person: "p-bo", name: "bo", read: "allow", change: "deny" }],
+  };
+  const owned = { ...site, folders: [], workspaces: [workspace], signing: people };
+  vi.mocked(api).mockResolvedValue({ sites: [owned], canInvite: true });
+  const live = { ...workspace, path: "D:\\notes", deny: [".env"] };
+  vi.mocked(post).mockImplementation(async (path: string) =>
+    path.endsWith("/workspaces/list")
+      ? { workspaces: [live] }
+      : { held: true, message: "Waiting for your approval." },
+  );
+  render(<JobSites onClose={() => undefined} />);
+  const box = await screen.findByTestId(`workspace-${"c".repeat(32)}`);
+  const hide = within(box).getByLabelText("Paths to hide in Notes");
+  await waitFor(() => expect(hide).toHaveValue(".env"));
+  // Giving more (J68): change asked about, a hidden path shown again.
+  fireEvent.change(within(box).getByLabelText("Change files"), { target: { value: "ask" } });
+  fireEvent.change(hide, { target: { value: "" } });
+  fireEvent.click(within(box).getByRole("button", { name: "Save rules" }));
+  expect(await screen.findByTestId("job-site-held")).toHaveTextContent(
+    "Waiting for your approval.",
+  );
+  await waitFor(() => expect(within(box).getByLabelText("Change files")).toHaveValue("deny"));
+  expect(hide).toHaveValue(".env");
+  // Sharing with someone new waits too: the list stays whom it is shared with now.
+  const sharing = within(box).getByTestId(`sharing-${"c".repeat(32)}`);
+  fireEvent.change(within(sharing).getByLabelText("Share with (how they sign in)"), {
+    target: { value: "cy" },
+  });
+  fireEvent.click(within(sharing).getByRole("button", { name: "Add" }));
+  expect(within(sharing).getByText("cy")).toBeTruthy();
+  fireEvent.click(within(sharing).getByRole("button", { name: "Save whom it is shared with" }));
+  await waitFor(() => expect(within(sharing).queryByText("cy")).toBeNull());
+  expect(within(sharing).getByText("bo")).toBeTruthy();
+});
+
 it("adds a workspace by its path, with its rules and paths to hide", async () => {
   const owned = { ...site, folders: [], workspaces: [], signing: people };
   vi.mocked(api).mockResolvedValue({ sites: [owned], canInvite: true });

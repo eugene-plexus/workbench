@@ -40,6 +40,35 @@ beforeEach(() => {
   vi.resetAllMocks();
 });
 
+it("says a job site's rules decide what asks, and that Workbench's own folders ask each time", async () => {
+  vi.mocked(api).mockResolvedValue({
+    available: true,
+    reason: null,
+    grants: [
+      { ...grant, id: "node:notes", source: "node", label: "desk", available: true },
+      { ...grant, id: "local", source: "local", name: "Shared" },
+    ],
+  });
+  render(<FolderSelection selected={[]} onChange={() => undefined} />);
+  expect(
+    await screen.findByText(
+      "Workbench's own folders ask before each file operation. On a job site, your rules there " +
+        "say which operations run without asking. Read contents go to this chat's model.",
+    ),
+  ).toBeTruthy();
+  expect(screen.queryByText(/Each file operation waits for approval/)).toBeNull();
+});
+
+it("says each file operation waits where only Workbench's own folders are offered", async () => {
+  vi.mocked(api).mockResolvedValue({ available: true, reason: null, grants: [grant] });
+  render(<FolderSelection selected={[]} onChange={() => undefined} />);
+  expect(
+    await screen.findByText(
+      "Each file operation waits for approval. Read contents go to this chat's model.",
+    ),
+  ).toBeTruthy();
+});
+
 it("defaults a new grant to read-only and assigns it to an explicitly chosen person", async () => {
   vi.mocked(api).mockImplementation(async (path) =>
     path === "/api/folders/people"
