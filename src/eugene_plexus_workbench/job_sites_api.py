@@ -18,10 +18,12 @@ from typing import Any
 from urllib.parse import quote
 
 from fastapi import APIRouter, Request, Response, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
 from .api import _person, _problem, _state
 from .folder_io import FolderError
+from .node_folders import HeldAtTheMachine
 
 router = APIRouter()
 
@@ -147,6 +149,16 @@ async def _call(request: Request, path: str, body: dict[str, Any]) -> dict[str, 
         return answer
     except FolderError as exc:
         raise _problem(status.HTTP_409_CONFLICT, str(exc)) from None
+
+
+def held_response(_request: Request, exc: Exception) -> JSONResponse:
+    """A change a job site holds for its owner's approval at the machine."""
+    message = exc.message if isinstance(exc, HeldAtTheMachine) else str(exc)
+    return JSONResponse(
+        {"held": True, "message": message},
+        status_code=status.HTTP_202_ACCEPTED,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 def commands(invite: dict[str, Any]) -> dict[str, str]:

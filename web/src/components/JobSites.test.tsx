@@ -267,3 +267,50 @@ it("shows the owner only which machine the rest of a chat used", () => {
     "The rest of this chat used files on desk. It is private in production mode.",
   );
 });
+
+const approvePage = "http://127.0.0.1:8079/link/approve";
+
+it("says no tool runs until the owner adds a key at the machine (J14a)", async () => {
+  const unsigned = { ...linked, signing: { state: "unsigned", held: 0, approvePage } };
+  vi.mocked(api).mockResolvedValue({ sites: [unsigned], canInvite: true });
+  render(<JobSites onClose={() => undefined} sub="p-ada" />);
+  expect(await screen.findByTestId(`signing-${site.id}`)).toHaveTextContent(
+    `No tool runs on desk until you add your own key there. On desk, open ${approvePage} and make a key.`,
+  );
+});
+
+it("says an install that cannot take a key yet, without pointing at a page it lacks", async () => {
+  const later = { ...site, signing: { state: "unsigned", held: 0, approvePage: null } };
+  vi.mocked(api).mockResolvedValue({ sites: [later], canInvite: true });
+  render(<JobSites onClose={() => undefined} sub="p-ada" />);
+  const words = await screen.findByTestId(`signing-${site.id}`);
+  expect(words).toHaveTextContent("cannot take a key yet");
+  expect(words).not.toHaveTextContent("open");
+});
+
+it("asks for the rules to be approved, and counts what is waiting once signed", async () => {
+  const unconfirmed = { ...site, signing: { state: "unconfirmed", held: 0, approvePage } };
+  vi.mocked(api).mockResolvedValue({ sites: [unconfirmed], canInvite: true });
+  const { unmount } = render(<JobSites onClose={() => undefined} sub="p-ada" />);
+  expect(await screen.findByTestId(`signing-${site.id}`)).toHaveTextContent(
+    "No tool runs on desk until you approve its rules with your key.",
+  );
+  unmount();
+  const signed = { ...site, signing: { state: "signed", held: 2, approvePage } };
+  vi.mocked(api).mockResolvedValue({ sites: [signed], canInvite: true });
+  render(<JobSites onClose={() => undefined} sub="p-ada" />);
+  expect(await screen.findByTestId(`signing-${site.id}`)).toHaveTextContent(
+    `2 changes are waiting: open ${approvePage} there.`,
+  );
+});
+
+it("shows a held change as waiting at the machine, not as a refusal", async () => {
+  vi.mocked(api).mockResolvedValue({ sites: [site], canInvite: true });
+  const words = `Waiting for your approval on desk, at ${approvePage}.`;
+  vi.mocked(post).mockResolvedValue({ held: true, message: words });
+  render(<JobSites onClose={() => undefined} />);
+  await screen.findByLabelText("What bo may do in Notes");
+  fireEvent.click(screen.getByRole("button", { name: "Save who may use it" }));
+  expect(await screen.findByTestId("job-site-held")).toHaveTextContent(words);
+  expect(screen.queryByRole("alert")).toBeNull();
+});
