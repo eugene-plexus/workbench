@@ -224,6 +224,25 @@ export interface JobSite {
   linkPage?: string | null;
   /** False where only the machine's owner is served (macOS). */
   sharing?: boolean;
+  /** Whether the machine checks its owner's changes with the owner's own key
+   * (J14a). Absent from a machine older than that. */
+  signing?: SiteSigning;
+}
+
+export interface SiteSigning {
+  /** `unsigned`: no key yet, so no tool runs there. `unconfirmed`: a key, but
+   * its rules are not approved with it yet. `signed`: tools run. */
+  state: "unsigned" | "unconfirmed" | "signed";
+  /** Changes the machine holds until they are approved there. */
+  held: number;
+  /** Where to add a key and approve changes, at the machine. */
+  approvePage?: string | null;
+}
+
+/** A change a machine holds until its owner approves it there (J14a). */
+export interface HeldChange {
+  held: true;
+  message: string;
 }
 
 export interface SiteLink {
@@ -231,6 +250,8 @@ export interface SiteLink {
   accountName: string;
   available: boolean;
   reason?: string | null;
+  /** How many keys this person has pinned at the machine. */
+  keys?: number;
 }
 
 /** What Eugene says about whose account a person's calls run as on a machine.

@@ -87,5 +87,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(tools_api.router)
     app.include_router(folders_api.router)
     app.include_router(job_sites_api.router)
+    app.add_exception_handler(job_sites_api.HeldAtTheMachine, job_sites_api.held_response)
     web.mount(app, web.static_dir(settings.static_dir))
     return app

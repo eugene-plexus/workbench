@@ -82,6 +82,8 @@ def site_world(
             if fake.refresh_tokens.get(body["refreshToken"]) != "p-ada":
                 return JSONResponse({"detail": {"detail": "No such job site."}}, status_code=404)
             state["managed"].append((what, ident, action, body))
+            if state.get("held"):
+                return JSONResponse({"held": True, "message": state["held"]}, status_code=202)
             return {"server": {"id": ident}, "people": body.get("people", [])}
 
         @server.post("/oidc/job-sites/{site}/{action}")
@@ -390,3 +392,24 @@ def test_what_runs_as_whom_reaches_the_folders_and_tools_a_person_sees(
     state["linking"] = {}  # a machine that predates linking says nothing
     grant = node_grant()
     assert "linked" not in grant and "linkPage" not in grant
+
+
+def test_a_change_the_machine_holds_reaches_the_page_as_202_with_its_words(
+    site_world: tuple[World, dict[str, Any]],
+) -> None:
+    """J14a: Eugene answers 202 when the job site holds a change for its
+    owner's key at the machine (J50). Workbench passes it on as that, not as
+    a refusal, with the machine's own words."""
+    world, state = site_world
+    words = "Waiting for your approval on desk, at http://127.0.0.1:8079/link/approve."
+    state["held"] = words
+    ada = world.browser()
+    ada.sign_in("p-ada")
+    held = ada.post(
+        f"/api/job-sites/{DESK}/folders/site-notes/people",
+        json={"people": [{"name": "bo", "writable": False}]},
+    )
+    assert held.status_code == 202, held.text
+    assert held.json() == {"held": True, "message": words}
+    assert held.headers["cache-control"] == "no-store"
+    assert state["managed"][-1][:3] == ("folders", "site-notes", "people")

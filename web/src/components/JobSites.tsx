@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { api, post } from "../lib/api";
 import type {
+  HeldChange,
   JobSite,
   JobSiteInvite,
   JobSiteList,
@@ -12,11 +13,15 @@ import { CopyButton } from "./CopyButton";
 
 const problemOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
+const isHeld = (value: unknown): value is HeldChange =>
+  typeof value === "object" && value !== null && (value as HeldChange).held === true;
+
 /** Job sites (your machines): the machines whose files you use from here.
  * Yours alone: only you say who may use their folders, yourself included. */
 export function JobSites({ onClose, sub }: { onClose: () => void; sub?: string }) {
   const [data, setData] = useState<JobSiteList | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [invite, setInvite] = useState<JobSiteInvite | null>(null);
   const [machine, setMachine] = useState("");
   const [busy, setBusy] = useState(false);
@@ -38,8 +43,11 @@ export function JobSites({ onClose, sub }: { onClose: () => void; sub?: string }
   const act = async (work: () => Promise<unknown>) => {
     setBusy(true);
     setProblem(null);
+    setNotice(null);
     try {
-      await work();
+      const value = await work();
+      // Held at the machine for its owner's key (J14a): not a refusal.
+      if (isHeld(value)) setNotice(value.message);
       await load();
     } catch (error) {
       setProblem(problemOf(error));
@@ -68,6 +76,11 @@ export function JobSites({ onClose, sub }: { onClose: () => void; sub?: string }
       {problem && (
         <p role="alert" className="text-sm text-error">
           {problem}
+        </p>
+      )}
+      {notice && (
+        <p role="status" className="text-sm" data-testid="job-site-held">
+          {notice}
         </p>
       )}
       {data?.sites.length === 0 && <p className="text-sm">You have no job sites yet.</p>}
@@ -266,6 +279,7 @@ function Site({ site, sub, busy, act }: { site: JobSite; sub?: string; busy: boo
         {!site.ready && site.reason ? ` · ${site.reason}` : ""}
       </p>
       <Linking site={site} sub={sub} base={base} busy={busy} act={act} />
+      <Signing site={site} />
       {site.folders.map((folder) => (
         <Folder
           key={folder.id}
@@ -282,10 +296,11 @@ function Site({ site, sub, busy, act }: { site: JobSite; sub?: string; busy: boo
         onSubmit={(event) => {
           event.preventDefault();
           void act(async () => {
-            await post(`${base}/folders`, { name, path, writable });
+            const value = await post(`${base}/folders`, { name, path, writable });
             setName("");
             setPath("");
             setWritable(false);
+            return value;
           });
         }}
       >
@@ -365,6 +380,41 @@ function Site({ site, sub, busy, act }: { site: JobSite; sub?: string; busy: boo
         </button>
       )}
     </article>
+  );
+}
+
+/** Whether the machine checks its owner's changes with the owner's own key
+ * (J14a), in words: no tool runs there until it does. */
+function Signing({ site }: { site: JobSite }) {
+  const signing = site.signing;
+  if (!signing) return null;
+  const page = signing.approvePage;
+  const there = page ? `On ${site.label}, open ${page}` : null;
+  if (signing.state === "unsigned") {
+    return (
+      <p data-testid={`signing-${site.id}`}>
+        No tool runs on {site.label} until you add your own key there.{" "}
+        {there
+          ? `${there} and make a key. Changes that give access then wait there for you to approve them.`
+          : `Eugene on ${site.label} cannot take a key yet: this kind of install gets it in a later update.`}
+      </p>
+    );
+  }
+  if (signing.state === "unconfirmed") {
+    return (
+      <p data-testid={`signing-${site.id}`}>
+        No tool runs on {site.label} until you approve its rules with your key.{" "}
+        {there ? `${there} to approve them.` : "Approve them at the machine."}
+      </p>
+    );
+  }
+  return (
+    <p className="text-muted" data-testid={`signing-${site.id}`}>
+      Changes that give access wait for your approval on {site.label}, with your own key.
+      {signing.held > 0
+        ? ` ${signing.held} ${signing.held === 1 ? "change is" : "changes are"} waiting${page ? `: open ${page} there` : ""}.`
+        : ""}
+    </p>
   );
 }
 

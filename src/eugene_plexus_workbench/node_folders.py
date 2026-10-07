@@ -80,6 +80,16 @@ def parse_site_server_id(ident: str) -> tuple[str, str]:
     return site, server
 
 
+class HeldAtTheMachine(Exception):
+    """A job site holds a change until its owner approves it at the machine
+    with their own key (J14a, J50). Answered to the page as 202, not as a
+    refusal: nothing changed yet, and the message says where to approve it."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
 class NodeFolders:
     def __init__(self, store: Store, provider: Provider, http: httpx.AsyncClient) -> None:
         self.store, self.provider, self.http = store, provider, http
@@ -159,6 +169,17 @@ class NodeFolders:
             raise FolderError("Workbench could not reach Eugene. Check its connection.") from None
         if response.status_code == 204:
             return None
+        if response.status_code == 202:
+            # The site holds the change until its owner approves it at the
+            # machine with their own key (J14a). Not a refusal.
+            try:
+                held = response.json()
+            except ValueError:
+                held = None
+            message = held.get("message") if isinstance(held, dict) else None
+            raise HeldAtTheMachine(
+                str(message or "The machine holds this change until you approve it there.")[:1024]
+            )
         if response.status_code not in (200, 201):
             fallback = (
                 "This Eugene version does not support job sites yet. Update Eugene."
