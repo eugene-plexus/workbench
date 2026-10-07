@@ -22,6 +22,7 @@ import {
   signEnvelope,
 } from "../lib/passkeys";
 import { CopyButton } from "./CopyButton";
+import { Workspaces } from "./Workspaces";
 
 const problemOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
@@ -96,9 +97,27 @@ export function JobSites({ onClose, sub }: { onClose: () => void; sub?: string }
         </p>
       )}
       {data?.sites.length === 0 && <p className="text-sm">You have no job sites yet.</p>}
-      {data?.sites.map((site) => (
-        <Site key={site.id} site={site} sub={sub} busy={busy} act={act} passkeys={data.passkeys} />
-      ))}
+      {data?.sites.map((site) =>
+        site.role === "linked" ? (
+          <LinkedSite
+            key={site.id}
+            site={site}
+            sub={sub}
+            busy={busy}
+            act={act}
+            passkeys={data.passkeys}
+          />
+        ) : (
+          <Site
+            key={site.id}
+            site={site}
+            sub={sub}
+            busy={busy}
+            act={act}
+            passkeys={data.passkeys}
+          />
+        ),
+      )}
       <section
         aria-label="Add a job site"
         className="flex flex-col gap-3 rounded-plexus border border-line p-3 text-sm"
@@ -274,6 +293,51 @@ function Linking({
   );
 }
 
+/** A machine you linked your own account on and do not own (2b.3b): only
+ * your own there -- your link, your keys, your workspaces and your lines of
+ * its audit log. Its owner sees none of your workspaces. */
+function LinkedSite({
+  site,
+  sub,
+  busy,
+  act,
+  passkeys,
+}: {
+  site: JobSite;
+  sub?: string;
+  busy: boolean;
+  act: Act;
+  passkeys?: PasskeyContext;
+}) {
+  const base = `/api/job-sites/${encodeURIComponent(site.id)}`;
+  return (
+    <article
+      className="flex flex-col gap-3 rounded-plexus border border-line p-3 text-sm"
+      data-testid={`job-site-${site.id}`}
+    >
+      <h2 className="font-semibold">{site.label} · linked</h2>
+      <p>
+        {site.online ? "Online" : "Offline"} · last contact {since(site.lastContactAt)}
+        {!site.ready && site.reason ? ` · ${site.reason}` : ""}
+      </p>
+      <Linking site={site} sub={sub} base={base} busy={busy} act={act} />
+      <Signing site={site} own />
+      {site.signing?.passkeys && site.signing.people && passkeys && (
+        <Passkeys site={site} base={base} context={passkeys} busy={busy} act={act} />
+      )}
+      {site.signing?.people ? (
+        <Workspaces site={site} base={base} busy={busy} act={act} owner={false} />
+      ) : (
+        <p className="text-muted">
+          Eugene on {site.label} keeps only its owner&apos;s folders. Once it is updated, you can
+          keep workspaces of your own there.
+        </p>
+      )}
+      <Audit base={base} label={site.label} />
+    </article>
+  );
+}
+
 function Site({
   site,
   sub,
@@ -307,17 +371,20 @@ function Site({
       {site.signing?.passkeys && passkeys && (
         <Passkeys site={site} base={base} context={passkeys} busy={busy} act={act} />
       )}
-      {site.folders.map((folder) => (
-        <Folder
-          key={folder.id}
-          base={base}
-          folder={folder}
-          busy={busy}
-          act={act}
-          solo={site.sharing === false}
-        />
-      ))}
+      {site.signing?.people && <Workspaces site={site} base={base} busy={busy} act={act} owner />}
+      {!site.signing?.people &&
+        site.folders.map((folder) => (
+          <Folder
+            key={folder.id}
+            base={base}
+            folder={folder}
+            busy={busy}
+            act={act}
+            solo={site.sharing === false}
+          />
+        ))}
       <form
+        hidden={Boolean(site.signing?.people)}
         aria-label={`Add a folder on ${site.label}`}
         className="flex flex-wrap items-end gap-3"
         onSubmit={(event) => {
@@ -410,13 +477,29 @@ function Site({
   );
 }
 
-/** Whether the machine checks its owner's changes with the owner's own key
- * (J14a), in words: no tool runs there until it does. */
-function Signing({ site }: { site: JobSite }) {
+/** Whether the machine checks your changes with your own key (J14a), in
+ * words: nothing runs there under your rules until it does. `own`: a site you
+ * are linked to, not its owner (2b.3b), where only your own rules are yours. */
+function Signing({ site, own = false }: { site: JobSite; own?: boolean }) {
   const signing = site.signing;
   if (!signing) return null;
   const page = signing.approvePage;
   const there = page ? `On ${site.label}, open ${page}` : null;
+  if (own) {
+    const state = signing.state;
+    return (
+      <p data-testid={`signing-${site.id}`}>
+        {state === "unsigned"
+          ? `Your workspaces on ${site.label} wait until you add your own key there.${there ? ` ${there} and make a key.` : ""}`
+          : state === "unconfirmed"
+            ? `Nothing of yours runs on ${site.label} until you approve your rules with your key.`
+            : `Your changes on ${site.label} wait for your approval with your own key.`}
+        {signing.held > 0
+          ? ` ${signing.held} ${signing.held === 1 ? "change is" : "changes are"} waiting.`
+          : ""}
+      </p>
+    );
+  }
   if (signing.state === "unsigned") {
     return (
       <p data-testid={`signing-${site.id}`}>
@@ -871,11 +954,12 @@ function Folder({
 }
 
 const NO = "no";
-const YES = "yes";
+const ASK = "ask" as const;
+const ALLOW = "allow" as const;
 
 /** A local server its administrator added at the machine: on or off, and who
- * may use which of its tools. A tool that can change things is a standing
- * pre-approval or nothing. */
+ * may use which of its tools, each without asking or asked about each time
+ * (J78). A tool that can change things is asked about unless you say not. */
 function LocalServer({
   base,
   entry,
@@ -891,7 +975,21 @@ function LocalServer({
 }) {
   const { server } = entry;
   const [people, setPeople] = useState(() =>
-    entry.people.map((p) => ({ name: p.name, tools: new Set(p.tools.map((t) => t.name)) })),
+    entry.people.map((p) => ({
+      name: p.name,
+      tools: new Map(
+        p.tools.map(
+          (t) =>
+            [
+              t.name,
+              t.decision ??
+                (t.standing || !server.tools.find((x) => x.name === t.name)?.destructive
+                  ? ALLOW
+                  : ASK),
+            ] as const,
+        ),
+      ),
+    })),
   );
   const [adding, setAdding] = useState("");
   const path = `${base}/servers/${encodeURIComponent(server.id)}`;
@@ -918,7 +1016,7 @@ function LocalServer({
       {server.reason && <p className="text-muted">{server.reason}</p>}
       {server.enabled && server.tools.length > 0 && (
         <>
-          <p>Who may use which tools. A tool that can change things runs without asking you.</p>
+          <p>Who may use which tools, and whether each is asked about each time.</p>
           {people.map((person, index) => (
             <fieldset key={person.name} className="flex flex-wrap items-center gap-3">
               <legend>{person.name}</legend>
@@ -926,14 +1024,14 @@ function LocalServer({
                 <label key={tool.name} className="flex items-center gap-1">
                   <select
                     aria-label={`${person.name} may use ${tool.name}`}
-                    value={person.tools.has(tool.name) ? YES : NO}
+                    value={person.tools.get(tool.name) ?? NO}
                     onChange={(event) =>
                       setPeople((old) =>
                         old.map((p, i) => {
                           if (i !== index) return p;
-                          const tools = new Set(p.tools);
-                          if (event.target.value === YES) tools.add(tool.name);
-                          else tools.delete(tool.name);
+                          const tools = new Map(p.tools);
+                          if (event.target.value === NO) tools.delete(tool.name);
+                          else tools.set(tool.name, event.target.value === ALLOW ? ALLOW : ASK);
                           return { ...p, tools };
                         }),
                       )
@@ -941,9 +1039,8 @@ function LocalServer({
                     className="rounded-plexus border border-line bg-soft px-1"
                   >
                     <option value={NO}>No</option>
-                    <option value={YES}>
-                      {tool.destructive ? "Yes, without asking you" : "Yes"}
-                    </option>
+                    <option value={ASK}>Yes, asking each time</option>
+                    <option value={ALLOW}>Yes, without asking</option>
                   </select>
                   {tool.title || tool.name}
                 </label>
@@ -973,7 +1070,10 @@ function LocalServer({
                 onClick={() => {
                   const name = adding.trim();
                   if (name && !people.some((p) => p.name.toLowerCase() === name.toLowerCase())) {
-                    setPeople((old) => [...old, { name, tools: new Set<string>() }]);
+                    setPeople((old) => [
+                      ...old,
+                      { name, tools: new Map<string, "allow" | "ask">() },
+                    ]);
                   }
                   setAdding("");
                 }}
@@ -992,7 +1092,7 @@ function LocalServer({
                     name: p.name,
                     tools: server.tools
                       .filter((t) => p.tools.has(t.name))
-                      .map((t) => ({ name: t.name, standing: t.destructive })),
+                      .map((t) => ({ name: t.name, decision: p.tools.get(t.name) })),
                   })),
                 }),
               )

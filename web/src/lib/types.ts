@@ -52,6 +52,11 @@ export interface ToolCall {
   site?: string | null;
   label?: string | null;
   mode?: "production" | "dev";
+  /** Asked about here; false when the site's rules allow it without asking
+   * (2b.3b, J70). Absent from a call made before then: it was asked. */
+  ask?: boolean;
+  /** The site gave rules for it, so it is told the person's word (J72). */
+  rules?: boolean;
 }
 
 interface ServerIdentity {
@@ -156,10 +161,41 @@ export interface Me {
   installModeNotice?: boolean;
 }
 
+/** What a rule says of a group of tools (J70). */
+export type Decision = "allow" | "ask" | "deny";
+
+export interface SiteRules {
+  read: Decision;
+  change: Decision;
+}
+
+export interface WorkspacePerson {
+  person: string;
+  name: string;
+  read: Decision;
+  change: Decision;
+}
+
+/** One of a person's own workspaces, by id and name (J76). */
+export interface JobSiteWorkspace {
+  id: string;
+  name: string;
+  writable: boolean;
+  rules: SiteRules;
+  people: WorkspacePerson[];
+}
+
+/** The same, read live from the machine: with its path and hidden patterns. */
+export interface JobSiteWorkspaceDetail extends JobSiteWorkspace {
+  path: string;
+  deny: string[];
+}
+
 export interface JobSiteFolder {
   id: string;
   name: string;
-  path: string;
+  /** Absent since 2b.3b: Eugene keeps no paths (J76). */
+  path?: string | null;
   writable: boolean;
   people: { person: string; name: string; writable: boolean }[];
 }
@@ -185,7 +221,11 @@ export interface SiteServer {
 
 export interface JobSiteServer {
   server: SiteServer;
-  people: { person: string; name: string; tools: { name: string; standing?: boolean }[] }[];
+  people: {
+    person: string;
+    name: string;
+    tools: { name: string; decision?: "allow" | "ask" | null; standing?: boolean }[];
+  }[];
 }
 
 export interface SiteAuditEntry {
@@ -205,6 +245,11 @@ export interface SiteAuditEntry {
 export interface JobSite {
   /** The site's own id (`s-` and 26 characters), never its label. */
   id: string;
+  /** `owner`: yours. `linked`: you linked your account on it (2b.3b), and
+   * see only your own there. Absent from an older Eugene: `owner`. */
+  role?: "owner" | "linked";
+  /** Your own workspaces there (2b.3b), by id and name. */
+  workspaces?: JobSiteWorkspace[];
   /** The machine's name; not unique. */
   label: string;
   hostNode?: string | null;
@@ -239,6 +284,8 @@ export interface SiteSigning {
   approvePage?: string | null;
   /** The machine takes a passkey from here, paired with a code it shows (J14a.3). */
   passkeys?: boolean;
+  /** The machine keeps each linked person's own workspaces and keys (2b.3b). */
+  people?: boolean;
 }
 
 /** What this Workbench needs to make a passkey (J14a.3): its relying party,
@@ -288,6 +335,10 @@ export interface SiteLink {
   reason?: string | null;
   /** How many keys this person has pinned at the machine. */
   keys?: number;
+  /** The state of this person's own rules there (2b.3b). */
+  signing?: "unsigned" | "unconfirmed" | "signed" | null;
+  /** Their changes waiting for their own key. */
+  held?: number;
 }
 
 /** What Eugene says about whose account a person's calls run as on a machine.

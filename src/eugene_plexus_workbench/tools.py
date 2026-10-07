@@ -33,6 +33,9 @@ from .settings import Settings
 from .store import Person, Store
 
 MAX_TOOLS = 64
+#: Where a job site's tool listing says a call must be asked about (2b.3b):
+#: the workspaces, for its file server; whether, for a local server's tool.
+ASK_META = "eugene-plexus/ask"
 MAX_ARGUMENTS = 16_384
 MAX_RESULT = 65_536
 MAX_RESPONSE = 2_097_152
@@ -374,7 +377,27 @@ class Tools:
                     schema = _narrowed(schema, names)
                     if schema is None:
                         continue
-                session.add(server, None, tool["name"], schema, str(tool.get("description") or ""))
+                session.add(
+                    server,
+                    None,
+                    tool["name"],
+                    schema,
+                    str(tool.get("description") or ""),
+                    ask=_ask_rule(tool),
+                )
+
+
+def _ask_rule(tool: dict[str, Any]) -> frozenset[str] | bool | None:
+    """Where the site says a call to `tool` must be asked about (2b.3b):
+    the workspace names, or a yes or no; None from a site that says nothing,
+    one older than 2b.3b, where every call is asked about as before."""
+    meta = tool.get("_meta")
+    rule = meta.get(ASK_META) if isinstance(meta, dict) else None
+    if isinstance(rule, bool):
+        return rule
+    if isinstance(rule, list) and all(isinstance(name, str) for name in rule):
+        return frozenset(rule)
+    return None
 
 
 def _narrowed(schema: dict[str, Any], names: set[str]) -> dict[str, Any] | None:
@@ -427,6 +450,9 @@ class ToolSession:
         self.person = person
         self.definitions: list[dict[str, Any]] = []
         self.tools: dict[str, tuple[dict[str, Any], Any, str, dict[str, Any]]] = {}
+        #: Each job-site tool's rule for asking (`_ask_rule`); absent for every
+        #: other tool, which is asked about each time.
+        self.asks: dict[str, frozenset[str] | bool | None] = {}
 
     def add(
         self,
@@ -435,6 +461,8 @@ class ToolSession:
         tool: str,
         schema: dict[str, Any],
         description: str,
+        *,
+        ask: frozenset[str] | bool | None = None,
     ) -> None:
         files = server["transport"] == "folder" or server.get("server") == SITE_FILES
         prefix = "files_" if files else "mcp_"
@@ -444,6 +472,7 @@ class ToolSession:
                 "The selected connections offer too many or duplicate tools. Select fewer."
             )
         self.tools[name] = (server, client, tool, schema)
+        self.asks[name] = ask
         self.definitions.append(
             {
                 "type": "function",
@@ -473,6 +502,15 @@ class ToolSession:
             raise ToolError(
                 f"The model sent invalid arguments for {tool}. No tool ran. Try another model."
             ) from None
+        rule = self.asks.get(name)
+        if isinstance(rule, bool):
+            ask = rule
+        elif isinstance(rule, frozenset):
+            ask = arguments.get("folder") in rule
+        else:
+            # Workbench's own folders (J75), other MCP servers, and a job site
+            # that says nothing: every call is asked about, as before.
+            ask = True
         return {
             "id": call["id"],
             "name": name,
@@ -482,6 +520,10 @@ class ToolSession:
             "arguments": arguments,
             "status": "pending",
             "result": None,
+            # Asked about here, or run under the site's `allow` (J70, J71).
+            "ask": ask,
+            # The site gave rules, so it is told the person's word (J72).
+            "rules": rule is not None,
             **(
                 {
                     "jobSite": True,
@@ -501,7 +543,15 @@ class ToolSession:
                 if self.node_folders is None:
                     raise folder_io.FolderError("Machines' tools are unavailable.")
                 text, is_error, meta = await self.node_folders.call_tool(
-                    self.person, server["site"], server["server"], tool, call["arguments"]
+                    self.person,
+                    server["site"],
+                    server["server"],
+                    tool,
+                    call["arguments"],
+                    # Only an approved call is ever executed when it asks;
+                    # a site with no rules is never told (an older root
+                    # would refuse the field).
+                    asked=bool(call.get("ask")) and bool(call.get("rules")),
                 )
                 if meta["jobSite"]:
                     # Kept with the result: whether the owner may ever read it

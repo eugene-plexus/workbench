@@ -167,7 +167,12 @@ def install(server: FastAPI, fake: Any, state: dict[str, Any]) -> None:
         readable = [f["name"] for f in folders]
         writable = [f["name"] for f in folders if f["people"][sub] and f["writable"]]
         if method == "tools/list":
-            return answer({"result": {"tools": file_tools(readable, writable)}})
+            tools = file_tools(readable, writable)
+            if "asks" in state:
+                # A site since 2b.3b says where each tool must be asked about.
+                for tool in tools:
+                    tool["_meta"] = {"eugene-plexus/ask": state["asks"].get(tool["name"], [])}
+            return answer({"result": {"tools": tools}})
         state["calls"].append(body)
         params = body["request"]["params"]
         args = dict(params.get("arguments") or {})

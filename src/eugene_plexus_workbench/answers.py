@@ -34,6 +34,11 @@ _SAVE_EVERY = 1.0
 #: A watching tab that falls this far behind is dropped; it reloads.
 _QUEUE_DEPTH = 1000
 _APPROVAL_SECONDS = 1800
+#: An answer's limits (J71): calls the rules allow do not count against the
+#: calls a person is asked about, and Stop ends an answer at any time.
+MAX_CALLS = 200
+MAX_ROUNDS = 50
+MAX_ASKED = 16
 
 
 def _tool_problem(exc: BaseException) -> str:
@@ -348,24 +353,30 @@ class Answers:
             if not session.definitions:
                 raise ToolError("The selected servers offer no tools. Check them in Tools.")
             body["tools"] = session.definitions
-            count = 0
+            count = asked = 0
             seen_ids: set[str] = set()
-            for _ in range(8):
+            for _ in range(MAX_ROUNDS):
                 start = len(m.content)
                 reasoning_start = len(m.reasoning)
                 calls = await self._stream(running, body)
                 if not calls:
                     return
                 count += len(calls)
-                if count > 16:
+                if count > MAX_CALLS:
                     raise ToolError(
-                        "This answer reached sixteen tool calls. Ask for a smaller task."
+                        f"This answer reached {MAX_CALLS} tool calls. Ask for a smaller task."
                     )
                 if any(call["id"] in seen_ids for call in calls):
                     raise ToolError("The model reused a tool-call ID. Try another model.")
                 seen_ids.update(call["id"] for call in calls)
                 # Validate the whole round before offering any action.
                 steps = [session.prepare(call) for call in calls]
+                asked += sum(1 for step in steps if step["ask"])
+                if asked > MAX_ASKED:
+                    raise ToolError(
+                        f"This answer reached {MAX_ASKED} calls that need your approval. Ask "
+                        "for a smaller task."
+                    )
                 turn: dict[str, Any] = {
                     "assistant": {
                         "role": "assistant",
@@ -379,20 +390,29 @@ class Answers:
                     turn["assistant"]["reasoning_content"] = m.reasoning[reasoning_start:]
                 m.answer_from, m.reasoning_from = len(m.content), len(m.reasoning)
                 for step in steps:
-                    running.approvals[step["id"]] = asyncio.get_running_loop().create_future()
+                    if step["ask"]:
+                        running.approvals[step["id"]] = asyncio.get_running_loop().create_future()
                 deadline = time.perf_counter() + _APPROVAL_SECONDS
-                running.progress = {"stage": "tool", "tool": "mcp", "phase": "approval"}
+                if running.approvals:
+                    running.progress = {"stage": "tool", "tool": "mcp", "phase": "approval"}
                 await self._checkpoint(running)
                 for step in steps:
-                    try:
-                        allowed = await asyncio.wait_for(
-                            running.approvals[step["id"]], max(0, deadline - time.perf_counter())
-                        )
-                    except TimeoutError:
-                        allowed = False
-                        step["result"] = "Approval expired after 30 minutes. This call did not run."
-                    finally:
-                        running.approvals.pop(step["id"], None)
+                    if not step["ask"]:
+                        # The site's rules allow it: it runs without asking (J70).
+                        allowed = True
+                    else:
+                        try:
+                            allowed = await asyncio.wait_for(
+                                running.approvals[step["id"]],
+                                max(0, deadline - time.perf_counter()),
+                            )
+                        except TimeoutError:
+                            allowed = False
+                            step["result"] = (
+                                "Approval expired after 30 minutes. This call did not run."
+                            )
+                        finally:
+                            running.approvals.pop(step["id"], None)
                     if allowed:
                         step["status"] = "running"
                         running.progress = {
@@ -419,7 +439,9 @@ class Answers:
                     # after a client tool must not force it again each round.
                     body.pop("web_search_options", None)
                 running.progress = None
-            raise ToolError("This answer reached eight tool rounds. Ask for a smaller task.")
+            raise ToolError(
+                f"This answer reached {MAX_ROUNDS} tool rounds. Ask for a smaller task."
+            )
 
     def _take(self, running: Running, chunk: dict[str, Any]) -> None:
         """One chunk of the gateway's stream into the answer, and out to every

@@ -10,6 +10,14 @@ Eugene's owner in for dev mode or not (J6e); and reads its audit log (J8).
 Eugene relays each change to the machine, whose own list is final (J6b).
 Workbench holds no authority of its own here and passes the answers through.
 
+**Each person's own** (2b.3b, `job-sites-own-enrollment.md` §3.3). A person
+linked to a machine they do not own keeps workspaces of their own there: they
+add one by its path on the machine, set their rules in it (allow, ask or deny
+for reading and for changing files, and paths to hide), and approve each
+change with their own key. The machine's owner shares their own workspaces,
+each person with rules of their own there. Paths are read live from the
+machine; Eugene keeps none (J76).
+
 **Passkeys** (J14a.3, `person-held-keys.md` §4.2, §12.5). At its HTTPS address
 Workbench is a WebAuthn relying party, and a person may pair a passkey with
 their machine and approve what it holds from here. The browser makes the
@@ -22,7 +30,7 @@ HTTPS address there is no relying party, so no passkey: the list says so.
 from __future__ import annotations
 
 import re
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import quote, urlsplit
 
 from fastapi import APIRouter, Request, Response, status
@@ -90,6 +98,8 @@ class People(BaseModel):
 class ToolGrant(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=128)
+    #: `allow` runs without asking, `ask` asks the person each time (J78).
+    decision: Literal["allow", "ask"] | None = None
     standing: StrictBool = False
 
 
@@ -104,6 +114,52 @@ class PersonTools(BaseModel):
 class Access(BaseModel):
     model_config = ConfigDict(extra="forbid")
     people: list[PersonTools] = Field(max_length=256)
+
+
+Decision = Literal["allow", "ask", "deny"]
+
+
+class Rules(BaseModel):
+    """`SiteRules` (J70): reading and searching, and changing files."""
+
+    model_config = ConfigDict(extra="forbid")
+    read: Decision
+    change: Decision
+
+
+#: `.gitignore`'s syntax without `!` (`SiteDenyPattern`).
+DenyPattern = Annotated[str, Field(min_length=1, max_length=256, pattern=r"^[^!\x00-\x1f]")]
+
+
+class WorkspaceCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=80)
+    path: str = Field(min_length=1, max_length=4096)
+    writable: StrictBool = True
+    rules: Rules | None = None
+    deny: list[DenyPattern] = Field(default_factory=list, max_length=64)
+
+    _clean = field_validator("name", "path")(classmethod(lambda cls, v: _clean(v)))
+
+
+class RulesSet(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    rules: Rules
+    deny: list[DenyPattern] = Field(max_length=64)
+
+
+class Share(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=256)
+    read: Decision
+    change: Decision
+
+    _clean = field_validator("name")(classmethod(lambda cls, v: _clean(v)))
+
+
+class Shares(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    people: list[Share] = Field(max_length=256)
 
 
 class LinkRemove(BaseModel):
@@ -134,6 +190,7 @@ _B64URL = r"^[A-Za-z0-9_-]+$"
 _KEY = r"^[a-f0-9]{32}$"
 _HELD = re.compile(r"^[a-z0-9]{1,32}$")
 _PASSKEY = re.compile(r"^[a-f0-9]{32}$")
+_WORKSPACE = re.compile(r"^[a-f0-9]{32}$")
 
 
 class PasskeyPair(BaseModel):
@@ -177,6 +234,12 @@ def _held(ident: str) -> str:
 def _passkey(ident: str) -> str:
     if not _PASSKEY.fullmatch(ident):
         raise _problem(status.HTTP_404_NOT_FOUND, "There is no such passkey.")
+    return ident
+
+
+def _workspace(ident: str) -> str:
+    if not _WORKSPACE.fullmatch(ident):
+        raise _problem(status.HTTP_404_NOT_FOUND, "There is no such workspace.")
     return ident
 
 
@@ -294,12 +357,61 @@ async def people(request: Request, site: str, folder_id: str, body: People) -> d
     return answer or {}
 
 
+@router.post("/api/job-sites/{site}/workspaces", status_code=status.HTTP_201_CREATED)
+async def add_workspace(request: Request, site: str, body: WorkspaceCreate) -> dict[str, Any]:
+    """A workspace of your own: your own account on the machine opens it.
+    The machine holds it until you approve it with your own key (J68)."""
+    payload: dict[str, Any] = {"name": body.name, "path": body.path, "writable": body.writable}
+    if body.rules is not None:
+        payload["rules"] = body.rules.model_dump()
+    if body.deny:
+        payload["deny"] = body.deny
+    answer = await _call(request, f"job-sites/{_site(site)}/workspaces", payload)
+    return answer or {}
+
+
+@router.post("/api/job-sites/{site}/workspaces/list")
+async def list_workspaces(request: Request, site: str) -> dict[str, Any]:
+    """Your workspaces there with their paths, read live (J76)."""
+    answer = await _call(request, f"job-sites/{_site(site)}/workspaces/list", {})
+    return answer or {"workspaces": []}
+
+
+@router.post("/api/job-sites/{site}/workspaces/{ident}/remove")
+async def remove_workspace(request: Request, site: str, ident: str) -> Response:
+    await _call(request, f"job-sites/{_site(site)}/workspaces/{_workspace(ident)}/remove", {})
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/api/job-sites/{site}/workspaces/{ident}/rules")
+async def workspace_rules(
+    request: Request, site: str, ident: str, body: RulesSet
+) -> dict[str, Any]:
+    answer = await _call(
+        request,
+        f"job-sites/{_site(site)}/workspaces/{_workspace(ident)}/rules",
+        {"rules": body.rules.model_dump(), "deny": body.deny},
+    )
+    return answer or {}
+
+
+@router.post("/api/job-sites/{site}/workspaces/{ident}/people")
+async def share_workspace(request: Request, site: str, ident: str, body: Shares) -> dict[str, Any]:
+    """The machine's owner shares one of their workspaces (J69)."""
+    answer = await _call(
+        request,
+        f"job-sites/{_site(site)}/workspaces/{_workspace(ident)}/people",
+        {"people": [p.model_dump() for p in body.people]},
+    )
+    return answer or {}
+
+
 @router.post("/api/job-sites/{site}/servers/{server}/access")
 async def access(request: Request, site: str, server: str, body: Access) -> dict[str, Any]:
     answer = await _call(
         request,
         f"job-sites/{_site(site)}/servers/{_server(server)}/access",
-        {"people": [p.model_dump() for p in body.people]},
+        {"people": [p.model_dump(exclude_none=True) for p in body.people]},
     )
     return answer or {}
 
