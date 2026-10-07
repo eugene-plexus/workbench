@@ -107,3 +107,17 @@ it("renders tool output as text without fetching images or running HTML", () => 
   expect(screen.getByText(/Result unknown/)).toBeInTheDocument();
   expect(screen.queryByRole("button")).toBeNull();
 });
+
+it("runs a call the site's rules allow without offering to approve it (J70)", () => {
+  const allowed: Message = {
+    ...message,
+    toolRounds: [
+      { calls: [{ ...message.toolRounds![0]!.calls[0]!, tool: "read_text", ask: false }] },
+    ],
+  };
+  render(
+    <ToolCalls chatId="chat" message={allowed} readOnly={false} onChanged={() => undefined} />,
+  );
+  expect(screen.getByRole("status")).toHaveTextContent("Allowed by the rules");
+  expect(screen.queryByRole("button", { name: "Approve call" })).toBeNull();
+});

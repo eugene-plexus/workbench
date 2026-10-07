@@ -280,6 +280,9 @@ class FakeGateway:
     release: asyncio.Event | None = None
     tool_arguments: str = '{"text":"hello"}'
     tool_name: str | None = None
+    #: How many rounds of tool calls an answer makes, and how many a round.
+    tool_rounds: int = 1
+    tools_per_round: int = 1
     repetition_modes: list[str | None] = field(default_factory=list)
     search: dict[str, Any] = field(default_factory=lambda: {"available": True, "reason": None})
 
@@ -337,7 +340,11 @@ class FakeGateway:
                 )
 
             async def frames() -> AsyncIterator[str]:
-                if self.mode.startswith("tools") and body["messages"][-1]["role"] != "tool":
+                messages = body["messages"]
+                asked_at = max(i for i, m in enumerate(messages) if m["role"] == "user")
+                answered = sum(1 for m in messages[asked_at:] if m["role"] == "tool")
+                wanted = self.tool_rounds * self.tools_per_round
+                if self.mode.startswith("tools") and answered < wanted:
                     name = body["tools"][0]["function"]["name"]
                     if self.tool_name:
                         name = next(
@@ -348,28 +355,32 @@ class FakeGateway:
                     if self.mode == "tools-unknown":
                         name = "not_offered"
                     yield chunk({"content": "I will use the tool."})
-                    yield chunk(
-                        {
-                            "tool_calls": [
-                                {
-                                    "index": 0,
-                                    "id": "call-1",
-                                    "type": "function",
-                                    "function": {
-                                        "name": name,
-                                        "arguments": self.tool_arguments[:5],
-                                    },
-                                }
-                            ]
-                        }
-                    )
-                    yield chunk(
-                        {
-                            "tool_calls": [
-                                {"index": 0, "function": {"arguments": self.tool_arguments[5:]}}
-                            ]
-                        }
-                    )
+                    for index in range(self.tools_per_round):
+                        yield chunk(
+                            {
+                                "tool_calls": [
+                                    {
+                                        "index": index,
+                                        "id": f"call-{answered + index + 1}",
+                                        "type": "function",
+                                        "function": {
+                                            "name": name,
+                                            "arguments": self.tool_arguments[:5],
+                                        },
+                                    }
+                                ]
+                            }
+                        )
+                        yield chunk(
+                            {
+                                "tool_calls": [
+                                    {
+                                        "index": index,
+                                        "function": {"arguments": self.tool_arguments[5:]},
+                                    }
+                                ]
+                            }
+                        )
                     yield chunk(
                         {},
                         finish="length" if self.mode == "tools-cut" else "tool_calls",

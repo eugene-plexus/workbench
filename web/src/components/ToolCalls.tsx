@@ -55,9 +55,11 @@ export function ToolCalls({
             {call.serverName} · {call.tool}
           </h3>
           <p role="status" className="text-muted">
-            {labels[call.status]}
+            {call.status === "pending" && call.ask === false
+              ? "Allowed by the rules: runs without asking"
+              : labels[call.status]}
           </p>
-          <details open={call.status === "pending"}>
+          <details open={call.status === "pending" && call.ask !== false}>
             <summary className="cursor-pointer">Arguments for this call</summary>
             <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all py-2">
               {JSON.stringify(call.arguments, null, 2)}
@@ -71,24 +73,27 @@ export function ToolCalls({
               </pre>
             </details>
           )}
-          {call.status === "pending" && message.status === "running" && !readOnly && (
-            <div className="mt-2 flex gap-3">
-              <button
-                disabled={sent.has(call.id)}
-                onClick={() => void decide(call, true)}
-                className="rounded-plexus bg-accent px-3 py-1 text-on-accent"
-              >
-                Approve call
-              </button>
-              <button
-                disabled={sent.has(call.id)}
-                onClick={() => void decide(call, false)}
-                className="px-3 py-1"
-              >
-                Decline
-              </button>
-            </div>
-          )}
+          {call.status === "pending" &&
+            call.ask !== false &&
+            message.status === "running" &&
+            !readOnly && (
+              <div className="mt-2 flex gap-3">
+                <button
+                  disabled={sent.has(call.id)}
+                  onClick={() => void decide(call, true)}
+                  className="rounded-plexus bg-accent px-3 py-1 text-on-accent"
+                >
+                  Approve call
+                </button>
+                <button
+                  disabled={sent.has(call.id)}
+                  onClick={() => void decide(call, false)}
+                  className="px-3 py-1"
+                >
+                  Decline
+                </button>
+              </div>
+            )}
         </article>
       ))}
       {problem && (

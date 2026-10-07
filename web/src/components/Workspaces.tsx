@@ -1,0 +1,412 @@
+import { useEffect, useState } from "react";
+
+import { post } from "../lib/api";
+import type { Decision, JobSite, JobSiteWorkspace, JobSiteWorkspaceDetail } from "../lib/types";
+
+type Act = (work: () => Promise<unknown>) => Promise<void>;
+
+const problemOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+/** The words for each decision (J70), as a person reads them. */
+export const DECISIONS: { value: Decision; label: string }[] = [
+  { value: "allow", label: "Without asking" },
+  { value: "ask", label: "Ask me each time" },
+  { value: "deny", label: "Never" },
+];
+
+/** One deny pattern a line, blanks dropped, each once (`SiteDenyPattern`). */
+export function parsePatterns(text: string): string[] {
+  return [
+    ...new Set(
+      text
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean),
+    ),
+  ];
+}
+
+/** Why a pattern list will be refused, or null: patterns only hide. */
+export function patternProblem(patterns: string[]): string | null {
+  if (patterns.length > 64) return "Use at most 64 patterns.";
+  const bad = patterns.find((p) => p.startsWith("!") || p.length > 256);
+  return bad ? `${bad} cannot be used: a pattern only hides, and is at most 256 characters.` : null;
+}
+
+function DecisionSelect({
+  label,
+  value,
+  onChange,
+  only,
+}: {
+  label: string;
+  value: Decision;
+  onChange: (value: Decision) => void;
+  only?: Decision;
+}) {
+  return (
+    <label className="flex items-center gap-2">
+      <span className="min-w-28">{label}</span>
+      <select
+        aria-label={label}
+        value={only ?? value}
+        disabled={only !== undefined}
+        onChange={(event) => onChange(event.target.value as Decision)}
+        className="rounded-plexus border border-line bg-soft px-2 py-1"
+      >
+        {DECISIONS.map((d) => (
+          <option key={d.value} value={d.value}>
+            {d.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+/**
+ * Your workspaces on a machine (2b.3b, J67-J70): folders your own account
+ * there opens, each with your rules, and paths no tool may touch. A change
+ * that gives more waits for your own key on the machine (J68). For the
+ * machine's owner, whom each is shared with, and their rules there (J69).
+ */
+export function Workspaces({
+  site,
+  base,
+  busy,
+  act,
+  owner,
+}: {
+  site: JobSite;
+  base: string;
+  busy: boolean;
+  act: Act;
+  owner: boolean;
+}) {
+  const [details, setDetails] = useState<Map<string, JobSiteWorkspaceDetail> | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+  const workspaces = site.workspaces ?? [];
+  const ids = workspaces.map((w) => w.id).join(",");
+
+  // Paths and hidden patterns are read live from the machine, never kept by
+  // Eugene (J76): once each time the set of workspaces changes.
+  useEffect(() => {
+    if (!ids) return;
+    let current = true;
+    setProblem(null);
+    post<{ workspaces: JobSiteWorkspaceDetail[] }>(`${base}/workspaces/list`)
+      .then((listed) => {
+        if (current) setDetails(new Map(listed.workspaces.map((w) => [w.id, w])));
+      })
+      .catch((error: unknown) => {
+        if (current) setProblem(problemOf(error));
+      });
+    return () => {
+      current = false;
+    };
+  }, [base, ids]);
+
+  return (
+    <section
+      aria-label={`Your workspaces on ${site.label}`}
+      className="flex flex-col gap-2"
+      data-testid={`workspaces-${site.id}`}
+    >
+      <h3 className="font-semibold">Your workspaces on {site.label}</h3>
+      <p className="text-muted">
+        Folders your own account on {site.label} opens. Your rules say what Workbench may do in each
+        without asking you; paths you hide are left out of every listing and search.
+      </p>
+      {workspaces.length === 0 && <p className="text-muted">None yet.</p>}
+      {problem && (
+        <p role="alert" className="text-error">
+          {problem}
+        </p>
+      )}
+      {workspaces.map((workspace) => (
+        <Workspace
+          key={workspace.id}
+          base={base}
+          workspace={workspace}
+          detail={details?.get(workspace.id)}
+          busy={busy}
+          act={act}
+          owner={owner}
+          solo={site.sharing === false}
+        />
+      ))}
+      <AddWorkspace base={base} label={site.label} busy={busy} act={act} />
+    </section>
+  );
+}
+
+function Workspace({
+  base,
+  workspace,
+  detail,
+  busy,
+  act,
+  owner,
+  solo,
+}: {
+  base: string;
+  workspace: JobSiteWorkspace;
+  detail?: JobSiteWorkspaceDetail;
+  busy: boolean;
+  act: Act;
+  owner: boolean;
+  solo: boolean;
+}) {
+  const [read, setRead] = useState<Decision>(workspace.rules.read);
+  const [change, setChange] = useState<Decision>(workspace.rules.change);
+  const [patterns, setPatterns] = useState<string | null>(null);
+  const path = `${base}/workspaces/${encodeURIComponent(workspace.id)}`;
+  const deny = patterns ?? (detail?.deny ?? []).join("\n");
+  const parsed = parsePatterns(deny);
+  const bad = patternProblem(parsed);
+  return (
+    <div
+      className="flex flex-col gap-2 rounded-plexus border border-line p-2"
+      data-testid={`workspace-${workspace.id}`}
+    >
+      <h4 className="font-semibold">
+        {workspace.name}
+        {workspace.writable ? "" : " · read only"}
+      </h4>
+      {detail && <p className="break-all text-muted">{detail.path}</p>}
+      <DecisionSelect label="Read and search" value={read} onChange={setRead} />
+      <DecisionSelect
+        label="Change files"
+        value={change}
+        onChange={setChange}
+        only={workspace.writable ? undefined : "deny"}
+      />
+      <label className="flex flex-col gap-1">
+        Paths to hide, one a line (like .gitignore: .env, secrets/, *.pem)
+        <textarea
+          rows={3}
+          value={deny}
+          disabled={detail === undefined}
+          placeholder={detail ? "" : `Reading them from the machine…`}
+          onChange={(event) => setPatterns(event.target.value)}
+          className="rounded-plexus border border-line bg-transparent px-2 py-1 font-mono"
+          aria-label={`Paths to hide in ${workspace.name}`}
+        />
+      </label>
+      {bad && <p className="text-error">{bad}</p>}
+      <div className="flex flex-wrap gap-3">
+        <button
+          disabled={busy || Boolean(bad) || detail === undefined}
+          className="rounded-plexus border border-line px-3 py-1"
+          onClick={() =>
+            void act(() =>
+              post(`${path}/rules`, {
+                rules: { read, change: workspace.writable ? change : "deny" },
+                deny: parsed,
+              }),
+            )
+          }
+        >
+          Save rules
+        </button>
+        <button
+          disabled={busy}
+          className="text-error"
+          onClick={() => void act(() => post(`${path}/remove`))}
+        >
+          Remove workspace
+        </button>
+      </div>
+      {owner && !solo && <Sharing base={path} workspace={workspace} busy={busy} act={act} />}
+    </div>
+  );
+}
+
+/** Whom the machine's owner shares a workspace with, and each one's rules. */
+function Sharing({
+  base,
+  workspace,
+  busy,
+  act,
+}: {
+  base: string;
+  workspace: JobSiteWorkspace;
+  busy: boolean;
+  act: Act;
+}) {
+  const [people, setPeople] = useState(() =>
+    workspace.people.map((p) => ({ name: p.name, read: p.read, change: p.change })),
+  );
+  const [adding, setAdding] = useState("");
+  return (
+    <div className="flex flex-col gap-2" data-testid={`sharing-${workspace.id}`}>
+      <p>Shared with:</p>
+      {people.length === 0 && <p className="text-muted">Nobody.</p>}
+      {people.map((person, index) => (
+        <fieldset key={person.name} className="flex flex-wrap items-center gap-3">
+          <legend>{person.name}</legend>
+          <DecisionSelect
+            label={`${person.name} reads and searches`}
+            value={person.read}
+            onChange={(read) =>
+              setPeople((old) => old.map((p, i) => (i === index ? { ...p, read } : p)))
+            }
+          />
+          <DecisionSelect
+            label={`${person.name} changes files`}
+            value={person.change}
+            only={workspace.writable ? undefined : "deny"}
+            onChange={(change) =>
+              setPeople((old) => old.map((p, i) => (i === index ? { ...p, change } : p)))
+            }
+          />
+          <button
+            type="button"
+            className="text-error"
+            onClick={() => setPeople((old) => old.filter((_, i) => i !== index))}
+          >
+            Stop sharing with {person.name}
+          </button>
+        </fieldset>
+      ))}
+      <div className="flex flex-wrap items-end gap-2">
+        <label className="flex flex-col gap-1">
+          Share with (how they sign in)
+          <input
+            value={adding}
+            onChange={(event) => setAdding(event.target.value)}
+            className="rounded-plexus border border-line bg-transparent px-2 py-1"
+          />
+        </label>
+        <button
+          type="button"
+          className="rounded-plexus border border-line px-3 py-1"
+          onClick={() => {
+            const name = adding.trim();
+            if (name && !people.some((p) => p.name.toLowerCase() === name.toLowerCase())) {
+              setPeople((old) => [...old, { name, read: "allow", change: "deny" }]);
+            }
+            setAdding("");
+          }}
+        >
+          Add
+        </button>
+      </div>
+      <button
+        disabled={busy}
+        className="self-start rounded-plexus border border-line px-3 py-1"
+        onClick={() =>
+          void act(() =>
+            post(`${base}/people`, {
+              people: people.map((p) => ({
+                ...p,
+                change: workspace.writable ? p.change : "deny",
+              })),
+            }),
+          )
+        }
+      >
+        Save whom it is shared with
+      </button>
+    </div>
+  );
+}
+
+function AddWorkspace({
+  base,
+  label,
+  busy,
+  act,
+}: {
+  base: string;
+  label: string;
+  busy: boolean;
+  act: Act;
+}) {
+  const [name, setName] = useState("");
+  const [path, setPath] = useState("");
+  const [writable, setWritable] = useState(true);
+  const [read, setRead] = useState<Decision>("allow");
+  const [change, setChange] = useState<Decision>("ask");
+  const [deny, setDeny] = useState("");
+  const parsed = parsePatterns(deny);
+  const bad = patternProblem(parsed);
+  return (
+    <form
+      aria-label={`Add a workspace on ${label}`}
+      className="flex flex-col gap-2 rounded-plexus border border-dashed border-line p-2"
+      onSubmit={(event) => {
+        event.preventDefault();
+        void act(async () => {
+          const value = await post(`${base}/workspaces`, {
+            name,
+            path,
+            writable,
+            rules: { read, change: writable ? change : "deny" },
+            deny: parsed,
+          });
+          setName("");
+          setPath("");
+          setDeny("");
+          return value;
+        });
+      }}
+    >
+      <h4 className="font-semibold">Add a workspace</h4>
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="flex flex-col gap-1">
+          Name
+          <input
+            required
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            className="rounded-plexus border border-line bg-transparent px-2 py-1"
+          />
+        </label>
+        <label className="flex flex-col gap-1">
+          Path on {label}
+          <input
+            required
+            value={path}
+            onChange={(event) => setPath(event.target.value)}
+            className="rounded-plexus border border-line bg-transparent px-2 py-1"
+          />
+        </label>
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={writable}
+            onChange={(event) => setWritable(event.target.checked)}
+          />
+          Files in it may be changed
+        </label>
+      </div>
+      <DecisionSelect label="Read and search" value={read} onChange={setRead} />
+      <DecisionSelect
+        label="Change files"
+        value={change}
+        onChange={setChange}
+        only={writable ? undefined : "deny"}
+      />
+      <label className="flex flex-col gap-1">
+        Paths to hide, one a line (optional)
+        <textarea
+          rows={2}
+          value={deny}
+          onChange={(event) => setDeny(event.target.value)}
+          className="rounded-plexus border border-line bg-transparent px-2 py-1 font-mono"
+        />
+      </label>
+      {bad && <p className="text-error">{bad}</p>}
+      <p className="text-muted">
+        It waits on {label} until you approve it with your own key there, or with your passkey here.
+      </p>
+      <button
+        disabled={busy || Boolean(bad)}
+        className="self-start rounded-plexus border border-line px-3 py-1"
+      >
+        Add workspace
+      </button>
+    </form>
+  );
+}

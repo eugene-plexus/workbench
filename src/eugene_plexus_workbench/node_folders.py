@@ -286,22 +286,27 @@ class NodeFolders:
         request: dict[str, Any],
         *,
         acting: bool = False,
+        asked: bool = False,
     ) -> dict[str, Any]:
         """One MCP request to one server on one machine. The answer
         (`SiteMcpAnswer`), or a refusal raised: `WriteUncertain` when a call
-        that may have acted was not confirmed."""
+        that may have acted was not confirmed. `asked`: the person approved
+        this call here (J72); sent only when true."""
         token = await self._refresh_token(person, current=True)
         operation = uuid.uuid4().hex
+        body: dict[str, Any] = {
+            "refreshToken": token,
+            "site": site,
+            "server": server,
+            "request": request,
+            "operationId": operation,
+        }
+        if asked:
+            body["asked"] = True
         try:
             response = await self.http.post(
                 self.provider.transport_url(f"{self.provider.issuer}/sites/mcp"),
-                json={
-                    "refreshToken": token,
-                    "site": site,
-                    "server": server,
-                    "request": request,
-                    "operationId": operation,
-                },
+                json=body,
                 auth=self.provider._auth(),
                 timeout=28.0,
                 follow_redirects=False,
@@ -381,6 +386,8 @@ class NodeFolders:
         server: str,
         tool: str,
         arguments: dict[str, Any],
+        *,
+        asked: bool = False,
     ) -> tuple[str, bool, dict[str, Any]]:
         """Run one tool: its result as text, whether it is an error, and what
         Eugene said about it (the install's mode, J13a; every site's result is
@@ -391,6 +398,7 @@ class NodeFolders:
             server,
             rpc("tools/call", {"name": tool, "arguments": arguments}),
             acting=True,
+            asked=asked,
         )
         mode = answer.get("installMode") if answer.get("installMode") == "dev" else PRODUCTION
         meta = {"jobSite": True, "mode": mode}

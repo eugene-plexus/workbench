@@ -261,3 +261,91 @@ def test_one_server_per_machine_narrowed_to_the_chats_folders(
     sneaking = ada.wait_answer(chat)
     assert sneaking["status"] == "failed" and not sneaking["toolRounds"]
     assert all(c["request"]["params"]["arguments"]["folder"] == "Notes" for c in remote["calls"])
+
+
+# --- 2b.3b: the site's rules decide what is asked about (J70-J72) --------------------
+
+
+ASKS = {"list_directory": [], "read_text": [], "write_text": ["Notes"]}
+
+
+def test_allow_runs_without_asking_and_ask_waits_for_the_person(
+    remote_world: tuple[World, dict[str, Any]],
+) -> None:
+    world, remote = remote_world
+    remote["asks"] = ASKS
+    ada, _, chat = select(world)
+    world.gateway.tool_name = "read_text"
+    world.gateway.tool_arguments = json.dumps({"folder": "Notes", "path": "note.txt"})
+    assert ada.post(f"/api/chats/{chat}/messages", json={"content": "Read it."}).status_code == 201
+    answer = ada.wait_answer(chat)
+    assert answer["status"] == "done", answer
+    [read] = answer["toolRounds"][0]["calls"]
+    assert read["status"] == "done" and read["ask"] is False
+    assert "asked" not in remote["calls"][0]
+    writing = offer(
+        world,
+        ada,
+        chat,
+        "write_text",
+        folder="Notes",
+        path="note.txt",
+        text="Changed",
+        expectedSha256="a" * 64,
+    )
+    assert writing["toolRounds"][0]["calls"][0]["ask"] is True
+    assert len(remote["calls"]) == 1, "nothing runs before the person says yes"
+    assert finish(ada, chat, writing)["status"] == "done"
+    assert remote["calls"][1]["asked"] is True
+
+
+def test_a_site_that_gives_no_rules_is_asked_about_and_never_told(
+    remote_world: tuple[World, dict[str, Any]],
+) -> None:
+    """A site from before 2b.3b: every call is asked about, and `asked` is
+    not sent, since a root from before then would refuse the field."""
+    world, remote = remote_world
+    ada, _, chat = select(world)
+    reading = offer(world, ada, chat, "read_text", folder="Notes", path="note.txt")
+    assert reading["toolRounds"][0]["calls"][0]["ask"] is True
+    assert finish(ada, chat, reading)["status"] == "done"
+    assert "asked" not in remote["calls"][0]
+
+
+def test_forty_calls_the_rules_allow_finish_without_a_prompt(
+    remote_world: tuple[World, dict[str, Any]],
+) -> None:
+    world, remote = remote_world
+    remote["asks"] = ASKS
+    ada, _, chat = select(world)
+    world.gateway.tool_name = "read_text"
+    world.gateway.tool_arguments = json.dumps({"folder": "Notes", "path": "note.txt"})
+    world.gateway.tool_rounds, world.gateway.tools_per_round = 10, 4
+    assert ada.post(f"/api/chats/{chat}/messages", json={"content": "Look."}).status_code == 201
+    answer = ada.wait_answer(chat, seconds=60)
+    assert answer["status"] == "done", answer
+    assert sum(len(r["calls"]) for r in answer["toolRounds"]) == 40
+    assert len(remote["calls"]) == 40
+
+
+def test_calls_that_ask_are_still_capped(
+    remote_world: tuple[World, dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """J71: calls the rules allow do not count against the calls a person is
+    asked about, which stay capped (sixteen; two here, to keep it short)."""
+    from eugene_plexus_workbench import answers
+
+    assert answers.MAX_ASKED == 16 and answers.MAX_CALLS == 200 and answers.MAX_ROUNDS == 50
+    monkeypatch.setattr(answers, "MAX_ASKED", 2)
+    world, remote = remote_world
+    remote["asks"] = ASKS
+    ada, _, chat = select(world)
+    world.gateway.tool_name = "write_text"
+    world.gateway.tool_arguments = json.dumps(
+        {"folder": "Notes", "path": "n.txt", "text": "x", "expectedSha256": "a" * 64}
+    )
+    world.gateway.tools_per_round = 3
+    assert ada.post(f"/api/chats/{chat}/messages", json={"content": "Go."}).status_code == 201
+    answer = ada.wait_answer(chat)
+    assert answer["status"] == "failed" and "2 calls that need your approval" in answer["error"]
+    assert remote["calls"] == []

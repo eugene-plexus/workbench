@@ -157,8 +157,9 @@ it("turns a local server on and says who may use which of its tools", async () =
   vi.mocked(post).mockResolvedValue({});
   render(<JobSites onClose={() => undefined} />);
   const tidy = await screen.findByLabelText("bo may use tidy");
-  expect(screen.getByRole("option", { name: "Yes, without asking you" })).toBeTruthy();
-  fireEvent.change(tidy, { target: { value: "yes" } });
+  expect(screen.getAllByRole("option", { name: "Yes, without asking" }).length).toBeGreaterThan(0);
+  // J78: a tool that can change things is asked about unless the owner says not.
+  fireEvent.change(tidy, { target: { value: "ask" } });
   fireEvent.click(screen.getByRole("button", { name: "Save who may use Notes tool" }));
   await waitFor(() =>
     expect(post).toHaveBeenCalledWith(
@@ -168,8 +169,8 @@ it("turns a local server on and says who may use which of its tools", async () =
           {
             name: "bo",
             tools: [
-              { name: "search", standing: false },
-              { name: "tidy", standing: true },
+              { name: "search", decision: "allow" },
+              { name: "tidy", decision: "ask" },
             ],
           },
         ],
@@ -515,4 +516,125 @@ describe("passkeys from here (J14a.3)", () => {
     );
     expect(get).not.toHaveBeenCalled();
   });
+});
+
+const people = { state: "signed", held: 0, approvePage: null, passkeys: true, people: true };
+
+it("shows a site you are linked to with only your own: your workspaces and your keys", async () => {
+  const linked = {
+    id: site.id,
+    label: "desk",
+    role: "linked",
+    online: true,
+    ready: true,
+    reason: null,
+    account: null,
+    lastContactAt: new Date().toISOString(),
+    folders: [],
+    servers: [],
+    workspaces: [
+      {
+        id: "a".repeat(32),
+        name: "Code",
+        writable: true,
+        rules: { read: "allow", change: "ask" },
+        people: [],
+      },
+    ],
+    links: [
+      { subject: "p-jo", accountName: "PC\\jo", available: true, signing: "unconfirmed", held: 1 },
+    ],
+    signing: { ...people, state: "unconfirmed", held: 1 },
+  };
+  vi.mocked(api).mockResolvedValue({ sites: [linked], canInvite: true });
+  vi.mocked(post).mockImplementation(async (path: string) =>
+    path.endsWith("/workspaces/list")
+      ? {
+          workspaces: [{ ...linked.workspaces[0], path: "D:\\code", deny: [".env"], people: [] }],
+        }
+      : {},
+  );
+  render(<JobSites onClose={() => undefined} sub="p-jo" />);
+  expect(await screen.findByText("desk · linked")).toBeTruthy();
+  expect(screen.getByTestId(`signing-${site.id}`)).toHaveTextContent(
+    "Nothing of yours runs on desk until you approve your rules with your key. 1 change is waiting.",
+  );
+  expect(screen.queryByRole("form", { name: "Add a folder on desk" })).toBeNull();
+  expect(screen.queryByText("Take this machine out")).toBeNull();
+  // The path and hidden patterns are read live from the machine (J76).
+  expect(await screen.findByText("D:\\code")).toBeTruthy();
+  const hide = screen.getByLabelText("Paths to hide in Code");
+  await waitFor(() => expect(hide).toHaveValue(".env"));
+  fireEvent.change(hide, { target: { value: ".env\nsecrets/" } });
+  fireEvent.change(screen.getAllByLabelText("Change files")[0]!, { target: { value: "deny" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save rules" }));
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith(
+      `/api/job-sites/${site.id}/workspaces/${"a".repeat(32)}/rules`,
+      { rules: { read: "allow", change: "deny" }, deny: [".env", "secrets/"] },
+    ),
+  );
+});
+
+it("adds a workspace by its path, with its rules and paths to hide", async () => {
+  const owned = { ...site, folders: [], workspaces: [], signing: people };
+  vi.mocked(api).mockResolvedValue({ sites: [owned], canInvite: true });
+  vi.mocked(post).mockResolvedValue({ held: true, message: "Waiting for your approval." });
+  render(<JobSites onClose={() => undefined} />);
+  const form = await screen.findByRole("form", { name: "Add a workspace on desk" });
+  fireEvent.change(within(form).getByLabelText("Name"), { target: { value: "Code" } });
+  fireEvent.change(within(form).getByLabelText("Path on desk"), { target: { value: "D:\\code" } });
+  fireEvent.change(within(form).getByLabelText("Read and search"), { target: { value: "ask" } });
+  fireEvent.change(within(form).getByLabelText("Paths to hide, one a line (optional)"), {
+    target: { value: "*.pem\n\n*.pem\n.env" },
+  });
+  fireEvent.click(within(form).getByRole("button", { name: "Add workspace" }));
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith(`/api/job-sites/${site.id}/workspaces`, {
+      name: "Code",
+      path: "D:\\code",
+      writable: true,
+      rules: { read: "ask", change: "ask" },
+      deny: ["*.pem", ".env"],
+    }),
+  );
+  expect(await screen.findByTestId("job-site-held")).toHaveTextContent(
+    "Waiting for your approval.",
+  );
+});
+
+it("shares an owner's workspace with each person's rules there (J69)", async () => {
+  const workspace = {
+    id: "b".repeat(32),
+    name: "Notes",
+    writable: false,
+    rules: { read: "allow", change: "deny" },
+    people: [{ person: "p-bo", name: "bo", read: "allow", change: "deny" }],
+  };
+  const owned = { ...site, folders: [], workspaces: [workspace], signing: people };
+  vi.mocked(api).mockResolvedValue({ sites: [owned], canInvite: true });
+  vi.mocked(post).mockResolvedValue({ workspaces: [] });
+  render(<JobSites onClose={() => undefined} />);
+  const sharing = await screen.findByTestId(`sharing-${"b".repeat(32)}`);
+  // A read-only workspace takes no change rule.
+  expect(within(sharing).getByLabelText("bo changes files")).toBeDisabled();
+  fireEvent.change(within(sharing).getByLabelText("Share with (how they sign in)"), {
+    target: { value: "cy" },
+  });
+  fireEvent.click(within(sharing).getByRole("button", { name: "Add" }));
+  fireEvent.change(within(sharing).getByLabelText("bo reads and searches"), {
+    target: { value: "ask" },
+  });
+  fireEvent.click(within(sharing).getByRole("button", { name: "Save whom it is shared with" }));
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith(
+      `/api/job-sites/${site.id}/workspaces/${"b".repeat(32)}/people`,
+      {
+        people: [
+          { name: "bo", read: "ask", change: "deny" },
+          { name: "cy", read: "allow", change: "deny" },
+        ],
+      },
+    ),
+  );
 });
