@@ -19,7 +19,16 @@ const kokoro: SpeechModel = {
   ...served,
   id: "openrouter/kokoro",
   voices: ["af_heart", "af_bella"],
+  voiceNames: {},
   formats: ["mp3", "wav"],
+};
+const eleven: SpeechModel = {
+  ...served,
+  id: "eleven/eleven_flash_v2_5",
+  provider: "ElevenLabs",
+  voices: ["21m00Tcm4TlvDq8ikWAM", "EXAVITQu4vr4xnSDxMaL", "pNInz6obpgDQGcFmaJgB"],
+  voiceNames: { "21m00Tcm4TlvDq8ikWAM": "Rachel", EXAVITQu4vr4xnSDxMaL: "Sarah" },
+  formats: ["mp3"],
 };
 const local: SpeechModel = {
   ...served,
@@ -28,6 +37,7 @@ const local: SpeechModel = {
   account: "voice",
   locality: "local",
   voices: null,
+  voiceNames: {},
   formats: ["wav", "mp3", "opus"],
 };
 const turbo: TranscriptionModel = { ...served, id: "openrouter/whisper-turbo", translates: false };
@@ -63,6 +73,37 @@ it("offers the model's own voices, and a free box where it lists none", () => {
   expect(
     [...(screen.getByTestId("speech-format") as HTMLSelectElement).options].map((o) => o.value),
   ).toEqual(["mp3", "wav", "opus"]);
+});
+
+it("shows ElevenLabs voices by name, sends the id, and finds a voice by its name", async () => {
+  vi.mocked(post).mockResolvedValue({ id: "m1" });
+  const many: SpeechModel = {
+    ...eleven,
+    voices: [...eleven.voices!, ...Array.from({ length: 12 }, (_, i) => `voice${i}`)],
+  };
+  render(<SpeechForm me={me} models={[many]} draft={null} onMade={() => undefined} />);
+  fireEvent.change(screen.getByTestId("speech-model"), {
+    target: { value: "eleven/eleven_flash_v2_5" },
+  });
+  const voice = screen.getByTestId("speech-voice") as HTMLSelectElement;
+  const shown = [...voice.options].map((o) => [o.value, o.textContent]);
+  expect(shown.slice(0, 4)).toEqual([
+    ["", "Choose a voice"],
+    ["21m00Tcm4TlvDq8ikWAM", "Rachel"],
+    ["EXAVITQu4vr4xnSDxMaL", "Sarah"],
+    ["pNInz6obpgDQGcFmaJgB", "pNInz6obpgDQGcFmaJgB"],
+  ]);
+  fireEvent.change(screen.getByLabelText("Find a voice"), { target: { value: "sar" } });
+  expect([...voice.options].map((o) => o.value)).toEqual(["", "EXAVITQu4vr4xnSDxMaL"]);
+  fireEvent.change(voice, { target: { value: "EXAVITQu4vr4xnSDxMaL" } });
+  fireEvent.change(screen.getByTestId("speech-input"), { target: { value: "Hello." } });
+  fireEvent.click(screen.getByTestId("make-speech"));
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith(
+      "/api/media/speech",
+      expect.objectContaining({ voice: "EXAVITQu4vr4xnSDxMaL" }),
+    ),
+  );
 });
 
 it("sends text, voice and format, and waits for each first", async () => {

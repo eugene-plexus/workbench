@@ -267,6 +267,47 @@ CASES: list[tuple[str, str, str, str, str, str]] = [
         "vitest",
         f"{FORMS_TEST}::says recording needs HTTPS",
     ),
+    # Voice names (ElevenLabs' ids say nothing), 2026-10-08.
+    (
+        "voice names are not passed to the page",
+        MEDIA_API,
+        '    named = info.get("voice_names")\n',
+        "    named = None\n",
+        "pytest",
+        f"{AUDIO_TESTS}::test_the_screens_list_speech_and_transcription_models_with_what_they_take",
+    ),
+    (
+        "a named voice is shown by its id",
+        LIB,
+        "  const name = model.voiceNames?.[id];\n",
+        "  const name = model.voiceNames?.[id] && undefined;\n",
+        "vitest",
+        f"{LIB_TEST}::shows a voice by its name",
+    ),
+    (
+        "two voices with one name cannot be told apart",
+        LIB,
+        "  return shared ? `${name} (${id})` : name;\n",
+        "  return shared ? name : name;\n",
+        "vitest",
+        f"{LIB_TEST}::shows a voice by its name",
+    ),
+    (
+        "the picker shows ids, not names",
+        AUDIO_FORMS,
+        "                      {voiceLabel(chosen, v)}\n",
+        "                      {voiceLabel(chosen, v) && v}\n",
+        "vitest",
+        f"{FORMS_TEST}::shows ElevenLabs voices by name",
+    ),
+    (
+        "a voice is not found by its name",
+        AUDIO_FORMS,
+        '      (chosen?.voiceNames?.[v] ?? "").toLowerCase().includes(wanted),\n',
+        '      (chosen?.voiceNames?.[v] ?? "").toLowerCase().includes(wanted) && false,\n',
+        "vitest",
+        f"{FORMS_TEST}::shows ElevenLabs voices by name",
+    ),
 ]
 
 BROWSER_CASES: list[tuple[str, str, str, str, str, str]] = [
@@ -319,10 +360,11 @@ BROWSER_CASES: list[tuple[str, str, str, str, str, str]] = [
 
 if os.getenv("WORKBENCH_PLAYWRIGHT"):
     CASES += BROWSER_CASES
-# `--only TEXT` runs the cases whose label holds TEXT (a rerun of a few).
+# `--only TEXT` runs the cases whose label holds TEXT (a rerun of a few);
+# `A|B` runs those holding either.
 if "--only" in sys.argv:
-    wanted = sys.argv[sys.argv.index("--only") + 1]
-    CASES = [c for c in CASES if wanted in c[0]]
+    wanted = sys.argv[sys.argv.index("--only") + 1].split("|")
+    CASES = [c for c in CASES if any(w in c[0] for w in wanted)]
 
 ENV = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUTF8": "1"}
 

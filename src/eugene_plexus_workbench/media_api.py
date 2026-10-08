@@ -75,9 +75,17 @@ def speech_model(model: dict[str, Any]) -> dict[str, Any]:
     is the provider's to check (a free-text box); `pcm` is left out, since a
     browser cannot play raw samples."""
     info = model.get("x_eugene_plexus") or {}
+    named = info.get("voice_names")
     return {
         **_common(model),
         "voices": info.get("voices"),
+        # A voice's display name by its id, where the provider names it
+        # (ElevenLabs); the id is still what is sent.
+        "voiceNames": {
+            k: v for k, v in named.items() if isinstance(k, str) and isinstance(v, str) and v
+        }
+        if isinstance(named, dict)
+        else {},
         "formats": [f for f in info.get("speech_formats") or ["mp3"] if f != "pcm"],
     }
 

@@ -164,6 +164,21 @@ AUDIO_MODELS: list[dict[str, Any]] = [
         },
     },
     {
+        # ElevenLabs lists voices by id and names them (one is unnamed).
+        "id": "eleven/eleven_flash_v2_5",
+        "object": "model",
+        "owned_by": "elevenlabs",
+        "x_eugene_plexus": {
+            "drivers": ["eleven"],
+            "surfaces": ["speech"],
+            "locality": "external",
+            "ready_backends": 1,
+            "voices": ["21m00Tcm4TlvDq8ikWAM", "EXAVITQu4vr4xnSDxMaL", "pNInz6obpgDQGcFmaJgB"],
+            "voice_names": {"21m00Tcm4TlvDq8ikWAM": "Rachel", "EXAVITQu4vr4xnSDxMaL": "Sarah"},
+            "speech_formats": ["mp3", "pcm"],
+        },
+    },
+    {
         "id": "openrouter/whisper-turbo",
         "object": "model",
         "owned_by": "openrouter",

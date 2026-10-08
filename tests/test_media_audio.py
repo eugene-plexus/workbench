@@ -50,8 +50,14 @@ def test_the_screens_list_speech_and_transcription_models_with_what_they_take(
     doors = ada.get("/api/media/doors").json()["doors"]
     speech = {m["id"]: m for m in doors["speech"]["models"]}
     hearing = {m["id"]: m for m in doors["transcription"]["models"]}
-    assert set(speech) == {"openrouter/kokoro", "local-voice"}
+    assert set(speech) == {"openrouter/kokoro", "local-voice", "eleven/eleven_flash_v2_5"}
     assert speech["openrouter/kokoro"]["voices"] == ["af_heart", "af_bella", "am_adam"]
+    assert speech["openrouter/kokoro"]["voiceNames"] == {}
+    # ElevenLabs' ids say nothing: their names ride beside them.
+    assert speech["eleven/eleven_flash_v2_5"]["voiceNames"] == {
+        "21m00Tcm4TlvDq8ikWAM": "Rachel",
+        "EXAVITQu4vr4xnSDxMaL": "Sarah",
+    }
     # pcm is left out: a browser cannot play raw samples.
     assert speech["openrouter/kokoro"]["formats"] == ["mp3", "wav"]
     assert speech["local-voice"]["voices"] is None and speech["local-voice"]["locality"] == "local"
