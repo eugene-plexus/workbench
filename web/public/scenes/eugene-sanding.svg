@@ -1,30 +1,34 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="320" height="320" viewBox="0 0 320 320" role="img" aria-labelledby="title description">
-  <title id="title">Eugene measuring a board</title>
-  <desc id="description">Eugene stands at his workbench with a tape measure. He pulls the tape out along a board, marks it with a pencil, and measures again.</desc>
+  <title id="title">Eugene sanding a board</title>
+  <desc id="description">Eugene stands at his workbench and sands a board smooth with a sanding block while dust puffs up.</desc>
   <defs>
     <linearGradient id="face-gradient" x1="410" y1="475" x2="815" y2="930" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#fbfafb" />
       <stop offset="1" stop-color="#f7f7f9" />
     </linearGradient>
-    <clipPath id="tape-slot"><rect x="96" y="200" width="160" height="40" /></clipPath>
   </defs>
   <style>
-    #blade { transform-box: fill-box; transform-origin: 0% 50%; animation: blade 4s ease-in-out infinite; }
-    #pencil-arm { transform-box: fill-box; transform-origin: 20% 5%; animation: tap 4s ease-in-out infinite; }
-    #head { transform-box: fill-box; transform-origin: 50% 92%; animation: look 4s ease-in-out infinite; }
-    @keyframes blade {
-      0%, 12%, 38%, 62%, 88%, 100% { transform: translateX(0); }
-      22%, 72% { transform: translateX(-98px); }
+    #sand-arm { transform-box: fill-box; transform-origin: 16px 2px; animation: scrub 2s ease-in-out infinite; }
+    #block { transform-box: fill-box; transform-origin: 25px 15px; animation: flat 2s ease-in-out infinite; }
+    #puff { transform-box: fill-box; transform-origin: 50% 100%; animation: puff 2s ease-out infinite; }
+    #head { transform-box: fill-box; transform-origin: 50% 92%; animation: look 2s ease-in-out infinite; }
+    @keyframes scrub {
+      0%, 50%, 100% { transform: rotate(0deg); }
+      25%, 75% { transform: rotate(14deg); }
     }
-    @keyframes tap {
-      0%, 40%, 48%, 90%, 98%, 100% { transform: translate(0, 0); }
-      44%, 94% { transform: translate(-2px, 7px); }
+    @keyframes flat {
+      0%, 50%, 100% { transform: rotate(0deg); }
+      25%, 75% { transform: rotate(-14deg); }
+    }
+    @keyframes puff {
+      0%, 50%, 100% { opacity: 0; transform: translate(0, 0) scale(0.6); }
+      15%, 65% { opacity: 1; }
+      45%, 95% { opacity: 0; transform: translate(0, -10px) scale(1); }
     }
     @keyframes look {
-      0%, 60%, 100% { transform: rotate(0deg); }
-      14%, 34%, 64%, 84% { transform: rotate(-5deg); }
-      42%, 50%, 92% { transform: rotate(4deg); }
+      0%, 50%, 100% { transform: rotate(2deg); }
+      25%, 75% { transform: rotate(-2deg); }
     }
     @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
   </style>
@@ -48,34 +52,29 @@
   <g id="board">
     <path d="M58 222 H262 V240 H58 Z" fill="#f4dfcf" stroke="#85573b" stroke-width="3" stroke-linejoin="round"/>
     <path d="M70 229 Q110 226 150 230 T236 229 M96 235 Q140 233 196 236" fill="none" stroke="#e7bf9e" stroke-width="2" stroke-linecap="round"/>
-    <path d="M207 222 V231" stroke="#061a2e" stroke-width="3" stroke-linecap="round"/>
   </g>
 
-  <g id="tape" stroke="#061a2e" stroke-linejoin="round">
-    <g clip-path="url(#tape-slot)">
-      <g id="blade">
-        <path d="M90 211 H204 V223 H90 Z" fill="#f3c25a" stroke-width="2.5"/>
-        <path d="M112 211 V216 M124 211 V218 M136 211 V216 M148 211 V219 M160 211 V216 M172 211 V218 M184 211 V216 M196 211 V219" stroke-width="2"/>
-        <path d="M202 207 H208 V227 H202 Z" fill="#9fb3c8" stroke-width="2.5"/>
-      </g>
-    </g>
-    <rect x="46" y="194" width="50" height="44" rx="11" fill="#f3c25a" stroke-width="4"/>
-    <circle cx="68" cy="216" r="11" fill="#29343d" stroke-width="3"/>
-    <path d="M54 194 V188 H68 V194" fill="#29343d" stroke-width="3"/>
+  <g id="puff" fill="#f4dfcf" stroke="#b9825b" stroke-width="1.5">
+    <circle cx="176" cy="216" r="3.5"/>
+    <circle cx="183" cy="209" r="2.6"/>
+    <circle cx="170" cy="207" r="3"/>
+    <circle cx="245" cy="214" r="2.6"/>
   </g>
 
   <path d="M115 174 Q94 177 86 215 L104 230 L129 194" fill="#cf9a72" stroke="#e7bf9e" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-
   <path d="M87 211 Q82 219 92 229 L112 237 Q121 237 119 230 L109 218 Q99 210 94 216" fill="#f7f7f9" stroke="#061a2e" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
 
-  <g id="pencil-arm">
-    <path d="M202 174 Q224 180 232 218 L212 230 L191 194" fill="#cf9a72" stroke="#e7bf9e" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-    <g stroke="#061a2e" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round">
-      <path d="M213 213 L240 176 L248 182 L221 219 Z" fill="#7fb0cf"/>
-      <path d="M213 213 L208 225 L221 219 Z" fill="#f4dfcf"/>
-      <path d="M210 221 L208 225 L212 223 Z" fill="#061a2e"/>
+  <g id="sand-arm">
+    <path d="M202 174 Q224 180 230 206 L212 218 L191 194" fill="#cf9a72" stroke="#e7bf9e" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <g id="block">
+      <g stroke="#061a2e" stroke-linejoin="round">
+        <rect x="190" y="204" width="48" height="16" rx="5" fill="#46668b" stroke-width="3"/>
+        <path d="M189 219 H239 V224 H189 Z" fill="#e7bf9e" stroke-width="2.5"/>
+      </g>
+      <g transform="translate(0 -14)">
+  <path d="M231 213 Q237 220 227 230 L207 237 Q198 237 201 230 L211 218 Q221 210 225 217" fill="#f7f7f9" stroke="#061a2e" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+      </g>
     </g>
-    <path d="M231 213 Q237 220 227 230 L207 237 Q198 237 201 230 L211 218 Q221 210 225 217" fill="#f7f7f9" stroke="#061a2e" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
   </g>
 
   <g id="head">

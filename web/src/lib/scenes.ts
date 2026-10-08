@@ -12,6 +12,12 @@ export interface Scene {
 
 export const SCENES: readonly Scene[] = [
   { file: "eugene-measuring.svg", phrase: "Measuring twice…" },
+  { file: "eugene-squaring.svg", phrase: "Squaring up…" },
+  { file: "eugene-hammering.svg", phrase: "Hammering it out…" },
+  { file: "eugene-sawing.svg", phrase: "Sawing…" },
+  { file: "eugene-sanding.svg", phrase: "Sanding the edges…" },
+  { file: "eugene-levelling.svg", phrase: "Checking the level…" },
+  { file: "eugene-clamping.svg", phrase: "Clamping…" },
 ];
 
 /** A wait shorter than this shows only the plain line, so a fast answer never flashes Eugene. */
