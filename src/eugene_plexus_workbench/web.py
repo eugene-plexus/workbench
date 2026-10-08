@@ -38,6 +38,13 @@ CSP = "; ".join(
     ]
 )
 
+#: A working scene (workbench.md §6.1) is an SVG whose animation is its own
+#: inline `<style>`. Some browsers hold an image to the policy it was served
+#: with, so the page's `style-src 'self'` would freeze it. It gets its own:
+#: that style and nothing else. The test gate (`web/src/sceneGate.ts`) keeps
+#: script and outside references out of the file itself.
+SCENE_CSP = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'"
+
 _API_PREFIXES = ("/api/", "/v1/", "/oidc/")
 
 NO_UI = """<!doctype html><meta charset="utf-8"><title>Workbench</title>
@@ -105,5 +112,8 @@ def mount(app: FastAPI, root: Path | None) -> None:
                     if path.startswith("assets/")
                     else "no-cache"
                 )
-                return FileResponse(candidate, headers={"Cache-Control": cache})
+                headers = {"Cache-Control": cache}
+                if path.startswith("scenes/") and path.endswith(".svg"):
+                    headers["Content-Security-Policy"] = SCENE_CSP
+                return FileResponse(candidate, headers=headers)
         return FileResponse(root / "index.html", headers={"Cache-Control": "no-cache"})

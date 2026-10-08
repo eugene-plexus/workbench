@@ -67,7 +67,18 @@ npm run build      # writes src/eugene_plexus_workbench/static/
 
 `python scripts/check-tools-sabotage.py` checks that removing approval,
 ownership, revocation and interrupted-call guards breaks the behavioral tests,
-then restores the exact working files. Run it alone. For system Chrome coverage,
+then restores the exact working files. Run it alone.
+`python scripts/check-scenes-sabotage.py` does the same for the working scenes:
+the scene gate, the scene beside the progress line, and the scenes' own policy.
+
+**Working scenes** (Eugene at the bench while a model works) are animated SVGs
+in `web/public/scenes/`, each listed with its phrase in `web/src/lib/scenes.ts`.
+A scene is drawn by a language model, so `web/src/scenes.test.ts` gates every
+file as text: no script or outside reference, a reduced-motion rule that stops
+every loop, matching first and last keyframes, and at most 32 KB.
+`tests/test_scenes_browser.py` renders each one in Chrome.
+
+For system Chrome coverage,
 build the page and set `WORKBENCH_PLAYWRIGHT` to a `playwright-core` installation
 before running pytest; `WORKBENCH_CHROME` can override the browser executable.
 
@@ -85,4 +96,4 @@ The config-trio shapes are generated from [`eugene-plexus/specs`](https://github
 
 ## Licence
 
-Apache 2.0. Eugene's mascot and logo come from the project's website and are under the same licence.
+Apache 2.0. Eugene's mascot and logo come from the project's website and are under the same licence, as are the working scenes drawn from them.

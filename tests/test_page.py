@@ -12,7 +12,7 @@ import pytest
 
 from eugene_plexus_workbench import api
 from eugene_plexus_workbench.store import Chat, Message, Store
-from eugene_plexus_workbench.web import CSP
+from eugene_plexus_workbench.web import CSP, SCENE_CSP
 
 from .conftest import World
 
@@ -51,6 +51,25 @@ def test_every_answer_carries_the_policy(world: World) -> None:
         httpx.get(world.workbench + "/api/status", trust_env=False).headers["cache-control"]
         == "no-store"
     )
+
+
+def test_a_working_scene_may_run_its_own_style_and_nothing_else(world: World) -> None:
+    """§6.1: a scene's animation is its inline style, which the page's policy
+    would block in a browser that applies it to images."""
+    assert world.settings.static_dir is not None
+    scenes = world.settings.static_dir / "scenes"
+    scenes.mkdir()
+    (scenes / "eugene-test.svg").write_text("<svg/>", encoding="utf-8")
+    (scenes / "notes.txt").write_text("x", encoding="utf-8")
+    (world.settings.static_dir / "eugene-face.svg").write_text("<svg/>", encoding="utf-8")
+    scene = httpx.get(world.workbench + "/scenes/eugene-test.svg", trust_env=False)
+    assert scene.status_code == 200 and scene.headers["content-type"] == "image/svg+xml"
+    assert scene.headers["content-security-policy"] == SCENE_CSP
+    assert "default-src 'none'" in SCENE_CSP and "script-src" not in SCENE_CSP
+    assert scene.headers["x-content-type-options"] == "nosniff"
+    for path in ("/scenes/notes.txt", "/eugene-face.svg", "/"):
+        headers = httpx.get(world.workbench + path, trust_env=False).headers
+        assert headers["content-security-policy"] == CSP, path
 
 
 def test_a_page_built_without_its_front_end_says_so(tmp_path: Path) -> None:
