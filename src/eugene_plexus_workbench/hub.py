@@ -61,6 +61,20 @@ def _gateway_param(response: httpx.Response) -> str | None:
     return str(param) if param else None
 
 
+def _video_resource(response: httpx.Response, what: str) -> dict[str, Any]:
+    try:
+        answer = response.json()
+    except ValueError as exc:
+        raise HubError(
+            f"The gateway answered {what} with something that is not JSON "
+            f"({response.headers.get('content-type') or 'no type'}).",
+            kind="gateway",
+        ) from exc
+    if not isinstance(answer, dict) or not isinstance(answer.get("id"), str):
+        raise HubError(f"The gateway's answer to {what} named no job.", kind="gateway")
+    return answer
+
+
 def refusal(status: int, words: str, param: str | None = None) -> HubError:
     """The gateway's refusal, said for a person who cannot see the console."""
     if status in (401, 403):
@@ -224,6 +238,56 @@ class Hub:
         if not isinstance(answer, dict) or not isinstance(answer.get("text"), str):
             raise HubError("The gateway's transcription had no text in it.", kind="gateway")
         return answer, dict(response.headers)
+
+    async def video(self, body: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+        """Submit one video job (P5): the gateway's `VideoResource`, whose
+        `id` is the handle to poll, and the request id. Raises `HubError`."""
+        headers = self._headers()
+        try:
+            response = await self._http.post(
+                f"{self.gateway_url}/v1/videos", json=body, headers=headers
+            )
+        except httpx.HTTPError as exc:
+            raise self._unreachable(exc) from exc
+        if response.status_code != 200:
+            raise refusal(response.status_code, _gateway_words(response), _gateway_param(response))
+        answer = _video_resource(response, "the video request")
+        return answer, response.headers.get("x-request-id")
+
+    async def video_job(self, handle: str) -> dict[str, Any]:
+        """One poll of a video job. Raises `HubError`, whose `status` says
+        whether polling again can help (a 503 says it can)."""
+        headers = self._headers()
+        try:
+            response = await self._http.get(
+                f"{self.gateway_url}/v1/videos/{handle}", headers=headers
+            )
+        except httpx.HTTPError as exc:
+            raise self._unreachable(exc) from exc
+        if response.status_code != 200:
+            raise refusal(response.status_code, _gateway_words(response), _gateway_param(response))
+        return _video_resource(response, "a poll of the video job")
+
+    async def video_content(self, handle: str, write: Any) -> int:
+        """A finished job's MP4, handed to `write` a chunk at a time as it
+        arrives (a long video is not held in memory). Returns the bytes
+        written. Raises `HubError`."""
+        headers = self._headers()
+        url = f"{self.gateway_url}/v1/videos/{handle}/content"
+        written = 0
+        try:
+            async with self._http.stream("GET", url, headers=headers) as response:
+                if response.status_code != 200:
+                    await response.aread()
+                    raise refusal(
+                        response.status_code, _gateway_words(response), _gateway_param(response)
+                    )
+                async for chunk in response.aiter_bytes():
+                    await write(chunk)
+                    written += len(chunk)
+        except httpx.HTTPError as exc:
+            raise self._unreachable(exc) from exc
+        return written
 
     async def stream_chat(self, body: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         """The chunks of one streamed answer, parsed. Raises `HubError`."""

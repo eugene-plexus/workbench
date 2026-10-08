@@ -15,6 +15,7 @@ import {
   type MediaItem,
   SHAPES,
   SIZE_PATTERN,
+  billedWords,
   bytesWords,
   captionOf,
   fieldOf,
@@ -29,12 +30,15 @@ import {
   servedWords,
   sizeWords,
   statusWords,
+  videoWords,
   whereItRuns,
 } from "../lib/media";
 import type { Me } from "../lib/types";
 import { SpeechForm, TranscriptionForm } from "./AudioForms";
 import { CopyButton } from "./CopyButton";
 import { Mascot } from "./Mascot";
+import { VideoForm } from "./VideoForm";
+import { WorkingScene } from "./WorkingScene";
 
 const problemOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
@@ -45,7 +49,8 @@ export interface Handoff {
 }
 
 /** The media area: a tab per screen, its form above and its bin below
- * (workbench-media-screens.md §2): Images, Speech and Transcription. */
+ * (workbench-media-screens.md §2): Images, Speech, Transcription and Video,
+ * whose bin is the list of long jobs, running and finished (M11). */
 export function Media({
   me,
   door,
@@ -238,6 +243,14 @@ export function Media({
             onMade={(made) => setItems((shown) => [made, ...shown.filter((i) => i.id !== made.id)])}
           />
         )}
+        {!readOnly && !nothingServes && doors && door === "video" && (
+          <VideoForm
+            me={me}
+            models={doors.doors.video.models}
+            draft={draft}
+            onMade={(made) => setItems((shown) => [made, ...shown.filter((i) => i.id !== made.id)])}
+          />
+        )}
         {!readOnly && !nothingServes && doors && door === "images" && (
           <ImageForm
             me={me}
@@ -253,7 +266,9 @@ export function Media({
           />
         )}
         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line pt-3">
-          <h2 className="font-semibold">{readOnly ? "Their bin" : "Your bin"}</h2>
+          <h2 className="font-semibold">
+            {door === "video" ? "Work orders · Long jobs" : readOnly ? "Their bin" : "Your bin"}
+          </h2>
           {!readOnly && (
             <p className="text-sm text-muted" data-testid="bin-total">
               Your bins hold {bytesWords(bytes)}.
@@ -351,14 +366,20 @@ function NothingServes({ me, door }: { me: Me; door: Door }) {
         )}
         {door !== "transcription" && (
           <p className="text-muted">
-            {door === "images" ? "Image" : "Speech"} models that run on your own machines are coming
-            later.
+            {LOCAL_LATER[door]} models that run on your own machines are coming later.
           </p>
         )}
       </div>
     </div>
   );
 }
+
+const LOCAL_LATER: Record<Door, string> = {
+  images: "Image",
+  speech: "Speech",
+  transcription: "Transcription",
+  video: "Video",
+};
 
 type Draft = MediaDraft;
 
@@ -817,12 +838,18 @@ function MediaCard({
   onTextToChat: (text: string) => void;
 }) {
   const [confirm, setConfirm] = useState(false);
-  const status = statusWords(item);
+  const video = item.door === "video";
+  const working = video && item.status === "running";
+  const now = useClock(working);
+  const status = statusWords(item, now);
   const served = servedWords(item);
+  const billed = billedWords(item);
   const upload = item.kind === "upload";
   const caption = captionOf(item);
   const heard = heardWords(item);
   const remakes = item.door !== "transcription";
+  // A video costs money: it is sent again only through the form, which asks first.
+  const again = remakes && !video;
   return (
     <li
       id={`media-${item.id}`}
@@ -842,6 +869,8 @@ function MediaCard({
                     file={file}
                     alt={upload ? "" : `Made from: ${item.request.prompt ?? ""}`}
                   />
+                ) : file.mediaType.startsWith("video/") ? (
+                  <BinVideo file={file} asked={item.request} />
                 ) : (
                   <BinAudio file={file} />
                 )}
@@ -897,7 +926,14 @@ function MediaCard({
           {heard.text}
         </p>
       )}
-      {status && (
+      {status && working && (
+        <WorkingScene active>
+          <p className="text-sm text-muted" data-testid="media-status">
+            {status}
+          </p>
+        </WorkingScene>
+      )}
+      {status && !working && (
         <p
           role={item.status === "failed" ? "alert" : undefined}
           className={item.status === "failed" ? "text-error" : "text-sm text-muted"}
@@ -907,6 +943,11 @@ function MediaCard({
           {item.status === "failed" && item.error?.param && (
             <span className="text-muted"> (the gateway named: {item.error.param})</span>
           )}
+        </p>
+      )}
+      {billed && (
+        <p className="text-sm" data-testid="billed-words">
+          {billed}
         </p>
       )}
       <p className="text-xs text-muted">
@@ -923,7 +964,7 @@ function MediaCard({
           )}
           {!upload && remakes && item.status !== "running" && (
             <>
-              {item.status === "done" && (
+              {item.status === "done" && again && (
                 <button className="flex items-center gap-1 text-accent" onClick={onAgain}>
                   <RotateCcw size={14} aria-hidden /> Again
                 </button>
@@ -983,6 +1024,71 @@ function BinImage({ file, alt }: { file: MediaFile; alt: string }) {
       data-testid="bin-image"
       className="max-h-64 max-w-xs rounded-plexus border border-line object-contain"
     />
+  );
+}
+
+/** The time now, in seconds, ticking each second while `running`: a running
+ * video says how long it has run (§5). */
+function useClock(running: boolean): number {
+  const [now, setNow] = useState(() => Date.now() / 1000);
+  useEffect(() => {
+    if (!running) return;
+    const tick = window.setInterval(() => setNow(Date.now() / 1000), 1000);
+    return () => window.clearInterval(tick);
+  }, [running]);
+  return running ? now : Date.now() / 1000;
+}
+
+/** A bin video, played from a blob: address as images are, with its own
+ * length and size beside what was asked (§2.4), read once it loads. */
+function BinVideo({
+  file,
+  asked,
+}: {
+  file: MediaFile;
+  asked: { seconds?: number; size?: string };
+}) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+  const [got, setGot] = useState<{ seconds: number; width: number; height: number } | null>(null);
+  useEffect(() => {
+    let made: string | null = null;
+    let cancelled = false;
+    fileUrl(file.id)
+      .then((u) => {
+        made = u;
+        if (cancelled) URL.revokeObjectURL(u);
+        else setUrl(u);
+      })
+      .catch((error) => !cancelled && setFailed(problemOf(error)));
+    return () => {
+      cancelled = true;
+      if (made) URL.revokeObjectURL(made);
+    };
+  }, [file.id]);
+  if (failed) return <p className="text-sm text-error">{failed}</p>;
+  if (!url) return <div className="h-40 w-72 rounded-plexus bg-hover" aria-hidden />;
+  const said = videoWords(asked, got);
+  return (
+    <>
+      <video
+        controls
+        src={url}
+        data-testid="bin-video"
+        className="max-h-80 w-full max-w-md rounded-plexus border border-line"
+        onLoadedMetadata={(e) => {
+          const v = e.currentTarget;
+          if (Number.isFinite(v.duration) && v.videoWidth) {
+            setGot({ seconds: v.duration, width: v.videoWidth, height: v.videoHeight });
+          }
+        }}
+      />
+      {said && (
+        <span className="text-xs text-muted" data-testid="video-words">
+          {said}
+        </span>
+      )}
+    </>
   );
 }
 
