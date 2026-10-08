@@ -39,7 +39,6 @@ function show(message: Message, progress: Progress | null = null) {
       chatId="c"
       message={m}
       progress={p}
-      last
       busy
       readOnly={false}
       onChanged={() => undefined}

@@ -285,6 +285,8 @@ class FakeGateway:
     tools_per_round: int = 1
     repetition_modes: list[str | None] = field(default_factory=list)
     search: dict[str, Any] = field(default_factory=lambda: {"available": True, "reason": None})
+    #: End each answer with ` #N`, N its request's number, to tell versions apart.
+    numbered: bool = False
 
     def app(self) -> FastAPI:
         app = FastAPI()
@@ -320,6 +322,7 @@ class FakeGateway:
         async def chat(request: Request) -> Any:
             body = await request.json()
             self.requests.append(body)
+            number = len(self.requests)
             self.repetition_modes.append(request.headers.get("X-Eugene-Repetition-Mode"))
             if (
                 request.headers.get("authorization") != f"Bearer {APP_KEY}"
@@ -410,6 +413,8 @@ class FakeGateway:
                     if self.delay:
                         await asyncio.sleep(self.delay)
                     yield chunk({"content": word})
+                if self.numbered:
+                    yield chunk({"content": f" #{number}"})
                 if self.mode == "cut":
                     return
                 if self.mode == "repetition":

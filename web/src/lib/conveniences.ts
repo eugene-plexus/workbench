@@ -1,5 +1,5 @@
 import type { Chat, ChatDetail } from "./types";
-import { answerParts, statusWords } from "./words";
+import { answerParts, EXPORT_BRANCHES_NOTE, statusWords } from "./words";
 
 const DRAFT_PREFIX = "workbench-draft:";
 const draftKey = (person: string, chat: string) =>
@@ -70,6 +70,8 @@ export function chatMarkdown(detail: ChatDetail): string {
     `# ${oneLine(detail.chat.title)}`,
     "Exported from Workbench. Attachment contents are not included.",
   ];
+  // The path shown is the export; a branch point on it means others exist.
+  if (detail.messages.some((m) => (m.versions?.count ?? 1) > 1)) lines.push(EXPORT_BRANCHES_NOTE);
   for (const message of detail.messages) {
     lines.push(`## ${message.role === "user" ? "You" : "Assistant"}`);
     lines.push(new Date(message.createdAt * 1000).toISOString());

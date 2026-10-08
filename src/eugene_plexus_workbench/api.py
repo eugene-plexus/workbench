@@ -16,6 +16,7 @@ import logging
 import secrets
 import time
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import Any, Literal
 from urllib.parse import quote
 
@@ -38,7 +39,7 @@ from .sessions import (
     signin_path,
 )
 from .signin import PENDING_SECONDS, Provider, SignInRefused, SignInUnavailable
-from .store import Chat, FileRecord, Message, Person, Store
+from .store import Chat, FileRecord, Message, Person, Store, path, versions
 
 log = logging.getLogger(__name__)
 
@@ -392,25 +393,49 @@ async def create_chat(request: Request, body: ChatCreate) -> dict[str, Any]:
 
 
 @router.get("/api/chats/{chat_id}")
-async def get_chat(request: Request, chat_id: str) -> dict[str, Any]:
+async def get_chat(request: Request, chat_id: str, via: str | None = None) -> dict[str, Any]:
+    """The chat's path, each message with its place among its versions.
+
+    `via` is the path through that message instead, and saves nothing: the
+    owner's read-only view steps through every branch with it (V5)."""
     person = await _person(request)
     chat, read_only = await _readable_chat(request, person, chat_id)
+    return await _chat_detail(request, chat, read_only=read_only, via=via)
+
+
+async def _chat_detail(
+    request: Request, chat: Chat, *, read_only: bool, via: str | None = None
+) -> dict[str, Any]:
     store: Store = _state(request).store
-    messages = await store.messages(chat.id)
-    attached = {f.id: f for f in await store.files_for_chat(chat.id)}
     running = _answers(request).running(chat.id)
+    tree = await store.tree(chat.id)
+    if running is not None:
+        # The answer being written, as it stands now rather than as last saved.
+        tree = [
+            replace(running.message, parent_id=m.parent_id, chosen=m.chosen)
+            if m.id == running.message.id
+            else m
+            for m in tree
+        ]
+    if via is not None and all(m.id != via for m in tree):
+        raise _problem(status.HTTP_404_NOT_FOUND, "There is no such message in this chat.")
+    places = versions(tree)
+    attached = {f.id: f for f in await store.files_for_chat(chat.id)}
     views = []
-    for m in messages:
-        view = message_view(running.message if running and running.message.id == m.id else m)
+    for m in path(tree, via):
+        view = message_view(m)
         view["files"] = [
             {"id": i, "name": attached[i].name, "mediaType": attached[i].media_type}
             for i in m.attachments
             if i in attached
         ]
+        view["versions"] = places[m.id]
         views.append(view)
     owner = await store.person(chat.owner) if read_only else None
     if read_only:
-        views = redact_for_owner(views, (await install_mode(request))["mode"])
+        views = redact_for_owner(
+            views, hidden_from_owner(tree, (await install_mode(request))["mode"])
+        )
     return {
         "chat": chat_view(chat, running=running is not None, read_only=read_only),
         "messages": views,
@@ -424,23 +449,39 @@ def _hidden_call(call: dict[str, Any], mode: str) -> bool:
     return bool(call.get("jobSite")) and not (mode == "dev" and call.get("mode") == "dev")
 
 
-def redact_for_owner(views: list[dict[str, Any]], mode: str) -> list[dict[str, Any]]:
-    """Production mode hides a chat from its first job-site result on (J13a).
+def _hidden_site(message: Message, mode: str) -> str | None:
+    for round_ in message.tool_rounds:
+        for call in round_.get("calls") or []:
+            if _hidden_call(call, mode):
+                return str(call.get("label") or call.get("site") or "a job site")
+    return None
+
+
+def hidden_from_owner(tree: list[Message], mode: str) -> dict[str, str]:
+    """What production mode hides from the owner, each with the machine it
+    names: a chat from its first job-site result on (J13a), along each path.
 
     The model's later replies quote what it read, so the result alone is not
-    enough; the owner sees the chat up to that point, then one line saying
-    which machine's files the rest used."""
+    enough. A message is hidden when it holds such a result, or when the
+    message it follows is hidden. Rows come in `seq` order, a parent before
+    its versions, so this is one walk; a branch that never touched a job
+    site stays visible."""
+    hidden: dict[str, str] = {}
+    for message in tree:
+        site = hidden.get(message.parent_id) if message.parent_id is not None else None
+        site = site or _hidden_site(message, mode)
+        if site is not None:
+            hidden[message.id] = site
+    return hidden
+
+
+def redact_for_owner(views: list[dict[str, Any]], hidden: dict[str, str]) -> list[dict[str, Any]]:
+    """The owner sees each hidden message as one line saying which machine's
+    files it used. Its place among its versions stays, so every branch can
+    still be reached (V5)."""
     out: list[dict[str, Any]] = []
-    site: str | None = None
     for view in views:
-        if site is None:
-            for round_ in view.get("toolRounds") or []:
-                for call in round_.get("calls") or []:
-                    if _hidden_call(call, mode):
-                        site = str(call.get("label") or call.get("site") or "a job site")
-                        break
-                if site is not None:
-                    break
+        site = hidden.get(view["id"])
         if site is None:
             out.append(view)
             continue
@@ -465,6 +506,7 @@ def redact_for_owner(views: list[dict[str, Any]], mode: str) -> list[dict[str, A
                 "finish": view.get("finish"),
                 "answerFrom": None,
                 "reasoningFrom": None,
+                "versions": view.get("versions"),
                 "redacted": {"site": site},
             }
         )
@@ -603,10 +645,22 @@ def _title(content: str, records: list[FileRecord]) -> str:
 
 
 async def _ask(
-    request: Request, chat: Chat, *, model: str, search: bool, records: list[FileRecord]
+    request: Request,
+    chat: Chat,
+    *,
+    parent_id: str | None,
+    model: str,
+    search: bool,
+    records: list[FileRecord],
+    version: bool = False,
 ) -> Message:
-    """Start the next answer in `chat`, whose last message is the person's."""
+    """Start an answer to the person's message `parent_id`.
+
+    The model is sent the path through it and nothing else. With `version`,
+    the answer is another version on a branch of its own (Try again, or an
+    edit), and every tab watching is told the path changed."""
     store: Store = _state(request).store
+    person = await _person(request)
     answer = await store.add_message(
         Message(
             id=_new_id(),
@@ -617,22 +671,27 @@ async def _ask(
             created_at=time.time(),
             search=search,
             model=model,
-        )
+        ),
+        parent_id=parent_id,
     )
-    history = [m for m in await store.messages(chat.id) if m.id != answer.id]
+    history = (await store.messages(chat.id, via=answer.id))[:-1]
     root = _state(request).settings.data_dir
     fresh = await store.chat(chat.id) or chat
 
     def build() -> dict[str, Any]:
         return request_for(fresh, history, records, root=root, model=model, search=search)
 
-    _answers(request).start(
+    answers = _answers(request)
+    if version:
+        # Before the answer's first piece, so a tab reloads into it.
+        answers.publish(chat.id, {"type": "path"})
+    answers.start(
         chat.id,
         answer,
         build,
         list(fresh.settings.get("toolServers") or []),
         list(fresh.settings.get("folderGrants") or []),
-        person=await _person(request),
+        person=person,
     )
     return answer
 
@@ -667,6 +726,7 @@ async def send(request: Request, chat_id: str, body: Send) -> dict[str, Any]:
         raise _problem(status.HTTP_400_BAD_REQUEST, "Write something, or attach a file.")
     search = chat.search if body.search is None else body.search
     store: Store = _state(request).store
+    shown = await store.messages(chat.id)
     user = await store.add_message(
         Message(
             id=_new_id(),
@@ -677,41 +737,70 @@ async def send(request: Request, chat_id: str, body: Send) -> dict[str, Any]:
             created_at=time.time(),
             content=body.content,
             attachments=list(body.attachments),
-        )
+        ),
+        # Sending continues from the end of the path shown.
+        parent_id=shown[-1].id if shown else None,
     )
     values: dict[str, Any] = {"model": model, "search": search, "updated_at": time.time()}
     if chat.title == NEW_CHAT:
         values["title"] = _title(body.content, [by_id[i] for i in body.attachments])
     await store.update_chat(chat.id, **values)
-    answer = await _ask(request, chat, model=model, search=search, records=records)
+    answer = await _ask(
+        request, chat, parent_id=user.id, model=model, search=search, records=records
+    )
     return {"user": message_view(user), "answer": message_view(answer)}
 
 
-@router.post("/api/chats/{chat_id}/retry", status_code=status.HTTP_201_CREATED)
-async def retry(request: Request, chat_id: str) -> dict[str, Any]:
-    """Try again: the last answer is replaced (W1)."""
-    person = await _person(request)
-    chat = await _own_chat(request, person, chat_id)
-    _no_running(request, chat)
+async def _try_again(request: Request, chat: Chat, message_id: str) -> dict[str, Any]:
+    """Another version of an answer, after the same message (V6). The old
+    one and everything after it stay. An answer still being written is
+    stopped first and kept as a version (V2)."""
     store: Store = _state(request).store
-    messages = await store.messages(chat.id)
-    if not messages or messages[-1].role != "assistant":
-        raise _problem(status.HTTP_409_CONFLICT, "There is no answer to try again.")
-    last = messages[-1]
-    await store.delete_messages_from(chat.id, last.seq)
-    model = chat.model or last.model
+    target = await store.message(message_id)
+    if target is None or target.chat_id != chat.id or target.role != "assistant":
+        raise _problem(status.HTTP_404_NOT_FOUND, "There is no such answer to try again.")
+    model = chat.model or target.model
     if not model:
         raise _problem(status.HTTP_400_BAD_REQUEST, "Choose a model first.")
+    await _answers(request).stop(chat.id)
     await store.update_chat(chat.id, updated_at=time.time())
     answer = await _ask(
-        request, chat, model=model, search=chat.search, records=await _chat_files(request, chat)
+        request,
+        chat,
+        parent_id=target.parent_id,
+        model=model,
+        search=chat.search,
+        records=await _chat_files(request, chat),
+        version=True,
     )
     return {"answer": message_view(answer)}
 
 
+@router.post("/api/chats/{chat_id}/retry", status_code=status.HTTP_201_CREATED)
+async def retry(request: Request, chat_id: str) -> dict[str, Any]:
+    """Try again on the last answer shown (W1)."""
+    person = await _person(request)
+    chat = await _own_chat(request, person, chat_id)
+    messages = await _state(request).store.messages(chat.id)
+    if not messages or messages[-1].role != "assistant":
+        raise _problem(status.HTTP_409_CONFLICT, "There is no answer to try again.")
+    return await _try_again(request, chat, messages[-1].id)
+
+
+@router.post(
+    "/api/chats/{chat_id}/messages/{message_id}/retry", status_code=status.HTTP_201_CREATED
+)
+async def retry_message(request: Request, chat_id: str, message_id: str) -> dict[str, Any]:
+    """Try again on any answer (V6)."""
+    person = await _person(request)
+    chat = await _own_chat(request, person, chat_id)
+    return await _try_again(request, chat, message_id)
+
+
 @router.post("/api/chats/{chat_id}/messages/{message_id}/edit", status_code=status.HTTP_201_CREATED)
 async def edit(request: Request, chat_id: str, message_id: str, body: Edit) -> dict[str, Any]:
-    """Edit a message: it and everything after it are replaced (W1)."""
+    """Edit a message (V3): the edit is a new version of it, with the same
+    attachments, and the old message and its whole branch stay."""
     person = await _person(request)
     chat = await _own_chat(request, person, chat_id)
     _no_running(request, chat)
@@ -721,19 +810,46 @@ async def edit(request: Request, chat_id: str, message_id: str, body: Edit) -> d
         raise _problem(status.HTTP_404_NOT_FOUND, "There is no such message to edit.")
     if not chat.model:
         raise _problem(status.HTTP_400_BAD_REQUEST, "Choose a model first.")
-    await store.delete_messages_from(chat.id, message.seq + 1)
-    await store.update_message(message.id, content=body.content)
+    edited = await store.add_message(
+        Message(
+            id=_new_id(),
+            chat_id=chat.id,
+            seq=0,
+            role="user",
+            status="done",
+            created_at=time.time(),
+            content=body.content,
+            attachments=list(message.attachments),
+        ),
+        parent_id=message.parent_id,
+    )
     await store.update_chat(chat.id, updated_at=time.time())
     answer = await _ask(
         request,
         chat,
+        parent_id=edited.id,
         model=chat.model,
         search=chat.search,
         records=await _chat_files(request, chat),
+        version=True,
     )
-    edited = await store.message(message.id)
-    assert edited is not None
     return {"user": message_view(edited), "answer": message_view(answer)}
+
+
+@router.post("/api/chats/{chat_id}/messages/{message_id}/choose")
+async def choose(request: Request, chat_id: str, message_id: str) -> dict[str, Any]:
+    """Show another version of a message, and the branch it remembers.
+
+    Refused while an answer runs, so the running answer, its Stop and any
+    call waiting for approval stay on the path shown (§1)."""
+    person = await _person(request)
+    chat = await _own_chat(request, person, chat_id)
+    _no_running(request, chat)
+    answers = _answers(request)
+    if not await _state(request).store.choose(chat.id, message_id):
+        raise _problem(status.HTTP_404_NOT_FOUND, "There is no such message in this chat.")
+    answers.publish(chat.id, {"type": "path"})
+    return await _chat_detail(request, chat, read_only=False)
 
 
 @router.post("/api/chats/{chat_id}/stop", status_code=status.HTTP_204_NO_CONTENT)

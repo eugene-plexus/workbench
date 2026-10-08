@@ -108,3 +108,14 @@ export function modeChanged(mode: "production" | "dev", at: string): string {
 export function redactedNote(site: string): string {
   return `The rest of this chat used files on ${site}. It is private in production mode.`;
 }
+
+/** Under an edit: the edit is a new version, and nothing is replaced (V3). */
+export const EDIT_NOTE =
+  "Your earlier version and what followed it are kept. Use the arrows to go back.";
+
+/** Why the arrows wait: a running answer stays where its Stop is. */
+export const VERSIONS_WAIT = "Wait for the answer, or stop it.";
+
+/** The line an export adds when the chat has other branches. */
+export const EXPORT_BRANCHES_NOTE =
+  "Exported as shown; other versions of some messages are not included.";

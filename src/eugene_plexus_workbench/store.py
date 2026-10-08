@@ -13,6 +13,12 @@ there is no lock to get wrong.
 
 **Bytes are not here.** An attachment's name, type, size and owner are;
 the file itself is under `files/` in the data directory (W7).
+
+**A chat is a tree** (`workbench-answer-versions.md`). Each message names
+the one it follows (`parent_id`); messages that follow the same one are
+versions of each other, and one in each group is `chosen`. The **path**,
+the chat as it is shown and sent, starts at the chosen first message and
+follows each message's chosen version. Nothing is deleted but a whole chat.
 """
 
 from __future__ import annotations
@@ -27,7 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -78,7 +84,9 @@ CREATE TABLE IF NOT EXISTS messages (
     finished_at REAL,
     answer_from INTEGER,
     reasoning_from INTEGER,
-    tool_rounds TEXT NOT NULL DEFAULT '[]'
+    tool_rounds TEXT NOT NULL DEFAULT '[]',
+    parent_id TEXT,
+    chosen INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS messages_by_chat ON messages (chat_id, seq);
 CREATE TABLE IF NOT EXISTS files (
@@ -125,6 +133,16 @@ _MIGRATIONS: dict[int, list[str]] = {
     5: [
         "CREATE TABLE folder_grants (id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL, "
         "identity TEXT NOT NULL, subject TEXT NOT NULL, writable INTEGER NOT NULL)",
+    ],
+    # Versions of a message (workbench-answer-versions.md §4): each existing
+    # row follows the one before it, and every row is chosen, so a chat
+    # opens as the same conversation with no versions.
+    6: [
+        "ALTER TABLE messages ADD COLUMN parent_id TEXT",
+        "ALTER TABLE messages ADD COLUMN chosen INTEGER NOT NULL DEFAULT 1",
+        "UPDATE messages SET parent_id = (SELECT p.id FROM messages p "
+        "WHERE p.chat_id = messages.chat_id AND p.seq < messages.seq "
+        "ORDER BY p.seq DESC LIMIT 1)",
     ],
 }
 
@@ -252,6 +270,10 @@ class Message:
     answer_from: int | None = None
     reasoning_from: int | None = None
     tool_rounds: list[dict[str, Any]] = field(default_factory=list)
+    #: The message this one follows; None for a chat's first message.
+    parent_id: str | None = None
+    #: Whether this is the version shown, among those that follow its parent.
+    chosen: bool = True
 
 
 @dataclass
@@ -299,6 +321,8 @@ def _message(row: sqlite3.Row) -> Message:
         answer_from=row["answer_from"],
         reasoning_from=row["reasoning_from"],
         tool_rounds=json.loads(row["tool_rounds"]),
+        parent_id=row["parent_id"],
+        chosen=bool(row["chosen"]),
     )
 
 
@@ -353,6 +377,87 @@ def _encode(column: str, value: Any) -> Any:
     if isinstance(value, bool):
         return int(value)
     return value
+
+
+def _groups(tree: list[Message]) -> dict[str | None, list[Message]]:
+    """Each group of versions, under the message they follow, oldest first."""
+    groups: dict[str | None, list[Message]] = {}
+    for message in tree:
+        groups.setdefault(message.parent_id, []).append(message)
+    return groups
+
+
+def path(tree: list[Message], via: str | None = None) -> list[Message]:
+    """The chat as shown, from all of its rows in `seq` order.
+
+    From the chosen first message, each message's chosen version follows.
+    With `via`, the path through that message instead: what it follows on
+    its own branch, it, then its own chosen versions after it. An unknown
+    `via` is an empty path.
+    """
+    groups = _groups(tree)
+    out: list[Message] = []
+    seen: set[str] = set()
+    at: str | None = None
+    if via is not None:
+        by_id = {m.id: m for m in tree}
+        node = by_id.get(via)
+        if node is None:
+            return []
+        while node is not None and node.id not in seen:
+            out.append(node)
+            seen.add(node.id)
+            node = by_id.get(node.parent_id) if node.parent_id is not None else None
+        out.reverse()
+        at = via
+    while group := groups.get(at):
+        # Exactly one is chosen; were none, the newest is shown, not nothing.
+        step = next((m for m in group if m.chosen), group[-1])
+        if step.id in seen:
+            break
+        out.append(step)
+        seen.add(step.id)
+        at = step.id
+    return out
+
+
+def versions(tree: list[Message]) -> dict[str, dict[str, Any]]:
+    """Each message's place among its versions: `{index, count, ids}`, from 1."""
+    out: dict[str, dict[str, Any]] = {}
+    for group in _groups(tree).values():
+        ids = [m.id for m in group]
+        for index, message in enumerate(group, start=1):
+            out[message.id] = {"index": index, "count": len(ids), "ids": ids}
+    return out
+
+
+def _choose(db: sqlite3.Connection, chat_id: str, message_id: str) -> bool:
+    """Put `message_id` on the path: it, and each message before it on its
+    own branch, becomes the chosen version in its group. A group already
+    right is left alone, so the usual case is one statement."""
+    rows = db.execute(
+        "SELECT id, parent_id, chosen FROM messages WHERE chat_id = ?", (chat_id,)
+    ).fetchall()
+    parent = {r["id"]: r["parent_id"] for r in rows}
+    if message_id not in parent:
+        return False
+    chosen = {r["id"] for r in rows if r["chosen"]}
+    count: dict[str | None, int] = {}
+    for r in rows:
+        if r["chosen"]:
+            count[r["parent_id"]] = count.get(r["parent_id"], 0) + 1
+    node: str | None = message_id
+    seen: set[str] = set()
+    while node is not None and node in parent and node not in seen:
+        seen.add(node)
+        above = parent[node]
+        if node not in chosen or count.get(above) != 1:
+            db.execute(
+                "UPDATE messages SET chosen = (id = ?) WHERE chat_id = ? AND parent_id IS ?",
+                (node, chat_id, above),
+            )
+        node = above
+    return True
 
 
 class Store:
@@ -569,49 +674,87 @@ class Store:
 
     # --- messages -------------------------------------------------------
 
-    async def add_message(self, message: Message) -> Message:
-        """Append `message` to its chat, numbering it after the last one."""
+    async def add_message(self, message: Message, *, parent_id: str | None) -> Message:
+        """Add `message` after `parent_id`, numbered after the chat's last row.
+
+        It becomes the chosen version among those that follow its parent, so
+        the path now runs through it. A new message's parent is the path's
+        last message; a version's parent is its sibling's.
+        """
 
         def go() -> Message:
             db = self._conn()
-            row = db.execute(
-                "SELECT COALESCE(MAX(seq), 0) AS last FROM messages WHERE chat_id = ?",
-                (message.chat_id,),
-            ).fetchone()
-            message.seq = int(row["last"]) + 1
-            db.execute(
-                "INSERT INTO messages (id, chat_id, seq, role, content, reasoning, attachments, "
-                "status, error, sources, searches, search, model, finish, created_at, finished_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    message.id,
-                    message.chat_id,
-                    message.seq,
-                    message.role,
-                    message.content,
-                    message.reasoning,
-                    json.dumps(message.attachments),
-                    message.status,
-                    message.error,
-                    json.dumps(message.sources),
-                    message.searches,
-                    int(message.search),
-                    message.model,
-                    message.finish,
-                    message.created_at,
-                    message.finished_at,
-                ),
-            )
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute(
+                    "SELECT COALESCE(MAX(seq), 0) AS last FROM messages WHERE chat_id = ?",
+                    (message.chat_id,),
+                ).fetchone()
+                message.seq = int(row["last"]) + 1
+                message.parent_id, message.chosen = parent_id, True
+                db.execute(
+                    "INSERT INTO messages (id, chat_id, seq, role, content, reasoning, "
+                    "attachments, status, error, sources, searches, search, model, finish, "
+                    "created_at, finished_at, parent_id, chosen) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
+                    (
+                        message.id,
+                        message.chat_id,
+                        message.seq,
+                        message.role,
+                        message.content,
+                        message.reasoning,
+                        json.dumps(message.attachments),
+                        message.status,
+                        message.error,
+                        json.dumps(message.sources),
+                        message.searches,
+                        int(message.search),
+                        message.model,
+                        message.finish,
+                        message.created_at,
+                        message.finished_at,
+                        parent_id,
+                    ),
+                )
+                _choose(db, message.chat_id, message.id)
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
             return message
 
         return await self._run(go)
 
-    async def messages(self, chat_id: str) -> list[Message]:
+    async def tree(self, chat_id: str) -> list[Message]:
+        """Every row of a chat, every version, in the order they were made."""
+
         def go() -> list[Message]:
             rows = self._conn().execute(
                 "SELECT * FROM messages WHERE chat_id = ? ORDER BY seq", (chat_id,)
             )
             return [_message(r) for r in rows]
+
+        return await self._run(go)
+
+    async def messages(self, chat_id: str, via: str | None = None) -> list[Message]:
+        """The chat's path (see `path`): what is shown and what the model is sent."""
+        return path(await self.tree(chat_id), via)
+
+    async def choose(self, chat_id: str, message_id: str) -> bool:
+        """Show this version, and the branch it remembers after it. False when
+        the chat has no such message."""
+
+        def go() -> bool:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                found = _choose(db, chat_id, message_id)
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return found
 
         return await self._run(go)
 
@@ -641,14 +784,6 @@ class Store:
             )
 
         await self._run(go)
-
-    async def delete_messages_from(self, chat_id: str, seq: int) -> None:
-        """Delete the message numbered `seq` and every one after it."""
-        await self._run(
-            lambda: self._conn().execute(
-                "DELETE FROM messages WHERE chat_id = ? AND seq >= ?", (chat_id, seq)
-            )
-        )
 
     async def mark_interrupted(self) -> int:
         """Boot: an answer still `running` was cut off by a restart (W1)."""

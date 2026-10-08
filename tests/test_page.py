@@ -100,7 +100,8 @@ async def test_a_restart_marks_an_answer_in_progress_interrupted(tmp_path: Path)
             status="running",
             created_at=now,
             content="Half an",
-        )
+        ),
+        parent_id=None,
     )
     await store.close()
     reopened = Store(tmp_path / "wb.sqlite3")
@@ -166,7 +167,8 @@ def test_shutdown_marks_a_running_answer_interrupted_not_stopped(tmp_path: Path)
             Chat(id="c", owner="p", title="t", model="m", created_at=now, updated_at=now)
         )
         message = await store.add_message(
-            Message(id="a", chat_id="c", seq=0, role="assistant", status="running", created_at=now)
+            Message(id="a", chat_id="c", seq=0, role="assistant", status="running", created_at=now),
+            parent_id=None,
         )
         answers = Answers(store, Slow(None, None))
         answers.start("c", message, lambda: {})
