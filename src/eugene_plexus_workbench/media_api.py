@@ -1,4 +1,5 @@
-"""The media area's API (workbench-media-screens.md §8). Slice 1: images.
+"""The media area's API (workbench-media-screens.md §8): images, speech,
+transcription, and video as a long job (slice 3).
 
 Every route needs a session, and every result is filtered by who is asking:
 **a result that is not yours is the same 404 as one that does not exist**,
@@ -26,8 +27,8 @@ from .store import Chat, FileRecord, MediaRow, Person, Store
 
 router = APIRouter()
 
-#: The screens slice 1 builds. Speech, transcription and video join later.
-DOORS = ("images", "speech", "transcription")
+#: The media screens, one tab each.
+DOORS = ("images", "speech", "transcription", "video")
 _PAGE = 30
 
 #: A provider's own name for the line *Runs on <account>* (M6).
@@ -116,6 +117,38 @@ def image_model(model: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _price_line(line: Any) -> dict[str, Any] | None:
+    """One line of a video model's price list, as the page reads it."""
+    usd = line.get("usd") if isinstance(line, dict) else None
+    if not isinstance(usd, int | float) or isinstance(usd, bool):
+        return None
+    out: dict[str, Any] = {"sku": line.get("sku"), "per": line.get("per"), "usd": usd}
+    for key, name in (
+        ("resolution", "resolution"),
+        ("sizes", "sizes"),
+        ("audio", "audio"),
+        ("first_frame", "firstFrame"),
+    ):
+        if line.get(key) is not None:
+            out[name] = line[key]
+    return out
+
+
+def video_model(model: dict[str, Any]) -> dict[str, Any]:
+    """A video model as the Video screen builds its form and its price from
+    it (§5, §6.4). No price listed is null: the page says so, never free."""
+    info = model.get("x_eugene_plexus") or {}
+    prices = info.get("video_prices")
+    lines = [p for p in (_price_line(x) for x in prices) if p] if isinstance(prices, list) else []
+    return {
+        **_common(model),
+        "durations": info.get("video_durations"),
+        "sizes": info.get("video_sizes"),
+        "firstFrame": bool(info.get("video_first_frame")),
+        "prices": lines or None,
+    }
+
+
 @router.get("/api/media/doors")
 async def doors(request: Request) -> dict[str, Any]:
     """Each screen this Workbench has, with the models that serve it."""
@@ -137,6 +170,7 @@ async def doors(request: Request) -> dict[str, Any]:
             "images": {"models": [image_model(m) for m in serving("image")]},
             "speech": {"models": [speech_model(m) for m in serving("speech")]},
             "transcription": {"models": [transcription_model(m) for m in serving("transcription")]},
+            "video": {"models": [video_model(m) for m in serving("video")]},
         }
     }
 
@@ -279,7 +313,9 @@ class ImageAsk(BaseModel):
     references: list[str] = Field(default_factory=list, max_length=16)
 
 
-async def _references(request: Request, person: Person, ids: list[str]) -> list[FileRecord]:
+async def _references(
+    request: Request, person: Person, ids: list[str], *, what: str = "reference image"
+) -> list[FileRecord]:
     """Reference images: images in the asker's own bins, under the gateway's
     limit together, said before anything is sent."""
     store = _store(request)
@@ -294,7 +330,7 @@ async def _references(request: Request, person: Person, ids: list[str]) -> list[
         ):
             raise api._problem(
                 status.HTTP_400_BAD_REQUEST,
-                "A reference image is no longer in your bins. Choose the references again.",
+                f"The {what} is no longer in your bins. Choose it again.",
             )
         found.append(record)
     if sum(r.size for r in found) > files.REFERENCES_LIMIT:
@@ -499,6 +535,49 @@ async def make_transcript(
         fields["language"] = language
     await _jobs(request).start_transcription(row, fields, source, translate=translate)
     return (await _views(store, [row]))[0]
+
+
+# --------------------------------------------------------------------------- #
+# video, as a long job (slice 3, M11)
+# --------------------------------------------------------------------------- #
+
+
+class VideoAsk(BaseModel):
+    model: str = Field(min_length=1, max_length=256)
+    #: The gateway's own limit on this door (`VideoCreateRequest.prompt`).
+    prompt: str = Field(min_length=1, max_length=32_000)
+    seconds: int | None = Field(default=None, ge=1, le=120)
+    size: str | None = Field(default=None, pattern=r"^\d{1,5}x\d{1,5}$")
+    #: An image in the asker's bins, sent as the first frame.
+    firstFrame: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+@router.post("/api/media/video", status_code=status.HTTP_201_CREATED)
+async def make_video(request: Request, body: VideoAsk) -> dict[str, Any]:
+    """Submits a video job on the server and returns its row. The Foreman
+    polls it from here on, through restarts, and keeps the video (M11).
+    The page asks before sending, with the price where one is listed."""
+    person = await api._person(request)
+    frames = await _references(
+        request, person, [body.firstFrame] if body.firstFrame else [], what="first frame"
+    )
+    gateway: dict[str, Any] = {"model": body.model, "prompt": body.prompt}
+    if body.seconds is not None:
+        gateway["seconds"] = str(body.seconds)
+    if body.size is not None:
+        gateway["size"] = body.size
+    row = MediaRow(
+        id=new_id(),
+        owner=person.sub,
+        door="video",
+        kind="made",
+        status="running",
+        created_at=time.time(),
+        model=body.model,
+        request=body.model_dump(exclude_none=True),
+    )
+    await _jobs(request).start_video(row, gateway, frames[0] if frames else None)
+    return (await _views(_store(request), [row]))[0]
 
 
 # --------------------------------------------------------------------------- #

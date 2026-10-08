@@ -163,6 +163,12 @@ def sniff_audio(data: bytes) -> str | None:
     return None
 
 
+def sniff_video(head: bytes) -> str | None:
+    """A video's type from its first bytes, or None. Every video door here
+    answers an MP4 (P5, measured), whose first box is `ftyp`."""
+    return "video/mp4" if head[4:8] == b"ftyp" else None
+
+
 def extension(media_type: str) -> str:
     return {
         "image/png": "png",
@@ -175,6 +181,7 @@ def extension(media_type: str) -> str:
         "audio/aac": "aac",
         "audio/webm": "webm",
         "audio/mp4": "m4a",
+        "video/mp4": "mp4",
     }.get(media_type, "bin")
 
 

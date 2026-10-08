@@ -3,13 +3,14 @@
  * model's listing, and how a result is said. Pure, so it is tested alone.
  */
 
-export type Door = "images" | "speech" | "transcription";
-export const DOORS: Door[] = ["images", "speech", "transcription"];
+export type Door = "images" | "speech" | "transcription" | "video";
+export const DOORS: Door[] = ["images", "speech", "transcription", "video"];
 /** Each screen's tab, and what a model on it does, for the empty state. */
 export const DOOR_WORDS: Record<Door, { tab: string; does: string }> = {
   images: { tab: "Images", does: "makes images" },
   speech: { tab: "Speech", does: "speaks" },
   transcription: { tab: "Transcription", does: "turns speech into text" },
+  video: { tab: "Video", does: "makes videos" },
 };
 
 export type Locality = "local" | "external" | "unknown";
@@ -58,11 +59,32 @@ export interface TranscriptionModel extends ServedModel {
   translates: boolean;
 }
 
+/** One line of a video model's price list (§6.4), in dollars. An absent
+ * condition holds either way. */
+export interface VideoPrice {
+  sku: string;
+  per: "second" | "input_image" | "minimum";
+  usd: number;
+  resolution?: string;
+  sizes?: string[];
+  audio?: boolean;
+  firstFrame?: boolean;
+}
+
+/** A video model (slice 3). Null prices: none is listed, never free. */
+export interface VideoModel extends ServedModel {
+  durations: number[] | null;
+  sizes: string[] | null;
+  firstFrame: boolean;
+  prices: VideoPrice[] | null;
+}
+
 export interface Doors {
   doors: {
     images: { models: ImageModel[] };
     speech: { models: SpeechModel[] };
     transcription: { models: TranscriptionModel[] };
+    video: { models: VideoModel[] };
   };
 }
 
@@ -96,6 +118,19 @@ export interface ImageRequest {
   language?: string;
   translate?: boolean;
   clipSeconds?: number;
+  /** Video: its length, and an image from the bins as its first frame. */
+  seconds?: number;
+  firstFrame?: string;
+}
+
+/** A long job as the server last polled it (M11). */
+export interface JobState {
+  status: string;
+  progress: number;
+  polls: number;
+  polledAt: number;
+  /** Why the last poll did not answer; the server asks again. */
+  problem: string | null;
 }
 
 export interface MediaItem {
@@ -121,9 +156,14 @@ export interface MediaItem {
     heardSeconds?: number | null;
     tokens?: number | null;
     clipSeconds?: number | null;
+    /** Video: the seconds and size the job said, and what the provider billed. */
+    seconds?: number | null;
+    size?: string | null;
+    costUsd?: number | null;
   } | null;
   text: string | null;
   error: { message: string; param: string | null; status: number | null } | null;
+  job?: JobState | null;
   files: MediaFile[];
   readOnly?: boolean;
 }
@@ -247,17 +287,45 @@ export function sizeWords(asked: string | undefined, file: MediaFile): string | 
   return asked ? `Asked ${times(asked)}` : null;
 }
 
+/** How long, in words: `18 s`, `2 min 5 s`. */
+export function elapsedWords(seconds: number): string {
+  const whole = Math.max(0, Math.floor(seconds));
+  if (whole < 60) return `${whole} s`;
+  const minutes = Math.floor(whole / 60);
+  const rest = whole % 60;
+  return rest ? `${minutes} min ${rest} s` : `${minutes} min`;
+}
+
+/** A running video job, said plainly (§5). Grok gives no progress (0, then
+ * 100), so the time so far is what there is; a progress the provider does
+ * give is said too. A poll that did not answer is said with its words. */
+export function workingWords(item: MediaItem, now: number): string {
+  const job = item.job;
+  const so = `Working, ${elapsedWords(now - item.createdAt)} so far.`;
+  const progress = job && job.progress > 0 && job.progress < 100 ? ` ${job.progress}% done.` : "";
+  const trouble = job?.problem
+    ? ` The last check did not answer: ${job.problem} Workbench keeps asking.`
+    : "";
+  return `${so}${progress} You can close this tab; it keeps going.${trouble}`;
+}
+
 /** A result's state in words, or null when it is simply done. */
-export function statusWords(item: MediaItem): string | null {
+export function statusWords(item: MediaItem, now = Date.now() / 1000): string | null {
+  const video = item.door === "video";
   switch (item.status) {
     case "running":
+      if (video) return workingWords(item, now);
       return item.door === "transcription"
         ? "Listening to it. You can close this tab; it keeps going."
         : "Making it. You can close this tab; it keeps going.";
     case "stopped":
-      return "Stopped. The provider may still bill it.";
+      return video
+        ? "Stopped. The provider may still make this video, and bill it: Eugene cannot cancel a video job."
+        : "Stopped. The provider may still bill it.";
     case "interrupted":
-      return "Workbench restarted while this was being made. The provider may have billed it.";
+      return video
+        ? "Workbench restarted before the gateway took this job. The provider may have billed it."
+        : "Workbench restarted while this was being made. The provider may have billed it.";
     case "failed":
       return item.error?.message ?? "It failed, and the gateway did not say why.";
     default:
@@ -306,6 +374,7 @@ export function imageBody(form: {
 export function fieldOf(param: string | null | undefined): string | null {
   if (!param) return null;
   if (param === "output_format") return "outputFormat";
+  if (param === "input_reference") return "firstFrame";
   if (param.startsWith("image")) return "references";
   return param;
 }
@@ -365,6 +434,99 @@ export async function clipSeconds(file: Blob): Promise<number | null> {
 export function speechFormats(model: SpeechModel): string[] {
   const listed = model.formats.length ? model.formats : ["mp3"];
   return listed.includes("mp3") ? ["mp3", ...listed.filter((f) => f !== "mp3")] : listed;
+}
+
+/** What a video request will cost, from the listing (§6.4): the `second`
+ * line for the size sent (else one with no resolution), times the seconds,
+ * plus a first frame's `input_image` line, and at least the `minimum`.
+ * Lines left open (sound, or the size when none is sent) give a range.
+ * Null when nothing listed prices it. */
+export interface VideoQuote {
+  low: number;
+  high: number;
+  resolution: string | null;
+}
+
+export function videoQuote(
+  model: VideoModel,
+  ask: { seconds: number | null; size: string | null; firstFrame: boolean },
+): VideoQuote | null {
+  const seconds = ask.seconds;
+  if (!model.prices || seconds == null) return null;
+  const holds = (p: VideoPrice) => p.firstFrame === undefined || p.firstFrame === ask.firstFrame;
+  const perSecond = model.prices.filter((p) => p.per === "second" && holds(p));
+  const size = ask.size;
+  const sized = size ? perSecond.filter((p) => p.sizes?.includes(size)) : [];
+  const lines = !size
+    ? perSecond
+    : sized.length
+      ? sized
+      : perSecond.filter((p) => p.resolution === undefined);
+  if (!lines.length) return null;
+  const frames = ask.firstFrame
+    ? model.prices.filter((p) => p.per === "input_image").reduce((sum, p) => sum + p.usd, 0)
+    : 0;
+  const least = Math.max(0, ...model.prices.filter((p) => p.per === "minimum").map((p) => p.usd));
+  const rates = lines.map((p) => p.usd);
+  const total = (rate: number) => Math.max(least, rate * seconds + frames);
+  const resolutions = new Set(lines.map((p) => p.resolution ?? null));
+  return {
+    low: total(Math.min(...rates)),
+    high: total(Math.max(...rates)),
+    resolution: resolutions.size === 1 ? ([...resolutions][0] ?? null) : null,
+  };
+}
+
+/** Dollars as a person reads them: `$0.05`, and never `$0.00` for a charge. */
+export function dollars(usd: number): string {
+  if (usd > 0 && usd < 0.005) return "under $0.01";
+  return `$${usd.toFixed(2)}`;
+}
+
+/** What sending asks first (M6): the length, the size, and the price where
+ * one is listed: *12 s at 480p. About $0.60, billed to OpenRouter.* */
+export function quoteWords(
+  model: VideoModel,
+  ask: { seconds: number | null; size: string | null; firstFrame: boolean },
+): string {
+  const who = model.provider ?? model.account ?? "the account that serves it";
+  const quote = videoQuote(model, ask);
+  const at = quote?.resolution ?? (ask.size ? times(ask.size) : null);
+  const length = ask.seconds != null ? `${ask.seconds} s` : "The model's own length";
+  const what = at ? `${length} at ${at}.` : `${length}, at the model's own size.`;
+  if (model.locality === "local") return `${what} It runs on your own machines.`;
+  if (!quote) return `${what} No price is listed for this; ${who} bills it to that account.`;
+  const price =
+    dollars(quote.low) === dollars(quote.high)
+      ? `About ${dollars(quote.high)}`
+      : `About ${dollars(quote.low)} to ${dollars(quote.high)}`;
+  return `${what} ${price}, billed to ${who}.`;
+}
+
+/** What the provider billed, once it said (§6.4). */
+export function billedWords(item: MediaItem): string | null {
+  const cost = item.units?.costUsd;
+  return cost == null ? null : `The provider billed ${dollars(cost)} for this.`;
+}
+
+/** The video's own length and size beside what was asked, when they differ
+ * (§2.4): read by the browser from the file. */
+export function videoWords(
+  asked: { seconds?: number; size?: string },
+  got: { seconds: number; width: number; height: number } | null,
+): string | null {
+  if (!got) return null;
+  const length = `${got.seconds.toFixed(1)} s`;
+  const size = `${got.width} × ${got.height}`;
+  const askedSize = asked.size ? times(asked.size) : null;
+  const differs =
+    (asked.seconds != null && Math.abs(asked.seconds - got.seconds) > 0.5) ||
+    (askedSize != null && askedSize !== size);
+  if (!differs) return `${length}, ${size}`;
+  const wanted = [asked.seconds != null ? `${asked.seconds} s` : null, askedSize]
+    .filter(Boolean)
+    .join(" at ");
+  return `Asked ${wanted}, got ${length} at ${size}`;
 }
 
 /** What a result says in the bin: the words asked for, spoken or heard. */

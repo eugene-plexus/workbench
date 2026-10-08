@@ -58,6 +58,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         tools.node_folders = NodeFolders(store, provider, http)
         answers = Answers(store, hub, tools)
         media = MediaJobs(store, hub, settings.data_dir)
+        # M11: a video job the gateway accepted is polled again, whatever
+        # stopped Workbench, because the provider kept working on it.
+        resumed = await media.resume()
+        if resumed:
+            log.info("polling %d video job(s) again after the restart", resumed)
         app.state.tools = tools
         app.state.store = store
         app.state.provider = provider

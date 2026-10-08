@@ -13,8 +13,13 @@ open. So, as with answers (W1):
 One stream per person, not per chat: one person can have several requests
 running on several screens.
 
-Slice 1 is images. Speech, transcription and video add their own `_run_*`
-and reuse the rest.
+**A video is a long job (M11).** The gateway accepts it and answers a
+handle; the Foreman here polls the handle every `POLL_SECONDS`, keeps it in
+the row's `job`, and downloads the MP4 into the bin the moment the job is
+done, because the provider's retention is unknown. The provider keeps
+working, and billing, whatever Workbench does, so a job with a handle is
+never marked `interrupted`: a restart, graceful or not, polls it again
+(`MediaJobs.resume`, at boot).
 """
 
 from __future__ import annotations
@@ -42,6 +47,20 @@ _QUEUE_DEPTH = 200
 
 #: What a request's `x_eugene_plexus` says about what served it (§2.4).
 _SERVED = ("driver", "backend", "latency_ms", "attempts", "tier", "waited_ms", "swapped_in")
+
+#: How often the Foreman asks after a running video (§5).
+POLL_SECONDS = 5.0
+
+#: A poll the gateway refuses with one of these ends the job: asking again
+#: cannot help. Anything else (its 503 *"Poll again once it is; the job is
+#: not lost"*, a gateway that cannot be reached, a limit) is said on the
+#: job and asked again at the next poll.
+_FINAL_POLL = frozenset({400, 401, 403, 404})
+
+#: Added to a refusal that ends a job the provider may have run anyway.
+MAY_HAVE_BILLED = (
+    "The provider may still make this video, and bill it: Eugene cannot cancel a video job."
+)
 
 
 def new_id() -> str:
@@ -74,6 +93,8 @@ def media_view(row: MediaRow, records: list[FileRecord]) -> dict[str, Any]:
         "units": row.units,
         "text": row.text,
         "error": row.error,
+        # A long job's state as the Foreman last saw it; its handle stays here.
+        "job": {k: v for k, v in row.job.items() if k != "handle"} if row.job else None,
         "files": [file_view(r) for r in records if r.media_id == row.id],
     }
 
@@ -97,6 +118,20 @@ class Running:
     row: MediaRow
     task: asyncio.Task[None] | None = None
     shutting_down: bool = False
+
+
+def resource_error(answer: dict[str, Any]) -> str:
+    """A failed video job's reason, in the gateway's words."""
+    error = answer.get("error")
+    message = error.get("message") if isinstance(error, dict) else None
+    return str(message) if message else "The provider reported the video job failed."
+
+
+def cost_of(answer: dict[str, Any]) -> float | None:
+    """What the provider says it billed (`x_eugene_plexus.cost_usd`, §6.4)."""
+    info = answer.get("x_eugene_plexus")
+    cost = info.get("cost_usd") if isinstance(info, dict) else None
+    return float(cost) if isinstance(cost, int | float) and not isinstance(cost, bool) else None
 
 
 @dataclass(eq=False)  # kept in a set, by identity
@@ -181,6 +216,25 @@ class MediaJobs:
             row, lambda running: self._transcribe(running, fields, source, translate=translate)
         )
 
+    async def start_video(
+        self, row: MediaRow, body: dict[str, Any], first_frame: FileRecord | None
+    ) -> None:
+        """Store `row` as running, submit its video job, and have the
+        Foreman poll it until it ends (slice 3, M11)."""
+        await self._start(row, lambda running: self._video(running, body, first_frame))
+
+    async def resume(self) -> int:
+        """Boot: poll again every video job the gateway accepted that had not
+        ended when Workbench stopped. Returns how many."""
+        rows = await self._store.media_jobs_running()
+        for row in rows:
+            running = Running(row=row)
+            self._running[row.id] = running
+            running.task = asyncio.create_task(
+                self._run(running, self._video(running, {}, None)), name=f"media-{row.id}"
+            )
+        return len(rows)
+
     async def _start(self, row: MediaRow, work: Any) -> None:
         if not await self._store.media(row.id):
             await self._store.add_media(row)
@@ -211,10 +265,15 @@ class MediaJobs:
 
     async def _run(self, running: Running, work: Any) -> None:
         row = running.row
+        kept = False
         try:
             await work
             row.status = "done"
         except asyncio.CancelledError:
+            # M11: the provider keeps working, and billing, on a job it
+            # accepted. At shutdown it stays running, and the next start
+            # polls it again.
+            kept = running.shutting_down and row.job is not None
             row.status = "interrupted" if running.shutting_down else "stopped"
         except HubError as exc:
             row.status = "failed"
@@ -236,22 +295,35 @@ class MediaJobs:
                 "status": None,
             }
         finally:
-            row.finished_at = time.time()
+            await self._settle(row, kept=kept)
+
+    async def _settle(self, row: MediaRow, *, kept: bool) -> None:
+        """Keep how a request ended; or, for a job kept for the next start,
+        only its last poll."""
+        if kept:
+            row.status = "running"
             try:
-                await asyncio.shield(
-                    self._store.update_media(
-                        row.id,
-                        status=row.status,
-                        finished_at=row.finished_at,
-                        served=row.served,
-                        units=row.units,
-                        text=row.text,
-                        error=row.error,
-                    )
-                )
+                await asyncio.shield(self._store.update_media(row.id, job=row.job))
             finally:
                 self._running.pop(row.id, None)
-                await self._changed(row)
+            return
+        row.finished_at = time.time()
+        try:
+            await asyncio.shield(
+                self._store.update_media(
+                    row.id,
+                    status=row.status,
+                    finished_at=row.finished_at,
+                    served=row.served,
+                    units=row.units,
+                    text=row.text,
+                    error=row.error,
+                    job=row.job,
+                )
+            )
+        finally:
+            self._running.pop(row.id, None)
+            await self._changed(row)
 
     async def _images(
         self, running: Running, body: dict[str, Any], references: list[FileRecord]
@@ -361,6 +433,116 @@ class MediaJobs:
             "clipSeconds": row.request.get("clipSeconds"),
         }
 
+    async def _video(
+        self, running: Running, body: dict[str, Any], first_frame: FileRecord | None
+    ) -> None:
+        """Submit the job, unless it was submitted before a restart; then
+        poll it until it ends, and keep the video the moment it is done."""
+        row = running.row
+        if row.job is None:
+            if first_frame is not None:
+                path = files.path_of(self._root, first_frame.owner, first_frame.id)
+                data = await asyncio.to_thread(path.read_bytes)
+                body = {
+                    **body,
+                    "input_reference": {"image_url": data_url(first_frame.media_type, data)},
+                }
+            answer, request_id = await self._hub.video(body)
+            routing = answer.get("x_eugene_plexus") or {}
+            row.served = {
+                **{k: routing.get(k) for k in _SERVED if k in routing},
+                "requestId": request_id,
+            }
+            row.job = {
+                "handle": answer["id"],
+                "status": answer.get("status") or "queued",
+                "progress": answer.get("progress") or 0,
+                "polls": 0,
+                "polledAt": time.time(),
+                "problem": None,
+            }
+            # The handle is what a restart polls again (M11): kept at once.
+            await self._store.update_media(row.id, served=row.served, job=row.job)
+            await self._changed(row)
+        await self._foreman(row)
+
+    async def _foreman(self, row: MediaRow) -> None:
+        """Poll one job every `POLL_SECONDS` until it ends (§5)."""
+        assert row.job is not None
+        job = row.job
+        while True:
+            try:
+                answer = await self._hub.video_job(job["handle"])
+                state = str(answer.get("status") or "")
+                job.update(
+                    status=state,
+                    progress=answer.get("progress") or 0,
+                    polls=int(job.get("polls") or 0) + 1,
+                    polledAt=time.time(),
+                    problem=None,
+                )
+                if state == "failed":
+                    row.units = {**(row.units or {}), "costUsd": cost_of(answer)}
+                    raise HubError(resource_error(answer), kind="video")
+                if state == "completed":
+                    row.units = {
+                        "seconds": _seconds(answer.get("seconds")),
+                        "size": answer.get("size") if answer.get("size") != "auto" else None,
+                        "costUsd": cost_of(answer),
+                    }
+                    await self._download(row, job["handle"])
+                    return
+            except HubError as exc:
+                if exc.kind == "video":
+                    raise
+                if exc.status in _FINAL_POLL or exc.kind == "key":
+                    raise _ended(exc) from exc
+                # Said on the job, and asked again at the next poll.
+                job.update(
+                    polls=int(job.get("polls") or 0) + 1, polledAt=time.time(), problem=exc.message
+                )
+            await self._store.update_media(row.id, job=job)
+            await self._changed(row)
+            await asyncio.sleep(POLL_SECONDS)
+
+    async def _download(self, row: MediaRow, handle: str) -> None:
+        """The finished video, streamed into the row's bin. A part written
+        before a failure is removed."""
+        record = FileRecord(
+            id=new_id(),
+            owner=row.owner,
+            chat_id=None,
+            media_id=row.id,
+            name="video.mp4",
+            media_type="video/mp4",
+            size=0,
+            created_at=time.time(),
+        )
+        path = files.path_of(self._root, row.owner, record.id)
+        await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
+        out = await asyncio.to_thread(path.open, "wb")
+        head = bytearray()
+        try:
+
+            async def write(chunk: bytes) -> None:
+                if len(head) < 12:
+                    head.extend(chunk[: 12 - len(head)])
+                await asyncio.to_thread(out.write, chunk)
+
+            record.size = await self._hub.video_content(handle, write)
+            await asyncio.to_thread(out.close)
+            if files.sniff_video(bytes(head)) is None:
+                raise HubError(
+                    "The gateway answered the finished video with bytes Workbench cannot read "
+                    f"as MP4 (they start {bytes(head[:8]).hex(' ') or 'with nothing'}).",
+                    kind="video",
+                )
+        except BaseException:
+            await asyncio.to_thread(out.close)
+            await asyncio.to_thread(path.unlink, True)
+            raise
+        await self._store.add_file(record)
+
     async def _keep(self, row: MediaRow, data: bytes, media_type: str, name: str) -> FileRecord:
         """Write one file into the row's bin and record it."""
         record = FileRecord(
@@ -382,6 +564,23 @@ class MediaJobs:
         await asyncio.to_thread(write)
         await self._store.add_file(record)
         return record
+
+
+def _seconds(raw: Any) -> int | None:
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _ended(exc: HubError) -> HubError:
+    """A poll refusal that ends a job, in the gateway's words. A job the
+    gateway no longer finds for this key (a key made again, say) may have
+    been made and billed all the same (§5)."""
+    message = exc.message
+    if exc.status == 404 or exc.kind == "key":
+        message = f"{message} {MAY_HAVE_BILLED}"
+    return HubError(message, status=exc.status, kind=exc.kind, param=exc.param)
 
 
 def served_from_headers(headers: dict[str, str]) -> dict[str, Any]:

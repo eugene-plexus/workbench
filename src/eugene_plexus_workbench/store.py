@@ -1085,6 +1085,19 @@ class Store:
 
         return await self._run(go)
 
+    async def media_jobs_running(self) -> list[MediaRow]:
+        """Boot: long jobs the gateway accepted that had not ended (M11).
+        Their handles are kept, so the provider's work is polled again."""
+
+        def go() -> list[MediaRow]:
+            rows = self._conn().execute(
+                "SELECT * FROM media WHERE status = 'running' AND job IS NOT NULL "
+                "ORDER BY created_at"
+            )
+            return [_media(r) for r in rows]
+
+        return await self._run(go)
+
     async def mark_media_interrupted(self) -> int:
         """Boot: a media request still `running` was cut off by a restart.
         The gateway may have been asked, so the provider may have billed it."""

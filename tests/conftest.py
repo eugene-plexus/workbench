@@ -130,6 +130,64 @@ def wav(seconds: float, rate: int = 8000) -> bytes:
     )  # fmt: skip
 
 
+#: An MP4 as a video door sends one: its first box is `ftyp`.
+MP4_CLIP = b"\x00\x00\x00\x18ftypisom" + bytes(range(256)) * 4
+
+#: Video models as the gateway lists them (slice 3): grok with its durations,
+#: sizes, first frame and price list (§6.4); a token-billed model lists no
+#: price the gateway can read.
+VIDEO_MODELS: list[dict[str, Any]] = [
+    {
+        "id": "x-ai/grok-imagine-video",
+        "object": "model",
+        "owned_by": "openrouter",
+        "x_eugene_plexus": {
+            "drivers": ["openrouter"],
+            "surfaces": ["video"],
+            "locality": "external",
+            "ready_backends": 1,
+            "video_durations": list(range(1, 16)),
+            "video_sizes": ["1280x720", "480x854", "854x480"],
+            "video_first_frame": True,
+            "video_prices": [
+                {"sku": "cents_per_image_input", "per": "input_image", "usd": 0.002},
+                {
+                    "sku": "cents_per_video_output_second_480p",
+                    "per": "second",
+                    "usd": 0.05,
+                    "resolution": "480p",
+                    "sizes": ["480x854", "854x480"],
+                    "audio": None,
+                    "first_frame": None,
+                },
+                {
+                    "sku": "cents_per_video_output_second_720p",
+                    "per": "second",
+                    "usd": 0.07,
+                    "resolution": "720p",
+                    "sizes": ["1280x720"],
+                },
+            ],
+        },
+    },
+    {
+        "id": "bytedance/seedance",
+        "object": "model",
+        "owned_by": "openrouter",
+        "x_eugene_plexus": {
+            "drivers": ["openrouter"],
+            "surfaces": ["video"],
+            "locality": "external",
+            "ready_backends": 1,
+            "video_durations": [4, 5, 6],
+            "video_sizes": None,
+            "video_first_frame": False,
+            "video_prices": None,
+        },
+    },
+]
+
+
 #: An MP3 as a speech model sends one: an ID3 tag, then frames.
 MP3_CLIP = b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\xff\xfb\x90\x00" + bytes(400)
 
@@ -467,6 +525,23 @@ class FakeGateway:
     audio_delay: float = 0.0
     #: A refusal to answer every speech or transcription request with.
     audio_refusal: tuple[int, str, str | None] | None = None
+    video_models: list[dict[str, Any]] = field(default_factory=lambda: list(VIDEO_MODELS))
+    #: Every video submit's body, and every poll's handle, in order.
+    video_requests: list[dict[str, Any]] = field(default_factory=list)
+    video_polls: list[str] = field(default_factory=list)
+    #: The jobs this gateway knows, by handle: how many polls each has had,
+    #: and how it ends. A test may add one, as a restart finds it.
+    video_jobs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: As OpenRouter measured (P5): queued for this many polls, then done.
+    video_polls_queued: int = 1
+    #: How a job ends: "completed" or "failed".
+    video_end: str = "completed"
+    video_cost: float | None = 0.05
+    video_content: bytes = MP4_CLIP
+    #: A refusal to answer every video submit with: (status, message, param).
+    video_refusal: tuple[int, str, str | None] | None = None
+    #: Polls to answer with this (status, message) before answering again.
+    video_poll_trouble: list[tuple[int, str]] = field(default_factory=list)
 
     def app(self) -> FastAPI:
         app = FastAPI()
@@ -497,6 +572,7 @@ class FakeGateway:
                     },
                     *self.image_models,
                     *self.audio_models,
+                    *self.video_models,
                 ],
             }
 
@@ -601,6 +677,74 @@ class FakeGateway:
         @app.post("/v1/audio/translations")
         async def translations(request: Request) -> Any:
             return await hear(request, "translations")
+
+        def video_error(code: int, message: str, param: str | None = None) -> Any:
+            return JSONResponse(
+                {"error": {"message": message, "type": "invalid_request_error", "param": param}},
+                status_code=code,
+            )
+
+        def resource(handle: str, job: dict[str, Any], state: str) -> dict[str, Any]:
+            body: dict[str, Any] = {
+                "id": handle,
+                "object": "video",
+                "model": job["model"],
+                "status": state,
+                "progress": 100 if state == "completed" else 0,
+                "created_at": 1,
+                "completed_at": 2 if state == "completed" else None,
+                "expires_at": None,
+                "prompt": None,
+                "size": job.get("size") or "auto",
+                "seconds": job.get("seconds") or "auto",
+                "remixed_from_video_id": None,
+                "error": {"code": "video_generation_failed", "message": job["reason"]}
+                if state == "failed"
+                else None,
+            }
+            if state in ("completed", "failed") and self.video_cost is not None:
+                body["x_eugene_plexus"] = {"cost_usd": self.video_cost}
+            return body
+
+        @app.post("/v1/videos")
+        async def create_video(request: Request) -> Any:
+            body = await request.json()
+            self.video_requests.append(body)
+            if request.headers.get("authorization") != f"Bearer {APP_KEY}":
+                return video_error(401, "invalid key")
+            if self.video_refusal is not None:
+                return video_error(*self.video_refusal)
+            handle = f"video_{len(self.video_requests)}"
+            self.video_jobs[handle] = {
+                "model": body["model"],
+                "seconds": body.get("seconds"),
+                "size": body.get("size"),
+                "polls": 0,
+                "reason": "The provider could not make this video.",
+            }
+            answer = resource(handle, self.video_jobs[handle], "queued")
+            answer["x_eugene_plexus"] = {"driver": "openrouter", "latency_ms": 3250, "attempts": 1}
+            return JSONResponse(
+                answer, headers={"x-request-id": f"video-req-{len(self.video_requests)}"}
+            )
+
+        @app.get("/v1/videos/{handle}")
+        async def poll_video(handle: str) -> Any:
+            self.video_polls.append(handle)
+            if self.video_poll_trouble:
+                return video_error(*self.video_poll_trouble.pop(0))
+            job = self.video_jobs.get(handle)
+            if job is None:
+                return video_error(404, f"No video job '{handle}' for this key.", "video_id")
+            job["polls"] += 1
+            state = "queued" if job["polls"] <= self.video_polls_queued else self.video_end
+            return resource(handle, job, state)
+
+        @app.get("/v1/videos/{handle}/content")
+        async def video_bytes(handle: str) -> Any:
+            if handle not in self.video_jobs:
+                return video_error(404, f"No video job '{handle}' for this key.", "video_id")
+            return Response(content=self.video_content, media_type="video/mp4")
 
         @app.post("/v1/chat/completions")
         async def chat(request: Request) -> Any:

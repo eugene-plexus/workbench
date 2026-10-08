@@ -1,18 +1,21 @@
 /**
  * C3 call 1 starts workshop names with the second tool. C5a adds MCP, so
  * Toolbox now carries its plain meaning, Tools; the media screens add Bins,
- * which carries Media. Unbuilt modules keep waiting. Read copy as strings
+ * which carries Media, and Work orders, which carries Long jobs (video). The
+ * Foreman that polls them is the server's, and stays off screen. Unbuilt
+ * modules keep waiting. Read copy as strings
  * and JSX text, not exported values.
  */
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-const WORKSHOP = ["Jigs", "Work orders", "Crew", "The shop", "Foreman", "Dispatch"];
+const WORKSHOP = ["Jigs", "Crew", "The shop", "Foreman", "Dispatch"];
 /** A built workshop name, and the plain meaning it never appears without. */
 const BUILT: [string, string][] = [
   ["Toolbox", "Toolbox · Tools"],
   ["Bins", "Bins · Media"],
+  ["Work orders", "Work orders · Long jobs"],
 ];
 
 function sources(dir: string): string[] {
@@ -23,7 +26,7 @@ function sources(dir: string): string[] {
   });
 }
 
-it("explains Toolbox and Bins and keeps unbuilt workshop names off screen", () => {
+it("explains Toolbox, Bins and Work orders and keeps unbuilt workshop names off screen", () => {
   const found: string[] = [];
   for (const path of sources(import.meta.dirname)) {
     const text = readFileSync(path, "utf8");
