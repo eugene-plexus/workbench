@@ -58,7 +58,7 @@ def test_a_schema_1_store_gains_the_marks_and_keeps_its_messages(tmp_path: Path)
     assert message.answer_from == 4 and message.reasoning_from == 0
     with sqlite3.connect(path) as db:
         (version,) = db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
-    assert int(version) == SCHEMA_VERSION == 6
+    assert int(version) == SCHEMA_VERSION == 7
 
 
 def test_schema_3_http_connections_survive_local_server_migration(tmp_path: Path) -> None:
@@ -93,6 +93,58 @@ def test_schema_3_http_connections_survive_local_server_migration(tmp_path: Path
 
     asyncio.run(read())
     asyncio.run(read())  # A second boot must not repeat ALTER TABLE.
+
+
+def test_a_schema_6_store_keeps_its_attachments_and_gains_media(tmp_path: Path) -> None:
+    """Schema 7 makes `files` again so a file can belong to a media row
+    instead of a chat; an attachment written before keeps its chat."""
+    path = tmp_path / "schema6.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.executescript(_V1_MESSAGES)
+        db.execute(
+            "CREATE TABLE files (id TEXT PRIMARY KEY, owner TEXT NOT NULL, chat_id TEXT NOT NULL, "
+            "name TEXT NOT NULL, media_type TEXT NOT NULL, size INTEGER NOT NULL, "
+            "created_at REAL NOT NULL)"
+        )
+        for target in range(2, 7):
+            for statement in storage._MIGRATIONS[target]:
+                db.execute(statement)
+        db.execute("INSERT INTO files VALUES ('f1', 'ann', 'c1', 'a.png', 'image/png', 9, 1.0)")
+        db.execute("UPDATE meta SET value = '6' WHERE key = 'schema'")
+
+    async def go() -> tuple[list[storage.FileRecord], list[storage.FileRecord]]:
+        store = Store(path)
+        await store.open()
+        try:
+            await store.add_media(
+                storage.MediaRow(
+                    id="m1", owner="ann", door="images", kind="made", status="done", created_at=2.0
+                )
+            )
+            await store.add_file(
+                storage.FileRecord(
+                    id="f2",
+                    owner="ann",
+                    chat_id=None,
+                    name="barn.png",
+                    media_type="image/png",
+                    size=5,
+                    created_at=2.0,
+                    media_id="m1",
+                    width=512,
+                    height=512,
+                )
+            )
+            return await store.files_for_chat("c1"), await store.files_for_media(["m1"])
+        finally:
+            await store.close()
+
+    attached, made = asyncio.run(go())
+    assert [(f.id, f.chat_id, f.media_id) for f in attached] == [("f1", "c1", None)]
+    assert [(f.id, f.chat_id, f.width) for f in made] == [("f2", None, 512)]
+    with sqlite3.connect(path) as db:
+        (version,) = db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
+    assert int(version) == SCHEMA_VERSION == 7
 
 
 def test_a_new_store_starts_at_the_current_schema(tmp_path: Path) -> None:

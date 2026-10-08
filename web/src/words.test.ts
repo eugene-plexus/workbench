@@ -1,13 +1,19 @@
 /**
  * C3 call 1 starts workshop names with the second tool. C5a adds MCP, so
- * Toolbox now carries its plain meaning, Tools. Unbuilt modules keep
- * waiting. Read copy as strings and JSX text, not exported values.
+ * Toolbox now carries its plain meaning, Tools; the media screens add Bins,
+ * which carries Media. Unbuilt modules keep waiting. Read copy as strings
+ * and JSX text, not exported values.
  */
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-const WORKSHOP = ["Jigs", "Work orders", "Bins", "Crew", "The shop", "Foreman", "Dispatch"];
+const WORKSHOP = ["Jigs", "Work orders", "Crew", "The shop", "Foreman", "Dispatch"];
+/** A built workshop name, and the plain meaning it never appears without. */
+const BUILT: [string, string][] = [
+  ["Toolbox", "Toolbox · Tools"],
+  ["Bins", "Bins · Media"],
+];
 
 function sources(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
@@ -17,12 +23,14 @@ function sources(dir: string): string[] {
   });
 }
 
-it("explains Toolbox and keeps unbuilt workshop names off screen", () => {
+it("explains Toolbox and Bins and keeps unbuilt workshop names off screen", () => {
   const found: string[] = [];
   for (const path of sources(import.meta.dirname)) {
     const text = readFileSync(path, "utf8");
-    if (/\bToolbox\b/.test(text.replaceAll("Toolbox · Tools", ""))) {
-      found.push(`${path}: Toolbox without its plain meaning`);
+    for (const [name, plain] of BUILT) {
+      if (new RegExp(`\\b${name}\\b`).test(text.replaceAll(plain, ""))) {
+        found.push(`${path}: ${name} without its plain meaning`);
+      }
     }
     for (const word of WORKSHOP) {
       if (new RegExp(`\\b${word}\\b`).test(text)) found.push(`${path}: ${word}`);

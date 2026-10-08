@@ -12,6 +12,7 @@ export function Sidebar({
   chats,
   current,
   onOpen,
+  onOpenMedia,
   onClose,
   onNew,
   onSignOut,
@@ -23,6 +24,8 @@ export function Sidebar({
   chats: Chat[];
   current: string | null;
   onOpen: (id: string) => void;
+  /** The owner opens a person's bins, read only (M3). */
+  onOpenMedia: (person: { sub: string; name: string }) => void;
   onClose: () => void;
   onNew: () => void;
   onSignOut: () => void;
@@ -149,7 +152,7 @@ export function Sidebar({
           </li>
         ))}
       </ul>
-      {me.owner && me.ownerReadsChats && <PeoplesChats onOpen={onOpen} />}
+      {me.owner && me.ownerReadsChats && <PeoplesChats onOpen={onOpen} onOpenMedia={onOpenMedia} />}
       {me.owner && me.consoleUrl && (
         <a
           href={me.consoleUrl}
@@ -178,7 +181,13 @@ export function Sidebar({
 }
 
 /** The owner's read-only view, when the business allows it (W4). */
-function PeoplesChats({ onOpen }: { onOpen: (id: string) => void }) {
+function PeoplesChats({
+  onOpen,
+  onOpenMedia,
+}: {
+  onOpen: (id: string) => void;
+  onOpenMedia: (person: { sub: string; name: string }) => void;
+}) {
   const [people, setPeople] = useState<Person[] | null>(null);
   const [chats, setChats] = useState<Record<string, Chat[]>>({});
   const [error, setError] = useState<string | null>(null);
@@ -199,7 +208,7 @@ function PeoplesChats({ onOpen }: { onOpen: (id: string) => void }) {
       }}
     >
       <summary className="flex cursor-pointer items-center gap-2 text-muted">
-        <Eye size={14} aria-hidden /> People&apos;s chats (read only)
+        <Eye size={14} aria-hidden /> People&apos;s chats and media (read only)
       </summary>
       {error && <p className="text-error">{error}</p>}
       {people?.length === 0 && (
@@ -220,6 +229,15 @@ function PeoplesChats({ onOpen }: { onOpen: (id: string) => void }) {
             >
               {person.name} ({person.chats})
             </button>
+            {person.media > 0 && (
+              <button
+                type="button"
+                className="block w-full truncate py-0.5 pl-3 text-left text-muted hover:underline"
+                onClick={() => onOpenMedia({ sub: person.sub, name: person.name })}
+              >
+                Their images ({person.media})
+              </button>
+            )}
             <ul className="pl-3">
               {chats[person.sub]?.map((chat) => (
                 <li key={chat.id}>

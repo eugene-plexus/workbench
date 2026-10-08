@@ -35,13 +35,14 @@ OWNER_READS_CHATS = "ownerReadsChats"
 FIELDS = [
     ConfigField(
         key=OWNER_READS_CHATS,
-        label="The owner may read people's chats",
+        label="The owner may read people's chats and media",
         description=(
-            "When on, the owner of this install can read, but not change, the chats of every "
-            "person given Workbench, including chats written before it was turned on, and each "
-            "person sees a line above their chats saying so. When off, Workbench's chat pages "
-            "refuse reads of anyone else's chats. Local servers run with Workbench's file "
-            "access, so use only programs trusted with everyone's data."
+            "When on, the owner of this install can read, but not change, the chats and media "
+            "(images and other results in their bins) of every person given Workbench, "
+            "including those made before it was turned on, and each person sees a line above "
+            "their chats saying so. When off, Workbench refuses reads of anyone else's chats "
+            "and media. Local servers run with Workbench's file access, so use only programs "
+            "trusted with everyone's data."
         ),
         category="people",
         valueType=ConfigValueType.boolean,

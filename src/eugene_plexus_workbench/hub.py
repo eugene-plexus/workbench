@@ -26,11 +26,15 @@ from ._http import ssl_context
 class HubError(Exception):
     """The gateway could not give an answer, in words a person reads."""
 
-    def __init__(self, message: str, *, status: int = 502, kind: str = "hub") -> None:
+    def __init__(
+        self, message: str, *, status: int = 502, kind: str = "hub", param: str | None = None
+    ) -> None:
         super().__init__(message)
         self.message = message
         self.status = status
         self.kind = kind
+        #: The request field the gateway named, so a form can mark it (§2.5).
+        self.param = param
 
 
 def _gateway_words(response: httpx.Response) -> str:
@@ -47,7 +51,17 @@ def _gateway_words(response: httpx.Response) -> str:
     return f"HTTP {response.status_code}"
 
 
-def refusal(status: int, words: str) -> HubError:
+def _gateway_param(response: httpx.Response) -> str | None:
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    error = body.get("error") if isinstance(body, dict) else None
+    param = error.get("param") if isinstance(error, dict) else None
+    return str(param) if param else None
+
+
+def refusal(status: int, words: str, param: str | None = None) -> HubError:
     """The gateway's refusal, said for a person who cannot see the console."""
     if status in (401, 403):
         return HubError(
@@ -64,7 +78,7 @@ def refusal(status: int, words: str) -> HubError:
             status=429,
             kind="limit",
         )
-    return HubError(words, status=status, kind="gateway")
+    return HubError(words, status=status, kind="gateway", param=param)
 
 
 class Hub:
@@ -136,6 +150,32 @@ class Hub:
             raise refusal(response.status_code, _gateway_words(response))
         body: dict[str, Any] = response.json()
         return body
+
+    async def images(
+        self, body: dict[str, Any], *, edit: bool
+    ) -> tuple[dict[str, Any], str | None]:
+        """One image request (P4), and the gateway's request id. A request
+        with reference images goes to `/edits` as JSON with `data:` URLs,
+        the shape the gateway takes from a server. Raises `HubError`."""
+        headers = self._headers()
+        url = f"{self.gateway_url}/v1/images/{'edits' if edit else 'generations'}"
+        try:
+            response = await self._http.post(url, json=body, headers=headers)
+        except httpx.HTTPError as exc:
+            raise self._unreachable(exc) from exc
+        if response.status_code != 200:
+            raise refusal(response.status_code, _gateway_words(response), _gateway_param(response))
+        try:
+            answer = response.json()
+        except ValueError as exc:
+            raise HubError(
+                "The gateway answered the image request with something that is not JSON "
+                f"({response.headers.get('content-type') or 'no type'}).",
+                kind="gateway",
+            ) from exc
+        if not isinstance(answer, dict):
+            raise HubError("The gateway's answer to the image request was not an object.")
+        return answer, response.headers.get("x-request-id")
 
     async def stream_chat(self, body: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         """The chunks of one streamed answer, parsed. Raises `HubError`."""

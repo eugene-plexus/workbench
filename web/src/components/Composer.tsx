@@ -10,7 +10,7 @@ const MODEL_KEY = "workbench-model";
 const ACCEPT =
   "image/png,image/jpeg,image/webp,image/gif,application/pdf,audio/wav,audio/x-wav,audio/mpeg";
 
-interface Pending {
+export interface Pending {
   id: string;
   name: string;
   mediaType: string;
@@ -82,6 +82,7 @@ async function asSendable(file: File): Promise<File> {
 
 export function Composer({
   chat,
+  initialAttachments,
   me,
   models,
   modelsError,
@@ -90,6 +91,7 @@ export function Composer({
   onChat,
 }: {
   chat: Chat;
+  initialAttachments?: Pending[];
   me: Me;
   models: Models | null;
   modelsError: string | null;
@@ -99,7 +101,7 @@ export function Composer({
 }) {
   const [text, setText] = useState(() => readDraft(me.sub, chat.id));
   const [draftSaved, setDraftSaved] = useState(true);
-  const [pending, setPending] = useState<Pending[]>([]);
+  const [pending, setPending] = useState<Pending[]>(() => initialAttachments ?? []);
   const [problem, setProblem] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   // The switch and the picker change the moment they are used; the chat on

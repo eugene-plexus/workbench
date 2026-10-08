@@ -38,6 +38,19 @@ export function watch(
   onEvent: (event: ChatEvent) => void,
   onReopen: () => void,
 ): Watching {
+  return watchStream<ChatEvent>(
+    `/api/chats/${encodeURIComponent(chatId)}/events`,
+    onEvent,
+    onReopen,
+  );
+}
+
+/** Any of Workbench's event streams: a chat's, or a person's media. */
+export function watchStream<E extends { type: string }>(
+  url: string,
+  onEvent: (event: E) => void,
+  onReopen: () => void,
+): Watching {
   const controller = new AbortController();
   let closed = false;
 
@@ -45,7 +58,7 @@ export function watch(
     if (!first) onReopen();
     try {
       const response = await checked(
-        await fetch(`/api/chats/${encodeURIComponent(chatId)}/events`, {
+        await fetch(url, {
           credentials: "same-origin",
           headers: headers(),
           signal: controller.signal,
@@ -59,12 +72,14 @@ export function watch(
         const parsed = parseFrames(buffer + value);
         buffer = parsed.rest;
         for (const data of parsed.events) {
-          const event = JSON.parse(data) as ChatEvent;
+          const event = JSON.parse(data) as
+            E | { type: "signed-out"; message: string; reason: string };
           if (event.type === "signed-out") {
-            announce(new SignedOut(event.message, event.reason));
+            const out = event as { message: string; reason: string };
+            announce(new SignedOut(out.message, out.reason));
             return;
           }
-          onEvent(event);
+          onEvent(event as E);
         }
       }
     } catch (error) {

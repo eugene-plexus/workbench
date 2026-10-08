@@ -12,6 +12,7 @@ import { MessageView } from "./MessageView";
 
 export function ChatView({
   chatId,
+  attachments,
   me,
   models,
   modelsError,
@@ -19,6 +20,8 @@ export function ChatView({
   onDeleted,
 }: {
   chatId: string;
+  /** Files already in this chat, waiting in its composer: an image sent from the media area (M7). */
+  attachments?: { id: string; name: string; mediaType: string }[];
   me: Me;
   models: Models | null;
   modelsError: string | null;
@@ -323,6 +326,7 @@ export function ChatView({
       {!chat.readOnly && (
         <Composer
           chat={chat}
+          initialAttachments={attachments}
           me={me}
           models={models}
           modelsError={modelsError}

@@ -3,10 +3,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ChatView } from "./components/ChatView";
 import { JobSites } from "./components/JobSites";
 import { Mascot } from "./components/Mascot";
+import { type Handoff, Media } from "./components/Media";
 import { Sidebar } from "./components/Sidebar";
 import { SignIn } from "./components/SignIn";
 import { Tools } from "./components/Tools";
 import { api, onSignedOut, post, SignedOut } from "./lib/api";
+import { type Door, mediaFromPath, mediaPath } from "./lib/media";
 import { forget, takeFragment } from "./lib/session";
 import type { Chat, Me, Models } from "./lib/types";
 import { modeChanged } from "./lib/words";
@@ -25,6 +27,11 @@ type Phase =
 export default function App() {
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   const [chatId, setChatId] = useState<string | null>(() => chatFromPath(window.location.pathname));
+  const [media, setMedia] = useState(() => mediaFromPath(window.location.pathname));
+  // The owner reading someone else's bins (M3); null is one's own.
+  const [mediaPerson, setMediaPerson] = useState<{ sub: string; name: string } | null>(null);
+  // An image sent to a new chat waits in that chat's composer (M7).
+  const [handoff, setHandoff] = useState<{ chatId: string; attachments: Handoff[] } | null>(null);
   const [chats, setChats] = useState<Chat[]>([]);
   const [models, setModels] = useState<Models | null>(null);
   const [modelsError, setModelsError] = useState<string | null>(null);
@@ -49,15 +56,33 @@ export default function App() {
     const path = id ? `/chats/${id}` : "/";
     if (window.location.pathname !== path) window.history.pushState(null, "", path);
     setChatId(id);
+    setMedia(null);
+    setMediaPerson(null);
     setShowTools(false);
     setShowSites(false);
     setShowChats(false);
   }, []);
 
+  const openMedia = useCallback(
+    (door: Door, person: { sub: string; name: string } | null = null) => {
+      const path = mediaPath(door);
+      if (window.location.pathname !== path) window.history.pushState(null, "", path);
+      setMedia({ door, id: null });
+      setMediaPerson(person);
+      setShowTools(false);
+      setShowSites(false);
+      setShowChats(false);
+    },
+    [],
+  );
+
   useEffect(() => {
     const back = () => {
       setChatId(chatFromPath(window.location.pathname));
+      setMedia(mediaFromPath(window.location.pathname));
+      setMediaPerson(null);
       setShowTools(false);
+      setShowSites(false);
       setShowChats(false);
     };
     window.addEventListener("popstate", back);
@@ -196,6 +221,7 @@ export default function App() {
           chats={chats}
           current={chatId}
           onOpen={open}
+          onOpenMedia={(person) => openMedia("images", person)}
           onClose={() => setShowChats(false)}
           onNew={() => void newChat()}
           creating={creating}
@@ -227,6 +253,15 @@ export default function App() {
               className="text-sm text-accent"
             >
               Toolbox · Tools
+            </button>
+          )}
+          {(media === null || showTools || showSites) && (
+            <button
+              onClick={() => openMedia("images")}
+              className="text-sm text-accent"
+              data-testid="open-media"
+            >
+              Bins · Media
             </button>
           )}
           {!showSites && !phase.me.owner && (
@@ -288,10 +323,25 @@ export default function App() {
           <JobSites onClose={() => setShowSites(false)} sub={phase.me.sub} />
         ) : showTools ? (
           <Tools owner={phase.me.owner} onClose={() => setShowTools(false)} />
+        ) : media ? (
+          <Media
+            key={`${media.door}:${mediaPerson?.sub ?? ""}`}
+            me={phase.me}
+            door={media.door}
+            focus={media.id}
+            person={mediaPerson}
+            onClose={() => open(chatId)}
+            onToChat={(id, attachment) => {
+              setHandoff({ chatId: id, attachments: [attachment] });
+              open(id);
+              void refreshChats();
+            }}
+          />
         ) : chatId ? (
           <ChatView
             key={chatId}
             chatId={chatId}
+            attachments={handoff?.chatId === chatId ? handoff.attachments : undefined}
             me={phase.me}
             models={models}
             modelsError={modelsError}
