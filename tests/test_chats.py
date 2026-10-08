@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import threading
@@ -10,8 +11,20 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 
-from .conftest import ADMIN_TOKEN, DRAFT, DRAFT_REASONING, MODEL, PNG, World
+from eugene_plexus_workbench import api as workbench_api
+from eugene_plexus_workbench import files
+from eugene_plexus_workbench.store import (
+    AttachmentGone,
+    Chat,
+    FileInUse,
+    FileRecord,
+    Message,
+    Store,
+)
+
+from .conftest import ADMIN_TOKEN, DRAFT, DRAFT_REASONING, MODEL, PNG, Browser, World
 
 
 def _events(
@@ -494,7 +507,7 @@ def test_the_gateways_size_limits_are_said_before_an_upload(world: World) -> Non
             == 201
         )
     full = ada.post(f"/api/chats/{chat}/files", files={"file": ("c.pdf", pdf, "application/pdf")})
-    assert full.status_code == 413 and "Start a new chat" in full.json()["detail"]["message"]
+    assert full.status_code == 413 and "start a new chat" in full.json()["detail"]["message"]
 
 
 def test_deleting_a_chat_deletes_its_files(world: World) -> None:
@@ -507,6 +520,134 @@ def test_deleting_a_chat_deletes_its_files(world: World) -> None:
     assert ada.delete(f"/api/chats/{chat}").status_code == 204
     assert not list(Path(world.data / "files").rglob(file_id))
     assert ada.get(f"/api/files/{file_id}").status_code == 404
+
+
+def _upload(person: Browser, chat: str, name: str, data: bytes, media_type: str) -> httpx.Response:
+    return person.post(f"/api/chats/{chat}/files", files={"file": (name, data, media_type)})
+
+
+def test_removing_an_unsent_upload_deletes_it_and_frees_the_chats_room(world: World) -> None:
+    """workbench#3: Remove took the chip away and left the row and the bytes,
+    so the removed file still counted against the chat's 11 MiB."""
+    ada = world.browser()
+    ada.sign_in("p-ada")
+    chat = ada.new_chat()
+    file_id = _upload(ada, chat, "dot.png", PNG, "image/png").json()["id"]
+    assert files.path_of(world.data, "p-ada", file_id).is_file()
+    removed = ada.delete(f"/api/chats/{chat}/files/{file_id}")
+    assert removed.status_code == 204, removed.text
+    assert not files.path_of(world.data, "p-ada", file_id).is_file(), "the bytes are gone"
+    gone = ada.get(f"/api/files/{file_id}")
+    assert gone.status_code == 404 and gone.json()["detail"]["message"] == "There is no such file."
+    again = ada.delete(f"/api/chats/{chat}/files/{file_id}")
+    assert again.status_code == 404 and "no such file" in again.json()["detail"]["message"]
+    # 12 MiB uploaded in all, each part removed before the next: never refused.
+    pdf = b"%PDF-1.7\n" + b"0" * (4 * 1024 * 1024)
+    for n in range(3):
+        up = _upload(ada, chat, f"part-{n}.pdf", pdf, "application/pdf")
+        assert up.status_code == 201, up.text
+        assert ada.delete(f"/api/chats/{chat}/files/{up.json()['id']}").status_code == 204
+    kept = _upload(ada, chat, "kept.pdf", pdf, "application/pdf")
+    assert kept.status_code == 201, kept.text
+
+
+def test_a_sent_file_stays_with_its_message(world: World) -> None:
+    ada = world.browser()
+    ada.sign_in("p-ada")
+    chat = ada.new_chat()
+    file_id = _upload(ada, chat, "dot.png", PNG, "image/png").json()["id"]
+    ada.post(f"/api/chats/{chat}/messages", json={"content": "This?", "attachments": [file_id]})
+    ada.wait_answer(chat)
+    refused = ada.delete(f"/api/chats/{chat}/files/{file_id}")
+    assert refused.status_code == 409 and "sent with a message" in refused.text
+    assert ada.get(f"/api/files/{file_id}").content == PNG
+    # Sending a removed file is refused, and names it.
+    late = _upload(ada, chat, "late.png", PNG, "image/png").json()["id"]
+    ada.delete(f"/api/chats/{chat}/files/{late}")
+    after = ada.post(f"/api/chats/{chat}/messages", json={"content": "x", "attachments": [late]})
+    assert after.status_code == 400 and "not in this chat" in after.text
+
+
+def test_a_file_removed_while_its_send_is_checked_is_refused_by_name(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another tab's Remove lands after the send read the chat's files."""
+    ada = world.browser()
+    ada.sign_in("p-ada")
+    chat = ada.new_chat()
+    late = _upload(ada, chat, "late.png", PNG, "image/png").json()["id"]
+    stale = FileRecord(late, "p-ada", chat, "late.png", "image/png", len(PNG), 0.0)
+
+    async def read_before_the_remove(request: Any, chat: Chat) -> list[FileRecord]:
+        return [stale]
+
+    assert ada.delete(f"/api/chats/{chat}/files/{late}").status_code == 204
+    monkeypatch.setattr(workbench_api, "_chat_files", read_before_the_remove)
+    sent = ada.post(f"/api/chats/{chat}/messages", json={"content": "x", "attachments": [late]})
+    assert sent.status_code == 400 and "not in this chat" in sent.text, sent.text
+    assert ada.get(f"/api/chats/{chat}").json()["messages"] == [], "nothing was added"
+
+
+def test_only_the_chats_owner_removes_its_uploads(world: World) -> None:
+    ada, bo, owner = world.browser(), world.browser(), world.browser()
+    ada.sign_in("p-ada")
+    bo.sign_in("p-bo")
+    owner.sign_in("operator")
+    chat = ada.new_chat()
+    file_id = _upload(ada, chat, "dot.png", PNG, "image/png").json()["id"]
+    elsewhere = ada.new_chat()
+    assert _owner_reads(world, True).json()["applied"] == ["ownerReadsChats"]
+    try:
+        assert owner.get(f"/api/chats/{chat}").json()["chat"]["readOnly"] is True
+        for person, at in ((bo, chat), (owner, chat), (ada, elsewhere)):
+            refused = person.delete(f"/api/chats/{at}/files/{file_id}")
+            assert refused.status_code == 404, refused.text
+    finally:
+        _owner_reads(world, None)
+    assert ada.get(f"/api/files/{file_id}").content == PNG, "still there"
+
+
+def test_a_send_and_a_remove_meet_one_at_a_time_in_the_store(tmp_path: Path) -> None:
+    """Two tabs: the send checked the file, then the other tab removed it.
+    The store refuses the message rather than keep one naming a lost file."""
+
+    async def go() -> None:
+        store = Store(tmp_path / "workbench.sqlite3")
+        await store.open()
+        try:
+            await store.create_chat(
+                Chat(id="c", owner="ada", title="t", model=None, created_at=1, updated_at=1)
+            )
+
+            async def upload(file_id: str) -> None:
+                await store.add_file(FileRecord(file_id, "ada", "c", "a.png", "image/png", 1, 1))
+
+            def asking(file_id: str) -> Message:
+                return Message(
+                    id=f"m-{file_id}",
+                    chat_id="c",
+                    seq=0,
+                    role="user",
+                    status="done",
+                    created_at=1,
+                    attachments=[file_id],
+                )
+
+            await upload("gone")
+            assert (await store.delete_unsent_file("c", "gone")) is not None
+            with pytest.raises(AttachmentGone):
+                await store.add_message(asking("gone"), parent_id=None)
+            assert await store.messages("c") == []
+            await upload("sent")
+            await store.add_message(asking("sent"), parent_id=None)
+            with pytest.raises(FileInUse):
+                await store.delete_unsent_file("c", "sent")
+            assert [f.id for f in await store.files_for_chat("c")] == ["sent"]
+            assert await store.delete_unsent_file("other", "sent") is None
+        finally:
+            await store.close()
+
+    asyncio.run(go())
 
 
 def test_each_piece_says_where_it_goes_counted_as_the_page_counts(world: World) -> None:

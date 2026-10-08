@@ -223,6 +223,23 @@ def test_send_to_a_chat_copies_and_each_side_deletes_alone(world: World) -> None
     assert ada.get(f"/api/files/{again['files'][0]['id']}").status_code == 200, "the result stays"
 
 
+def test_removing_a_sent_to_chat_copy_deletes_only_the_copy(world: World) -> None:
+    """workbench#3: the copy waits in the new chat's composer, unsent."""
+    ada = world.browser()
+    ada.sign_in("p-ada")
+    item = _wait(ada, _make(ada)["id"])
+    source = item["files"][0]["id"]
+    sent = ada.post(f"/api/media/{item['id']}/to-chat", json={"fileId": source}).json()
+    chat, copy = sent["chatId"], sent["attachment"]["id"]
+    assert ada.delete(f"/api/chats/{chat}/files/{copy}").status_code == 204
+    assert not _on_disk(world, "p-ada", copy), "the copy is gone"
+    assert _on_disk(world, "p-ada", source), "the bin keeps its original"
+    assert ada.get(f"/api/files/{source}").content == png(3, 2)
+    refused = ada.delete(f"/api/chats/{chat}/files/{source}")
+    assert refused.status_code == 404, "a bin's file is no chat's to remove"
+    assert _on_disk(world, "p-ada", source)
+
+
 def test_a_webp_cannot_go_into_a_chat_and_says_why(world: World) -> None:
     ada = world.browser()
     ada.sign_in("p-ada")

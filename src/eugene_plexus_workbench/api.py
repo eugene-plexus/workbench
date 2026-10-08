@@ -39,7 +39,17 @@ from .sessions import (
     signin_path,
 )
 from .signin import PENDING_SECONDS, Provider, SignInRefused, SignInUnavailable
-from .store import Chat, FileRecord, Message, Person, Store, path, versions
+from .store import (
+    AttachmentGone,
+    Chat,
+    FileInUse,
+    FileRecord,
+    Message,
+    Person,
+    Store,
+    path,
+    versions,
+)
 
 log = logging.getLogger(__name__)
 
@@ -727,20 +737,24 @@ async def send(request: Request, chat_id: str, body: Send) -> dict[str, Any]:
     search = chat.search if body.search is None else body.search
     store: Store = _state(request).store
     shown = await store.messages(chat.id)
-    user = await store.add_message(
-        Message(
-            id=_new_id(),
-            chat_id=chat.id,
-            seq=0,
-            role="user",
-            status="done",
-            created_at=time.time(),
-            content=body.content,
-            attachments=list(body.attachments),
-        ),
-        # Sending continues from the end of the path shown.
-        parent_id=shown[-1].id if shown else None,
-    )
+    try:
+        user = await store.add_message(
+            Message(
+                id=_new_id(),
+                chat_id=chat.id,
+                seq=0,
+                role="user",
+                status="done",
+                created_at=time.time(),
+                content=body.content,
+                attachments=list(body.attachments),
+            ),
+            # Sending continues from the end of the path shown.
+            parent_id=shown[-1].id if shown else None,
+        )
+    except AttachmentGone:
+        # Removed in another tab while this send was being checked.
+        raise _problem(status.HTTP_400_BAD_REQUEST, "An attachment is not in this chat.") from None
     values: dict[str, Any] = {"model": model, "search": search, "updated_at": time.time()}
     if chat.title == NEW_CHAT:
         values["title"] = _title(body.content, [by_id[i] for i in body.attachments])
@@ -958,7 +972,7 @@ async def upload(request: Request, chat_id: str, file: UploadFile = File(...)) -
             status.HTTP_413_CONTENT_TOO_LARGE,
             "This chat's attachments would add up to more than Eugene carries in one request "
             f"({files.CHAT_LIMIT // files.MIB} MiB), because the whole chat is sent each time. "
-            "Start a new chat to attach more.",
+            "Remove a file not yet sent, or start a new chat to attach more.",
         )
     record = FileRecord(
         id=_new_id(),
@@ -978,6 +992,28 @@ async def upload(request: Request, chat_id: str, file: UploadFile = File(...)) -
     await asyncio.to_thread(write)
     await store.add_file(record)
     return {"id": record.id, "name": record.name, "mediaType": media_type, "size": record.size}
+
+
+@router.delete("/api/chats/{chat_id}/files/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_upload(request: Request, chat_id: str, file_id: str) -> Response:
+    """The composer's Remove: an upload not yet sent is deleted, row and
+    bytes, so it no longer counts against the chat's limit (workbench#3).
+    A sent file stays with its message."""
+    person = await _person(request)
+    chat = await _own_chat(request, person, chat_id)
+    try:
+        record = await _state(request).store.delete_unsent_file(chat.id, file_id)
+    except FileInUse:
+        raise _problem(
+            status.HTTP_409_CONFLICT,
+            "This file was sent with a message, so it stays with the chat. "
+            "Deleting the chat deletes it.",
+        ) from None
+    if record is None:
+        raise _problem(status.HTTP_404_NOT_FOUND, "There is no such file in this chat.")
+    stored = files.path_of(_state(request).settings.data_dir, record.owner, record.id)
+    await asyncio.to_thread(stored.unlink, True)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 async def _may_read_file(request: Request, person: Person, record: FileRecord) -> None:

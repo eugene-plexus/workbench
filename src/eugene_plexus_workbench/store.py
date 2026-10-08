@@ -336,6 +336,14 @@ class FileRecord:
     height: int | None = None
 
 
+class AttachmentGone(Exception):
+    """A message names a file its chat no longer has (workbench#3)."""
+
+
+class FileInUse(Exception):
+    """A message refers to the file, so it goes with the chat (workbench#3)."""
+
+
 @dataclass
 class MediaRow:
     """One request a media screen sent, or one file brought in (`kind`)."""
@@ -789,12 +797,26 @@ class Store:
         It becomes the chosen version among those that follow its parent, so
         the path now runs through it. A new message's parent is the path's
         last message; a version's parent is its sibling's.
+
+        Its attachments must be files of its chat: a file removed after the
+        send checked it raises `AttachmentGone`, and nothing is added.
         """
 
         def go() -> Message:
             db = self._conn()
             db.execute("BEGIN IMMEDIATE")
             try:
+                if message.attachments:
+                    marks = ", ".join("?" for _ in message.attachments)
+                    found = {
+                        r["id"]
+                        for r in db.execute(
+                            f"SELECT id FROM files WHERE chat_id = ? AND id IN ({marks})",
+                            (message.chat_id, *message.attachments),
+                        )
+                    }
+                    if not found.issuperset(message.attachments):
+                        raise AttachmentGone
                 row = db.execute(
                     "SELECT COALESCE(MAX(seq), 0) AS last FROM messages WHERE chat_id = ?",
                     (message.chat_id,),
@@ -949,6 +971,34 @@ class Store:
         def go() -> list[FileRecord]:
             rows = self._conn().execute("SELECT * FROM files WHERE chat_id = ?", (chat_id,))
             return [_file(r) for r in rows]
+
+        return await self._run(go)
+
+    async def delete_unsent_file(self, chat_id: str, file_id: str) -> FileRecord | None:
+        """Delete a file of this chat that no message refers to: an upload
+        taken back before it was sent (workbench#3). None when the chat has
+        no such file; `FileInUse` when a message refers to it. The bytes are
+        the caller's to remove."""
+
+        def go() -> FileRecord | None:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute(
+                    "SELECT * FROM files WHERE id = ? AND chat_id = ?", (file_id, chat_id)
+                ).fetchone()
+                if row is not None:
+                    for m in db.execute(
+                        "SELECT attachments FROM messages WHERE chat_id = ?", (chat_id,)
+                    ):
+                        if file_id in json.loads(m["attachments"] or "[]"):
+                            raise FileInUse
+                    db.execute("DELETE FROM files WHERE id = ?", (file_id,))
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return _file(row) if row is not None else None
 
         return await self._run(go)
 
