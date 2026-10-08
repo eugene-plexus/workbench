@@ -14,6 +14,7 @@ import {
   type SpeechModel,
   speechFormats,
   statusWords,
+  voiceLabel,
   whereItRuns,
 } from "./media";
 
@@ -165,4 +166,28 @@ it("finds the form field a gateway refusal names", () => {
   expect(fieldOf("images[0].image_url")).toBe("references");
   expect(fieldOf("n")).toBe("n");
   expect(fieldOf(null)).toBeNull();
+});
+
+it("shows a voice by its name, with the id only where two share a name", () => {
+  const eleven = {
+    voices: [
+      "21m00Tcm4TlvDq8ikWAM",
+      "EXAVITQu4vr4xnSDxMaL",
+      "pNInz6obpgDQGcFmaJgB",
+      "cl0n3dRachel",
+    ],
+    voiceNames: {
+      "21m00Tcm4TlvDq8ikWAM": "Rachel",
+      EXAVITQu4vr4xnSDxMaL: "Sarah",
+      cl0n3dRachel: "Rachel",
+    },
+  } as unknown as SpeechModel;
+  expect(voiceLabel(eleven, "EXAVITQu4vr4xnSDxMaL")).toBe("Sarah");
+  expect(voiceLabel(eleven, "21m00Tcm4TlvDq8ikWAM")).toBe("Rachel (21m00Tcm4TlvDq8ikWAM)");
+  expect(voiceLabel(eleven, "cl0n3dRachel")).toBe("Rachel (cl0n3dRachel)");
+  // No name: the id is all there is.
+  expect(voiceLabel(eleven, "pNInz6obpgDQGcFmaJgB")).toBe("pNInz6obpgDQGcFmaJgB");
+  expect(
+    voiceLabel({ voices: ["af_heart"], voiceNames: {} } as unknown as SpeechModel, "af_heart"),
+  ).toBe("af_heart");
 });

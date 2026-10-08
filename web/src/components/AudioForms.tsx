@@ -14,6 +14,7 @@ import {
   rememberModel,
   rememberedModel,
   speechFormats,
+  voiceLabel,
   whereItRuns,
 } from "../lib/media";
 import type { Me } from "../lib/types";
@@ -111,7 +112,13 @@ export function SpeechForm({
   const formats = chosen ? speechFormats(chosen) : ["mp3"];
   const voices = chosen?.voices ?? null;
   const wanted = voiceQuery.trim().toLowerCase();
-  const shownVoices = (voices ?? []).filter((v) => !wanted || v.toLowerCase().includes(wanted));
+  // A voice is found by its name or its id.
+  const shownVoices = (voices ?? []).filter(
+    (v) =>
+      !wanted ||
+      v.toLowerCase().includes(wanted) ||
+      (chosen?.voiceNames?.[v] ?? "").toLowerCase().includes(wanted),
+  );
 
   // "Edit and send" fills the form with what a result asked for.
   useEffect(() => {
@@ -219,7 +226,7 @@ export function SpeechForm({
                   <option value="">Choose a voice</option>
                   {shownVoices.map((v) => (
                     <option key={v} value={v}>
-                      {v}
+                      {voiceLabel(chosen, v)}
                     </option>
                   ))}
                 </select>

@@ -39,7 +39,18 @@ export interface ImageModel extends ServedModel {
 /** A speech model (slice 2). Voices null are the provider's to check. */
 export interface SpeechModel extends ServedModel {
   voices: string[] | null;
+  /** A voice's display name by its id, where the provider names it. */
+  voiceNames: Record<string, string>;
   formats: string[];
+}
+
+/** How a voice is shown: its name where the provider gives one (ElevenLabs'
+ * ids say nothing), with the id only when another voice shares the name. */
+export function voiceLabel(model: SpeechModel, id: string): string {
+  const name = model.voiceNames?.[id];
+  if (!name) return id;
+  const shared = (model.voices ?? []).some((v) => v !== id && model.voiceNames?.[v] === name);
+  return shared ? `${name} (${id})` : name;
 }
 
 /** A model the Transcription screen sends audio to. */
