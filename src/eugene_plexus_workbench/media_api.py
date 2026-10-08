@@ -12,9 +12,9 @@ import json
 import shutil
 import time
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, Request, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -27,7 +27,7 @@ from .store import Chat, FileRecord, MediaRow, Person, Store
 router = APIRouter()
 
 #: The screens slice 1 builds. Speech, transcription and video join later.
-DOORS = ("images",)
+DOORS = ("images", "speech", "transcription")
 _PAGE = 30
 
 #: A provider's own name for the line *Runs on <account>* (M6).
@@ -55,12 +55,8 @@ def _door(door: str) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def image_model(model: dict[str, Any]) -> dict[str, Any]:
-    """An image model as the Images screen builds its form from it (M5).
-
-    A setting the gateway does not list (null, or a gateway from before the
-    media screens) is the backend's to check: the page gives it a free-text
-    box rather than a list it would have to invent."""
+def _common(model: dict[str, Any]) -> dict[str, Any]:
+    """What every screen's picker says of a model: who serves it, where."""
     info = model.get("x_eugene_plexus") or {}
     drivers = info.get("drivers") or []
     provider = str(model.get("owned_by") or "")
@@ -71,6 +67,37 @@ def image_model(model: dict[str, Any]) -> dict[str, Any]:
         "locality": info.get("locality") or "unknown",
         "ready": (info.get("ready_backends") or 0) > 0,
         "onDemand": bool(info.get("on_demand")),
+    }
+
+
+def speech_model(model: dict[str, Any]) -> dict[str, Any]:
+    """A speech model as the Speech screen offers it (slice 2). Voices null
+    is the provider's to check (a free-text box); `pcm` is left out, since a
+    browser cannot play raw samples."""
+    info = model.get("x_eugene_plexus") or {}
+    return {
+        **_common(model),
+        "voices": info.get("voices"),
+        "formats": [f for f in info.get("speech_formats") or ["mp3"] if f != "pcm"],
+    }
+
+
+def transcription_model(model: dict[str, Any]) -> dict[str, Any]:
+    """A model the Transcription screen sends audio to, and whether it can
+    translate into English too (only OpenAI's whisper, measured)."""
+    surfaces = (model.get("x_eugene_plexus") or {}).get("surfaces") or []
+    return {**_common(model), "translates": "translation" in surfaces}
+
+
+def image_model(model: dict[str, Any]) -> dict[str, Any]:
+    """An image model as the Images screen builds its form from it (M5).
+
+    A setting the gateway does not list (null, or a gateway from before the
+    media screens) is the backend's to check: the page gives it a free-text
+    box rather than a list it would have to invent."""
+    info = model.get("x_eugene_plexus") or {}
+    return {
+        **_common(model),
         "maxImages": info.get("image_max_images"),
         "qualities": info.get("image_qualities"),
         "backgrounds": info.get("image_backgrounds"),
@@ -90,12 +117,20 @@ async def doors(request: Request) -> dict[str, Any]:
         listing = await hub.models()
     except HubError as exc:
         raise api._problem(exc.status if exc.status < 500 else 502, exc.message) from exc
-    images = [
-        image_model(m)
-        for m in listing.get("data") or []
-        if "image" in ((m.get("x_eugene_plexus") or {}).get("surfaces") or [])
-    ]
-    return {"doors": {"images": {"models": images}}}
+    data = listing.get("data") or []
+
+    def serving(surface: str) -> list[dict[str, Any]]:
+        return [
+            m for m in data if surface in ((m.get("x_eugene_plexus") or {}).get("surfaces") or [])
+        ]
+
+    return {
+        "doors": {
+            "images": {"models": [image_model(m) for m in serving("image")]},
+            "speech": {"models": [speech_model(m) for m in serving("speech")]},
+            "transcription": {"models": [transcription_model(m) for m in serving("transcription")]},
+        }
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -349,6 +384,116 @@ async def bring_in(request: Request, file: UploadFile = File(...)) -> dict[str, 
 
 
 # --------------------------------------------------------------------------- #
+# speech and transcription (slice 2)
+# --------------------------------------------------------------------------- #
+
+
+class SpeechAsk(BaseModel):
+    model: str = Field(min_length=1, max_length=256)
+    #: The gateway's own limit on this door (`SpeechRequest.input`).
+    input: str = Field(min_length=1, max_length=4096)
+    voice: str = Field(min_length=1, max_length=128)
+    format: Literal["mp3", "opus", "aac", "flac", "wav"] = "mp3"
+
+
+@router.post("/api/media/speech", status_code=status.HTTP_201_CREATED)
+async def make_speech(request: Request, body: SpeechAsk) -> dict[str, Any]:
+    """Starts a spoken clip on the server and returns its row."""
+    person = await api._person(request)
+    row = MediaRow(
+        id=new_id(),
+        owner=person.sub,
+        door="speech",
+        kind="made",
+        status="running",
+        created_at=time.time(),
+        model=body.model,
+        request=body.model_dump(),
+    )
+    await _jobs(request).start_speech(
+        row,
+        {
+            "model": body.model,
+            "input": body.input,
+            "voice": body.voice,
+            "response_format": body.format,
+        },
+    )
+    return (await _views(_store(request), [row]))[0]
+
+
+@router.post("/api/media/transcription", status_code=status.HTTP_201_CREATED)
+async def make_transcript(
+    request: Request,
+    model: str = Form(min_length=1, max_length=256),
+    language: str | None = Form(default=None, max_length=16),
+    translate: bool = Form(default=False),
+    clipSeconds: float | None = Form(default=None, ge=0, le=86_400),
+    file: UploadFile = File(...),
+) -> dict[str, Any]:
+    """Keeps the audio in the bin, then sends it to be transcribed (or
+    translated into English) on the server. `clipSeconds` is the clip's own
+    length as the page measured it, to set beside what the model heard."""
+    person = await api._person(request)
+    data = await file.read(files.TRANSCRIBE_LIMIT + 1)
+    if len(data) > files.TRANSCRIBE_LIMIT:
+        raise api._problem(
+            status.HTTP_413_CONTENT_TOO_LARGE,
+            f"That recording is larger than Eugene carries to be transcribed "
+            f"({files.TRANSCRIBE_LIMIT // files.MIB} MiB). Send a shorter one.",
+        )
+    media_type = files.sniff_audio(data)
+    if media_type is None:
+        raise api._problem(
+            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            "Workbench can send audio as MP3, WAV, Ogg, FLAC, AAC, WebM or MP4 (M4A). "
+            "This file is none of them.",
+        )
+    now = time.time()
+    name = (file.filename or f"recording.{files.extension(media_type)}")[:255]
+    asked: dict[str, Any] = {"model": model, "name": name, "translate": translate}
+    if language:
+        asked["language"] = language
+    if clipSeconds is not None:
+        asked["clipSeconds"] = round(clipSeconds, 2)
+    row = MediaRow(
+        id=new_id(),
+        owner=person.sub,
+        door="transcription",
+        kind="made",
+        status="running",
+        created_at=now,
+        model=model,
+        request=asked,
+    )
+    source = FileRecord(
+        id=new_id(),
+        owner=person.sub,
+        chat_id=None,
+        media_id=row.id,
+        name=name,
+        media_type=media_type,
+        size=len(data),
+        created_at=now,
+    )
+    path = files.path_of(request.app.state.settings.data_dir, person.sub, source.id)
+
+    def write() -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+
+    await asyncio.to_thread(write)
+    store = _store(request)
+    await store.add_media(row)
+    await store.add_file(source)
+    fields = {"model": model, "response_format": "json"}
+    if language and not translate:
+        fields["language"] = language
+    await _jobs(request).start_transcription(row, fields, source, translate=translate)
+    return (await _views(store, [row]))[0]
+
+
+# --------------------------------------------------------------------------- #
 # into a chat (M7)
 # --------------------------------------------------------------------------- #
 
@@ -359,7 +504,7 @@ class ToChat(BaseModel):
 
 @router.post("/api/media/{media_id}/to-chat", status_code=status.HTTP_201_CREATED)
 async def to_chat(request: Request, media_id: str, body: ToChat) -> dict[str, Any]:
-    """A copy of one image, attached to a new chat. The copy is the chat's:
+    """A copy of one image or clip, attached to a new chat. The copy is the chat's:
     deleting the result keeps it, and deleting the chat keeps the result."""
     person = await api._person(request)
     row = await _own(request, person, media_id)
@@ -367,21 +512,25 @@ async def to_chat(request: Request, media_id: str, body: ToChat) -> dict[str, An
     record = next((r for r in await store.files_for_media([row.id]) if r.id == body.fileId), None)
     if record is None:
         raise api._problem(status.HTTP_404_NOT_FOUND, "There is no such file in this result.")
-    if files.KINDS.get(record.media_type) != "image":
-        raise api._problem(
-            status.HTTP_400_BAD_REQUEST,
-            "A chat carries PNG and JPEG images, and this one is "
-            f"{record.media_type.removeprefix('image/').upper()}.",
+    kind = files.KINDS.get(record.media_type)
+    shown = record.media_type.split("/")[1].removeprefix("mpeg").upper() or "MP3"
+    if kind not in ("image", "audio"):
+        carried = (
+            "PNG and JPEG images" if record.media_type.startswith("image/") else "WAV and MP3 audio"
         )
-    if record.size > files.LIMITS["image"]:
+        raise api._problem(
+            status.HTTP_400_BAD_REQUEST, f"A chat carries {carried}, and this one is {shown}."
+        )
+    if record.size > files.LIMITS[kind]:
         raise api._problem(
             status.HTTP_413_CONTENT_TOO_LARGE,
-            f"A chat carries images up to {files.describe_limit('image')}, and this one is "
+            f"A chat carries {kind} up to {files.describe_limit(kind)}, and this one is "
             f"{record.size / files.MIB:.1f} MiB.",
         )
     root = request.app.state.settings.data_dir
     now = time.time()
-    title = " ".join(str(row.request.get("prompt") or row.request.get("name") or "").split())
+    said = row.request.get("prompt") or row.request.get("input") or row.request.get("name") or ""
+    title = " ".join(str(said).split())
     chat = Chat(
         id=new_id(),
         owner=person.sub,

@@ -1,6 +1,8 @@
 import {
+  captionOf,
   fieldOf,
   groupModels,
+  heardWords,
   type ImageModel,
   imageBody,
   maxImages,
@@ -9,6 +11,8 @@ import {
   offer,
   referenceRange,
   sizeWords,
+  type SpeechModel,
+  speechFormats,
   statusWords,
   whereItRuns,
 } from "./media";
@@ -114,6 +118,46 @@ it("sends only what was chosen", () => {
       references: [],
     }),
   ).toEqual({ model: "m", prompt: "a barn", outputFormat: "png" });
+});
+
+it("reads the speech and transcription addresses", () => {
+  expect(mediaFromPath("/media/speech")).toEqual({ door: "speech", id: null });
+  expect(mediaFromPath("/media/transcription/x1")).toEqual({ door: "transcription", id: "x1" });
+});
+
+it("says plainly when the model heard less than the clip, and only then claims anything", () => {
+  const item = (heard: number | null, clip: number | null) =>
+    ({
+      door: "transcription",
+      request: {},
+      units: { heardSeconds: heard, clipSeconds: clip },
+    }) as unknown as MediaItem;
+  // Measured: OpenRouter's whisper heard 1.5 s of a 3.1 s MP3.
+  expect(heardWords(item(1.525, 3.07))).toEqual({
+    text: "The model heard 1.5 s of this 3.1 s clip. Words after that may be missing.",
+    short: true,
+  });
+  // OpenAI counts whole seconds up: 4 heard of 3.07 is the whole clip.
+  expect(heardWords(item(4, 3.07))).toEqual({ text: "Clip 3.1 s.", short: false });
+  expect(heardWords(item(null, 3.07))).toEqual({ text: "Clip 3.1 s.", short: false });
+  expect(heardWords(item(1.5, null))).toBeNull();
+});
+
+it("offers mp3 first, as the format every browser plays", () => {
+  const model = { formats: ["wav", "opus", "mp3"] } as SpeechModel;
+  expect(speechFormats(model)).toEqual(["mp3", "wav", "opus"]);
+  expect(speechFormats({ formats: [] as string[] } as SpeechModel)).toEqual(["mp3"]);
+});
+
+it("captions each kind of result in its own words", () => {
+  const base = { kind: "made", request: {} } as unknown as MediaItem;
+  expect(captionOf({ ...base, door: "speech", request: { input: "Hello." } })).toBe("Hello.");
+  expect(
+    captionOf({ ...base, door: "transcription", request: { name: "a.webm", translate: true } }),
+  ).toBe("Translated into English: a.webm");
+  expect(captionOf({ ...base, door: "images", kind: "upload", request: { name: "p.png" } })).toBe(
+    "Brought in: p.png",
+  );
 });
 
 it("finds the form field a gateway refusal names", () => {

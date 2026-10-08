@@ -130,8 +130,52 @@ def _webp_size(data: bytes) -> tuple[int, int] | None:
     return None
 
 
+#: What audio in a bin may be (§2.8, slice 2): what speech models make
+#: (mp3, opus in Ogg, aac, flac, wav) and what a recording or an upload to
+#: transcribe is (Chrome records WebM/Opus; phones record MP4/AAC).
+AUDIO_TYPES = (
+    "audio/mpeg", "audio/wav", "audio/ogg", "audio/flac", "audio/aac", "audio/webm", "audio/mp4",
+)  # fmt: skip
+#: Audio sent to be transcribed: the gateway's own limit on that door.
+TRANSCRIBE_LIMIT = 25 * MIB
+
+
+def sniff_audio(data: bytes) -> str | None:
+    """An audio file's type from its first bytes, or None."""
+    if data[:4] == b"RIFF" and data[8:12] == b"WAVE":
+        return "audio/wav"
+    if data.startswith(b"OggS"):
+        return "audio/ogg"
+    if data.startswith(b"fLaC"):
+        return "audio/flac"
+    if data.startswith(b"\x1a\x45\xdf\xa3"):
+        return "audio/webm"
+    if data[4:8] == b"ftyp":
+        return "audio/mp4"
+    if data.startswith(b"ID3"):
+        return "audio/mpeg"
+    if len(data) > 1 and data[0] == 0xFF:
+        # ADTS (AAC) has layer bits 00; an MPEG audio frame never does.
+        if data[1] & 0xF6 == 0xF0:
+            return "audio/aac"
+        if data[1] & 0xE0 == 0xE0 and (data[1] >> 1) & 0x03:
+            return "audio/mpeg"
+    return None
+
+
 def extension(media_type: str) -> str:
-    return {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}.get(media_type, "bin")
+    return {
+        "image/png": "png",
+        "image/jpeg": "jpg",
+        "image/webp": "webp",
+        "audio/mpeg": "mp3",
+        "audio/wav": "wav",
+        "audio/ogg": "ogg",
+        "audio/flac": "flac",
+        "audio/aac": "aac",
+        "audio/webm": "webm",
+        "audio/mp4": "m4a",
+    }.get(media_type, "bin")
 
 
 def person_dir(root: Path, sub: str) -> Path:

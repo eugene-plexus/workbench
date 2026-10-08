@@ -166,11 +166,28 @@ class MediaJobs:
     ) -> None:
         """Store `row` as running and send its image request. `body` is the
         gateway's request; `references` are bin files to edit from."""
-        await self._store.add_media(row)
+        await self._start(row, lambda running: self._images(running, body, references))
+
+    async def start_speech(self, row: MediaRow, body: dict[str, Any]) -> None:
+        """Store `row` as running and ask for its spoken clip (slice 2)."""
+        await self._start(row, lambda running: self._speech(running, body))
+
+    async def start_transcription(
+        self, row: MediaRow, fields: dict[str, str], source: FileRecord, *, translate: bool
+    ) -> None:
+        """Store `row` as running and send its audio (`source`, already kept
+        in the bin) to be transcribed, or translated into English."""
+        await self._start(
+            row, lambda running: self._transcribe(running, fields, source, translate=translate)
+        )
+
+    async def _start(self, row: MediaRow, work: Any) -> None:
+        if not await self._store.media(row.id):
+            await self._store.add_media(row)
         running = Running(row=row)
         self._running[row.id] = running
         running.task = asyncio.create_task(
-            self._run(running, self._images(running, body, references)), name=f"media-{row.id}"
+            self._run(running, work(running)), name=f"media-{row.id}"
         )
         await self._changed(row)
 
@@ -228,6 +245,7 @@ class MediaJobs:
                         finished_at=row.finished_at,
                         served=row.served,
                         units=row.units,
+                        text=row.text,
                         error=row.error,
                     )
                 )
@@ -307,3 +325,82 @@ class MediaJobs:
             "sizes": [f"{r.width}x{r.height}" if r.width else None for r in records],
             "usage": answer.get("usage"),
         }
+
+    async def _speech(self, running: Running, body: dict[str, Any]) -> None:
+        row = running.row
+        audio, headers = await self._hub.speech(body)
+        row.served = served_from_headers(headers)
+        media_type = files.sniff_audio(audio)
+        if media_type is None:
+            raise HubError(
+                "The gateway answered the speech request with bytes Workbench cannot read as "
+                f"audio (they start {audio[:8].hex(' ')}).",
+                kind="gateway",
+            )
+        await self._keep(row, audio, media_type, f"speech.{files.extension(media_type)}")
+        row.units = {"characters": len(str(body.get("input") or ""))}
+
+    async def _transcribe(
+        self, running: Running, fields: dict[str, str], source: FileRecord, *, translate: bool
+    ) -> None:
+        row = running.row
+        path = files.path_of(self._root, source.owner, source.id)
+        audio = await asyncio.to_thread(path.read_bytes)
+        answer, headers = await self._hub.transcribe(
+            fields, (source.name, audio, source.media_type), translate=translate
+        )
+        row.served = served_from_headers(headers)
+        row.text = str(answer["text"]).strip()
+        found = answer.get("usage")
+        usage: dict[str, Any] = found if isinstance(found, dict) else {}
+        # What the backend says it heard: seconds where its usage counts
+        # them (OpenAI rounds them up), tokens where it counts those (§0).
+        row.units = {
+            "heardSeconds": usage.get("seconds") if usage.get("type") == "duration" else None,
+            "tokens": usage.get("total_tokens") if usage.get("type") == "tokens" else None,
+            "clipSeconds": row.request.get("clipSeconds"),
+        }
+
+    async def _keep(self, row: MediaRow, data: bytes, media_type: str, name: str) -> FileRecord:
+        """Write one file into the row's bin and record it."""
+        record = FileRecord(
+            id=new_id(),
+            owner=row.owner,
+            chat_id=None,
+            media_id=row.id,
+            name=name,
+            media_type=media_type,
+            size=len(data),
+            created_at=time.time(),
+        )
+        path = files.path_of(self._root, row.owner, record.id)
+
+        def write() -> None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+
+        await asyncio.to_thread(write)
+        await self._store.add_file(record)
+        return record
+
+
+def served_from_headers(headers: dict[str, str]) -> dict[str, Any]:
+    """What served a clip or a transcript: the gateway's `x-eugene-plexus-*`
+    headers (U4), as `x_eugene_plexus` says it in a JSON body."""
+    out: dict[str, Any] = {}
+    lowered = {k.lower(): v for k, v in headers.items()}
+    for key in _SERVED:
+        value = lowered.get("x-eugene-plexus-" + key.replace("_", "-"))
+        if value is None:
+            continue
+        if key in ("latency_ms", "attempts", "tier", "waited_ms"):
+            try:
+                out[key] = int(value)
+            except ValueError:
+                continue
+        elif key == "swapped_in":
+            out[key] = value == "true"
+        else:
+            out[key] = value
+    out["requestId"] = lowered.get("x-request-id")
+    return out

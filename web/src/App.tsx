@@ -9,6 +9,7 @@ import { SignIn } from "./components/SignIn";
 import { Tools } from "./components/Tools";
 import { api, onSignedOut, post, SignedOut } from "./lib/api";
 import { type Door, mediaFromPath, mediaPath } from "./lib/media";
+import { saveDraft } from "./lib/conveniences";
 import { forget, takeFragment } from "./lib/session";
 import type { Chat, Me, Models } from "./lib/types";
 import { modeChanged } from "./lib/words";
@@ -331,10 +332,22 @@ export default function App() {
             focus={media.id}
             person={mediaPerson}
             onClose={() => open(chatId)}
+            onDoor={(door) => openMedia(door, mediaPerson)}
             onToChat={(id, attachment) => {
               setHandoff({ chatId: id, attachments: [attachment] });
               open(id);
               void refreshChats();
+            }}
+            onTextToChat={async (text) => {
+              // A transcript waits as the new chat's unsent text (M7).
+              try {
+                const chat = await post<Chat>("/api/chats", {});
+                saveDraft(phase.me.sub, chat.id, text);
+                setChats((current) => [chat, ...current]);
+                open(chat.id);
+              } catch (error) {
+                setActionError(error instanceof Error ? error.message : String(error));
+              }
             }}
           />
         ) : chatId ? (

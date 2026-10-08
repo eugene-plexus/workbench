@@ -3,20 +3,30 @@
  * model's listing, and how a result is said. Pure, so it is tested alone.
  */
 
-export type Door = "images";
-export const DOORS: Door[] = ["images"];
+export type Door = "images" | "speech" | "transcription";
+export const DOORS: Door[] = ["images", "speech", "transcription"];
+/** Each screen's tab, and what a model on it does, for the empty state. */
+export const DOOR_WORDS: Record<Door, { tab: string; does: string }> = {
+  images: { tab: "Images", does: "makes images" },
+  speech: { tab: "Speech", does: "speaks" },
+  transcription: { tab: "Transcription", does: "turns speech into text" },
+};
 
 export type Locality = "local" | "external" | "unknown";
 
-/** An image model as `/api/media/doors` gives it (M5). A null setting is the
- * backend's to check: the form offers a free-text box, never an invented list. */
-export interface ImageModel {
+/** What every screen's picker says of a model: who serves it, and where. */
+export interface ServedModel {
   id: string;
   account: string | null;
   provider: string | null;
   locality: Locality;
   ready: boolean;
   onDemand: boolean;
+}
+
+/** An image model as `/api/media/doors` gives it (M5). A null setting is the
+ * backend's to check: the form offers a free-text box, never an invented list. */
+export interface ImageModel extends ServedModel {
   maxImages: number | null;
   qualities: string[] | null;
   backgrounds: string[] | null;
@@ -26,8 +36,23 @@ export interface ImageModel {
   edits: boolean;
 }
 
+/** A speech model (slice 2). Voices null are the provider's to check. */
+export interface SpeechModel extends ServedModel {
+  voices: string[] | null;
+  formats: string[];
+}
+
+/** A model the Transcription screen sends audio to. */
+export interface TranscriptionModel extends ServedModel {
+  translates: boolean;
+}
+
 export interface Doors {
-  doors: { images: { models: ImageModel[] } };
+  doors: {
+    images: { models: ImageModel[] };
+    speech: { models: SpeechModel[] };
+    transcription: { models: TranscriptionModel[] };
+  };
 }
 
 export interface MediaFile {
@@ -50,8 +75,16 @@ export interface ImageRequest {
   background?: string;
   outputFormat?: string;
   references?: string[];
-  /** A file brought in, rather than made. */
+  /** A file brought in, rather than made; or the recording transcribed. */
   name?: string;
+  /** Speech: what to say, in which voice and format. */
+  input?: string;
+  voice?: string;
+  format?: string;
+  /** Transcription: the language spoken, whether to translate, the clip's length. */
+  language?: string;
+  translate?: boolean;
+  clipSeconds?: number;
 }
 
 export interface MediaItem {
@@ -70,11 +103,26 @@ export interface MediaItem {
     attempts?: number;
     requestId?: string | null;
   } | null;
-  units: { images?: number; sizes?: (string | null)[] } | null;
+  units: {
+    images?: number;
+    sizes?: (string | null)[];
+    characters?: number;
+    heardSeconds?: number | null;
+    tokens?: number | null;
+    clipSeconds?: number | null;
+  } | null;
   text: string | null;
   error: { message: string; param: string | null; status: number | null } | null;
   files: MediaFile[];
   readOnly?: boolean;
+}
+
+/** A result's request, back in its screen's form: "Edit and send", with the
+ * field a refusal named, so it can be marked (§2.5). */
+export interface MediaDraft {
+  request: ImageRequest;
+  field: string | null;
+  message: string | null;
 }
 
 export type MediaEvent =
@@ -128,7 +176,7 @@ export function referenceRange(model: ImageModel): [number, number] {
 
 /** Where a request runs, said before sending (M6). External names the account
  * rather than claiming a charge: not every external account bills. */
-export function whereItRuns(model: ImageModel): string {
+export function whereItRuns(model: ServedModel): string {
   if (model.locality === "local") return "Runs on your own machines.";
   if (model.locality === "external") {
     const who = model.provider ?? model.account ?? "another service";
@@ -139,12 +187,12 @@ export function whereItRuns(model: ImageModel): string {
 }
 
 /** Models grouped by the account that serves them, for the picker. */
-export function groupModels(
-  models: ImageModel[],
+export function groupModels<M extends ServedModel>(
+  models: M[],
   query = "",
-): { label: string; models: ImageModel[] }[] {
+): { label: string; models: M[] }[] {
   const wanted = query.trim().toLowerCase();
-  const groups = new Map<string, ImageModel[]>();
+  const groups = new Map<string, M[]>();
   for (const model of models) {
     if (wanted && !model.id.toLowerCase().includes(wanted)) continue;
     const label =
@@ -192,7 +240,9 @@ export function sizeWords(asked: string | undefined, file: MediaFile): string | 
 export function statusWords(item: MediaItem): string | null {
   switch (item.status) {
     case "running":
-      return "Making it. You can close this tab; it keeps going.";
+      return item.door === "transcription"
+        ? "Listening to it. You can close this tab; it keeps going."
+        : "Making it. You can close this tab; it keeps going.";
     case "stopped":
       return "Stopped. The provider may still bill it.";
     case "interrupted":
@@ -247,4 +297,72 @@ export function fieldOf(param: string | null | undefined): string | null {
   if (param === "output_format") return "outputFormat";
   if (param.startsWith("image")) return "references";
   return param;
+}
+
+/** What the model heard against the clip's own length (§4, M10). Measured
+ * 2026-10-08: OpenRouter's whisper heard 1.5 s of a 3.1 s MP3, every time,
+ * so a shortfall is said plainly. OpenAI rounds the seconds it counts up,
+ * so only a shortfall is a claim; otherwise the clip's length is all. */
+export function heardWords(item: MediaItem): { text: string; short: boolean } | null {
+  const clip = item.units?.clipSeconds ?? item.request.clipSeconds ?? null;
+  const heard = item.units?.heardSeconds ?? null;
+  if (clip == null) return null;
+  if (heard != null && heard < clip - 0.25) {
+    return {
+      text: `The model heard ${heard.toFixed(1)} s of this ${clip.toFixed(1)} s clip. Words after that may be missing.`,
+      short: true,
+    };
+  }
+  return { text: `Clip ${clip.toFixed(1)} s.`, short: false };
+}
+
+/** Whether this page may record: a microphone needs HTTPS or this computer
+ * (localhost), and a browser that records. */
+export function canRecord(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    window.isSecureContext &&
+    typeof navigator !== "undefined" &&
+    typeof navigator.mediaDevices?.getUserMedia === "function" &&
+    typeof MediaRecorder !== "undefined"
+  );
+}
+
+export const RECORD_NEEDS_HTTPS =
+  "Recording needs this page opened over HTTPS, or on the computer Workbench runs on. You can still choose a recording to upload.";
+
+/** A clip's own length, decoded by the browser; null when it cannot say. */
+export async function clipSeconds(file: Blob): Promise<number | null> {
+  const Context =
+    typeof window === "undefined"
+      ? undefined
+      : (window.AudioContext ??
+        (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext);
+  if (!Context) return null;
+  const context = new Context();
+  try {
+    const decoded = await context.decodeAudioData(await file.arrayBuffer());
+    return Number.isFinite(decoded.duration) ? decoded.duration : null;
+  } catch {
+    return null;
+  } finally {
+    void context.close();
+  }
+}
+
+/** The formats offered for speech, mp3 first: what the browser plays. */
+export function speechFormats(model: SpeechModel): string[] {
+  const listed = model.formats.length ? model.formats : ["mp3"];
+  return listed.includes("mp3") ? ["mp3", ...listed.filter((f) => f !== "mp3")] : listed;
+}
+
+/** What a result says in the bin: the words asked for, spoken or heard. */
+export function captionOf(item: MediaItem): string {
+  if (item.kind === "upload") return `Brought in: ${item.request.name ?? "an image"}`;
+  if (item.door === "speech") return item.request.input ?? "";
+  if (item.door === "transcription") {
+    const how = item.request.translate ? "Translated into English" : "Transcribed";
+    return `${how}: ${item.request.name ?? "a recording"}`;
+  }
+  return item.request.prompt ?? "";
 }

@@ -177,6 +177,54 @@ class Hub:
             raise HubError("The gateway's answer to the image request was not an object.")
         return answer, response.headers.get("x-request-id")
 
+    async def speech(self, body: dict[str, Any]) -> tuple[bytes, dict[str, str]]:
+        """One spoken clip (P3a): its bytes, and the response's headers, which
+        carry what served it (`x-eugene-plexus-*`). Raises `HubError`."""
+        headers = self._headers()
+        try:
+            response = await self._http.post(
+                f"{self.gateway_url}/v1/audio/speech", json=body, headers=headers
+            )
+        except httpx.HTTPError as exc:
+            raise self._unreachable(exc) from exc
+        if response.status_code != 200:
+            raise refusal(response.status_code, _gateway_words(response), _gateway_param(response))
+        return response.content, dict(response.headers)
+
+    async def transcribe(
+        self,
+        fields: dict[str, str],
+        file: tuple[str, bytes, str],
+        *,
+        translate: bool = False,
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        """One transcription (P3b), or translation into English (P3-4), as
+        the OpenAI SDK sends it: a multipart form. Raises `HubError`."""
+        headers = self._headers()
+        door = "translations" if translate else "transcriptions"
+        try:
+            response = await self._http.post(
+                f"{self.gateway_url}/v1/audio/{door}",
+                data=fields,
+                files={"file": file},
+                headers=headers,
+            )
+        except httpx.HTTPError as exc:
+            raise self._unreachable(exc) from exc
+        if response.status_code != 200:
+            raise refusal(response.status_code, _gateway_words(response), _gateway_param(response))
+        try:
+            answer = response.json()
+        except ValueError as exc:
+            raise HubError(
+                "The gateway answered the transcription with something that is not JSON "
+                f"({response.headers.get('content-type') or 'no type'}).",
+                kind="gateway",
+            ) from exc
+        if not isinstance(answer, dict) or not isinstance(answer.get("text"), str):
+            raise HubError("The gateway's transcription had no text in it.", kind="gateway")
+        return answer, dict(response.headers)
+
     async def stream_chat(self, body: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         """The chunks of one streamed answer, parsed. Raises `HubError`."""
         headers = self._headers()
