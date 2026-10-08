@@ -9,11 +9,12 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI
 
-from . import api, config, folders_api, job_sites_api, tools_api, web
+from . import api, config, folders_api, job_sites_api, media_api, tools_api, web
 from ._build import commit
 from ._http import ssl_context
 from .answers import Answers
 from .hub import Hub
+from .media import MediaJobs
 from .node_folders import NodeFolders
 from .sessions import Sessions
 from .settings import Settings
@@ -38,6 +39,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             log.info(
                 "%d answer(s) were cut off by the last restart; marked interrupted", interrupted
             )
+        cut = await store.mark_media_interrupted()
+        if cut:
+            log.info(
+                "%d media request(s) were cut off by the last restart; marked interrupted", cut
+            )
         # Eugene's sign-in is this install's own agent: never via a proxy.
         http = httpx.AsyncClient(timeout=15.0, trust_env=False, verify=ssl_context())
         provider = Provider(
@@ -51,11 +57,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         tools = Tools(store, settings)
         tools.node_folders = NodeFolders(store, provider, http)
         answers = Answers(store, hub, tools)
+        media = MediaJobs(store, hub, settings.data_dir)
         app.state.tools = tools
         app.state.store = store
         app.state.provider = provider
         app.state.hub = hub
         app.state.answers = answers
+        app.state.media = media
         app.state.sessions = Sessions(store, provider)
         for problem in (provider.why_not(), hub.why_not()):
             if problem:
@@ -71,6 +79,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             yield
         finally:
             await answers.aclose()
+            await media.aclose()
             await hub.aclose()
             await http.aclose()
             await store.close()
@@ -84,6 +93,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.add_middleware(CanonicalOrigin, origin=settings.public_origin)
     app.include_router(config.router)
     app.include_router(api.router)
+    app.include_router(media_api.router)
     app.include_router(tools_api.router)
     app.include_router(folders_api.router)
     app.include_router(job_sites_api.router)

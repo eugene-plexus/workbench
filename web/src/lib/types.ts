@@ -430,4 +430,6 @@ export interface Person {
   sub: string;
   name: string;
   chats: number;
+  /** How many media results they have (M3). */
+  media: number;
 }

@@ -18,7 +18,13 @@ the file itself is under `files/` in the data directory (W7).
 the one it follows (`parent_id`); messages that follow the same one are
 versions of each other, and one in each group is `chosen`. The **path**,
 the chat as it is shown and sent, starts at the chosen first message and
-follows each message's chosen version. Nothing is deleted but a whole chat.
+follows each message's chosen version. Nothing in a chat is deleted but the
+whole chat.
+
+**Media is a person's bins** (`workbench-media-screens.md`, schema 7): one
+`media` row per request a media screen sent, or per file brought in, and
+its files under `files/` like an attachment's, with `media_id` in place of
+`chat_id`. A media row and its files can be deleted on their own (M8).
 """
 
 from __future__ import annotations
@@ -33,7 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -92,13 +98,34 @@ CREATE INDEX IF NOT EXISTS messages_by_chat ON messages (chat_id, seq);
 CREATE TABLE IF NOT EXISTS files (
     id TEXT PRIMARY KEY,
     owner TEXT NOT NULL,
-    chat_id TEXT NOT NULL,
+    chat_id TEXT,
     name TEXT NOT NULL,
     media_type TEXT NOT NULL,
     size INTEGER NOT NULL,
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    media_id TEXT,
+    width INTEGER,
+    height INTEGER
 );
 CREATE INDEX IF NOT EXISTS files_by_chat ON files (chat_id);
+CREATE INDEX IF NOT EXISTS files_by_media ON files (media_id);
+CREATE TABLE IF NOT EXISTS media (
+    id TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    door TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    model TEXT,
+    request TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    finished_at REAL,
+    served TEXT,
+    units TEXT,
+    text TEXT,
+    error TEXT,
+    job TEXT
+);
+CREATE INDEX IF NOT EXISTS media_by_owner ON media (owner, door, created_at);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS tool_servers (
     id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL, token TEXT NOT NULL,
@@ -143,6 +170,22 @@ _MIGRATIONS: dict[int, list[str]] = {
         "UPDATE messages SET parent_id = (SELECT p.id FROM messages p "
         "WHERE p.chat_id = messages.chat_id AND p.seq < messages.seq "
         "ORDER BY p.seq DESC LIMIT 1)",
+    ],
+    # Media (workbench-media-screens.md §7): a file belongs to a chat or to a
+    # media row, so `chat_id` loses NOT NULL, which SQLite changes only by
+    # making the table again. The `media` table itself is `_SCHEMA`'s.
+    7: [
+        # A store made before attachments had none; schema 1's files table.
+        "CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, owner TEXT NOT NULL, "
+        "chat_id TEXT NOT NULL, name TEXT NOT NULL, media_type TEXT NOT NULL, "
+        "size INTEGER NOT NULL, created_at REAL NOT NULL)",
+        "CREATE TABLE files_7 (id TEXT PRIMARY KEY, owner TEXT NOT NULL, chat_id TEXT, "
+        "name TEXT NOT NULL, media_type TEXT NOT NULL, size INTEGER NOT NULL, "
+        "created_at REAL NOT NULL, media_id TEXT, width INTEGER, height INTEGER)",
+        "INSERT INTO files_7 (id, owner, chat_id, name, media_type, size, created_at) "
+        "SELECT id, owner, chat_id, name, media_type, size, created_at FROM files",
+        "DROP TABLE files",
+        "ALTER TABLE files_7 RENAME TO files",
     ],
 }
 
@@ -280,11 +323,44 @@ class Message:
 class FileRecord:
     id: str
     owner: str
-    chat_id: str
+    #: The chat it is attached to, or None for a media file.
+    chat_id: str | None
     name: str
     media_type: str
     size: int
     created_at: float
+    #: The media row it belongs to, or None for an attachment.
+    media_id: str | None = None
+    #: An image's own pixel size, read from its bytes (§2.4).
+    width: int | None = None
+    height: int | None = None
+
+
+@dataclass
+class MediaRow:
+    """One request a media screen sent, or one file brought in (`kind`)."""
+
+    id: str
+    owner: str
+    #: The screen: images, speech, transcription or video.
+    door: str
+    #: `made` (a request to the gateway) or `upload` (a file brought in).
+    kind: str
+    status: str
+    created_at: float
+    model: str | None = None
+    #: What was asked: prompt or text, and the settings sent.
+    request: dict[str, Any] = field(default_factory=dict)
+    finished_at: float | None = None
+    #: What served it: driver, backend, latency, attempts, request id.
+    served: dict[str, Any] | None = None
+    #: Units as measured: images and sizes, characters, seconds.
+    units: dict[str, Any] | None = None
+    text: str | None = None
+    #: The gateway's words: message, param, status.
+    error: dict[str, Any] | None = None
+    #: A long job's handle and last poll (video, slice 3).
+    job: dict[str, Any] | None = None
 
 
 def _chat(row: sqlite3.Row) -> Chat:
@@ -335,7 +411,37 @@ def _file(row: sqlite3.Row) -> FileRecord:
         media_type=row["media_type"],
         size=row["size"],
         created_at=row["created_at"],
+        media_id=row["media_id"],
+        width=row["width"],
+        height=row["height"],
     )
+
+
+def _json_or_none(value: str | None) -> Any:
+    return json.loads(value) if value is not None else None
+
+
+def _media(row: sqlite3.Row) -> MediaRow:
+    return MediaRow(
+        id=row["id"],
+        owner=row["owner"],
+        door=row["door"],
+        kind=row["kind"],
+        status=row["status"],
+        created_at=row["created_at"],
+        model=row["model"],
+        request=json.loads(row["request"] or "{}"),
+        finished_at=row["finished_at"],
+        served=_json_or_none(row["served"]),
+        units=_json_or_none(row["units"]),
+        text=row["text"],
+        error=_json_or_none(row["error"]),
+        job=_json_or_none(row["job"]),
+    )
+
+
+_MEDIA_FIELDS = {"status", "finished_at", "served", "units", "text", "error", "job"}
+_MEDIA_JSON = {"served", "units", "error", "job"}
 
 
 _MESSAGE_FIELDS = {
@@ -527,18 +633,21 @@ class Store:
 
         return await self._run(go)
 
-    async def people(self) -> list[tuple[Person, int]]:
-        """Everyone who has signed in, with how many chats each has."""
+    async def people(self) -> list[tuple[Person, int, int]]:
+        """Everyone who has signed in, with how many chats and how many media
+        results each has."""
 
-        def go() -> list[tuple[Person, int]]:
+        def go() -> list[tuple[Person, int, int]]:
             rows = self._conn().execute(
-                "SELECT p.*, (SELECT COUNT(*) FROM chats c WHERE c.owner = p.sub) AS chats "
+                "SELECT p.*, (SELECT COUNT(*) FROM chats c WHERE c.owner = p.sub) AS chats, "
+                "(SELECT COUNT(*) FROM media m WHERE m.owner = p.sub) AS media "
                 "FROM people p ORDER BY p.name COLLATE NOCASE"
             )
             return [
                 (
                     Person(sub=r["sub"], name=r["name"], role=r["role"], username=r["username"]),
                     int(r["chats"]),
+                    int(r["media"]),
                 )
                 for r in rows
             ]
@@ -811,8 +920,8 @@ class Store:
     async def add_file(self, record: FileRecord) -> None:
         def go() -> None:
             self._conn().execute(
-                "INSERT INTO files (id, owner, chat_id, name, media_type, size, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO files (id, owner, chat_id, name, media_type, size, created_at, "
+                "media_id, width, height) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     record.id,
                     record.owner,
@@ -821,6 +930,9 @@ class Store:
                     record.media_type,
                     record.size,
                     record.created_at,
+                    record.media_id,
+                    record.width,
+                    record.height,
                 ),
             )
 
@@ -837,6 +949,153 @@ class Store:
         def go() -> list[FileRecord]:
             rows = self._conn().execute("SELECT * FROM files WHERE chat_id = ?", (chat_id,))
             return [_file(r) for r in rows]
+
+        return await self._run(go)
+
+    async def files_for_media(self, media_ids: list[str]) -> list[FileRecord]:
+        """The files of these media rows, in the order they were made."""
+        if not media_ids:
+            return []
+
+        def go() -> list[FileRecord]:
+            marks = ", ".join("?" for _ in media_ids)
+            rows = self._conn().execute(
+                f"SELECT * FROM files WHERE media_id IN ({marks}) ORDER BY created_at, rowid",
+                media_ids,
+            )
+            return [_file(r) for r in rows]
+
+        return await self._run(go)
+
+    # --- media ----------------------------------------------------------
+
+    async def add_media(self, row: MediaRow) -> None:
+        def go() -> None:
+            self._conn().execute(
+                "INSERT INTO media (id, owner, door, kind, model, request, status, created_at, "
+                "finished_at, served, units, text, error, job) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    row.id,
+                    row.owner,
+                    row.door,
+                    row.kind,
+                    row.model,
+                    json.dumps(row.request),
+                    row.status,
+                    row.created_at,
+                    row.finished_at,
+                    *(json.dumps(v) if v is not None else None for v in (row.served, row.units)),
+                    row.text,
+                    *(json.dumps(v) if v is not None else None for v in (row.error, row.job)),
+                ),
+            )
+
+        await self._run(go)
+
+    async def media(self, media_id: str) -> MediaRow | None:
+        def go() -> MediaRow | None:
+            r = self._conn().execute("SELECT * FROM media WHERE id = ?", (media_id,)).fetchone()
+            return _media(r) if r is not None else None
+
+        return await self._run(go)
+
+    async def media_list(
+        self, owner: str, door: str, *, before: float | None = None, limit: int = 30
+    ) -> list[MediaRow]:
+        """A person's results on one screen, newest first, a page at a time."""
+
+        def go() -> list[MediaRow]:
+            rows = self._conn().execute(
+                "SELECT * FROM media WHERE owner = ? AND door = ? AND created_at < ? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (owner, door, before if before is not None else float("inf"), limit),
+            )
+            return [_media(r) for r in rows]
+
+        return await self._run(go)
+
+    async def update_media(self, media_id: str, **values: Any) -> None:
+        unknown = set(values) - _MEDIA_FIELDS
+        if unknown:
+            raise ValueError(f"not media fields: {sorted(unknown)}")
+        if not values:
+            return
+
+        def go() -> None:
+            columns = ", ".join(f"{k} = ?" for k in values)
+            params = [
+                (json.dumps(v) if v is not None else None) if k in _MEDIA_JSON else v
+                for k, v in values.items()
+            ]
+            self._conn().execute(f"UPDATE media SET {columns} WHERE id = ?", (*params, media_id))
+
+        await self._run(go)
+
+    async def delete_media(self, media_ids: list[str]) -> list[FileRecord]:
+        """Delete these rows and their file records together; returns the
+        records, so the caller can remove the bytes."""
+        if not media_ids:
+            return []
+
+        def go() -> list[FileRecord]:
+            db = self._conn()
+            marks = ", ".join("?" for _ in media_ids)
+            db.execute("BEGIN")
+            try:
+                gone = [
+                    _file(r)
+                    for r in db.execute(
+                        f"SELECT * FROM files WHERE media_id IN ({marks})", media_ids
+                    ).fetchall()
+                ]
+                db.execute(f"DELETE FROM files WHERE media_id IN ({marks})", media_ids)
+                db.execute(f"DELETE FROM media WHERE id IN ({marks})", media_ids)
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return gone
+
+        return await self._run(go)
+
+    async def media_ids(self, owner: str, door: str) -> list[str]:
+        def go() -> list[str]:
+            rows = self._conn().execute(
+                "SELECT id FROM media WHERE owner = ? AND door = ?", (owner, door)
+            )
+            return [r["id"] for r in rows]
+
+        return await self._run(go)
+
+    async def media_bytes(self, owner: str) -> int:
+        """What a person's bins hold on disk, every screen together (M4)."""
+
+        def go() -> int:
+            row = (
+                self._conn()
+                .execute(
+                    "SELECT COALESCE(SUM(size), 0) AS total FROM files "
+                    "WHERE owner = ? AND media_id IS NOT NULL",
+                    (owner,),
+                )
+                .fetchone()
+            )
+            return int(row["total"])
+
+        return await self._run(go)
+
+    async def mark_media_interrupted(self) -> int:
+        """Boot: a media request still `running` was cut off by a restart.
+        The gateway may have been asked, so the provider may have billed it."""
+
+        def go() -> int:
+            cursor = self._conn().execute(
+                "UPDATE media SET status = 'interrupted', finished_at = ? "
+                "WHERE status = 'running' AND job IS NULL",
+                (time.time(),),
+            )
+            return cursor.rowcount
 
         return await self._run(go)
 

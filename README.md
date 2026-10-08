@@ -21,7 +21,7 @@ Open it from the same page.
 
 For a central Workbench, enroll each file-serving machine as an ordinary Eugene node. In **People → Files on your machines**, enable file support, register existing folders, and assign each person read or text-write access. The node prepares its bundled helper automatically; no model or separate Workbench installation is needed there. Windows service and Linux system installations currently support file helpers. Select these folders per chat in Workbench; the browser needs no route to the desktop. See the [setup and platform guide](https://github.com/eugene-plexus/specs/blob/main/docs/design/node-file-helpers.md#using-it).
 
-Workbench's one setting is on its page in the console. It controls whether the owner may read the chats of the people the owner gives Workbench to. It is off by default.
+Workbench's one setting is on its page in the console. It controls whether the owner may read the chats and media of the people the owner gives Workbench to. It is off by default.
 
 ## What it does
 
@@ -37,6 +37,7 @@ Workbench's one setting is on its page in the console. It controls whether the o
 - **MCP tools**: the owner adds shared Streamable HTTP servers in **Toolbox · Tools**. Choose servers in a chat's settings, then approve or decline each proposed call. Credentials stay on the server. Pending approvals expire after 30 minutes; interrupted calls are never automatically repeated.
 - **Folder tools**: use node folders assigned in Eugene's People page, or existing Workbench-host grants managed in **Toolbox · Tools**. Read-only is the default; text creation and editing are optional. Select folders per chat and approve each listing, read or write. File contents go to the selected model and remain in the chat.
 - **Answers keep going with no tab open**: an answer is saved as it arrives. Close the tab and come back, and it is there.
+- **Bins · Media: Images**: make images with any image model the install serves, from a prompt or from reference images you bring in. The form offers only the settings the chosen model lists, and says where the model runs (your machines, or the account it bills). Requests run on the server, so a closed tab loses nothing. Each result shows the size asked beside the size that came back, can be sent to a new chat as a copy, and can be deleted. Speech, transcription and video screens come later.
 
 Network MCP connections use HTTPS, except for loopback HTTP, with an optional bearer credential. They are shared with everyone signed into this Workbench. Tool results and arguments stay with the answer. Stopping or editing a chat does not undo actions already taken.
 

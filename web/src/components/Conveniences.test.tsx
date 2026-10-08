@@ -153,6 +153,7 @@ it("searches chat names without changing order and offers a clear search action"
       chats={[chat, other]}
       current={chat.id}
       onOpen={vi.fn()}
+      onOpenMedia={vi.fn()}
       onClose={vi.fn()}
       onNew={vi.fn()}
       onSignOut={vi.fn()}

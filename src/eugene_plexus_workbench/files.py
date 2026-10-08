@@ -59,6 +59,81 @@ def media_type(declared: str | None, head: bytes) -> str | None:
     return sniffed
 
 
+#: What an image in a bin may be (workbench-media-screens.md §2.8): what a
+#: chat carries, plus WebP, which a model makes when its listing offers it.
+IMAGE_TYPES = ("image/png", "image/jpeg", "image/webp")
+#: A file brought into a bin to use as a reference image.
+UPLOAD_LIMIT = 10 * MIB
+#: Reference images in one request, together. The gateway takes 25 MiB of
+#: JSON on its edits door, and base64 makes 3 bytes 4.
+REFERENCES_LIMIT = 18 * MIB
+
+
+def sniff_image(data: bytes) -> str | None:
+    """An image's type from its first bytes, or None."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def image_size(data: bytes) -> tuple[int, int] | None:
+    """An image's own width and height, read from its bytes; None when they
+    cannot be read. What came back is shown beside what was asked (§2.4)."""
+    try:
+        if data.startswith(b"\x89PNG\r\n\x1a\n") and data[12:16] == b"IHDR":
+            return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+        if data.startswith(b"\xff\xd8"):
+            return _jpeg_size(data)
+        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            return _webp_size(data)
+    except (IndexError, ValueError):
+        return None
+    return None
+
+
+def _jpeg_size(data: bytes) -> tuple[int, int] | None:
+    at = 2
+    while at + 9 < len(data):
+        if data[at] != 0xFF:
+            at += 1
+            continue
+        marker = data[at + 1]
+        if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+            at += 2
+            continue
+        length = int.from_bytes(data[at + 2 : at + 4], "big")
+        # Start of frame, every kind but the DHT/JPG/DAC markers among them.
+        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+            height = int.from_bytes(data[at + 5 : at + 7], "big")
+            width = int.from_bytes(data[at + 7 : at + 9], "big")
+            return width, height
+        at += 2 + length
+    return None
+
+
+def _webp_size(data: bytes) -> tuple[int, int] | None:
+    chunk = data[12:16]
+    if chunk == b"VP8X":
+        return int.from_bytes(data[24:27], "little") + 1, int.from_bytes(data[27:30], "little") + 1
+    if chunk == b"VP8L":
+        bits = int.from_bytes(data[21:25], "little")
+        return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
+    if chunk == b"VP8 ":
+        return (
+            int.from_bytes(data[26:28], "little") & 0x3FFF,
+            int.from_bytes(data[28:30], "little") & 0x3FFF,
+        )
+    return None
+
+
+def extension(media_type: str) -> str:
+    return {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}.get(media_type, "bin")
+
+
 def person_dir(root: Path, sub: str) -> Path:
     return root / "files" / hashlib.sha256(sub.encode("utf-8")).hexdigest()[:32]
 

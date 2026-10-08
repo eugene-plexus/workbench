@@ -40,8 +40,83 @@ CLIENT_SECRET = "wb-client-secret"
 APP_KEY = "app-key-token"
 ADMIN_TOKEN = "admin-token"
 MODEL = "local-model"
+
+
 #: The "draft" mode's text before its search; the emoji is two units in the
 #: page's string length and one in Python's.
+def png(width: int, height: int) -> bytes:
+    """A real PNG of this size: one colour, decodable by a browser."""
+    import struct
+    import zlib
+
+    def part(tag: bytes, data: bytes) -> bytes:
+        body = tag + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
+
+    rows = b"".join(b"\x00" + b"\xcc\x55\x22" * width for _ in range(height))
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + part(b"IHDR", header)
+        + part(b"IDAT", zlib.compress(rows))
+        + part(b"IEND", b"")
+    )
+
+
+#: Image models as the gateway lists them since the media screens (§6.1):
+#: flux makes one at a time and edits from up to four references; mini makes
+#: up to ten and takes a quality; `oai-image` leaves every setting to its API.
+IMAGE_MODELS: list[dict[str, Any]] = [
+    {
+        "id": "openrouter/flux",
+        "object": "model",
+        "owned_by": "openrouter",
+        "x_eugene_plexus": {
+            "drivers": ["openrouter"],
+            "surfaces": ["image"],
+            "locality": "external",
+            "ready_backends": 1,
+            "image_edits": True,
+            "image_max_images": 1,
+            "image_qualities": [],
+            "image_backgrounds": [],
+            "image_output_formats": ["png", "jpeg"],
+            "image_min_references": 0,
+            "image_max_references": 4,
+        },
+    },
+    {
+        "id": "openrouter/mini",
+        "object": "model",
+        "owned_by": "openrouter",
+        "x_eugene_plexus": {
+            "drivers": ["openrouter"],
+            "surfaces": ["image"],
+            "locality": "external",
+            "ready_backends": 1,
+            "image_edits": True,
+            "image_max_images": 10,
+            "image_qualities": ["auto", "low", "medium", "high"],
+            "image_backgrounds": ["auto", "transparent", "opaque"],
+            "image_output_formats": None,
+            "image_min_references": 0,
+            "image_max_references": 16,
+        },
+    },
+    {
+        "id": "oai-image",
+        "object": "model",
+        "owned_by": "openai",
+        "x_eugene_plexus": {
+            "drivers": ["oai"],
+            "surfaces": ["image"],
+            "locality": "external",
+            "ready_backends": 1,
+            "image_edits": True,
+        },
+    },
+]
+
 DRAFT = "A first answer 🎉, before searching."
 DRAFT_REASONING = "No tools needed."
 
@@ -287,6 +362,15 @@ class FakeGateway:
     search: dict[str, Any] = field(default_factory=lambda: {"available": True, "reason": None})
     #: End each answer with ` #N`, N its request's number, to tell versions apart.
     numbered: bool = False
+    #: The image models listed (media screens), as the gateway lists them.
+    image_models: list[dict[str, Any]] = field(default_factory=lambda: list(IMAGE_MODELS))
+    #: Every image request, with the door it came to: (`generations`|`edits`, body).
+    image_requests: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    #: The image answered, whatever size was asked: 3x2, so asked and got differ.
+    image_answer: bytes = b""
+    image_delay: float = 0.0
+    #: A refusal to answer every image request with: (status, message, param).
+    image_refusal: tuple[int, str, str | None] | None = None
 
     def app(self) -> FastAPI:
         app = FastAPI()
@@ -315,8 +399,53 @@ class FakeGateway:
                         "object": "model",
                         "x_eugene_plexus": {"surfaces": ["embeddings"]},
                     },
+                    *self.image_models,
                 ],
             }
+
+        async def images(request: Request, door: str) -> Any:
+            body = await request.json()
+            self.image_requests.append((door, body))
+            if request.headers.get("authorization") != f"Bearer {APP_KEY}":
+                return JSONResponse({"error": {"message": "invalid key"}}, status_code=401)
+            if self.image_delay:
+                await asyncio.sleep(self.image_delay)
+            if self.image_refusal is not None:
+                code, message, param = self.image_refusal
+                return JSONResponse(
+                    {
+                        "error": {
+                            "message": message,
+                            "type": "invalid_request_error",
+                            "param": param,
+                        }
+                    },
+                    status_code=code,
+                )
+            picture = base64.b64encode(self.image_answer or png(3, 2)).decode()
+            return JSONResponse(
+                {
+                    "created": 1,
+                    "data": [{"b64_json": picture} for _ in range(body.get("n") or 1)],
+                    "usage": {"input_tokens": 6, "output_tokens": 1024, "total_tokens": 1030},
+                    "x_eugene_plexus": {
+                        "driver": "openrouter",
+                        "backend": "openai_compat_http",
+                        "latency_ms": 12,
+                        "attempts": 1,
+                        "tier": 1,
+                    },
+                },
+                headers={"x-request-id": f"req-{len(self.image_requests)}"},
+            )
+
+        @app.post("/v1/images/generations")
+        async def generations(request: Request) -> Any:
+            return await images(request, "generations")
+
+        @app.post("/v1/images/edits")
+        async def edits(request: Request) -> Any:
+            return await images(request, "edits")
 
         @app.post("/v1/chat/completions")
         async def chat(request: Request) -> Any:

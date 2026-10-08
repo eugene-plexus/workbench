@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from eugene_plexus_workbench import store as storage
-from eugene_plexus_workbench.store import Message, Store
+from eugene_plexus_workbench.store import SCHEMA_VERSION, Message, Store
 
 from .conftest import Browser, World
 from .test_chats import _events
@@ -94,7 +94,9 @@ def test_a_schema_5_chat_opens_as_the_same_conversation(tmp_path: Path) -> None:
 
     _run(tmp_path, steps)
     with sqlite3.connect(path) as db:
-        assert db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()[0] == "6"
+        assert db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()[0] == str(
+            SCHEMA_VERSION
+        )
 
 
 async def _branching(store: Store) -> None:

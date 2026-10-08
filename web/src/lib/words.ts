@@ -94,7 +94,7 @@ export function statusWords(message: Message): string | null {
 export const SEARCH_LABEL = "Search the web";
 export const SEARCH_HINT =
   "Search the web before answering. The words searched for go to the internet.";
-export const OWNER_READS = "The owner of this Workbench can read your chats.";
+export const OWNER_READS = "The owner of this Workbench can read your chats and media.";
 export const PRODUCTION_MODE =
   "Production mode: Eugene's owner cannot see what your job sites' tools return.";
 export const DEV_MODE =

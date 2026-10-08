@@ -69,7 +69,7 @@ async def recipients(request: Request) -> dict[str, Any]:
     return {
         "people": [
             {"sub": p.sub, "name": p.name, "username": p.username}
-            for p, _ in await _state(request).store.people()
+            for p, *_ in await _state(request).store.people()
         ]
     }
 

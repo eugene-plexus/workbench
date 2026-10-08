@@ -21,7 +21,7 @@ from typing import Any, Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile, status
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import config, files
@@ -610,8 +610,8 @@ async def people(request: Request) -> dict[str, Any]:
         )
     return {
         "people": [
-            {"sub": p.sub, "name": p.name, "chats": n}
-            for p, n in await store.people()
+            {"sub": p.sub, "name": p.name, "chats": n, "media": m}
+            for p, n, m in await store.people()
             if p.sub != person.sub
         ]
     }
@@ -980,21 +980,40 @@ async def upload(request: Request, chat_id: str, file: UploadFile = File(...)) -
     return {"id": record.id, "name": record.name, "mediaType": media_type, "size": record.size}
 
 
+async def _may_read_file(request: Request, person: Person, record: FileRecord) -> None:
+    """A file is readable by whoever may read what it belongs to: its chat,
+    or its media row (workbench-media-screens.md §2.7). The file's own
+    owner is checked too, so an id is never the only thing guarding it."""
+    store: Store = _state(request).store
+    if record.chat_id is not None:
+        chat, _ = await _readable_chat(request, person, record.chat_id)
+        if chat.owner == record.owner:
+            return
+    elif record.media_id is not None:
+        row = await store.media(record.media_id)
+        if row is not None and row.owner == record.owner:
+            if row.owner == person.sub:
+                return
+            if person.is_owner and await config.owner_reads_chats(store):
+                return
+    raise _problem(status.HTTP_404_NOT_FOUND, "There is no such file.")
+
+
 @router.get("/api/files/{file_id}")
 async def download(request: Request, file_id: str) -> Response:
+    """The file, streamed from disk, with `Range` answered so audio and video
+    can seek (§2.8)."""
     person = await _person(request)
     store: Store = _state(request).store
     record = await store.file(file_id)
     if record is None:
         raise _problem(status.HTTP_404_NOT_FOUND, "There is no such file.")
-    await _readable_chat(request, person, record.chat_id)
+    await _may_read_file(request, person, record)
     path = files.path_of(_state(request).settings.data_dir, record.owner, record.id)
-    try:
-        data = await asyncio.to_thread(path.read_bytes)
-    except OSError as exc:
-        raise _problem(status.HTTP_404_NOT_FOUND, "That file is no longer on disk.") from exc
-    return Response(
-        content=data,
+    if not await asyncio.to_thread(path.is_file):
+        raise _problem(status.HTTP_404_NOT_FOUND, "That file is no longer on disk.")
+    return FileResponse(
+        path,
         media_type=record.media_type,
         headers={
             "Content-Disposition": "attachment",
