@@ -16,6 +16,7 @@ import {
 import { Markdown } from "./Markdown";
 import { CopyButton } from "./CopyButton";
 import { ToolCalls } from "./ToolCalls";
+import { WorkingScene } from "./WorkingScene";
 
 export function MessageView({
   chatId,
@@ -184,9 +185,13 @@ export function MessageView({
       )}
       <ToolCalls chatId={chatId} message={message} readOnly={readOnly} onChanged={onChanged} />
       {waiting && (
-        <p aria-live="polite" className="text-muted" data-testid="progress">
-          {progressWords(progress)}
-        </p>
+        // Eugene works while the model does; waiting on the person's
+        // approval is not work, so he steps away then.
+        <WorkingScene active={!(progress?.stage === "tool" && progress.phase === "approval")}>
+          <p aria-live="polite" className="text-muted" data-testid="progress">
+            {progressWords(progress)}
+          </p>
+        </WorkingScene>
       )}
       {answer && <Markdown text={answer} />}
       {(message.sources.length > 0 || message.searches > 0) && (
