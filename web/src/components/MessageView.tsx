@@ -100,7 +100,7 @@ export function MessageView({
             }}
           >
             <textarea
-              aria-label="Your message"
+              aria-label="Edit your message"
               value={editing}
               onChange={(e) => setEditing(e.target.value)}
               rows={4}

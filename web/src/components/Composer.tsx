@@ -1,7 +1,7 @@
 import { Paperclip, Send, Square, X } from "lucide-react";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 
-import { api, patch, post } from "../lib/api";
+import { api, del, patch, post } from "../lib/api";
 import { readDraft, saveDraft } from "../lib/conveniences";
 import type { Chat, Me, Message, Model, Models } from "../lib/types";
 import { modelLabel, SEARCH_HINT, SEARCH_LABEL, takes } from "../lib/words";
@@ -113,6 +113,7 @@ export function Composer({
   const sendPending = useRef(false);
   const uploadPending = useRef(false);
   const [uploading, setUploading] = useState<string | null>(null);
+  const [removing, setRemoving] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const dragDepth = useRef(0);
 
@@ -191,8 +192,26 @@ export function Composer({
     if (files.current) files.current.value = "";
   }
 
+  /** An upload taken back before it is sent is deleted, so it stops counting
+   * against the chat's limit (workbench#3). A refusal keeps the chip. */
+  async function remove(file: Pending) {
+    setRemoving(file.id);
+    setProblem(null);
+    try {
+      await del(`/api/chats/${chat.id}/files/${encodeURIComponent(file.id)}`);
+      setPending((current) => current.filter((p) => p.id !== file.id));
+    } catch (error) {
+      setProblem(
+        `${file.name} was not removed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      setRemoving(null);
+    }
+  }
+
   async function send() {
     if (!chosen || sendPending.current || uploadPending.current || running || cannotTake) return;
+    if (removing !== null) return;
     if (!text.trim() && pending.length === 0) return;
     sendPending.current = true;
     setSending(true);
@@ -284,8 +303,8 @@ export function Composer({
                 <button
                   type="button"
                   aria-label={`Remove ${file.name}`}
-                  disabled={sending}
-                  onClick={() => setPending((current) => current.filter((p) => p.id !== file.id))}
+                  disabled={sending || removing !== null}
+                  onClick={() => void remove(file)}
                 >
                   <X size={12} />
                 </button>
@@ -400,6 +419,7 @@ export function Composer({
                 blocked !== null ||
                 sending ||
                 uploading !== null ||
+                removing !== null ||
                 (!text.trim() && pending.length === 0)
               }
               onClick={() => void send()}

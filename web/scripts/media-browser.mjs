@@ -1,7 +1,8 @@
 /* global process, console, document */
 // The Images screen in Chrome (workbench-media-screens.md §9): make an image,
 // close the tab while it is being made, find it kept in a new tab with what
-// was asked beside what came back, send it to a chat, go Back, delete it.
+// was asked beside what came back, send it to a chat, remove it there and
+// attach another, go Back, delete it.
 // The fake gateway holds each image for 2 s and answers a 3x2 PNG.
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -54,7 +55,17 @@ try {
   // Send it to a chat: a new chat, the image waiting in its composer.
   await item.getByRole("button", { name: "Send to a chat" }).click();
   await page.waitForURL(/\/chats\/[A-Za-z0-9_-]+$/);
-  await page.getByRole("button", { name: "Remove image-1.png" }).waitFor();
+  const remove = page.getByRole("button", { name: "Remove image-1.png" });
+  await remove.waitFor();
+  // Remove deletes the unsent copy (workbench#3); attach another in its place.
+  const removed = page.waitForResponse(
+    (r) => r.request().method() === "DELETE" && r.url().includes("/files/"),
+  );
+  await remove.click();
+  assert.equal((await removed).status(), 204, "Remove deleted the copy");
+  await remove.waitFor({ state: "detached" });
+  await page.getByTestId("attach-input").setInputFiles(cfg.attach);
+  await page.getByRole("button", { name: "Remove square.png" }).waitFor();
   await page.getByTestId("composer").fill("What is in this picture?");
   await page.getByTestId("send").click();
   await page.locator('[data-testid=answer][data-status="done"]').waitFor();
@@ -70,7 +81,9 @@ try {
   await page.getByText("Nothing here yet. What you make appears here.").waitFor();
 
   assert.deepEqual(errors, []);
-  console.log("PASS: made, kept past a closed tab, sent to a chat, Back, deleted");
+  console.log(
+    "PASS: made, kept past a closed tab, sent to a chat, removed, attached, Back, deleted",
+  );
 } finally {
   await browser.close();
 }

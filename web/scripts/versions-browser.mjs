@@ -52,10 +52,11 @@ try {
     await page.getByTestId("edit-note").textContent(),
     "Your earlier version and what followed it are kept. Use the arrows to go back.",
   );
+  // The edit box has its own name, apart from the composer's (workbench#2).
   await page
-    .getByTestId("user-message")
-    .getByRole("textbox", { name: "Your message" })
+    .getByRole("textbox", { name: "Edit your message", exact: true })
     .fill("Edited question");
+  assert.equal(await page.getByRole("textbox", { name: "Your message", exact: true }).count(), 1);
   await page.getByRole("button", { name: "Save and ask again" }).click();
   await finished(3).waitFor();
   await group("Message 2 of 2").waitFor();

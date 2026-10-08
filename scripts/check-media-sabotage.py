@@ -405,8 +405,8 @@ CASES: list[tuple[str, str, str, str, str, str]] = [
     (
         "video: the job's trouble is not said",
         MEDIA,
-        "                    polls=int(job.get(\"polls\") or 0) + 1, polledAt=time.time(), problem=exc.message\n",
-        "                    polls=int(job.get(\"polls\") or 0) + 1, polledAt=time.time(), problem=None\n",
+        '                    polls=int(job.get("polls") or 0) + 1, polledAt=time.time(), problem=exc.message\n',
+        '                    polls=int(job.get("polls") or 0) + 1, polledAt=time.time(), problem=None\n',
         "pytest",
         f"{VIDEO_TESTS}::test_the_view_carries_the_job_state_and_its_trouble",
     ),
