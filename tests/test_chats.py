@@ -162,7 +162,7 @@ def test_the_whole_conversation_and_the_instructions_are_sent(world: World) -> N
     assert "web_search_options" not in body
 
 
-def test_try_again_replaces_the_last_answer(world: World) -> None:
+def test_try_again_shows_a_new_answer_and_keeps_the_last_as_a_version(world: World) -> None:
     ada = world.browser()
     ada.sign_in("p-ada")
     chat = ada.new_chat()
@@ -174,9 +174,10 @@ def test_try_again_replaces_the_last_answer(world: World) -> None:
     messages = ada.get(f"/api/chats/{chat}").json()["messages"]
     assert [m["role"] for m in messages] == ["user", "assistant"]
     assert second["id"] != first["id"] and second["content"] == "Another answer."
+    assert second["versions"] == {"index": 2, "count": 2, "ids": [first["id"], second["id"]]}
 
 
-def test_editing_a_message_replaces_it_and_everything_after(world: World) -> None:
+def test_editing_a_message_shows_the_edit_and_keeps_the_old_branch(world: World) -> None:
     ada = world.browser()
     ada.sign_in("p-ada")
     chat = ada.new_chat()
@@ -191,6 +192,7 @@ def test_editing_a_message_replaces_it_and_everything_after(world: World) -> Non
     messages = ada.get(f"/api/chats/{chat}").json()["messages"]
     assert (messages[0]["role"], messages[0]["content"]) == ("user", "Uno")
     assert len(messages) == 2
+    assert messages[0]["versions"]["ids"][0] == first["id"]
     assert [m["content"] for m in world.gateway.requests[-1]["messages"]] == ["Uno"]
 
 

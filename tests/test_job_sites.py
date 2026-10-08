@@ -489,3 +489,41 @@ def test_a_passkey_and_its_approvals_are_carried_and_the_code_never_is(
     assert removed.status_code == 204
     assert state["managed"][-1][:3] == ("passkeys", "c" * 32, "remove")
     assert ada.post(f"/api/job-sites/{DESK}/passkeys/abc123/remove").status_code == 404
+
+
+def test_the_owner_reaches_every_branch_and_each_is_redacted_along_its_own_path(
+    site_world: tuple[World, dict[str, Any]],
+) -> None:
+    """V5: a person cannot hide a branch from oversight by switching away
+    from it, and a branch that never touched a job site stays readable."""
+    world, _ = site_world
+    owner, ada, chat = _chat_with_a_site_read(world)
+    shown = ada.get(f"/api/chats/{chat}").json()["messages"]
+    site_answer = next(
+        m for m in shown if any(c.get("jobSite") for r in m["toolRounds"] for c in r["calls"])
+    )
+    world.gateway.words = ["A", " fresh", " try."]
+    tried = ada.post(f"/api/chats/{chat}/messages/{site_answer['id']}/retry")
+    assert tried.status_code == 201, tried.text
+    ada.wait_answer(chat)
+
+    # The owner opens on the person's path: the new try, never at a job site.
+    read = owner.get(f"/api/chats/{chat}")
+    assert read.status_code == 200 and "SITE-SECRET" not in read.text
+    current = read.json()["messages"]
+    assert not any(m.get("redacted") for m in current)
+    assert current[-1]["content"] == "A fresh try."
+    assert current[-1]["versions"]["ids"] == [site_answer["id"], tried.json()["answer"]["id"]]
+
+    # Stepping to the other branch: hidden from the site result on, by its path.
+    branch = owner.get(f"/api/chats/{chat}?via={site_answer['id']}")
+    assert branch.status_code == 200
+    assert "SITE-SECRET" not in branch.text and "Summarise it" not in branch.text
+    messages = branch.json()["messages"]
+    at = next(i for i, m in enumerate(messages) if m["id"] == site_answer["id"])
+    assert not any(m.get("redacted") for m in messages[:at])
+    assert len(messages) > at + 1 and all(m.get("redacted") for m in messages[at:])
+    assert messages[at]["versions"]["count"] == 2, "the arrows still reach the other branch"
+    # Looking moved nothing: the person's path is as they left it.
+    assert ada.get(f"/api/chats/{chat}").json()["messages"][-1]["content"] == "A fresh try."
+    assert owner.post(f"/api/chats/{chat}/messages/{site_answer['id']}/choose").status_code == 404

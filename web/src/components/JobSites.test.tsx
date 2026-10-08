@@ -258,7 +258,6 @@ it("shows the owner only which machine the rest of a chat used", () => {
       chatId="c"
       message={message}
       progress={null}
-      last
       busy={false}
       readOnly
       onChanged={() => undefined}

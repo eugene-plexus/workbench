@@ -216,6 +216,19 @@ it("exports a snapshot with source, file names and unfinished status without fet
   expect(api).not.toHaveBeenCalled();
 });
 
+it("exports the path shown, and says when other versions exist", () => {
+  const one = chatMarkdown({ chat, ownerName: null, messages: [message] });
+  expect(one).not.toContain("other versions");
+  const branched = chatMarkdown({
+    chat,
+    ownerName: null,
+    messages: [message, { ...message, id: "b", versions: { index: 1, count: 2, ids: ["b", "c"] } }],
+  });
+  expect(branched).toContain(
+    "Exported as shown; other versions of some messages are not included.",
+  );
+});
+
 it("acknowledges a successful copy and explains a refused clipboard", async () => {
   const writeText = vi
     .fn()

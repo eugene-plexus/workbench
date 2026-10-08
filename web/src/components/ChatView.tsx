@@ -25,7 +25,7 @@ export function ChatView({
   onChanged: () => void;
   onDeleted: () => void;
 }) {
-  const { detail, update, progress, error, reload } = useChat(chatId);
+  const { detail, update, progress, error, reload, look } = useChat(chatId);
   const [showSettings, setShowSettings] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -102,8 +102,6 @@ export function ChatView({
       setActing(false);
     }
   }
-
-  const lastAnswer = [...messages].reverse().find((m) => m.role === "assistant");
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -296,13 +294,13 @@ export function ChatView({
               chatId={chat.id}
               message={message}
               progress={message.status === "running" ? progress : null}
-              last={message.id === lastAnswer?.id}
               busy={running}
               readOnly={chat.readOnly}
               onChanged={() => {
                 void reload();
                 onChanged();
               }}
+              onLook={chat.readOnly ? look : undefined}
             />
           ))}
         </div>

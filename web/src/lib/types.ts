@@ -38,6 +38,15 @@ export interface Message {
   /** The owner reading someone's chat in production mode: from the first
    * job-site result on, nothing but which machine it used (J13a). */
   redacted?: { site: string };
+  /** Its place among its versions, from 1: the edits of a message, or the
+   * tries of an answer, oldest first (workbench-answer-versions.md). */
+  versions?: Versions;
+}
+
+export interface Versions {
+  index: number;
+  count: number;
+  ids: string[];
 }
 
 export interface ToolCall {
@@ -413,6 +422,8 @@ export type ChatEvent =
     }
   | { type: "done"; message: Message }
   | { type: "reload" }
+  /** Another version is shown: Try again, an edit, or a choice. */
+  | { type: "path" }
   | { type: "signed-out"; reason: string; message: string };
 
 export interface Person {

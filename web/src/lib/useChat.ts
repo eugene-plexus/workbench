@@ -32,9 +32,15 @@ export function place(
 
 export function applyEvent(detail: ChatDetail, event: ChatEvent): Outcome {
   const replace = (message: Message): ChatDetail => {
-    const found = detail.messages.some((m) => m.id === message.id);
-    const files = detail.messages.find((m) => m.id === message.id)?.files;
-    const merged = { ...message, files: message.files ?? files };
+    const shown = detail.messages.find((m) => m.id === message.id);
+    const found = shown !== undefined;
+    // An event's message carries neither its files nor its place among its
+    // versions; the ones already shown stay.
+    const merged = {
+      ...message,
+      files: message.files ?? shown?.files,
+      versions: message.versions ?? shown?.versions,
+    };
     return {
       ...detail,
       chat: { ...detail.chat, running: message.status === "running" },
@@ -102,6 +108,9 @@ export function useChat(chatId: string | null) {
   // placed against it at once, rather than inside a React updater.
   const current = useRef<ChatDetail | null>(null);
   const held = useRef<ChatEvent[]>([]);
+  // The owner's read-only view looks at another branch through this message,
+  // which saves nothing (V5). Null is the person's own path.
+  const via = useRef<string | null>(null);
 
   const setDetail = useCallback((next: ChatDetail | null) => {
     current.current = next;
@@ -120,7 +129,8 @@ export function useChat(chatId: string | null) {
   const reload = useCallback(async () => {
     if (!chatId) return;
     try {
-      let next = await api<ChatDetail>(`/api/chats/${encodeURIComponent(chatId)}`);
+      const through = via.current ? `?via=${encodeURIComponent(via.current)}` : "";
+      let next = await api<ChatDetail>(`/api/chats/${encodeURIComponent(chatId)}${through}`);
       for (const event of held.current) next = applyEvent(next, event).detail;
       held.current = [];
       setDetail(next);
@@ -130,16 +140,27 @@ export function useChat(chatId: string | null) {
     }
   }, [chatId, setDetail]);
 
+  /** Show the branch through `id` without choosing it. */
+  const look = useCallback(
+    (id: string) => {
+      via.current = id;
+      void reload();
+    },
+    [reload],
+  );
+
   useEffect(() => {
     setDetail(null);
     setProgress(null);
     setError(null);
     held.current = [];
+    via.current = null;
     if (!chatId) return;
     const watching = watch(
       chatId,
       (event) => {
-        if (event.type === "reload") {
+        // Another version is shown in some tab: every tab follows.
+        if (event.type === "reload" || event.type === "path") {
           void reload();
           return;
         }
@@ -160,5 +181,5 @@ export function useChat(chatId: string | null) {
     return () => watching.close();
   }, [chatId, reload, setDetail]);
 
-  return { detail, update, progress, error, reload };
+  return { detail, update, progress, error, reload, look };
 }

@@ -1,7 +1,13 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
+import { post } from "../lib/api";
 import type { Message } from "../lib/types";
 import { MessageView } from "./MessageView";
+
+vi.mock("../lib/api", async (actual) => ({
+  ...(await actual<typeof import("../lib/api")>()),
+  post: vi.fn(),
+}));
 
 const answer = (over: Partial<Message>): Message => ({
   id: "a",
@@ -28,7 +34,6 @@ function show(message: Message) {
       chatId="c"
       message={message}
       progress={null}
-      last
       busy={false}
       readOnly={false}
       onChanged={() => undefined}
@@ -100,7 +105,6 @@ describe("a searched answer (W6)", () => {
         chatId="c"
         message={answer({ content: "Draft.", answerFrom: 6, status: "running" })}
         progress={{ stage: "tool", tool: "web_search", phase: "finished" }}
-        last
         busy
         readOnly={false}
         onChanged={() => undefined}
@@ -126,5 +130,93 @@ describe("a searched answer (W6)", () => {
     show(answer({ reasoning: "Thinking…", status: "failed", error: "the key was refused" }));
     expect(screen.getByText("Reasoning").closest("details")).not.toHaveAttribute("open");
     expect(screen.getByRole("alert")).toHaveTextContent("the key was refused");
+  });
+});
+
+describe("versions of a message (workbench-answer-versions.md)", () => {
+  const versions = { index: 2, count: 3, ids: ["a1", "a", "a3"] };
+
+  function view(message: Message, over: { busy?: boolean; readOnly?: boolean } = {}) {
+    const onChanged = vi.fn();
+    const onLook = vi.fn();
+    render(
+      <MessageView
+        chatId="c"
+        message={message}
+        progress={null}
+        busy={over.busy ?? false}
+        readOnly={over.readOnly ?? false}
+        onChanged={onChanged}
+        onLook={over.readOnly ? onLook : undefined}
+      />,
+    );
+    return { onChanged, onLook };
+  }
+
+  beforeEach(() => vi.mocked(post).mockReset().mockResolvedValue(undefined));
+
+  it("counts, names itself, and the model follows", () => {
+    view(answer({ versions, model: "qwen" }));
+    const arrows = screen.getByRole("group", { name: "Answer 2 of 3" });
+    expect(arrows).toHaveTextContent("2 of 3");
+    expect(arrows.nextElementSibling).toHaveTextContent("qwen");
+    expect(screen.queryByRole("group", { name: /of 1/ })).toBeNull();
+  });
+
+  it("chooses the next version and reloads", async () => {
+    const { onChanged } = view(answer({ versions }));
+    fireEvent.click(screen.getByRole("button", { name: "Next version" }));
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
+    expect(post).toHaveBeenCalledWith("/api/chats/c/messages/a3/choose");
+  });
+
+  it("names a message's versions, and stops at the first", () => {
+    view(answer({ role: "user", content: "Hi", versions: { ...versions, index: 1 } }));
+    expect(screen.getByRole("group", { name: "Message 1 of 3" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Previous version" })).toBeDisabled();
+  });
+
+  it("waits while an answer runs, and says so", () => {
+    view(answer({ versions }), { busy: true });
+    for (const name of ["Previous version", "Next version"]) {
+      const button = screen.getByRole("button", { name });
+      expect(button).toBeDisabled();
+      expect(button).toHaveAttribute("title", "Wait for the answer, or stop it.");
+    }
+  });
+
+  it("only looks for the owner, even while an answer runs", () => {
+    const { onLook, onChanged } = view(answer({ versions }), { busy: true, readOnly: true });
+    fireEvent.click(screen.getByRole("button", { name: "Previous version" }));
+    expect(onLook).toHaveBeenCalledWith("a1");
+    expect(post).not.toHaveBeenCalled();
+    expect(onChanged).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("try-again")).toBeNull();
+  });
+
+  it("keeps a hidden message's arrows for the owner (V5)", () => {
+    const { onLook } = view(answer({ versions, redacted: { site: "desk" } }), { readOnly: true });
+    expect(screen.getByTestId("redacted-message")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Next version" }));
+    expect(onLook).toHaveBeenCalledWith("a3");
+  });
+
+  it("tries again on any answer, and on a running one (V2, V6)", async () => {
+    const { onChanged } = view(answer({ id: "early", status: "running", content: "Part" }), {
+      busy: true,
+    });
+    const again = screen.getByTestId("try-again");
+    expect(again).toHaveAttribute("title", expect.stringContaining("keeps it as a version"));
+    fireEvent.click(again);
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
+    expect(post).toHaveBeenCalledWith("/api/chats/c/messages/early/retry");
+  });
+
+  it("says an edit keeps the earlier version", () => {
+    view(answer({ role: "user", content: "Hi" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(screen.getByTestId("edit-note")).toHaveTextContent(
+      "Your earlier version and what followed it are kept. Use the arrows to go back.",
+    );
   });
 });

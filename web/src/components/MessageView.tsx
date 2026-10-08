@@ -1,4 +1,4 @@
-import { FileText, Music, Pencil, RotateCcw } from "lucide-react";
+import { ChevronLeft, ChevronRight, FileText, Music, Pencil, RotateCcw } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { fileUrl, post } from "../lib/api";
@@ -7,11 +7,13 @@ import {
   answerParts,
   DRAFT_HINT,
   DRAFT_LABEL,
+  EDIT_NOTE,
   progressWords,
   redactedNote,
   reasoningParts,
   SEARCHED_MARK,
   statusWords,
+  VERSIONS_WAIT,
 } from "../lib/words";
 import { Markdown } from "./Markdown";
 import { CopyButton } from "./CopyButton";
@@ -22,31 +24,47 @@ export function MessageView({
   chatId,
   message,
   progress,
-  last,
   busy,
   readOnly,
   onChanged,
+  onLook,
 }: {
   chatId: string;
   message: Message;
   progress: Progress | null;
-  last: boolean;
   busy: boolean;
   readOnly: boolean;
   onChanged: () => void;
+  /** The owner's read-only view: show another version without choosing it. */
+  onLook?: (id: string) => void;
 }) {
   const [editing, setEditing] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [acting, setActing] = useState(false);
+  const arrows = (
+    <VersionArrows
+      chatId={chatId}
+      message={message}
+      busy={busy}
+      readOnly={readOnly}
+      onChanged={onChanged}
+      onLook={onLook}
+      onProblem={setProblem}
+    />
+  );
 
   if (message.redacted) {
     return (
-      <p
-        data-testid="redacted-message"
-        className="rounded-plexus border border-line px-3 py-2 text-sm text-muted"
-      >
-        {redactedNote(message.redacted.site)}
-      </p>
+      <div className="flex flex-col gap-1">
+        <p
+          data-testid="redacted-message"
+          className="rounded-plexus border border-line px-3 py-2 text-sm text-muted"
+        >
+          {redactedNote(message.redacted.site)}
+        </p>
+        {/* Every branch stays reachable, hidden or not (V5). */}
+        <div className="flex text-xs text-muted">{arrows}</div>
+      </div>
     );
   }
 
@@ -93,8 +111,8 @@ export function MessageView({
               }}
               className="rounded-plexus border border-line bg-soft p-2"
             />
-            <p className="text-xs text-muted">
-              Asking again replaces everything after this message.
+            <p className="text-xs text-muted" data-testid="edit-note">
+              {EDIT_NOTE}
             </p>
             <div className="flex justify-end gap-2">
               <button
@@ -129,6 +147,7 @@ export function MessageView({
         <div className="flex flex-wrap items-center justify-end gap-3 text-xs text-muted">
           <MessageTime message={message} />
           {editing === null && message.content && <CopyButton text={message.content} />}
+          {arrows}
           {!readOnly && editing === null && !busy && (
             <button
               type="button"
@@ -145,7 +164,8 @@ export function MessageView({
 
   const { draft, answer } = answerParts(message);
   const thoughts = reasoningParts(message);
-  const waiting = message.status === "running" && !answer;
+  const running = message.status === "running";
+  const waiting = running && !answer;
   const status = statusWords(message);
   const hasTools = Boolean(message.toolRounds?.length);
   const draftLabel = hasTools ? "Written before using tools" : DRAFT_LABEL;
@@ -236,42 +256,125 @@ export function MessageView({
           {status}
         </p>
       )}
-      {message.status !== "running" && (
-        <div className="flex flex-wrap items-center gap-3 break-all text-xs text-muted">
-          <MessageTime message={message} />
-          {answer && <CopyButton text={answer} />}
-          {last && !readOnly && !busy && (
-            <button
-              type="button"
-              data-testid="try-again"
-              disabled={acting}
-              onClick={async () => {
-                if (acting) return;
-                setActing(true);
-                setProblem(null);
-                try {
-                  await post(`/api/chats/${chatId}/retry`);
-                  onChanged();
-                } catch (error) {
-                  setProblem(error instanceof Error ? error.message : String(error));
-                } finally {
-                  setActing(false);
-                }
-              }}
-              className="flex items-center gap-1 hover:text-fg"
-            >
-              <RotateCcw size={12} aria-hidden /> Try again
-            </button>
-          )}
-          {message.model && <span>{message.model}</span>}
-        </div>
-      )}
+      <div className="flex flex-wrap items-center gap-3 break-all text-xs text-muted">
+        {!running && <MessageTime message={message} />}
+        {!running && answer && <CopyButton text={answer} />}
+        {/* On any answer (V6); while one runs, it is stopped and kept (V2). */}
+        {!readOnly && (
+          <button
+            type="button"
+            data-testid="try-again"
+            disabled={acting}
+            title={
+              running
+                ? "Stops this answer, keeps it as a version, and writes another."
+                : busy
+                  ? "Stops the answer being written, keeps it, and tries this one again."
+                  : undefined
+            }
+            onClick={async () => {
+              if (acting) return;
+              setActing(true);
+              setProblem(null);
+              try {
+                await post(`/api/chats/${chatId}/messages/${message.id}/retry`);
+                onChanged();
+              } catch (error) {
+                setProblem(error instanceof Error ? error.message : String(error));
+              } finally {
+                setActing(false);
+              }
+            }}
+            className="flex items-center gap-1 hover:text-fg"
+          >
+            <RotateCcw size={12} aria-hidden /> Try again
+          </button>
+        )}
+        {arrows}
+        {message.model && (!running || (message.versions?.count ?? 1) > 1) && (
+          <span>{message.model}</span>
+        )}
+      </div>
       {problem && (
         <p role="alert" className="text-sm text-error">
           {problem}
         </p>
       )}
     </article>
+  );
+}
+
+/** `‹ 2 of 3 ›`: the versions of a message, or the tries of an answer.
+ * Moving chooses that version for every tab; the owner's arrows only look. */
+function VersionArrows({
+  chatId,
+  message,
+  busy,
+  readOnly,
+  onChanged,
+  onLook,
+  onProblem,
+}: {
+  chatId: string;
+  message: Message;
+  busy: boolean;
+  readOnly: boolean;
+  onChanged: () => void;
+  onLook?: (id: string) => void;
+  onProblem: (problem: string | null) => void;
+}) {
+  const [moving, setMoving] = useState(false);
+  const versions = message.versions;
+  if (!versions || versions.count < 2) return null;
+  const what = message.role === "user" ? "Message" : "Answer";
+  // Looking changes nothing, so a running answer holds only the person's.
+  const held = busy && !readOnly;
+
+  async function go(step: number) {
+    const id = versions?.ids[versions.index - 1 + step];
+    if (!id || moving) return;
+    if (readOnly) {
+      onLook?.(id);
+      return;
+    }
+    setMoving(true);
+    onProblem(null);
+    try {
+      await post(`/api/chats/${chatId}/messages/${id}/choose`);
+      onChanged();
+    } catch (error) {
+      onProblem(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMoving(false);
+    }
+  }
+
+  const arrow = (step: number, label: string, Icon: typeof ChevronLeft, end: boolean) => (
+    <button
+      type="button"
+      aria-label={label}
+      title={held ? VERSIONS_WAIT : label}
+      disabled={held || moving || end}
+      onClick={() => void go(step)}
+      className="rounded-plexus p-0.5 hover:text-fg disabled:opacity-40"
+    >
+      <Icon size={14} aria-hidden />
+    </button>
+  );
+  return (
+    <span
+      role="group"
+      aria-label={`${what} ${versions.index} of ${versions.count}`}
+      title={held ? VERSIONS_WAIT : undefined}
+      data-testid="versions"
+      className="flex items-center gap-0.5 whitespace-nowrap"
+    >
+      {arrow(-1, "Previous version", ChevronLeft, versions.index <= 1)}
+      <span aria-hidden>
+        {versions.index} of {versions.count}
+      </span>
+      {arrow(1, "Next version", ChevronRight, versions.index >= versions.count)}
+    </span>
   );
 }
 

@@ -240,7 +240,8 @@ async def test_restart_keeps_uncertainty_and_cancels_pending(tmp_path: Any) -> N
     store = Store(path)
     await store.open()
     await store.add_message(
-        Message(id="m", chat_id="c", seq=0, role="assistant", status="running", created_at=0)
+        Message(id="m", chat_id="c", seq=0, role="assistant", status="running", created_at=0),
+        parent_id=None,
     )
     await store.update_message(
         "m", tool_rounds=[{"calls": [{"status": "running"}, {"status": "pending"}]}]

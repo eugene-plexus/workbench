@@ -25,7 +25,7 @@ Workbench's one setting is on its page in the console. It controls whether the o
 
 ## What it does
 
-- **Chats**: answers stream as they arrive. You can Stop an answer, Try again, or edit a message.
+- **Chats**: answers stream as they arrive. You can Stop an answer, Try again on any answer, or edit any message. Each try and each edit is kept as a version: arrows on the message step between them, and every earlier version keeps the conversation that followed it.
 - **Finding chats**: search chat names and browse Today, Yesterday, Previous 7 days and Older groups.
 - **Text drafts**: unsent text survives chat switches and refreshes in the same tab. Drafts belong to the signed-in person and clear on send, deletion or sign-out. Attachments must be selected again after leaving a chat.
 - **Writing**: the message box grows with your text. Drop files onto it or paste an image; upload progress says what is arriving and Send waits until it is ready.
