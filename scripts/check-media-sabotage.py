@@ -35,6 +35,10 @@ VIEW = "web/src/components/Media.tsx"
 LIB_TEST = "src/lib/media.test.ts"
 VIEW_TEST = "src/components/Media.test.tsx"
 BROWSER_TEST = "tests/test_media_browser.py"
+AUDIO_TESTS = "tests/test_media_audio.py"
+AUDIO_FORMS = "web/src/components/AudioForms.tsx"
+FORMS_TEST = "src/components/AudioForms.test.tsx"
+AUDIO_BROWSER_TEST = "tests/test_media_audio_browser.py"
 
 # (label, file, before, after, kind, check): kind is vitest, pytest or browser.
 CASES: list[tuple[str, str, str, str, str, str]] = [
@@ -182,9 +186,109 @@ CASES: list[tuple[str, str, str, str, str, str]] = [
         "vitest",
         f"{VIEW_TEST}::read only, with no form or actions",
     ),
+    # --- slice 2: speech and transcription ---------------------------------
+    (
+        "what the model heard is not kept",
+        MEDIA,
+        '"heardSeconds": usage.get("seconds") if usage.get("type") == "duration" else None,',
+        '"heardSeconds": None,',
+        "pytest",
+        f"{AUDIO_TESTS}::test_what_the_model_heard_is_kept_beside_the_clips_length",
+    ),
+    (
+        "translate goes to the transcriptions door",
+        MEDIA_API,
+        "await _jobs(request).start_transcription(row, fields, source, translate=translate)",
+        "await _jobs(request).start_transcription(row, fields, source, translate=False)",
+        "pytest",
+        f"{AUDIO_TESTS}::test_translate_goes_to_the_translations_door_without_a_language",
+    ),
+    (
+        "a language is sent with a translation",
+        MEDIA_API,
+        "    if language and not translate:\n",
+        "    if language:\n",
+        "pytest",
+        f"{AUDIO_TESTS}::test_translate_goes_to_the_translations_door_without_a_language",
+    ),
+    (
+        "pcm is offered to a browser",
+        MEDIA_API,
+        'if f != "pcm"]',
+        "if f]",
+        "pytest",
+        f"{AUDIO_TESTS}::test_the_screens_list_speech_and_transcription_models_with_what_they_take",
+    ),
+    (
+        "a Chrome recording is not recognised",
+        FILES,
+        '    if data.startswith(b"\\x1a\\x45\\xdf\\xa3"):\n        return "audio/webm"\n',
+        "",
+        "pytest",
+        f"{AUDIO_TESTS}::test_every_recording_kind_measured_is_taken",
+    ),
+    (
+        "a clip cannot go into a chat",
+        MEDIA_API,
+        'if kind not in ("image", "audio"):',
+        'if kind not in ("image",):',
+        "pytest",
+        f"{AUDIO_TESTS}::test_send_to_a_chat_takes_mp3_and_wav_and_says_why_not_the_rest",
+    ),
+    (
+        "a shortfall in what was heard is not said",
+        LIB,
+        "if (heard != null && heard < clip - 0.25) {",
+        "if (heard != null && heard < clip - 5) {",
+        "vitest",
+        f"{VIEW_TEST}::says when the model heard less",
+    ),
+    (
+        "a model that lists no voices gets an empty list",
+        AUDIO_FORMS,
+        "  const voices = chosen?.voices ?? null;",
+        "  const voices = chosen?.voices ?? [];",
+        "vitest",
+        f"{FORMS_TEST}::a free box where it lists none",
+    ),
+    (
+        "translation is offered on any model",
+        AUDIO_FORMS,
+        "        {chosen?.translates && (",
+        "        {chosen && (",
+        "vitest",
+        f"{FORMS_TEST}::still takes an upload",
+    ),
+    (
+        "recording is offered without HTTPS",
+        AUDIO_FORMS,
+        "          {recordable ? (",
+        "          {recordable || true ? (",
+        "vitest",
+        f"{FORMS_TEST}::says recording needs HTTPS",
+    ),
 ]
 
 BROWSER_CASES: list[tuple[str, str, str, str, str, str]] = [
+    (
+        "Chrome: a transcript sent to a chat is not waiting there",
+        "web/src/App.tsx",
+        "                saveDraft(phase.me.sub, chat.id, text);\n",
+        # Kept referenced, so the page still builds: the draft goes to no chat.
+        '                saveDraft(phase.me.sub, "no chat", text);\n',
+        "browser",
+        AUDIO_BROWSER_TEST,
+    ),
+    (
+        "Chrome: a tab does not open its screen",
+        "web/src/components/Media.tsx",
+        "onClick={() => d !== door && onDoor(d)}",
+        # The tab reopens the screen already shown (`onDoor` stays used, so
+        # the page still builds).
+        "onClick={() => d !== door && onDoor(door)}",
+        "browser",
+        AUDIO_BROWSER_TEST,
+    ),
     (
         "Chrome: Back loses the media area",
         "web/src/App.tsx",

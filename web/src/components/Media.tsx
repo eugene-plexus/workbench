@@ -4,18 +4,22 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, del, fileUrl, post } from "../lib/api";
 import { watchStream } from "../lib/events";
 import {
+  DOORS,
+  DOOR_WORDS,
   type Door,
   type Doors,
   type ImageModel,
-  type ImageRequest,
   type MediaEvent,
+  type MediaDraft,
   type MediaFile,
   type MediaItem,
   SHAPES,
   SIZE_PATTERN,
   bytesWords,
+  captionOf,
   fieldOf,
   groupModels,
+  heardWords,
   imageBody,
   maxImages,
   offer,
@@ -28,6 +32,8 @@ import {
   whereItRuns,
 } from "../lib/media";
 import type { Me } from "../lib/types";
+import { SpeechForm, TranscriptionForm } from "./AudioForms";
+import { CopyButton } from "./CopyButton";
 import { Mascot } from "./Mascot";
 
 const problemOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -39,14 +45,16 @@ export interface Handoff {
 }
 
 /** The media area: a tab per screen, its form above and its bin below
- * (workbench-media-screens.md §2). Slice 1 has one screen, Images. */
+ * (workbench-media-screens.md §2): Images, Speech and Transcription. */
 export function Media({
   me,
   door,
   focus,
   person,
   onClose,
+  onDoor,
   onToChat,
+  onTextToChat,
 }: {
   me: Me;
   door: Door;
@@ -54,7 +62,10 @@ export function Media({
   /** The owner reading someone else's bins (M3), or null for one's own. */
   person: { sub: string; name: string } | null;
   onClose: () => void;
+  onDoor: (door: Door) => void;
   onToChat: (chatId: string, attachment: Handoff) => void;
+  /** A transcript sent to a new chat, as text waiting in its composer (M7). */
+  onTextToChat: (text: string) => void;
 }) {
   const [doors, setDoors] = useState<Doors | null>(null);
   const [doorsError, setDoorsError] = useState<string | null>(null);
@@ -122,8 +133,11 @@ export function Media({
     if (focus) document.getElementById(`media-${focus}`)?.scrollIntoView({ block: "center" });
   }, [focus, items.length]);
 
-  const models = doors?.doors.images.models ?? [];
-  const nothingServes = doors !== null && models.length === 0;
+  const served = DOORS.filter((d) => (doors?.doors[d]?.models.length ?? 0) > 0);
+  // A tab shows when a model serves its screen (M1); the one asked for always does.
+  const tabs =
+    readOnly || doors === null ? [door] : DOORS.filter((d) => d === door || served.includes(d));
+  const nothingServes = doors !== null && !served.includes(door);
 
   async function remove(item: MediaItem) {
     try {
@@ -161,7 +175,7 @@ export function Media({
     const asked = { ...item.request };
     delete asked.name;
     try {
-      const made = await post<MediaItem>("/api/media/images", asked);
+      const made = await post<MediaItem>(`/api/media/${item.door}`, asked);
       setItems((shown) => [made, ...shown.filter((i) => i.id !== made.id)]);
     } catch (error) {
       setActionError(problemOf(error));
@@ -176,27 +190,31 @@ export function Media({
             <h1 className="text-lg font-semibold">Bins · Media</h1>
             <p className="text-sm text-muted">
               {readOnly
-                ? `${person.name}'s images, read only.`
-                : "Images you make or bring in are kept here, even if you close this tab."}
+                ? `${person.name}'s media, read only.`
+                : "What you make or bring in is kept here, even if you close this tab."}
             </p>
           </div>
           <button onClick={onClose}>Back to chat</button>
         </div>
         <div role="tablist" aria-label="Media screens" className="flex gap-2 border-b border-line">
-          <span
-            role="tab"
-            aria-selected="true"
-            className="border-b-2 border-accent px-2 pb-1 text-sm font-medium"
-          >
-            Images
-          </span>
+          {tabs.map((d) => (
+            <button
+              key={d}
+              role="tab"
+              aria-selected={d === door}
+              onClick={() => d !== door && onDoor(d)}
+              className={`px-2 pb-1 text-sm ${d === door ? "border-b-2 border-accent font-medium" : "text-muted"}`}
+            >
+              {DOOR_WORDS[d].tab}
+            </button>
+          ))}
         </div>
         {readOnly && (
           <p
             role="status"
             className="rounded-plexus border border-warn-line bg-warn-bg p-3 text-sm text-warn"
           >
-            You are reading {person.name}&apos;s images. You cannot change, send or delete them.
+            You are reading {person.name}&apos;s media. You cannot change, send or delete it.
           </p>
         )}
         {doorsError && (
@@ -204,11 +222,26 @@ export function Media({
             {doorsError}
           </p>
         )}
-        {!readOnly && nothingServes && <NothingServes me={me} />}
-        {!readOnly && models.length > 0 && (
+        {!readOnly && nothingServes && <NothingServes me={me} door={door} />}
+        {!readOnly && !nothingServes && doors && door === "speech" && (
+          <SpeechForm
+            me={me}
+            models={doors.doors.speech.models}
+            draft={draft}
+            onMade={(made) => setItems((shown) => [made, ...shown.filter((i) => i.id !== made.id)])}
+          />
+        )}
+        {!readOnly && !nothingServes && doors && door === "transcription" && (
+          <TranscriptionForm
+            me={me}
+            models={doors.doors.transcription.models}
+            onMade={(made) => setItems((shown) => [made, ...shown.filter((i) => i.id !== made.id)])}
+          />
+        )}
+        {!readOnly && !nothingServes && doors && door === "images" && (
           <ImageForm
             me={me}
-            models={models}
+            models={doors.doors.images.models}
             draft={draft}
             bin={items}
             addReference={addReference}
@@ -233,7 +266,7 @@ export function Media({
           )}
           {confirmEmpty && (
             <span className="flex items-center gap-2 text-sm">
-              Delete every image in this bin? This cannot be undone.
+              Delete everything in this bin? This cannot be undone.
               <button className="text-error underline" onClick={() => void emptyBin()}>
                 Delete them all
               </button>
@@ -283,6 +316,7 @@ export function Media({
               }}
               onToChat={(file) => void toChat(item, file)}
               onReference={(file) => setAddReference(file)}
+              onTextToChat={onTextToChat}
             />
           ))}
         </ul>
@@ -291,12 +325,12 @@ export function Media({
   );
 }
 
-function NothingServes({ me }: { me: Me }) {
+function NothingServes({ me, door }: { me: Me; door: Door }) {
   return (
     <div className="flex items-center gap-4 rounded-plexus border border-line bg-panel p-4">
       <Mascot pose="guide" size={96} />
-      <div className="flex flex-col gap-1 text-sm" data-testid="no-image-models">
-        <p className="font-medium">No model here makes images yet.</p>
+      <div className="flex flex-col gap-1 text-sm" data-testid="no-models">
+        <p className="font-medium">No model here {DOOR_WORDS[door].does} yet.</p>
         {me.owner ? (
           <p>
             Add one in Eugene: <strong>Backends</strong>, then{" "}
@@ -315,17 +349,18 @@ function NothingServes({ me }: { me: Me }) {
         ) : (
           <p>Ask the owner of this Workbench to add one.</p>
         )}
-        <p className="text-muted">Image models that run on your own machines are coming later.</p>
+        {door !== "transcription" && (
+          <p className="text-muted">
+            {door === "images" ? "Image" : "Speech"} models that run on your own machines are coming
+            later.
+          </p>
+        )}
       </div>
     </div>
   );
 }
 
-interface Draft {
-  request: ImageRequest;
-  field: string | null;
-  message: string | null;
-}
+type Draft = MediaDraft;
 
 interface FormState {
   model: string;
@@ -768,6 +803,7 @@ function MediaCard({
   onEdit,
   onToChat,
   onReference,
+  onTextToChat,
 }: {
   item: MediaItem;
   focused: boolean;
@@ -778,12 +814,15 @@ function MediaCard({
   onEdit: () => void;
   onToChat: (file: MediaFile) => void;
   onReference: (file: MediaFile) => void;
+  onTextToChat: (text: string) => void;
 }) {
   const [confirm, setConfirm] = useState(false);
   const status = statusWords(item);
   const served = servedWords(item);
   const upload = item.kind === "upload";
-  const caption = upload ? `Brought in: ${item.request.name ?? "an image"}` : item.request.prompt;
+  const caption = captionOf(item);
+  const heard = heardWords(item);
+  const remakes = item.door !== "transcription";
   return (
     <li
       id={`media-${item.id}`}
@@ -794,31 +833,69 @@ function MediaCard({
       <p className="whitespace-pre-wrap break-words">{caption}</p>
       {item.files.length > 0 && (
         <ul className="flex flex-wrap gap-3">
-          {item.files.map((file) => (
-            <li key={file.id} className="flex flex-col gap-1">
-              <BinImage file={file} alt={upload ? "" : `Made from: ${item.request.prompt ?? ""}`} />
-              <span className="text-xs text-muted" data-testid="size-words">
-                {sizeWords(item.request.size, file)}
-              </span>
-              <span className="flex flex-wrap gap-2 text-sm">
-                <DownloadButton file={file} />
-                {!readOnly && (
-                  <>
+          {item.files.map((file) => {
+            const image = file.mediaType.startsWith("image/");
+            return (
+              <li key={file.id} className="flex flex-col gap-1">
+                {image ? (
+                  <BinImage
+                    file={file}
+                    alt={upload ? "" : `Made from: ${item.request.prompt ?? ""}`}
+                  />
+                ) : (
+                  <BinAudio file={file} />
+                )}
+                {image && (
+                  <span className="text-xs text-muted" data-testid="size-words">
+                    {sizeWords(item.request.size, file)}
+                  </span>
+                )}
+                <span className="flex flex-wrap gap-2 text-sm">
+                  <DownloadButton file={file} />
+                  {!readOnly && (image || item.door === "speech") && (
                     <button
                       className="flex items-center gap-1 text-accent"
                       onClick={() => onToChat(file)}
                     >
                       <MessageSquarePlus size={14} aria-hidden /> Send to a chat
                     </button>
+                  )}
+                  {!readOnly && image && (
                     <button className="text-accent" onClick={() => onReference(file)}>
                       Use as reference
                     </button>
-                  </>
-                )}
-              </span>
-            </li>
-          ))}
+                  )}
+                </span>
+              </li>
+            );
+          })}
         </ul>
+      )}
+      {item.text != null && item.text !== "" && (
+        <div className="flex flex-col gap-1 rounded-plexus bg-soft p-2">
+          <p className="whitespace-pre-wrap break-words" data-testid="transcript">
+            {item.text}
+          </p>
+          <span className="flex flex-wrap items-center gap-3 text-sm">
+            <CopyButton text={item.text} />
+            {!readOnly && (
+              <button
+                className="flex items-center gap-1 text-accent"
+                onClick={() => onTextToChat(item.text ?? "")}
+              >
+                <MessageSquarePlus size={14} aria-hidden /> Send to a chat
+              </button>
+            )}
+          </span>
+        </div>
+      )}
+      {heard && item.status === "done" && (
+        <p
+          className={heard.short ? "text-sm text-warn" : "text-xs text-muted"}
+          data-testid="heard-words"
+        >
+          {heard.text}
+        </p>
       )}
       {status && (
         <p
@@ -844,7 +921,7 @@ function MediaCard({
               <Square size={14} aria-hidden /> Stop
             </button>
           )}
-          {!upload && item.status !== "running" && (
+          {!upload && remakes && item.status !== "running" && (
             <>
               {item.status === "done" && (
                 <button className="flex items-center gap-1 text-accent" onClick={onAgain}>
@@ -907,6 +984,30 @@ function BinImage({ file, alt }: { file: MediaFile; alt: string }) {
       className="max-h-64 max-w-xs rounded-plexus border border-line object-contain"
     />
   );
+}
+
+/** A bin clip, played from a blob: address for the same reason. */
+function BinAudio({ file }: { file: MediaFile }) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+  useEffect(() => {
+    let made: string | null = null;
+    let cancelled = false;
+    fileUrl(file.id)
+      .then((u) => {
+        made = u;
+        if (cancelled) URL.revokeObjectURL(u);
+        else setUrl(u);
+      })
+      .catch((error) => !cancelled && setFailed(problemOf(error)));
+    return () => {
+      cancelled = true;
+      if (made) URL.revokeObjectURL(made);
+    };
+  }, [file.id]);
+  if (failed) return <p className="text-sm text-error">{failed}</p>;
+  if (!url) return <div className="h-10 w-72 rounded-plexus bg-hover" aria-hidden />;
+  return <audio controls src={url} data-testid="bin-audio" className="w-72 max-w-full" />;
 }
 
 function DownloadButton({ file }: { file: MediaFile }) {

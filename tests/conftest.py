@@ -28,7 +28,7 @@ import httpx
 import pytest
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from joserfc import jwt
 from joserfc.jwk import RSAKey
 
@@ -113,6 +113,76 @@ IMAGE_MODELS: list[dict[str, Any]] = [
             "locality": "external",
             "ready_backends": 1,
             "image_edits": True,
+        },
+    },
+]
+
+
+def wav(seconds: float, rate: int = 8000) -> bytes:
+    """A real WAV of silence this long."""
+    import struct
+
+    body = b"\x00\x00" * int(rate * seconds)
+    return (
+        b"RIFF" + struct.pack("<I", 36 + len(body)) + b"WAVEfmt "
+        + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
+        + b"data" + struct.pack("<I", len(body)) + body
+    )  # fmt: skip
+
+
+#: An MP3 as a speech model sends one: an ID3 tag, then frames.
+MP3_CLIP = b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\xff\xfb\x90\x00" + bytes(400)
+
+#: Speech and transcription models as the gateway lists them (slice 2): kokoro
+#: lists its voices; a local voice leaves the voice to its provider (null);
+#: whisper-1 translates too.
+AUDIO_MODELS: list[dict[str, Any]] = [
+    {
+        "id": "openrouter/kokoro",
+        "object": "model",
+        "owned_by": "openrouter",
+        "x_eugene_plexus": {
+            "drivers": ["openrouter"],
+            "surfaces": ["speech"],
+            "locality": "external",
+            "ready_backends": 1,
+            "voices": ["af_heart", "af_bella", "am_adam"],
+            "speech_formats": ["mp3", "wav", "pcm"],
+        },
+    },
+    {
+        "id": "local-voice",
+        "object": "model",
+        "owned_by": "local",
+        "x_eugene_plexus": {
+            "drivers": ["voice"],
+            "surfaces": ["speech"],
+            "locality": "local",
+            "ready_backends": 1,
+            "voices": None,
+            "speech_formats": ["mp3", "opus", "aac", "flac", "wav", "pcm"],
+        },
+    },
+    {
+        "id": "openrouter/whisper-turbo",
+        "object": "model",
+        "owned_by": "openrouter",
+        "x_eugene_plexus": {
+            "drivers": ["openrouter"],
+            "surfaces": ["transcription"],
+            "locality": "external",
+            "ready_backends": 1,
+        },
+    },
+    {
+        "id": "oai/whisper-1",
+        "object": "model",
+        "owned_by": "openai",
+        "x_eugene_plexus": {
+            "drivers": ["oai"],
+            "surfaces": ["transcription", "translation"],
+            "locality": "external",
+            "ready_backends": 1,
         },
     },
 ]
@@ -364,6 +434,7 @@ class FakeGateway:
     numbered: bool = False
     #: The image models listed (media screens), as the gateway lists them.
     image_models: list[dict[str, Any]] = field(default_factory=lambda: list(IMAGE_MODELS))
+    audio_models: list[dict[str, Any]] = field(default_factory=lambda: list(AUDIO_MODELS))
     #: Every image request, with the door it came to: (`generations`|`edits`, body).
     image_requests: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     #: The image answered, whatever size was asked: 3x2, so asked and got differ.
@@ -371,6 +442,16 @@ class FakeGateway:
     image_delay: float = 0.0
     #: A refusal to answer every image request with: (status, message, param).
     image_refusal: tuple[int, str, str | None] | None = None
+    #: Every speech request (JSON), and every transcription: (door, fields, file).
+    speech_requests: list[dict[str, Any]] = field(default_factory=list)
+    transcriptions: list[tuple[str, dict[str, Any], tuple[str, bytes, str]]] = field(
+        default_factory=list
+    )
+    #: The seconds a transcription says it heard; None says tokens instead.
+    heard_seconds: float | None = 3.0
+    audio_delay: float = 0.0
+    #: A refusal to answer every speech or transcription request with.
+    audio_refusal: tuple[int, str, str | None] | None = None
 
     def app(self) -> FastAPI:
         app = FastAPI()
@@ -400,6 +481,7 @@ class FakeGateway:
                         "x_eugene_plexus": {"surfaces": ["embeddings"]},
                     },
                     *self.image_models,
+                    *self.audio_models,
                 ],
             }
 
@@ -446,6 +528,64 @@ class FakeGateway:
         @app.post("/v1/images/edits")
         async def edits(request: Request) -> Any:
             return await images(request, "edits")
+
+        def audio_refused() -> Any:
+            if self.audio_refusal is None:
+                return None
+            code, message, param = self.audio_refusal
+            return JSONResponse(
+                {"error": {"message": message, "type": "invalid_request_error", "param": param}},
+                status_code=code,
+            )
+
+        @app.post("/v1/audio/speech")
+        async def speech(request: Request) -> Any:
+            body = await request.json()
+            self.speech_requests.append(body)
+            if self.audio_delay:
+                await asyncio.sleep(self.audio_delay)
+            if (refused := audio_refused()) is not None:
+                return refused
+            clip = wav(0.5) if body.get("response_format") == "wav" else MP3_CLIP
+            return Response(
+                content=clip,
+                media_type="audio/wav" if clip.startswith(b"RIFF") else "audio/mpeg",
+                headers={
+                    "x-eugene-plexus-driver": "openrouter",
+                    "x-eugene-plexus-latency-ms": "420",
+                    "x-eugene-plexus-attempts": "1",
+                    "x-request-id": f"speech-{len(self.speech_requests)}",
+                },
+            )
+
+        async def hear(request: Request, door: str) -> Any:
+            form = await request.form()
+            upload = form["file"]
+            assert not isinstance(upload, str)
+            fields = {k: v for k, v in form.items() if k != "file"}
+            sent = (upload.filename or "", await upload.read(), upload.content_type or "")
+            self.transcriptions.append((door, fields, sent))
+            if self.audio_delay:
+                await asyncio.sleep(self.audio_delay)
+            if (refused := audio_refused()) is not None:
+                return refused
+            usage = (
+                {"type": "duration", "seconds": self.heard_seconds}
+                if self.heard_seconds is not None
+                else {"type": "tokens", "input_tokens": 30, "output_tokens": 11, "total_tokens": 41}
+            )
+            return JSONResponse(
+                {"text": " The bench is ready.", "usage": usage},
+                headers={"x-eugene-plexus-driver": "openrouter", "x-request-id": "hear-1"},
+            )
+
+        @app.post("/v1/audio/transcriptions")
+        async def transcriptions(request: Request) -> Any:
+            return await hear(request, "transcriptions")
+
+        @app.post("/v1/audio/translations")
+        async def translations(request: Request) -> Any:
+            return await hear(request, "translations")
 
         @app.post("/v1/chat/completions")
         async def chat(request: Request) -> Any:

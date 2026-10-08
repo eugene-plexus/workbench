@@ -72,7 +72,9 @@ const show = (props: Partial<Parameters<typeof Media>[0]> = {}) =>
       focus={null}
       person={null}
       onClose={() => undefined}
+      onDoor={() => undefined}
       onToChat={() => undefined}
+      onTextToChat={() => undefined}
       {...props}
     />,
   );
@@ -159,10 +161,76 @@ it("marks the field a refusal named when the request is edited", async () => {
   expect(screen.getByTestId("image-prompt")).toHaveValue("a red barn");
 });
 
+it("shows a tab for each screen a model serves, and switches by address", async () => {
+  vi.mocked(api).mockImplementation((path: string) =>
+    Promise.resolve(
+      path === "/api/media/doors"
+        ? {
+            doors: {
+              images: { models: [flux] },
+              speech: {
+                models: [
+                  { ...flux, id: "openrouter/kokoro", voices: ["af_heart"], formats: ["mp3"] },
+                ],
+              },
+              transcription: { models: [] },
+            },
+          }
+        : { items: [], bytes: 0 },
+    ),
+  );
+  const onDoor = vi.fn();
+  show({ door: "speech", onDoor });
+  await screen.findByTestId("speech-model");
+  const tabs = screen.getAllByRole("tab").map((t) => t.textContent);
+  expect(tabs).toEqual(["Images", "Speech"]);
+  expect(screen.getByRole("tab", { name: "Speech" })).toHaveAttribute("aria-selected", "true");
+  fireEvent.click(screen.getByRole("tab", { name: "Images" }));
+  expect(onDoor).toHaveBeenCalledWith("images");
+});
+
+it("shows a transcript, says when the model heard less, and sends the text to a chat", async () => {
+  const heard: MediaItem = {
+    ...done,
+    door: "transcription",
+    model: "openrouter/whisper-turbo",
+    request: { model: "openrouter/whisper-turbo", name: "note.mp3", clipSeconds: 3.07 },
+    text: "The bench is ready.",
+    units: { heardSeconds: 1.525, clipSeconds: 3.07 },
+    files: [
+      { id: "a1", name: "note.mp3", mediaType: "audio/mpeg", size: 9, width: null, height: null },
+    ],
+  };
+  vi.mocked(api).mockImplementation((path: string) =>
+    Promise.resolve(
+      path === "/api/media/doors"
+        ? {
+            doors: {
+              images: { models: [] },
+              speech: { models: [] },
+              transcription: { models: [] },
+            },
+          }
+        : { items: [heard], bytes: 9 },
+    ),
+  );
+  const onTextToChat = vi.fn();
+  show({ door: "transcription", onTextToChat });
+  expect(await screen.findByTestId("transcript")).toHaveTextContent("The bench is ready.");
+  expect(screen.getByTestId("heard-words")).toHaveTextContent(
+    "The model heard 1.5 s of this 3.1 s clip.",
+  );
+  expect(screen.getByTestId("heard-words")).toHaveClass("text-warn");
+  expect(screen.queryByRole("button", { name: /Again/ })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: /Send to a chat/ }));
+  expect(onTextToChat).toHaveBeenCalledWith("The bench is ready.");
+  expect(screen.getByText("No model here turns speech into text yet.")).toBeInTheDocument();
+});
+
 it("shows someone else's bin read only, with no form or actions", async () => {
   serve([flux], [{ ...done, readOnly: true }]);
   show({ me: { ...me, owner: true }, person: { sub: "p-bo", name: "Bo" } });
-  expect(await screen.findByText(/You are reading Bo's images/)).toBeInTheDocument();
+  expect(await screen.findByText(/You are reading Bo's media/)).toBeInTheDocument();
   expect(api).toHaveBeenCalledWith("/api/people/p-bo/media?door=images");
   expect(screen.queryByTestId("image-model")).toBeNull();
   expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
