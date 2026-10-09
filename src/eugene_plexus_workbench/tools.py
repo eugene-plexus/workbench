@@ -12,7 +12,7 @@ import hashlib
 import ipaddress
 import json
 import ssl
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 from urllib.parse import urlsplit
@@ -28,7 +28,7 @@ from . import folder_io, folders
 from .local_tools import LocalProcesses, LocalToolError, unavailable
 from .node_folders import FILES as SITE_FILES
 from .node_folders import PREFIX as NODE_FOLDER_PREFIX
-from .node_folders import SITE_PREFIX, NodeFolders, site_server_id
+from .node_folders import SITE_PREFIX, Held, NodeFolders, site_server_id
 from .settings import Settings
 from .store import Person, Store
 
@@ -36,6 +36,10 @@ MAX_TOOLS = 64
 #: Where a job site's tool listing says a call must be asked about (2b.3b):
 #: the workspaces, for its file server; whether, for a local server's tool.
 ASK_META = "eugene-plexus/ask"
+#: A job site that checks the person's own signature on each call (J14b):
+#: Workbench sends the call and has the person sign what the site holds,
+#: instead of asking first.
+SIGNED_META = "eugene-plexus/signed"
 MAX_ARGUMENTS = 16_384
 MAX_RESULT = 65_536
 MAX_RESPONSE = 2_097_152
@@ -384,6 +388,7 @@ class Tools:
                     schema,
                     str(tool.get("description") or ""),
                     ask=_ask_rule(tool),
+                    signed=_signed(tool),
                 )
 
 
@@ -398,6 +403,12 @@ def _ask_rule(tool: dict[str, Any]) -> frozenset[str] | bool | None:
     if isinstance(rule, list) and all(isinstance(name, str) for name in rule):
         return frozenset(rule)
     return None
+
+
+def _signed(tool: dict[str, Any]) -> bool:
+    """Whether the site checks the person's signature on calls to `tool`."""
+    meta = tool.get("_meta")
+    return isinstance(meta, dict) and meta.get(SIGNED_META) is True
 
 
 def _narrowed(schema: dict[str, Any], names: set[str]) -> dict[str, Any] | None:
@@ -441,6 +452,11 @@ class _LimitedBody(httpx2.AsyncByteStream):
         await self.stream.aclose()
 
 
+#: Waits for the person to sign a call a job site holds (J14b): what to send
+#: again (`SiteCallApproval`), or None when they declined.
+Signer = Callable[[dict[str, Any], Held], Awaitable[dict[str, Any] | None]]
+
+
 class ToolSession:
     def __init__(self, tools: Tools, person: Person | None) -> None:
         self.store = tools.store
@@ -453,6 +469,8 @@ class ToolSession:
         #: Each job-site tool's rule for asking (`_ask_rule`); absent for every
         #: other tool, which is asked about each time.
         self.asks: dict[str, frozenset[str] | bool | None] = {}
+        #: The job-site tools whose site checks the person's signature (J14b).
+        self.signed: set[str] = set()
 
     def add(
         self,
@@ -463,6 +481,7 @@ class ToolSession:
         description: str,
         *,
         ask: frozenset[str] | bool | None = None,
+        signed: bool = False,
     ) -> None:
         files = server["transport"] == "folder" or server.get("server") == SITE_FILES
         prefix = "files_" if files else "mcp_"
@@ -473,6 +492,8 @@ class ToolSession:
             )
         self.tools[name] = (server, client, tool, schema)
         self.asks[name] = ask
+        if signed:
+            self.signed.add(name)
         self.definitions.append(
             {
                 "type": "function",
@@ -503,7 +524,12 @@ class ToolSession:
                 f"The model sent invalid arguments for {tool}. No tool ran. Try another model."
             ) from None
         rule = self.asks.get(name)
-        if isinstance(rule, bool):
+        signed = name in self.signed
+        if signed:
+            # The site holds the call for the person's own signature and says
+            # what to sign (J14b): nothing is asked here first.
+            ask = False
+        elif isinstance(rule, bool):
             ask = rule
         elif isinstance(rule, frozenset):
             ask = arguments.get("folder") in rule
@@ -524,6 +550,8 @@ class ToolSession:
             "ask": ask,
             # The site gave rules, so it is told the person's word (J72).
             "rules": rule is not None,
+            # The site checks the person's signature itself (J14b).
+            "signed": signed,
             **(
                 {
                     "jobSite": True,
@@ -536,23 +564,46 @@ class ToolSession:
             ),
         }
 
-    async def execute(self, call: dict[str, Any]) -> None:
+    async def execute(self, call: dict[str, Any], signer: Signer | None = None) -> None:
+        """Run one prepared call. A job site that holds it for the person's
+        signature (J14b) is answered by `signer`, which waits for the person
+        and returns what to send again, or None when they declined."""
         server, client, tool, _ = self.tools[call["name"]]
         if server["transport"] == "site":
             try:
                 if self.node_folders is None:
                     raise folder_io.FolderError("Machines' tools are unavailable.")
-                text, is_error, meta = await self.node_folders.call_tool(
-                    self.person,
-                    server["site"],
-                    server["server"],
-                    tool,
-                    call["arguments"],
-                    # Only an approved call is ever executed when it asks;
-                    # a site with no rules is never told (an older root
-                    # would refuse the field).
-                    asked=bool(call.get("ask")) and bool(call.get("rules")),
-                )
+                approval: dict[str, Any] | None = None
+                while True:
+                    try:
+                        text, is_error, meta = await self.node_folders.call_tool(
+                            self.person,
+                            server["site"],
+                            server["server"],
+                            tool,
+                            call["arguments"],
+                            # Only an approved call is ever executed when it
+                            # asks; a site with no rules is never told (an
+                            # older root would refuse the field).
+                            asked=bool(call.get("ask")) and bool(call.get("rules")),
+                            approval=approval,
+                        )
+                        break
+                    except Held as held:
+                        if signer is None:
+                            raise folder_io.FolderError(held.message) from None
+                        approval = await signer(call, held)
+                        if approval is None:
+                            call.pop("held", None)
+                            call.update(
+                                status="declined",
+                                result=call.get("result")
+                                or "The person did not sign this call. It did not run.",
+                            )
+                            return
+                call.pop("held", None)
+                if meta.get("windowUntil"):
+                    call["windowUntil"] = meta["windowUntil"]
                 if meta["jobSite"]:
                     # Kept with the result: whether the owner may ever read it
                     # depends on the mode it was made in (J18, not retroactive).

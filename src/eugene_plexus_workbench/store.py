@@ -483,6 +483,15 @@ def interrupt_tools(rounds: list[dict[str, Any]]) -> None:
                 )
             elif call["status"] == "pending":
                 call.update(status="cancelled", result="The call was not approved and did not run.")
+            elif call["status"] == "signing":
+                # Sent again while it waited (J14b): signed at the machine, it
+                # may have run on the last try.
+                call.pop("held", None)
+                call.update(
+                    status="uncertain",
+                    result="The call was interrupted while it waited for your signature. If you "
+                    "signed it on the machine, it may have run. Check before trying again.",
+                )
 
 
 def _encode(column: str, value: Any) -> Any:

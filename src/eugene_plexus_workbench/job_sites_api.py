@@ -120,11 +120,13 @@ Decision = Literal["allow", "ask", "deny"]
 
 
 class Rules(BaseModel):
-    """`SiteRules` (J70): reading and searching, and changing files."""
+    """`SiteRules` (J70): reading and searching, and changing files; since
+    2b.4, running commands (J88), signed each time or never."""
 
     model_config = ConfigDict(extra="forbid")
     read: Decision
     change: Decision
+    command: Literal["ask", "deny"] | None = None
 
 
 #: `.gitignore`'s syntax without `!` (`SiteDenyPattern`).
@@ -363,7 +365,8 @@ async def add_workspace(request: Request, site: str, body: WorkspaceCreate) -> d
     The machine holds it until you approve it with your own key (J68)."""
     payload: dict[str, Any] = {"name": body.name, "path": body.path, "writable": body.writable}
     if body.rules is not None:
-        payload["rules"] = body.rules.model_dump()
+        # Without `command` when not given: an older Eugene refuses the field.
+        payload["rules"] = body.rules.model_dump(exclude_none=True)
     if body.deny:
         payload["deny"] = body.deny
     answer = await _call(request, f"job-sites/{_site(site)}/workspaces", payload)
@@ -390,7 +393,7 @@ async def workspace_rules(
     answer = await _call(
         request,
         f"job-sites/{_site(site)}/workspaces/{_workspace(ident)}/rules",
-        {"rules": body.rules.model_dump(), "deny": body.deny},
+        {"rules": body.rules.model_dump(exclude_none=True), "deny": body.deny},
     )
     return answer or {}
 
@@ -508,6 +511,22 @@ async def approve_held(
 @router.post("/api/job-sites/{site}/held/{ident}/reject")
 async def reject_held(request: Request, site: str, ident: str) -> Response:
     await _call(request, f"job-sites/{_site(site)}/held/{_held(ident)}/reject", {})
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/api/job-sites/{site}/window/close")
+async def close_window(request: Request, site: str) -> Response:
+    """Close the person's window on a machine now (J14b, J90): it only takes
+    access away, so it needs no passkey."""
+    await _call(request, f"job-sites/{_site(site)}/window/close", {})
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/api/job-sites/{site}/commands/withdraw")
+async def withdraw_commands(request: Request, site: str) -> Response:
+    """The machine's owner turns commands off there (J30, J89). Turning them
+    on again is done at the machine, by an administrator."""
+    await _call(request, f"job-sites/{_site(site)}/commands/withdraw", {})
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

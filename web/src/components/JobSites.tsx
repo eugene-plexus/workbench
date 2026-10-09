@@ -293,6 +293,100 @@ function Linking({
   );
 }
 
+function clockTime(iso: string): string {
+  const when = new Date(iso);
+  return Number.isNaN(when.getTime())
+    ? iso
+    : when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+/**
+ * Your window on a machine, and whether it runs commands (J14b, 2b.4). A
+ * window you open with your key lets the tools your rules allow run without
+ * your signature each, for an hour (J81, J82); closing it needs nothing.
+ * Commands run only where an administrator allowed them at the machine
+ * (J89); its owner may turn them off from here (J30).
+ */
+export function Calls({
+  site,
+  sub,
+  base,
+  busy,
+  act,
+  owner,
+}: {
+  site: JobSite;
+  sub?: string;
+  base: string;
+  busy: boolean;
+  act: Act;
+  owner: boolean;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const commands = site.commands;
+  if (!commands) return null;
+  const mine = site.links?.find((link) => link.subject === sub);
+  const until = mine?.windowUntil;
+  return (
+    <section aria-label={`Signed calls on ${site.label}`} className="flex flex-col gap-2">
+      <h3 className="font-semibold">Your signature on {site.label}</h3>
+      {until ? (
+        <div className="flex flex-wrap items-center gap-3">
+          <p>
+            Your window is open until {clockTime(until)}: Workbench uses the tools your rules allow
+            there without asking for your signature each time.
+          </p>
+          <button
+            disabled={busy}
+            className="rounded-plexus border border-line px-3 py-1"
+            onClick={() => void act(() => post(`${base}/window/close`))}
+          >
+            Close it now
+          </button>
+        </div>
+      ) : (
+        <p className="text-muted">
+          No window is open. The first time Workbench uses a tool your rules allow there, you sign
+          once for an hour of them. Anything your rules ask about, and every command, needs your
+          signature each time.
+        </p>
+      )}
+      {commands.allowed ? (
+        <div className="flex flex-wrap items-center gap-3">
+          <p>
+            Commands may run on {site.label}, each with your signature, in your workspaces whose
+            rules ask about them.
+          </p>
+          {owner && !confirming && (
+            <button disabled={busy} className="text-error" onClick={() => setConfirming(true)}>
+              Turn commands off
+            </button>
+          )}
+          {owner && confirming && (
+            <span className="flex flex-wrap items-center gap-2">
+              Only an administrator at {site.label} can turn them back on.
+              <button
+                disabled={busy}
+                className="rounded-plexus border border-line px-3 py-1 text-error"
+                onClick={() =>
+                  void act(() => post(`${base}/commands/withdraw`)).then(() => setConfirming(false))
+                }
+              >
+                Turn them off
+              </button>
+              <button className="px-3 py-1" onClick={() => setConfirming(false)}>
+                Keep them
+              </button>
+            </span>
+          )}
+        </div>
+      ) : (
+        <p className="text-muted">{commands.reason ?? `Commands do not run on ${site.label}.`}</p>
+      )}
+    </section>
+  );
+}
+
 /** A machine you linked your own account on and do not own (2b.3b): only
  * your own there -- your link, your keys, your workspaces and your lines of
  * its audit log. Its owner sees none of your workspaces. */
@@ -325,6 +419,7 @@ function LinkedSite({
       {site.signing?.passkeys && site.signing.people && passkeys && (
         <Passkeys site={site} base={base} context={passkeys} busy={busy} act={act} />
       )}
+      <Calls site={site} sub={sub} base={base} busy={busy} act={act} owner={false} />
       {site.signing?.people ? (
         <Workspaces site={site} base={base} busy={busy} act={act} owner={false} />
       ) : (
@@ -371,6 +466,7 @@ function Site({
       {site.signing?.passkeys && passkeys && (
         <Passkeys site={site} base={base} context={passkeys} busy={busy} act={act} />
       )}
+      <Calls site={site} sub={sub} base={base} busy={busy} act={act} owner />
       {site.signing?.people && <Workspaces site={site} base={base} busy={busy} act={act} owner />}
       {!site.signing?.people &&
         site.folders.map((folder) => (
