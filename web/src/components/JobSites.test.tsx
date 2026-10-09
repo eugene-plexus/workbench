@@ -678,3 +678,70 @@ it("shares an owner's workspace with each person's rules there (J69)", async () 
     ),
   );
 });
+
+const commands = { allowed: true, consentedAt: "2026-10-08T12:00:00Z" };
+
+it("adds a workspace whose commands ask for a signature, where the machine runs them", async () => {
+  const owned = { ...site, folders: [], workspaces: [], signing: people, commands };
+  vi.mocked(api).mockResolvedValue({ sites: [owned], canInvite: true });
+  vi.mocked(post).mockResolvedValue({ held: true, message: "Waiting for your approval." });
+  render(<JobSites onClose={() => undefined} />);
+  const form = await screen.findByRole("form", { name: "Add a workspace on desk" });
+  const run = within(form).getByLabelText("Run commands");
+  expect(run).toHaveValue("ask");
+  // Never "without asking" for a command (J47).
+  expect(within(run).queryByRole("option", { name: "Without asking" })).toBeNull();
+  fireEvent.change(within(form).getByLabelText("Name"), { target: { value: "Code" } });
+  fireEvent.change(within(form).getByLabelText("Path on desk"), { target: { value: "D:\\code" } });
+  fireEvent.click(within(form).getByRole("button", { name: "Add workspace" }));
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith(`/api/job-sites/${site.id}/workspaces`, {
+      name: "Code",
+      path: "D:\\code",
+      writable: true,
+      rules: { read: "allow", change: "ask", command: "ask" },
+      deny: [],
+    }),
+  );
+});
+
+it("shows your open window, closes it, and lets the owner turn commands off", async () => {
+  const until = new Date(Date.now() + 30 * 60_000).toISOString();
+  const owned = {
+    ...site,
+    folders: [],
+    workspaces: [],
+    signing: people,
+    commands,
+    links: [{ subject: "p-ada", accountName: "HOST/ada", available: true, windowUntil: until }],
+  };
+  vi.mocked(api).mockResolvedValue({ sites: [owned], canInvite: true });
+  vi.mocked(post).mockResolvedValue(undefined);
+  render(<JobSites onClose={() => undefined} sub="p-ada" />);
+  const panel = await screen.findByRole("region", { name: "Signed calls on desk" });
+  expect(panel).toHaveTextContent("Your window is open until");
+  fireEvent.click(within(panel).getByRole("button", { name: "Close it now" }));
+  await waitFor(() => expect(post).toHaveBeenCalledWith(`/api/job-sites/${site.id}/window/close`));
+  fireEvent.click(within(panel).getByRole("button", { name: "Turn commands off" }));
+  expect(panel).toHaveTextContent("Only an administrator at desk can turn them back on.");
+  fireEvent.click(within(panel).getByRole("button", { name: "Turn them off" }));
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith(`/api/job-sites/${site.id}/commands/withdraw`),
+  );
+});
+
+it("says how an administrator allows commands where they are not allowed", async () => {
+  const reason = "An administrator has not allowed commands on desk.";
+  const owned = {
+    ...site,
+    folders: [],
+    workspaces: [],
+    signing: people,
+    commands: { allowed: false, reason },
+  };
+  vi.mocked(api).mockResolvedValue({ sites: [owned], canInvite: true });
+  render(<JobSites onClose={() => undefined} sub="p-ada" />);
+  const panel = await screen.findByRole("region", { name: "Signed calls on desk" });
+  expect(panel).toHaveTextContent(reason);
+  expect(within(panel).queryByRole("button", { name: "Turn commands off" })).toBeNull();
+});

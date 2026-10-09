@@ -1,7 +1,13 @@
 import { useEffect, useState } from "react";
 
 import { post } from "../lib/api";
-import type { Decision, JobSite, JobSiteWorkspace, JobSiteWorkspaceDetail } from "../lib/types";
+import type {
+  Decision,
+  JobSite,
+  JobSiteWorkspace,
+  JobSiteWorkspaceDetail,
+  SiteCommands,
+} from "../lib/types";
 
 type Act = (work: () => Promise<unknown>) => Promise<void>;
 
@@ -11,6 +17,12 @@ const problemOf = (error: unknown) => (error instanceof Error ? error.message : 
 export const DECISIONS: { value: Decision; label: string }[] = [
   { value: "allow", label: "Without asking" },
   { value: "ask", label: "Ask me each time" },
+  { value: "deny", label: "Never" },
+];
+
+/** Commands are signed each time or never (J47, J88): never "without asking". */
+export const COMMAND_DECISIONS: { value: Decision; label: string }[] = [
+  { value: "ask", label: "Ask me each time (my signature)" },
   { value: "deny", label: "Never" },
 ];
 
@@ -38,11 +50,13 @@ function DecisionSelect({
   value,
   onChange,
   only,
+  choices = DECISIONS,
 }: {
   label: string;
   value: Decision;
   onChange: (value: Decision) => void;
   only?: Decision;
+  choices?: { value: Decision; label: string }[];
 }) {
   return (
     <label className="flex items-center gap-2">
@@ -54,7 +68,7 @@ function DecisionSelect({
         onChange={(event) => onChange(event.target.value as Decision)}
         className="rounded-plexus border border-line bg-soft px-2 py-1"
       >
-        {DECISIONS.map((d) => (
+        {choices.map((d) => (
           <option key={d.value} value={d.value}>
             {d.label}
           </option>
@@ -135,10 +149,11 @@ export function Workspaces({
           act={act}
           owner={owner}
           solo={site.sharing === false}
+          commands={site.commands}
           onSaved={() => setReads((n) => n + 1)}
         />
       ))}
-      <AddWorkspace base={base} label={site.label} busy={busy} act={act} />
+      <AddWorkspace base={base} label={site.label} busy={busy} act={act} commands={site.commands} />
     </section>
   );
 }
@@ -151,6 +166,7 @@ function Workspace({
   act,
   owner,
   solo,
+  commands,
   onSaved,
 }: {
   base: string;
@@ -160,6 +176,7 @@ function Workspace({
   act: Act;
   owner: boolean;
   solo: boolean;
+  commands?: SiteCommands;
   onSaved: () => void;
 }) {
   // A person's edits until they save; otherwise the rules in effect, read
@@ -167,15 +184,18 @@ function Workspace({
   // (J68), so it is shown only once the machine applies it.
   const [read, setRead] = useState<Decision | null>(null);
   const [change, setChange] = useState<Decision | null>(null);
+  const [command, setCommand] = useState<Decision | null>(null);
   const [patterns, setPatterns] = useState<string | null>(null);
   const rules = detail?.rules ?? workspace.rules;
   const shownRead = read ?? rules.read;
   const shownChange = change ?? rules.change;
+  const shownCommand = command ?? rules.command ?? "deny";
   const path = `${base}/workspaces/${encodeURIComponent(workspace.id)}`;
   const deny = patterns ?? (detail?.deny ?? []).join("\n");
   const saved = () => {
     setRead(null);
     setChange(null);
+    setCommand(null);
     setPatterns(null);
     onSaved();
   };
@@ -198,6 +218,14 @@ function Workspace({
         onChange={setChange}
         only={workspace.writable ? undefined : "deny"}
       />
+      {commands && (
+        <CommandRule
+          value={shownCommand}
+          onChange={setCommand}
+          writable={workspace.writable}
+          commands={commands}
+        />
+      )}
       <label className="flex flex-col gap-1">
         Paths to hide, one a line (like .gitignore: .env, secrets/, *.pem)
         <textarea
@@ -218,7 +246,13 @@ function Workspace({
           onClick={() =>
             void act(() =>
               post(`${path}/rules`, {
-                rules: { read: shownRead, change: workspace.writable ? shownChange : "deny" },
+                rules: {
+                  read: shownRead,
+                  change: workspace.writable ? shownChange : "deny",
+                  // Only to a machine that runs commands: an older Eugene
+                  // would refuse the field.
+                  ...(commands ? { command: workspace.writable ? shownCommand : "deny" } : {}),
+                },
                 deny: parsed,
               }),
             ).then(saved)
@@ -353,22 +387,54 @@ function Sharing({
   );
 }
 
+/** Running commands in a workspace (2b.4, J88): signed each time, or never. */
+function CommandRule({
+  value,
+  onChange,
+  writable,
+  commands,
+}: {
+  value: Decision;
+  onChange: (value: Decision) => void;
+  writable: boolean;
+  commands: SiteCommands;
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      <DecisionSelect
+        label="Run commands"
+        value={value}
+        onChange={onChange}
+        only={writable ? undefined : "deny"}
+        choices={COMMAND_DECISIONS}
+      />
+      <p className="text-xs text-muted">
+        A command runs as your own account and can do whatever it can, not only in this folder.
+        {commands.allowed ? "" : ` ${commands.reason ?? "This machine does not run commands now."}`}
+      </p>
+    </div>
+  );
+}
+
 function AddWorkspace({
   base,
   label,
   busy,
   act,
+  commands,
 }: {
   base: string;
   label: string;
   busy: boolean;
   act: Act;
+  commands?: SiteCommands;
 }) {
   const [name, setName] = useState("");
   const [path, setPath] = useState("");
   const [writable, setWritable] = useState(true);
   const [read, setRead] = useState<Decision>("allow");
   const [change, setChange] = useState<Decision>("ask");
+  const [command, setCommand] = useState<Decision>("ask");
   const [deny, setDeny] = useState("");
   const parsed = parsePatterns(deny);
   const bad = patternProblem(parsed);
@@ -383,7 +449,11 @@ function AddWorkspace({
             name,
             path,
             writable,
-            rules: { read, change: writable ? change : "deny" },
+            rules: {
+              read,
+              change: writable ? change : "deny",
+              ...(commands ? { command: writable ? command : "deny" } : {}),
+            },
             deny: parsed,
           });
           setName("");
@@ -429,6 +499,14 @@ function AddWorkspace({
         onChange={setChange}
         only={writable ? undefined : "deny"}
       />
+      {commands && (
+        <CommandRule
+          value={command}
+          onChange={setCommand}
+          writable={writable}
+          commands={commands}
+        />
+      )}
       <label className="flex flex-col gap-1">
         Paths to hide, one a line (optional)
         <textarea

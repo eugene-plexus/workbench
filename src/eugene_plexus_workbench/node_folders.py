@@ -90,6 +90,30 @@ class HeldAtTheMachine(Exception):
         self.message = message
 
 
+class Held(Exception):
+    """A job site holds a call for the person's own signature (J14b, J86):
+    `held` (`SiteHeldCall`) says what to sign, in the site's words. Nothing
+    ran. It runs when the call is sent again naming it, once signed at the
+    machine or with a passkey."""
+
+    def __init__(self, held: dict[str, Any], message: str, window_until: str | None) -> None:
+        super().__init__(message)
+        self.held = held
+        self.message = message
+        self.window_until = window_until
+
+
+def _held_call(value: Any) -> bool:
+    """Whether `value` reads as a `SiteHeldCall`."""
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("id"), str)
+        and value.get("kind") in {"call", "window"}
+        and isinstance(value.get("words"), list)
+        and all(isinstance(word, str) for word in value["words"])
+    )
+
+
 class NodeFolders:
     def __init__(self, store: Store, provider: Provider, http: httpx.AsyncClient) -> None:
         self.store, self.provider, self.http = store, provider, http
@@ -287,11 +311,13 @@ class NodeFolders:
         *,
         acting: bool = False,
         asked: bool = False,
+        approval: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """One MCP request to one server on one machine. The answer
         (`SiteMcpAnswer`), or a refusal raised: `WriteUncertain` when a call
         that may have acted was not confirmed. `asked`: the person approved
-        this call here (J72); sent only when true."""
+        this call here (J72); sent only when true. `approval`: a call the site
+        held for the person's signature, sent again (J14b)."""
         token = await self._refresh_token(person, current=True)
         operation = uuid.uuid4().hex
         body: dict[str, Any] = {
@@ -303,6 +329,8 @@ class NodeFolders:
         }
         if asked:
             body["asked"] = True
+        if approval is not None:
+            body["approval"] = approval
         try:
             response = await self.http.post(
                 self.provider.transport_url(f"{self.provider.issuer}/sites/mcp"),
@@ -350,9 +378,12 @@ class NodeFolders:
                 "done",
                 "failed",
                 "uncertain",
+                "held",
             }:
                 raise ValueError
             if value["status"] == "done" and not isinstance(value.get("response"), dict):
+                raise ValueError
+            if value["status"] == "held" and not _held_call(value.get("held")):
                 raise ValueError
         except (ValueError, TypeError):
             error = WriteUncertain if acting else FolderError
@@ -388,10 +419,12 @@ class NodeFolders:
         arguments: dict[str, Any],
         *,
         asked: bool = False,
+        approval: dict[str, Any] | None = None,
     ) -> tuple[str, bool, dict[str, Any]]:
         """Run one tool: its result as text, whether it is an error, and what
         Eugene said about it (the install's mode, J13a; every site's result is
-        a job-site result)."""
+        a job-site result; the person's open window, J14b). A call the site
+        holds for the person's signature raises `Held`."""
         answer = await self.mcp(
             person,
             site,
@@ -399,9 +432,18 @@ class NodeFolders:
             rpc("tools/call", {"name": tool, "arguments": arguments}),
             acting=True,
             asked=asked,
+            approval=approval,
         )
         mode = answer.get("installMode") if answer.get("installMode") == "dev" else PRODUCTION
-        meta = {"jobSite": True, "mode": mode}
+        meta: dict[str, Any] = {"jobSite": True, "mode": mode}
+        if isinstance(answer.get("windowUntil"), str):
+            meta["windowUntil"] = answer["windowUntil"]
+        if answer["status"] == "held":
+            raise Held(
+                answer["held"],
+                answer.get("message") or "This call waits for your signature.",
+                answer.get("windowUntil") if isinstance(answer.get("windowUntil"), str) else None,
+            )
         if answer["status"] == "uncertain":
             raise WriteUncertain(
                 answer.get("message") or "This call may have acted. Check before trying again."

@@ -25,8 +25,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .hub import Hub, HubError
+from .node_folders import Held
 from .store import Message, Person, Store, interrupt_tools
-from .tools import Calls, ToolError, Tools, transcript
+from .tools import Calls, Signer, ToolError, Tools, transcript
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +35,9 @@ _SAVE_EVERY = 1.0
 #: A watching tab that falls this far behind is dropped; it reloads.
 _QUEUE_DEPTH = 1000
 _APPROVAL_SECONDS = 1800
+#: How often a call a job site holds for the person's signature is sent again
+#: while they sign at the machine (J14b).
+_SIGN_POLL_SECONDS = 4.0
 #: An answer's limits (J71): calls the rules allow do not count against the
 #: calls a person is asked about, and Stop ends an answer at any time.
 MAX_CALLS = 200
@@ -423,7 +427,7 @@ class Answers:
                         # Commit intent before dispatch, so a crash cannot look
                         # like a call that is safe to repeat.
                         await self._checkpoint(running)
-                        await session.execute(step)
+                        await session.execute(step, self._signer(running))
                     else:
                         step.update(
                             status="declined",
@@ -442,6 +446,53 @@ class Answers:
             raise ToolError(
                 f"This answer reached {MAX_ROUNDS} tool rounds. Ask for a smaller task."
             )
+
+    def _signer(self, running: Running) -> Signer:
+        """What waits for the person when a job site holds a call for their
+        own signature (J14b, J86). The site is the authority: the person signs
+        on the machine's own page or with a passkey here, and the call is sent
+        again every few seconds, or at once when the page says it signed, until
+        the site runs it. Declining, or 30 minutes, ends the wait; nothing ran."""
+        started: dict[str, float] = {}
+
+        async def sign(step: dict[str, Any], held: Held) -> dict[str, Any] | None:
+            ident = str(held.held["id"])
+            shown = {
+                key: held.held.get(key)
+                for key in ("id", "kind", "minutes", "words", "expiresAt", "approvePage")
+            }
+            shown["message"] = held.message
+            future = running.approvals.get(step["id"])
+            if step.get("held") != shown or future is None or future.done():
+                step["held"] = shown
+                step["status"] = "signing"
+                started.setdefault(step["id"], time.perf_counter())
+                future = asyncio.get_running_loop().create_future()
+                running.approvals[step["id"]] = future
+                running.progress = {"stage": "tool", "tool": step["tool"], "phase": "approval"}
+                await self._checkpoint(running)
+            left = _APPROVAL_SECONDS - (time.perf_counter() - started[step["id"]])
+            if left <= 0:
+                running.approvals.pop(step["id"], None)
+                step["result"] = "Signing expired after 30 minutes. This call did not run."
+                return None
+            try:
+                signed = await asyncio.wait_for(
+                    asyncio.shield(future), min(_SIGN_POLL_SECONDS, left)
+                )
+            except TimeoutError:
+                # Not signed here yet: ask the site again, which knows whether
+                # it was signed at the machine.
+                return {"held": ident}
+            running.approvals.pop(step["id"], None)
+            if not signed:
+                return None
+            step["status"] = "running"
+            running.progress = {"stage": "tool", "tool": step["tool"], "phase": "started"}
+            await self._checkpoint(running)
+            return {"held": ident}
+
+        return sign
 
     def _take(self, running: Running, chunk: dict[str, Any]) -> None:
         """One chunk of the gateway's stream into the answer, and out to every

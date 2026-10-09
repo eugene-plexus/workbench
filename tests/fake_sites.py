@@ -172,7 +172,31 @@ def install(server: FastAPI, fake: Any, state: dict[str, Any]) -> None:
                 # A site since 2b.3b says where each tool must be asked about.
                 for tool in tools:
                     tool["_meta"] = {"eugene-plexus/ask": state["asks"].get(tool["name"], [])}
+            if state.get("signed"):
+                # A site since J14b checks the person's own signature.
+                for tool in tools:
+                    tool["_meta"] = {**tool.get("_meta", {}), "eugene-plexus/signed": True}
             return answer({"result": {"tools": tools}})
+        if state.get("signed"):
+            # J14b: held until the person signs it, here `signed_ids`, which a
+            # test fills as the machine's page or a passkey would.
+            approval = body.get("approval") or {}
+            state.setdefault("tries", []).append(body)
+            if approval.get("held") not in state.setdefault("signed_ids", set()):
+                return {
+                    "status": "held",
+                    "message": "This call runs once you sign it with your key.",
+                    "installMode": state.get("mode", "production"),
+                    "held": {
+                        "id": "h0123456789abcde",
+                        "kind": "call",
+                        "words": ["Write the file note.txt in “Notes” on desk:", "Changed"],
+                        "expiresAt": "2026-10-08T12:30:00Z",
+                        "approved": False,
+                        "envelopes": {},
+                        "approvePage": "http://127.0.0.1:8079/link/approve",
+                    },
+                }
         state["calls"].append(body)
         params = body["request"]["params"]
         args = dict(params.get("arguments") or {})

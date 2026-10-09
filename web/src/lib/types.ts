@@ -55,7 +55,8 @@ export interface ToolCall {
   serverName: string;
   tool: string;
   arguments: Record<string, unknown>;
-  status: "pending" | "running" | "done" | "declined" | "cancelled" | "failed" | "uncertain";
+  status:
+    "pending" | "signing" | "running" | "done" | "declined" | "cancelled" | "failed" | "uncertain";
   result: string | null;
   jobSite?: boolean;
   site?: string | null;
@@ -66,6 +67,27 @@ export interface ToolCall {
   ask?: boolean;
   /** The site gave rules for it, so it is told the person's word (J72). */
   rules?: boolean;
+  /** The site checks your own signature on it (J14b): it holds the call and
+   * says what to sign, rather than Workbench asking first. */
+  signed?: boolean;
+  /** While `signing`: what the site holds, in its own words. */
+  held?: HeldCall;
+  /** When your open window on that site ended, as of this call. */
+  windowUntil?: string;
+}
+
+/** A call a site holds for your signature (`SiteHeldCall`, J86). */
+export interface HeldCall {
+  id: string;
+  /** `call`: this call. `window`: a window in which the tools your rules
+   * allow run without your signature each. */
+  kind: "call" | "window";
+  minutes?: number | null;
+  words: string[];
+  expiresAt?: string;
+  /** The machine's own page, where you can sign it and see exactly what it is. */
+  approvePage?: string | null;
+  message?: string;
 }
 
 interface ServerIdentity {
@@ -176,6 +198,9 @@ export type Decision = "allow" | "ask" | "deny";
 export interface SiteRules {
   read: Decision;
   change: Decision;
+  /** Running commands (2b.4, J88): each one needs your own signature, or
+   * never. Absent from a workspace made before commands: never. */
+  command?: "ask" | "deny" | null;
 }
 
 export interface WorkspacePerson {
@@ -281,6 +306,17 @@ export interface JobSite {
   /** Whether the machine checks its owner's changes with the owner's own key
    * (J14a). Absent from a machine older than that. */
   signing?: SiteSigning;
+  /** Whether the machine runs commands from Workbench (2b.4, J89). Absent
+   * from a machine older than that, which also does not check signed calls. */
+  commands?: SiteCommands;
+}
+
+export interface SiteCommands {
+  allowed: boolean;
+  consentedAt?: string | null;
+  withdrawnAt?: string | null;
+  /** Why not, and how an administrator allows them at the machine. */
+  reason?: string | null;
 }
 
 export interface SiteSigning {
@@ -348,6 +384,8 @@ export interface SiteLink {
   signing?: "unsigned" | "unconfirmed" | "signed" | null;
   /** Their changes waiting for their own key. */
   held?: number;
+  /** When their open window there ends (J14b, J81); null when none is open. */
+  windowUntil?: string | null;
 }
 
 /** What Eugene says about whose account a person's calls run as on a machine.

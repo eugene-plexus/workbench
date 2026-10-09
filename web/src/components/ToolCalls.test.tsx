@@ -121,3 +121,78 @@ it("runs a call the site's rules allow without offering to approve it (J70)", ()
   expect(screen.getByRole("status")).toHaveTextContent("Allowed by the rules");
   expect(screen.queryByRole("button", { name: "Approve call" })).toBeNull();
 });
+
+const held: Message = {
+  ...message,
+  toolRounds: [
+    {
+      calls: [
+        {
+          id: "cmd",
+          serverId: "site:s-desk:files",
+          serverName: "Ada's desktop · Files",
+          tool: "run_command",
+          arguments: { folder: "Work", command: "npm test" },
+          status: "signing",
+          result: null,
+          jobSite: true,
+          site: "s-desk",
+          label: "desk",
+          ask: false,
+          signed: true,
+          held: {
+            id: "h1",
+            kind: "call",
+            words: ["Run this command on desk as HOST/ada, starting in “Work”:", "npm test"],
+            approvePage: "http://127.0.0.1:8079/link/approve",
+          },
+        },
+      ],
+    },
+  ],
+};
+
+it("shows what the machine holds for a signature, and where to sign it", () => {
+  render(<ToolCalls chatId="chat" message={held} readOnly={false} onChanged={vi.fn()} />);
+  expect(screen.getByText("Waiting for your signature")).toBeInTheDocument();
+  expect(screen.getByText("desk asks for your signature")).toBeInTheDocument();
+  expect(screen.getByLabelText("What desk holds")).toHaveTextContent("npm test");
+  expect(screen.getByRole("link", { name: "Sign on desk's page" })).toHaveAttribute(
+    "href",
+    "http://127.0.0.1:8079/link/approve",
+  );
+  // No approval of Workbench's own: the machine checks the signature itself.
+  expect(screen.queryByRole("button", { name: "Approve call" })).not.toBeInTheDocument();
+});
+
+it("says no to a held call without signing it", async () => {
+  vi.mocked(post).mockResolvedValue(undefined);
+  render(<ToolCalls chatId="chat" message={held} readOnly={false} onChanged={vi.fn()} />);
+  fireEvent.click(screen.getByRole("button", { name: "Do not sign" }));
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith("/api/chats/chat/messages/answer/tools/decision", {
+      callId: "cmd",
+      approve: false,
+    }),
+  );
+});
+
+it("offers a window for an hour of allowed tools", () => {
+  const call = held.toolRounds![0]!.calls[0]!;
+  const windowed: Message = {
+    ...held,
+    toolRounds: [
+      {
+        calls: [
+          {
+            ...call,
+            tool: "read_text",
+            held: { ...call.held!, kind: "window", minutes: 60, words: ["Let Workbench use…"] },
+          },
+        ],
+      },
+    ],
+  };
+  render(<ToolCalls chatId="chat" message={windowed} readOnly={false} onChanged={vi.fn()} />);
+  expect(screen.getByText("Open a 60-minute window on desk")).toBeInTheDocument();
+});
