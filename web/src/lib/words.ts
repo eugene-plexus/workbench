@@ -95,14 +95,16 @@ export const SEARCH_LABEL = "Search the web";
 export const SEARCH_HINT =
   "Search the web before answering. The words searched for go to the internet.";
 export const OWNER_READS = "The owner of this Workbench can read your chats and media.";
-export const PRODUCTION_MODE =
-  "Production mode: Eugene's owner cannot see what your job sites' tools return.";
-export const DEV_MODE =
-  "Dev mode: Eugene's owner can see all tool information, including what your job sites return.";
+export const PRODUCTION_MODE = "Production mode";
+export const DEV_MODE = "Developer mode";
+export const PRODUCTION_MODE_EXPLAINED =
+  "Eugene's owner cannot see what your job sites' tools return.";
+export const DEV_MODE_EXPLAINED =
+  "Eugene's owner can see all tool information, including what your job sites return.";
 export function modeChanged(mode: "production" | "dev", at: string): string {
   const when = new Date(at).toLocaleString();
   return mode === "dev"
-    ? `Eugene switched to dev mode on ${when}. Its owner can now see what job sites return in chats made from now on.`
+    ? `Eugene switched to developer mode on ${when}. Its owner can now see what job sites return in chats made from now on.`
     : `Eugene switched to production mode on ${when}. Its owner can no longer see what job sites return.`;
 }
 export function redactedNote(site: string): string {

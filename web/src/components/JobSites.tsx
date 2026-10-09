@@ -544,7 +544,8 @@ function Site({
               void act(() => post(`${base}/settings`, { ownerInDevMode: event.target.checked }))
             }
           />
-          Let Eugene&apos;s owner use folders they give themselves here, while Eugene is in dev mode
+          Let Eugene&apos;s owner use folders they give themselves here, while Eugene is in
+          developer mode
         </label>
       )}
       <Audit base={base} label={site.label} />

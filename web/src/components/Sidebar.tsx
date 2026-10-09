@@ -4,7 +4,13 @@ import { useState } from "react";
 import { api } from "../lib/api";
 import { chatGroups } from "../lib/conveniences";
 import type { Chat, Me, Person } from "../lib/types";
-import { DEV_MODE, OWNER_READS, PRODUCTION_MODE } from "../lib/words";
+import {
+  DEV_MODE,
+  DEV_MODE_EXPLAINED,
+  OWNER_READS,
+  PRODUCTION_MODE,
+  PRODUCTION_MODE_EXPLAINED,
+} from "../lib/words";
 import { Logo } from "./Mascot";
 
 export function Sidebar({
@@ -65,15 +71,23 @@ export function Sidebar({
         </button>
       </div>
       {me.installMode && (
-        <p
-          data-testid="install-mode"
-          className={`mx-3 mt-3 rounded-plexus border px-3 py-2 text-sm ${
-            me.installMode === "dev"
-              ? "border-warn-line bg-warn-bg text-warn"
-              : "border-line text-muted"
-          }`}
-        >
-          {me.installMode === "dev" ? DEV_MODE : PRODUCTION_MODE}
+        <p className="mx-3 mt-3">
+          <span
+            data-testid="install-mode"
+            tabIndex={0}
+            title={me.installMode === "dev" ? DEV_MODE_EXPLAINED : PRODUCTION_MODE_EXPLAINED}
+            aria-describedby="install-mode-explained"
+            className={`inline-block rounded-plexus border px-2 py-1 text-sm ${
+              me.installMode === "dev"
+                ? "border-error-line bg-error-bg text-error"
+                : "border-line text-muted"
+            }`}
+          >
+            {me.installMode === "dev" ? DEV_MODE : PRODUCTION_MODE}
+          </span>
+          <span id="install-mode-explained" className="sr-only">
+            {me.installMode === "dev" ? DEV_MODE_EXPLAINED : PRODUCTION_MODE_EXPLAINED}
+          </span>
         </p>
       )}
       {!me.owner && me.ownerReadsChats && (
