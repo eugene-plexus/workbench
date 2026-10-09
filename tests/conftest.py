@@ -505,6 +505,9 @@ class FakeGateway:
     search: dict[str, Any] = field(default_factory=lambda: {"available": True, "reason": None})
     #: End each answer with ` #N`, N its request's number, to tell versions apart.
     numbered: bool = False
+    #: Search Suggestions HTML a searched answer's final chunk carries; `{n}`
+    #: is the request's number (google-search-account.md GS4).
+    suggestions: list[str] = field(default_factory=list)
     #: The image models listed (media screens), as the gateway lists them.
     image_models: list[dict[str, Any]] = field(default_factory=lambda: list(IMAGE_MODELS))
     audio_models: list[dict[str, Any]] = field(default_factory=lambda: list(AUDIO_MODELS))
@@ -770,6 +773,15 @@ class FakeGateway:
                     status_code=400,
                 )
 
+            def extension(searched: bool | None = None) -> dict[str, Any]:
+                searched = "web_search_options" in body if searched is None else searched
+                found: dict[str, Any] = {"web_searches": 1 if searched else 0}
+                if searched and self.suggestions:
+                    found["search_suggestions"] = [
+                        s.replace("{n}", str(number)) for s in self.suggestions
+                    ]
+                return found
+
             async def frames() -> AsyncIterator[str]:
                 messages = body["messages"]
                 asked_at = max(i for i, m in enumerate(messages) if m["role"] == "user")
@@ -815,7 +827,7 @@ class FakeGateway:
                     yield chunk(
                         {},
                         finish="length" if self.mode == "tools-cut" else "tool_calls",
-                        extension={"web_searches": 1 if "web_search_options" in body else 0},
+                        extension=extension(),
                     )
                     yield "data: [DONE]\n\n"
                     return
@@ -858,7 +870,7 @@ class FakeGateway:
                         }
                     ]
                     yield chunk({"annotations": annotations})
-                yield chunk({}, finish="stop", extension={"web_searches": 1 if annotations else 0})
+                yield chunk({}, finish="stop", extension=extension(bool(annotations)))
                 yield "data: [DONE]\n\n"
 
             return StreamingResponse(frames(), media_type="text/event-stream")

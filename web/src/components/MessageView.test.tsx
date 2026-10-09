@@ -220,3 +220,29 @@ describe("versions of a message (workbench-answer-versions.md)", () => {
     );
   });
 });
+
+describe("a search provider's Search Suggestions (GS4)", () => {
+  const GOOGLE =
+    "<style>.container{padding:8px 12px}</style>" +
+    '<div class="container"><a class="chip" href="https://www.google.com/search?q=barns">barns &amp; silos</a></div>';
+
+  it("shows each one in a frame that can run nothing, holding Google's HTML as it came", () => {
+    show(answer({ searches: 2, searchSuggestions: [GOOGLE, GOOGLE + "<!-- two -->"] }));
+    const frames = screen.getAllByTitle("Google Search Suggestions");
+    expect(frames).toHaveLength(2);
+    const [first, second] = frames as HTMLIFrameElement[];
+    expect(first!.getAttribute("sandbox")).toBe("allow-popups allow-popups-to-escape-sandbox");
+    expect(first!.srcdoc).toContain(GOOGLE);
+    expect(second!.srcdoc).toContain(GOOGLE + "<!-- two -->");
+    expect(first!.srcdoc).toContain('<base target="_blank">');
+    expect(first!.srcdoc).toContain('<meta name="referrer" content="no-referrer">');
+    expect(screen.getByTestId("sources")).toContainElement(first!);
+  });
+
+  it("shows nothing when the search came with none", () => {
+    show(answer({ searches: 1 }));
+    expect(screen.queryByTitle("Google Search Suggestions")).toBeNull();
+    show(answer({ searches: 1, searchSuggestions: [] }));
+    expect(screen.queryByTitle("Google Search Suggestions")).toBeNull();
+  });
+});

@@ -105,6 +105,7 @@ def message_view(message: Message) -> dict[str, Any]:
         "error": message.error,
         "sources": message.sources,
         "searches": message.searches,
+        "searchSuggestions": message.search_suggestions,
         "search": message.search,
         "model": message.model,
         "finish": message.finish,
@@ -244,6 +245,7 @@ class Answers:
             "reasoning": m.reasoning,
             "sources": m.sources,
             "searches": m.searches,
+            "search_suggestions": m.search_suggestions,
             "answer_from": m.answer_from,
             "reasoning_from": m.reasoning_from,
             "tool_rounds": m.tool_rounds,
@@ -502,6 +504,17 @@ class Answers:
         searches = extension.get("web_searches")
         if isinstance(searches, int):
             m.searches = searches
+        suggestions = extension.get("search_suggestions")
+        if isinstance(suggestions, list):
+            # The final chunk of each request carries that request's own list;
+            # a tool round makes another request, so these add up (GS4).
+            added = [s for s in suggestions if isinstance(s, str) and s]
+            if added:
+                m.search_suggestions = [*m.search_suggestions, *added]
+                self.publish(
+                    running.chat_id,
+                    {"type": "delta", "id": m.id, "searchSuggestions": m.search_suggestions},
+                )
         choices = chunk.get("choices") or []
         if not choices:
             progress = extension.get("progress")

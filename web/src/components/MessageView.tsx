@@ -241,6 +241,9 @@ export function MessageView({
               </li>
             ))}
           </ol>
+          {(message.searchSuggestions ?? []).map((html, i) => (
+            <SearchSuggestions key={i} html={html} />
+          ))}
         </div>
       )}
       {status && (
@@ -384,6 +387,36 @@ function MessageTime({ message }: { message: Message }) {
     <time dateTime={date.toISOString()} title={date.toLocaleString()}>
       {date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
     </time>
+  );
+}
+
+/** Google's Search Suggestions, exactly as Google sent them (its terms forbid
+ * editing, framing around, or interspersing them). They sit in a frame that
+ * can run nothing and read nothing of this page: `allow-popups` lets a chip
+ * open Google in a new tab, and no `allow-scripts` or `allow-same-origin`
+ * leaves the HTML inert. The frame's own page only says where links open, to
+ * send no referrer, and that it follows light or dark as Google's CSS does. */
+export function searchSuggestionsDocument(html: string): string {
+  return (
+    '<!doctype html><html><head><meta charset="utf-8">' +
+    '<meta name="color-scheme" content="light dark">' +
+    '<meta name="referrer" content="no-referrer">' +
+    '<base target="_blank"></head><body style="margin:0">' +
+    html +
+    "</body></html>"
+  );
+}
+
+function SearchSuggestions({ html }: { html: string }) {
+  return (
+    <iframe
+      title="Google Search Suggestions"
+      sandbox="allow-popups allow-popups-to-escape-sandbox"
+      srcDoc={searchSuggestionsDocument(html)}
+      referrerPolicy="no-referrer"
+      data-testid="search-suggestions"
+      className="mt-2 block h-14 w-full border-0"
+    />
   );
 }
 

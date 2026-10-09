@@ -25,6 +25,9 @@ export interface Message {
   error: string | null;
   sources: Source[];
   searches: number;
+  /** A search provider's required Search Suggestions: Google's own HTML, one
+   * per search that had any, shown as it came and nowhere else (GS4). */
+  searchSuggestions?: string[];
   search: boolean;
   model: string | null;
   finish: string | null;
@@ -449,6 +452,7 @@ export type ChatEvent =
       reasoning?: string;
       reasoningAt?: number;
       sources?: Source[];
+      searchSuggestions?: string[];
     }
   | {
       type: "progress";
