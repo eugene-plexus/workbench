@@ -32,7 +32,12 @@ DOORS = ("images", "speech", "transcription", "video")
 _PAGE = 30
 
 #: A provider's own name for the line *Runs on <account>* (M6).
-_PROVIDERS = {"openrouter": "OpenRouter", "openai": "OpenAI", "elevenlabs": "ElevenLabs"}
+_PROVIDERS = {
+    "openrouter": "OpenRouter",
+    "openai": "OpenAI",
+    "elevenlabs": "ElevenLabs",
+    "gemini": "Google Gemini",
+}
 
 
 def _store(request: Request) -> Store:
