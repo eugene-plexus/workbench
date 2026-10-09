@@ -65,6 +65,7 @@ export function applyEvent(detail: ChatDetail, event: ChatEvent): Outcome {
           content: content.text,
           reasoning: reasoning.text,
           sources: event.sources ?? m.sources,
+          searchSuggestions: event.searchSuggestions ?? m.searchSuggestions,
         };
       });
       const known = detail.messages.some((m) => m.id === event.id);

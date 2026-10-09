@@ -501,6 +501,7 @@ def redact_for_owner(views: list[dict[str, Any]], hidden: dict[str, str]) -> lis
                 "reasoning": "",
                 "sources": [],
                 "searches": 0,
+                "searchSuggestions": [],
                 "search": False,
                 "id": view["id"],
                 "seq": view["seq"],

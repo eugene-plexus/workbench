@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -92,7 +92,8 @@ CREATE TABLE IF NOT EXISTS messages (
     reasoning_from INTEGER,
     tool_rounds TEXT NOT NULL DEFAULT '[]',
     parent_id TEXT,
-    chosen INTEGER NOT NULL DEFAULT 1
+    chosen INTEGER NOT NULL DEFAULT 1,
+    search_suggestions TEXT NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS messages_by_chat ON messages (chat_id, seq);
 CREATE TABLE IF NOT EXISTS files (
@@ -186,6 +187,11 @@ _MIGRATIONS: dict[int, list[str]] = {
         "SELECT id, owner, chat_id, name, media_type, size, created_at FROM files",
         "DROP TABLE files",
         "ALTER TABLE files_7 RENAME TO files",
+    ],
+    # Google's Search Suggestions, kept with the answer they came with so the
+    # person sees them in their own history (google-search-account.md GS4).
+    8: [
+        "ALTER TABLE messages ADD COLUMN search_suggestions TEXT NOT NULL DEFAULT '[]'",
     ],
 }
 
@@ -317,6 +323,10 @@ class Message:
     parent_id: str | None = None
     #: Whether this is the version shown, among those that follow its parent.
     chosen: bool = True
+    #: A search provider's required suggestions, as HTML, one per search that
+    #: had any, in the order the searches ran. Shown unmodified to the person
+    #: who asked; never logged, measured, or sent to a model (GS4).
+    search_suggestions: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -407,6 +417,7 @@ def _message(row: sqlite3.Row) -> Message:
         tool_rounds=json.loads(row["tool_rounds"]),
         parent_id=row["parent_id"],
         chosen=bool(row["chosen"]),
+        search_suggestions=json.loads(row["search_suggestions"] or "[]"),
     )
 
 
@@ -467,9 +478,10 @@ _MESSAGE_FIELDS = {
     "answer_from",
     "reasoning_from",
     "tool_rounds",
+    "search_suggestions",
 }
 _CHAT_FIELDS = {"title", "model", "settings", "search", "updated_at"}
-_JSON_FIELDS = {"attachments", "sources", "settings", "tool_rounds"}
+_JSON_FIELDS = {"attachments", "sources", "settings", "tool_rounds", "search_suggestions"}
 
 
 def interrupt_tools(rounds: list[dict[str, Any]]) -> None:
