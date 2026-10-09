@@ -298,7 +298,7 @@ export interface JobSite {
   folders: JobSiteFolder[];
   /** The local servers its administrator added at the machine. */
   servers?: JobSiteServer[];
-  /** Whether Eugene's owner may use folders here while Eugene is in dev mode (J6e). */
+  /** Whether Eugene's owner may use folders here while Eugene is in developer mode (J6e). */
   ownerInDevMode?: boolean | null;
   /** Who has linked their own OS account on the machine (no person names). */
   links?: SiteLink[];

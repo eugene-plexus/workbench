@@ -115,6 +115,18 @@ it("opens the first matching chat when Enter is pressed in chat search", () => {
   expect(onOpen).toHaveBeenCalledWith("two");
 });
 
+it("shows developer mode as a short red badge with the explanation for assistive tech", () => {
+  sidebar([chat], vi.fn(), { ...me, installMode: "dev" });
+  const badge = screen.getByTestId("install-mode");
+  expect(badge).toHaveTextContent(/^Developer mode$/);
+  expect(badge).toHaveClass("text-error");
+  expect(badge).toHaveAttribute("tabindex", "0");
+  const explained =
+    "Eugene's owner can see all tool information, including what your job sites return.";
+  expect(badge).toHaveAttribute("title", explained);
+  expect(badge).toHaveAccessibleDescription(explained);
+});
+
 it("names the running dot for a screen reader", () => {
   sidebar([{ ...chat, running: true }]);
   expect(screen.getByRole("img", { name: "An answer is being written" })).toBeInTheDocument();

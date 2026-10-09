@@ -177,7 +177,7 @@ it("turns a local server on and says who may use which of its tools", async () =
       },
     ),
   );
-  fireEvent.click(screen.getByLabelText(/while Eugene is in dev mode/));
+  fireEvent.click(screen.getByLabelText(/while Eugene is in developer mode/));
   await waitFor(() =>
     expect(post).toHaveBeenCalledWith("/api/job-sites/s-deskdeskdeskdeskdeskdeskde/settings", {
       ownerInDevMode: true,
