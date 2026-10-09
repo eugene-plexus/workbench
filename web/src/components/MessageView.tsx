@@ -7,6 +7,7 @@ import {
   answerParts,
   DRAFT_HINT,
   DRAFT_LABEL,
+  EDIT_KEYS,
   EDIT_NOTE,
   progressWords,
   redactedNote,
@@ -108,11 +109,15 @@ export function MessageView({
               autoFocus
               onKeyDown={(e) => {
                 if (e.key === "Escape" && !acting) setEditing(null);
+                if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  e.currentTarget.form?.requestSubmit();
+                }
               }}
               className="rounded-plexus border border-line bg-soft p-2"
             />
             <p className="text-xs text-muted" data-testid="edit-note">
-              {EDIT_NOTE}
+              {EDIT_NOTE} {EDIT_KEYS}
             </p>
             <div className="flex justify-end gap-2">
               <button
@@ -238,6 +243,12 @@ export function MessageView({
                 >
                   {source.title}
                 </a>
+                {siteOf(source.url) && (
+                  <span className="text-muted" data-testid="source-site">
+                    {" "}
+                    · {siteOf(source.url)}
+                  </span>
+                )}
               </li>
             ))}
           </ol>
@@ -381,13 +392,36 @@ function VersionArrows({
   );
 }
 
+/** The time alone today; with its date on any earlier day, so an old chat
+ * does not read as if it were written this morning. */
+export function shortTime(date: Date, now = new Date()): string {
+  const time = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (date.toDateString() === now.toDateString()) return time;
+  const day = date.toLocaleDateString([], {
+    month: "short",
+    day: "numeric",
+    ...(date.getFullYear() === now.getFullYear() ? {} : { year: "numeric" }),
+  });
+  return `${day}, ${time}`;
+}
+
 function MessageTime({ message }: { message: Message }) {
   const date = new Date(message.createdAt * 1000);
   return (
     <time dateTime={date.toISOString()} title={date.toLocaleString()}>
-      {date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+      {shortTime(date)}
     </time>
   );
+}
+
+/** The site a source is on, without `www.`, so a reader sees where it leads. */
+export function siteOf(url: string): string | null {
+  if (!/^https?:/i.test(url)) return null;
+  try {
+    return new URL(url).hostname.replace(/^www\./, "") || null;
+  } catch {
+    return null;
+  }
 }
 
 /** Google's Search Suggestions, exactly as Google sent them (its terms forbid
@@ -444,17 +478,29 @@ function Attachment({ file }: { file: AttachedFile }) {
   }, [file.id, image]);
   if (image && url) {
     return (
-      <img
-        src={url}
-        alt={file.name}
-        className="h-24 rounded-plexus border border-line object-cover"
-      />
+      <a
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        title={`Open ${file.name} full size`}
+        data-testid="attachment-image"
+      >
+        <img
+          src={url}
+          alt={file.name}
+          className="h-24 rounded-plexus border border-line object-cover"
+        />
+      </a>
     );
   }
   const Icon = file.mediaType.startsWith("audio/") ? Music : FileText;
   return (
-    <span className="flex items-center gap-1 rounded-plexus border border-line bg-soft px-2 py-1 text-sm">
-      <Icon size={14} aria-hidden /> {file.name}
+    <span
+      title={file.name}
+      className="flex max-w-xs items-center gap-1 rounded-plexus border border-line bg-soft px-2 py-1 text-sm"
+    >
+      <Icon size={14} aria-hidden className="shrink-0" />
+      <span className="truncate">{file.name}</span>
     </span>
   );
 }

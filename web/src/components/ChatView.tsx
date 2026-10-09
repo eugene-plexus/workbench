@@ -65,6 +65,16 @@ export function ChatView({
     wasRunning.current = running;
   }, [running, onChanged]);
 
+  // The tab says which chat it holds, so several open tabs can be told apart.
+  const title = detail?.chat.title;
+  useEffect(() => {
+    if (!title) return;
+    document.title = `${title} · Workbench`;
+    return () => {
+      document.title = "Workbench";
+    };
+  }, [title]);
+
   if (error && !detail) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
@@ -206,7 +216,14 @@ export function ChatView({
           </>
         )}
         {confirmDelete && !chat.readOnly && (
-          <div className="flex w-full flex-wrap items-center gap-2 text-sm">
+          <div
+            role="group"
+            aria-label="Delete this chat?"
+            className="flex w-full flex-wrap items-center gap-2 text-sm"
+            onKeyDown={(e) => {
+              if (e.key === "Escape" && !acting) setConfirmDelete(false);
+            }}
+          >
             Delete this chat and its files?
             <button
               type="button"
@@ -230,8 +247,11 @@ export function ChatView({
             >
               Delete
             </button>
+            {/* Focus starts on the safe answer: Enter on a reflex keeps the chat. */}
             <button
               type="button"
+              autoFocus
+              data-testid="keep-chat"
               onClick={() => setConfirmDelete(false)}
               disabled={acting}
               className="px-2 py-0.5"

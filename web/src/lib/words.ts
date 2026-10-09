@@ -113,6 +113,9 @@ export function redactedNote(site: string): string {
 export const EDIT_NOTE =
   "Your earlier version and what followed it are kept. Use the arrows to go back.";
 
+/** How to save or leave an edit from the keyboard. */
+export const EDIT_KEYS = "Ctrl+Enter saves; Escape cancels.";
+
 /** Why the arrows wait: a running answer stays where its Stop is. */
 export const VERSIONS_WAIT = "Wait for the answer, or stop it.";
 
