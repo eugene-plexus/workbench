@@ -99,6 +99,13 @@ export function Sidebar({
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Escape") setQuery("");
+            // Enter opens the first chat that matches, so search-and-open
+            // needs no mouse.
+            const first = groups[0]?.chats[0];
+            if (e.key === "Enter" && query.trim() && first) {
+              e.preventDefault();
+              onOpen(first.id);
+            }
           }}
           className="min-w-0 flex-1 bg-transparent py-2 text-sm"
         />
@@ -140,6 +147,9 @@ export function Sidebar({
                   >
                     {chat.running && (
                       <span
+                        role="img"
+                        aria-label="An answer is being written"
+                        data-testid="chat-running"
                         className="h-2 w-2 shrink-0 rounded-full bg-accent"
                         title="An answer is being written"
                       />
@@ -210,7 +220,11 @@ function PeoplesChats({
       <summary className="flex cursor-pointer items-center gap-2 text-muted">
         <Eye size={14} aria-hidden /> People&apos;s chats and media (read only)
       </summary>
-      {error && <p className="text-error">{error}</p>}
+      {error && (
+        <p role="alert" className="text-error">
+          {error}
+        </p>
+      )}
       {people?.length === 0 && (
         <p className="py-1 text-muted">Nobody else has used Workbench yet.</p>
       )}
@@ -221,10 +235,17 @@ function PeoplesChats({
               type="button"
               className="w-full truncate py-1 text-left hover:underline"
               onClick={async () => {
-                const found = await api<{ chats: Chat[] }>(
-                  `/api/people/${encodeURIComponent(person.sub)}/chats`,
-                );
-                setChats((current) => ({ ...current, [person.sub]: found.chats }));
+                setError(null);
+                try {
+                  const found = await api<{ chats: Chat[] }>(
+                    `/api/people/${encodeURIComponent(person.sub)}/chats`,
+                  );
+                  setChats((current) => ({ ...current, [person.sub]: found.chats }));
+                } catch (e) {
+                  setError(
+                    `${person.name}'s chats did not load: ${e instanceof Error ? e.message : String(e)}`,
+                  );
+                }
               }}
             >
               {person.name} ({person.chats})

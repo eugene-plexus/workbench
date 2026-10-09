@@ -295,7 +295,8 @@ export default function App() {
               message
             </p>
             <p className="mt-1 text-muted">
-              On Mac, use Control + Option. Enter sends; Shift + Enter adds a line.
+              On Mac, use Control + Option. Enter sends; Shift + Enter adds a line. In chat search,
+              Enter opens the first match. While editing a message, Ctrl + Enter saves.
             </p>
             <button className="mt-2 text-accent" onClick={() => setShowShortcuts(false)}>
               Close shortcuts
