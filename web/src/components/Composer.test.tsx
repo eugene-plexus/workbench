@@ -94,7 +94,7 @@ it("names the edit box apart from the composer (workbench#2)", () => {
       {composer()}
     </>,
   );
-  fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+  fireEvent.click(screen.getByRole("button", { name: "Edit your message" }));
   const mine = screen.getAllByRole("textbox", { name: "Your message" });
   const edit = screen.getAllByRole("textbox", { name: "Edit your message" });
   expect(mine).toHaveLength(1);
@@ -134,4 +134,12 @@ describe("Remove on an attachment not yet sent (workbench#3)", () => {
     await waitFor(() => expect(screen.getByTestId("send")).toBeDisabled());
     expect(screen.getByRole("button", { name: "Remove dot.png" })).toBeDisabled();
   });
+});
+
+it("keeps the placeholder short and the keys in the described-by hint", () => {
+  render(composer());
+  const box = screen.getByTestId("composer");
+  expect(box).toHaveAttribute("placeholder", "Ask anything");
+  fireEvent.change(box, { target: { value: "hi" } });
+  expect(box).toHaveAccessibleDescription(/Enter sends; Shift\+Enter adds a line/);
 });

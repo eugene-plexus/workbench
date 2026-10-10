@@ -30,7 +30,7 @@ function CodeBlock({ children }: { children: ReactNode }) {
   return (
     <div className="relative">
       <div className="flex justify-end rounded-t-plexus border border-b-0 border-line bg-soft px-2 py-1 text-xs text-muted">
-        <CopyButton text={text} />
+        <CopyButton text={text} label="code" />
       </div>
       <pre className="overflow-x-auto rounded-plexus border border-line bg-soft p-3 pr-20 font-mono text-sm">
         {children}

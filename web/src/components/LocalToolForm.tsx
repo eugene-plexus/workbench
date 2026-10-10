@@ -18,14 +18,46 @@ export function LocalToolForm({ onAdded }: { onAdded: (server: ToolServer) => vo
       onSubmit={async (event) => {
         event.preventDefault();
         setProblem(null);
+        let parsedArgs: unknown;
+        try {
+          parsedArgs = JSON.parse(args);
+        } catch {
+          setProblem(
+            'Arguments are not valid JSON. Write a JSON array of strings, for example ["-m", "my_server"].',
+          );
+          return;
+        }
+        if (!Array.isArray(parsedArgs) || parsedArgs.some((a) => typeof a !== "string")) {
+          setProblem('Arguments must be a JSON array of strings, for example ["-m", "my_server"].');
+          return;
+        }
+        let parsedEnvironment: unknown;
+        try {
+          parsedEnvironment = JSON.parse(environment || "{}");
+        } catch {
+          setProblem(
+            'Environment values are not valid JSON. Write a JSON object, for example {"API_TOKEN":"your token"}.',
+          );
+          return;
+        }
+        if (
+          typeof parsedEnvironment !== "object" ||
+          parsedEnvironment === null ||
+          Array.isArray(parsedEnvironment)
+        ) {
+          setProblem(
+            'Environment values must be a JSON object, for example {"API_TOKEN":"your token"}.',
+          );
+          return;
+        }
         setBusy(true);
         try {
           const server = await post<ToolServer>("/api/tools/servers", {
             transport: "stdio",
             name,
             command,
-            args: JSON.parse(args),
-            environment: JSON.parse(environment || "{}"),
+            args: parsedArgs,
+            environment: parsedEnvironment,
           });
           onAdded(server);
           setName("");
@@ -33,13 +65,7 @@ export function LocalToolForm({ onAdded }: { onAdded: (server: ToolServer) => vo
           setArgs("[]");
           setEnvironment("");
         } catch (error) {
-          setProblem(
-            error instanceof SyntaxError
-              ? "Arguments must be a JSON array of strings; environment values must be a JSON object."
-              : error instanceof Error
-                ? error.message
-                : String(error),
-          );
+          setProblem(error instanceof Error ? error.message : String(error));
         } finally {
           setBusy(false);
         }

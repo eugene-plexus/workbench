@@ -10,6 +10,7 @@ import {
   type TranscriptionModel,
   canRecord,
   clipSeconds,
+  bytesWords,
   groupModels,
   rememberModel,
   rememberedModel,
@@ -307,6 +308,7 @@ export function TranscriptionForm({
   const [recording, setRecording] = useState<{ stop: () => void; started: number } | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const upload = useRef<HTMLInputElement>(null);
+  const chooseButton = useRef<HTMLButtonElement>(null);
   const chosen = models.find((m) => m.id === model);
   const recordable = canRecord();
   const translating = translate && Boolean(chosen?.translates);
@@ -360,7 +362,7 @@ export function TranscriptionForm({
       : !clip
         ? "Record or choose a recording first."
         : clip.file.size > TRANSCRIBE_LIMIT
-          ? "That recording is larger than Eugene carries to be transcribed (25 MiB)."
+          ? `That recording is ${bytesWords(clip.file.size)}, and Eugene carries at most ${bytesWords(TRANSCRIBE_LIMIT)} to be transcribed.`
           : null;
 
   async function send() {
@@ -417,6 +419,7 @@ export function TranscriptionForm({
             }}
           />
           <button
+            ref={chooseButton}
             type="button"
             className="text-accent"
             disabled={Boolean(recording)}
@@ -451,10 +454,27 @@ export function TranscriptionForm({
           )}
         </div>
         {clip && (
-          <p className="text-sm" data-testid="chosen-recording">
-            {clip.file.name}
-            {clip.seconds != null ? `, ${clip.seconds.toFixed(1)} s` : ""}
-          </p>
+          <div className="flex flex-wrap items-center gap-3 text-sm">
+            <p
+              className={clip.file.size > TRANSCRIBE_LIMIT ? "text-error" : undefined}
+              data-testid="chosen-recording"
+            >
+              {clip.file.name}
+              {clip.seconds != null ? `, ${clip.seconds.toFixed(1)} s` : ""}
+              {`, ${bytesWords(clip.file.size)} of ${bytesWords(TRANSCRIBE_LIMIT)} allowed`}
+            </p>
+            <button
+              type="button"
+              className="text-muted underline"
+              onClick={() => {
+                setClip(null);
+                if (upload.current) upload.current.value = "";
+                chooseButton.current?.focus();
+              }}
+            >
+              Remove recording
+            </button>
+          </div>
         )}
       </div>
       <div className="flex flex-wrap items-end gap-4">

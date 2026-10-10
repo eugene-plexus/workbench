@@ -29,7 +29,7 @@ const FIELDS: {
   {
     key: "topP",
     label: "Top-p",
-    hint: "Samples only from the likeliest words that add up to this share.",
+    hint: "Samples only from the likeliest tokens that add up to this share.",
     step: "0.05",
     min: 0.01,
     max: 1,
@@ -121,19 +121,25 @@ export function ChatSettings({
         </label>
         <div className="grid gap-3 sm:grid-cols-3">
           {FIELDS.map((field) => (
-            <label key={field.key} className="flex flex-col gap-1 text-sm" title={field.hint}>
-              <span className="font-medium">{field.label}</span>
-              <input
-                inputMode="decimal"
-                value={values[field.key]}
-                onChange={(e) => {
-                  setValues((v) => ({ ...v, [field.key]: e.target.value }));
-                  setSaved(false);
-                }}
-                placeholder="The model's default"
-                className="rounded-plexus border border-line bg-soft px-2 py-1"
-              />
-            </label>
+            <div key={field.key} className="flex flex-col gap-1 text-sm">
+              <label className="flex flex-col gap-1">
+                <span className="font-medium">{field.label}</span>
+                <input
+                  inputMode="decimal"
+                  value={values[field.key]}
+                  onChange={(e) => {
+                    setValues((v) => ({ ...v, [field.key]: e.target.value }));
+                    setSaved(false);
+                  }}
+                  placeholder="The model's default"
+                  aria-describedby={`setting-hint-${field.key}`}
+                  className="rounded-plexus border border-line bg-soft px-2 py-1"
+                />
+              </label>
+              <span id={`setting-hint-${field.key}`} className="text-muted">
+                {field.hint} Between {field.min} and {field.max}.
+              </span>
+            </div>
           ))}
         </div>
         <label className="flex flex-col gap-1 text-sm">
@@ -176,16 +182,20 @@ export function ChatSettings({
           </p>
         )}
         <div className="flex items-center justify-end gap-3 text-sm">
-          {saved && <span className="text-muted">Saved. The next answer uses these.</span>}
+          {saved && (
+            <span role="status" className="text-muted">
+              Saved. The next answer uses these.
+            </span>
+          )}
           <button type="button" onClick={onClose} className="px-3 py-1">
-            Close
+            Close settings
           </button>
           <button
             type="button"
             onClick={() => void save()}
             className="rounded-plexus bg-accent px-3 py-1 text-on-accent"
           >
-            Save
+            Save settings
           </button>
         </div>
       </div>

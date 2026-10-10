@@ -187,7 +187,9 @@ it("saves an edited message with Ctrl+Enter", async () => {
   fireEvent.change(box, { target: { value: "Hello again" } });
   fireEvent.keyDown(box, { key: "Enter" });
   expect(post).not.toHaveBeenCalled(); // a plain Enter is a new line
-  expect(screen.getByTestId("edit-note")).toHaveTextContent("Ctrl+Enter saves");
+  expect(screen.getByTestId("edit-note")).toHaveTextContent(
+    "Ctrl+Enter (Cmd+Enter on a Mac) saves",
+  );
   fireEvent.keyDown(box, { key: "Enter", ctrlKey: true });
   await waitFor(() =>
     expect(post).toHaveBeenCalledWith("/api/chats/c/messages/u/edit", { content: "Hello again" }),

@@ -58,7 +58,7 @@ it("says who runs as whom, and lets the owner remove anyone's link", async () =>
       person: "p-bo",
     }),
   );
-  fireEvent.click(screen.getByRole("button", { name: "Remove my link" }));
+  fireEvent.click(screen.getByRole("button", { name: "Remove my link on desk" }));
   await waitFor(() =>
     expect(post).toHaveBeenCalledWith(`/api/job-sites/${site.id}/links/remove`, {}),
   );
@@ -84,7 +84,7 @@ it("says the owner has not linked yet, and how a Linux machine links", async () 
   expect(box).toHaveTextContent("You have not linked your own account on desk yet.");
   expect(box).toHaveTextContent("On a Linux machine, people link with:");
   expect(box).toHaveTextContent("sudo sh -s -- --site-link --person NAME");
-  expect(screen.queryByRole("button", { name: "Remove my link" })).toBeNull();
+  expect(screen.queryByRole("button", { name: /Remove my link/ })).toBeNull();
 });
 
 it("serves only the owner where there is no folder boundary", async () => {
@@ -278,7 +278,7 @@ it("shows a held change as waiting at the machine, not as a refusal", async () =
   );
   render(<JobSites onClose={() => undefined} />);
   await screen.findByLabelText("bo changes files");
-  fireEvent.click(screen.getByRole("button", { name: "Save whom it is shared with" }));
+  fireEvent.click(screen.getByRole("button", { name: /^Save sharing/ }));
   expect(await screen.findByTestId("job-site-held")).toHaveTextContent(words);
   expect(screen.queryByRole("alert")).toBeNull();
 });
@@ -366,12 +366,12 @@ describe("passkeys from here (J14a.3)", () => {
       return {};
     });
     render(<JobSites onClose={() => undefined} sub="p-ada" />);
-    fireEvent.click(await screen.findByRole("button", { name: "Add a passkey" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add a passkey for desk" }));
     // Where to get the code, in plain words: no page at a Linux system install.
     expect(screen.getByTestId(`passkeys-${site.id}`)).toHaveTextContent(
       "run Eugene's installer on desk again with --site-pair",
     );
-    const pairButton = screen.getByRole("button", { name: "Make and pair a passkey" });
+    const pairButton = screen.getByRole("button", { name: "Make and pair a passkey for desk" });
     expect(pairButton).toBeDisabled();
     fireEvent.change(screen.getByTestId("passkey-code"), { target: { value: "k7qf3-mzd9t" } });
     fireEvent.click(pairButton);
@@ -424,9 +424,11 @@ describe("passkeys from here (J14a.3)", () => {
     expect(await screen.findByTestId(`signing-${site.id}`)).toHaveTextContent(
       "Approve them here with your passkey.",
     );
-    fireEvent.click(screen.getByRole("button", { name: "Review changes waiting" }));
+    fireEvent.click(screen.getByRole("button", { name: "Review changes waiting on desk" }));
     expect(await screen.findByTestId("held-rules")).toHaveTextContent("Notes: you");
-    fireEvent.click(screen.getByRole("button", { name: "Approve with your passkey" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Approve with your passkey: desk's rules" }),
+    );
     await waitFor(() =>
       expect(
         vi.mocked(post).mock.calls.some(([p]) => String(p).endsWith("/held/rules/approve")),
@@ -452,7 +454,7 @@ describe("passkeys from here (J14a.3)", () => {
     const withPage = { ...linux, linkPage: "http://127.0.0.1:8079/link" };
     vi.mocked(api).mockResolvedValue({ sites: [withPage], canInvite: true, passkeys: context });
     render(<JobSites onClose={() => undefined} sub="p-ada" />);
-    fireEvent.click(await screen.findByRole("button", { name: "Add a passkey" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add a passkey for desk" }));
     expect(screen.getByTestId(`passkeys-${site.id}`)).toHaveTextContent(
       "open http://127.0.0.1:8079/link on desk and choose Show a code for a passkey",
     );
@@ -469,11 +471,11 @@ describe("passkeys from here (J14a.3)", () => {
       return {};
     });
     render(<JobSites onClose={() => undefined} sub="p-ada" />);
-    fireEvent.click(await screen.findByRole("button", { name: "Review changes waiting" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Review changes waiting on desk" }));
     const row = await screen.findByTestId(`passkey-${passkey.id}`);
-    fireEvent.click(within(row).getByRole("button", { name: "Remove" }));
+    fireEvent.click(within(row).getByRole("button", { name: /^Remove passkey/ }));
     expect(row).toHaveTextContent(says);
-    fireEvent.click(within(row).getByRole("button", { name: "Remove it" }));
+    fireEvent.click(within(row).getByRole("button", { name: /^Remove it: / }));
     await waitFor(() =>
       expect(
         vi
@@ -533,7 +535,7 @@ it("shows a site you are linked to with only your own: your workspaces and your 
   await waitFor(() => expect(hide).toHaveValue(".env"));
   fireEvent.change(hide, { target: { value: ".env\nsecrets/" } });
   fireEvent.change(screen.getAllByLabelText("Change files")[0]!, { target: { value: "deny" } });
-  fireEvent.click(screen.getByRole("button", { name: "Save rules" }));
+  fireEvent.click(screen.getByRole("button", { name: /^Save rules/ }));
   await waitFor(() =>
     expect(post).toHaveBeenCalledWith(
       `/api/job-sites/${site.id}/workspaces/${"a".repeat(32)}/rules`,
@@ -565,7 +567,7 @@ it("shows the rules in effect after a change held for the key, never the change 
   // Giving more (J68): change asked about, a hidden path shown again.
   fireEvent.change(within(box).getByLabelText("Change files"), { target: { value: "ask" } });
   fireEvent.change(hide, { target: { value: "" } });
-  fireEvent.click(within(box).getByRole("button", { name: "Save rules" }));
+  fireEvent.click(within(box).getByRole("button", { name: /^Save rules/ }));
   expect(await screen.findByTestId("job-site-held")).toHaveTextContent(
     "Waiting for your approval.",
   );
@@ -576,9 +578,9 @@ it("shows the rules in effect after a change held for the key, never the change 
   fireEvent.change(within(sharing).getByLabelText("Share with (how they sign in)"), {
     target: { value: "cy" },
   });
-  fireEvent.click(within(sharing).getByRole("button", { name: "Add" }));
+  fireEvent.click(within(sharing).getByRole("button", { name: /^Add to those sharing/ }));
   expect(within(sharing).getByText("cy")).toBeTruthy();
-  fireEvent.click(within(sharing).getByRole("button", { name: "Save whom it is shared with" }));
+  fireEvent.click(within(sharing).getByRole("button", { name: /^Save sharing/ }));
   await waitFor(() => expect(within(sharing).queryByText("cy")).toBeNull());
   expect(within(sharing).getByText("bo")).toBeTruthy();
 });
@@ -629,11 +631,11 @@ it("shares an owner's workspace with each person's rules there (J69)", async () 
   fireEvent.change(within(sharing).getByLabelText("Share with (how they sign in)"), {
     target: { value: "cy" },
   });
-  fireEvent.click(within(sharing).getByRole("button", { name: "Add" }));
+  fireEvent.click(within(sharing).getByRole("button", { name: /^Add to those sharing/ }));
   fireEvent.change(within(sharing).getByLabelText("bo reads and searches"), {
     target: { value: "ask" },
   });
-  fireEvent.click(within(sharing).getByRole("button", { name: "Save whom it is shared with" }));
+  fireEvent.click(within(sharing).getByRole("button", { name: /^Save sharing/ }));
   await waitFor(() =>
     expect(post).toHaveBeenCalledWith(
       `/api/job-sites/${site.id}/workspaces/${"b".repeat(32)}/people`,
@@ -687,11 +689,11 @@ it("shows your open window, closes it, and lets the owner turn commands off", as
   render(<JobSites onClose={() => undefined} sub="p-ada" />);
   const panel = await screen.findByRole("region", { name: "Signed calls on desk" });
   expect(panel).toHaveTextContent("Your window is open until");
-  fireEvent.click(within(panel).getByRole("button", { name: "Close it now" }));
+  fireEvent.click(within(panel).getByRole("button", { name: "Close it now: your window on desk" }));
   await waitFor(() => expect(post).toHaveBeenCalledWith(`/api/job-sites/${site.id}/window/close`));
-  fireEvent.click(within(panel).getByRole("button", { name: "Turn commands off" }));
+  fireEvent.click(within(panel).getByRole("button", { name: "Turn commands off on desk" }));
   expect(panel).toHaveTextContent("Only an administrator at desk can turn them back on.");
-  fireEvent.click(within(panel).getByRole("button", { name: "Turn them off" }));
+  fireEvent.click(within(panel).getByRole("button", { name: "Turn them off on desk" }));
   await waitFor(() =>
     expect(post).toHaveBeenCalledWith(`/api/job-sites/${site.id}/commands/withdraw`),
   );
@@ -709,5 +711,89 @@ it("says how an administrator allows commands where they are not allowed", async
   render(<JobSites onClose={() => undefined} sub="p-ada" />);
   const panel = await screen.findByRole("region", { name: "Signed calls on desk" });
   expect(panel).toHaveTextContent(reason);
-  expect(within(panel).queryByRole("button", { name: "Turn commands off" })).toBeNull();
+  expect(within(panel).queryByRole("button", { name: "Turn commands off on desk" })).toBeNull();
+});
+
+it("says it is loading, and Back to chat", () => {
+  vi.mocked(api).mockReturnValue(new Promise(() => undefined));
+  const onClose = vi.fn();
+  render(<JobSites onClose={onClose} />);
+  expect(screen.getByRole("status")).toHaveTextContent("Loading job sites…");
+  fireEvent.click(screen.getByRole("button", { name: "Back to chat" }));
+  expect(onClose).toHaveBeenCalled();
+});
+
+it("copies the Linux link command and names each join command", async () => {
+  const none = { ...site, links: [], linkPage: null, sharing: true };
+  vi.mocked(api).mockResolvedValue({ sites: [none], canInvite: true });
+  render(<JobSites onClose={() => undefined} sub="p-ada" />);
+  expect(
+    await screen.findByRole("button", { name: "Copy the Linux link command" }),
+  ).toBeInTheDocument();
+});
+
+it("names the machine on each of its buttons", async () => {
+  vi.mocked(api).mockResolvedValue({
+    sites: [{ ...site, links: [], sharing: true }],
+    canInvite: true,
+  });
+  render(<JobSites onClose={() => undefined} sub="p-ada" />);
+  fireEvent.click(await screen.findByRole("button", { name: "Take this machine out: desk" }));
+  expect(screen.getByRole("button", { name: "Take it out: desk" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Keep it: desk" })).toBeInTheDocument();
+});
+
+it("says how many audit entries it shows and its cap, then offers Refresh", async () => {
+  vi.mocked(api).mockResolvedValue({ sites: [site], canInvite: true });
+  vi.mocked(post).mockResolvedValue({
+    entries: [
+      { at: "2026-10-05T12:00:00Z", subject: "p-bo", kind: "mcp", tool: "a", decision: "allowed" },
+      { at: "2026-10-05T12:01:00Z", subject: "p-bo", kind: "mcp", tool: "b", decision: "allowed" },
+    ],
+  });
+  render(<JobSites onClose={() => undefined} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Show what desk was asked" }));
+  expect(await screen.findByText(/Showing the latest 2 entries/)).toHaveTextContent(
+    "This list shows at most the latest 50.",
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Refresh what desk was asked" }));
+  await waitFor(() =>
+    expect(
+      vi.mocked(post).mock.calls.filter(([path]) => String(path).endsWith("/audit")),
+    ).toHaveLength(2),
+  );
+});
+
+it("names the workspace on its buttons, copies its path and alerts on a bad pattern", async () => {
+  const live = { id: "f1", path: "D:\\notes", deny: [], rules: { read: "allow", change: "ask" } };
+  vi.mocked(api).mockResolvedValue({ sites: [site], canInvite: true });
+  vi.mocked(post).mockImplementation(async (path: string) =>
+    path.endsWith("/workspaces/list") ? { workspaces: [live] } : {},
+  );
+  render(<JobSites onClose={() => undefined} />);
+  const box = await screen.findByTestId("workspace-f1");
+  expect(
+    await within(box).findByRole("button", { name: "Copy the path of Notes" }),
+  ).toBeInTheDocument();
+  expect(within(box).getByRole("button", { name: "Save rules for Notes" })).toBeInTheDocument();
+  expect(within(box).getByRole("button", { name: "Remove workspace Notes" })).toBeInTheDocument();
+  fireEvent.change(within(box).getByLabelText("Paths to hide in Notes"), {
+    target: { value: "!keep" },
+  });
+  expect(within(box).getByRole("alert")).toHaveTextContent("!keep cannot be used");
+});
+
+it("says sharing edits are not saved yet, and the button says Save sharing", async () => {
+  vi.mocked(api).mockResolvedValue({ sites: [site], canInvite: true });
+  render(<JobSites onClose={() => undefined} />);
+  const sharing = await screen.findByTestId("sharing-f1");
+  expect(within(sharing).queryByText("Not saved yet.")).toBeNull();
+  fireEvent.change(within(sharing).getByLabelText("Share with (how they sign in)"), {
+    target: { value: "cy" },
+  });
+  fireEvent.click(within(sharing).getByRole("button", { name: "Add to those sharing Notes" }));
+  expect(within(sharing).getByRole("status")).toHaveTextContent("Not saved yet.");
+  expect(within(sharing).getByRole("button", { name: "Save sharing for Notes" })).toHaveTextContent(
+    "Save sharing",
+  );
 });

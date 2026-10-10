@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { post } from "../lib/api";
+import { CopyButton } from "./CopyButton";
 import {
   passkeyProblem,
   passkeysHere,
@@ -118,6 +119,8 @@ function SignCall({
         )}
         {passkeysHere() && (
           <button
+            type="button"
+            aria-label={`Sign ${call.tool} call with my passkey`}
             disabled={disabled || busy}
             onClick={() => void withPasskey()}
             className="rounded-plexus border border-line px-3 py-1"
@@ -126,6 +129,8 @@ function SignCall({
           </button>
         )}
         <button
+          type="button"
+          aria-label={`Do not sign ${call.tool} call`}
           disabled={disabled || busy}
           onClick={() => void onDecide(false)}
           className="px-3 py-1"
@@ -200,6 +205,12 @@ export function ToolCalls({
           </p>
           <details open={call.status === "pending" && call.ask !== false}>
             <summary className="cursor-pointer">Arguments for this call</summary>
+            <div className="pt-1 text-xs text-muted">
+              <CopyButton
+                text={JSON.stringify(call.arguments, null, 2)}
+                label={`${call.tool} call arguments`}
+              />
+            </div>
             <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all py-2">
               {JSON.stringify(call.arguments, null, 2)}
             </pre>
@@ -207,6 +218,9 @@ export function ToolCalls({
           {call.result && (
             <details>
               <summary className="cursor-pointer">Result</summary>
+              <div className="pt-1 text-xs text-muted">
+                <CopyButton text={call.result} label={`${call.tool} call result`} />
+              </div>
               <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all py-2">
                 {call.result}
               </pre>
@@ -225,6 +239,8 @@ export function ToolCalls({
             !readOnly && (
               <div className="mt-2 flex gap-3">
                 <button
+                  type="button"
+                  aria-label={`Approve ${call.tool} call`}
                   disabled={sent.has(call.id)}
                   onClick={() => void decide(call, true)}
                   className="rounded-plexus bg-accent px-3 py-1 text-on-accent"
@@ -232,6 +248,8 @@ export function ToolCalls({
                   Approve call
                 </button>
                 <button
+                  type="button"
+                  aria-label={`Decline ${call.tool} call`}
                   disabled={sent.has(call.id)}
                   onClick={() => void decide(call, false)}
                   className="px-3 py-1"

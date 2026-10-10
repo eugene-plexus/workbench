@@ -74,6 +74,10 @@ export const DRAFT_LABEL = "Written before searching";
 export const DRAFT_HINT = "The model wrote this before it read what the search found.";
 export const SEARCHED_MARK = "Searched the web";
 
+/** Names the setting by its label in Chat settings (ChatSettings.tsx). */
+export const LENGTH_LIMIT_NOTE =
+  "The answer reached its length limit. Ask it to continue, or raise “Longest answer (tokens)” in this chat's settings.";
+
 /** Why an answer is not a finished one, or null when it is. */
 export function statusWords(message: Message): string | null {
   switch (message.status) {
@@ -87,7 +91,7 @@ export function statusWords(message: Message): string | null {
     case "failed":
       return message.error ?? "This answer failed.";
     default:
-      return message.finish === "length" ? "The answer reached its length limit." : null;
+      return message.finish === "length" ? LENGTH_LIMIT_NOTE : null;
   }
 }
 
@@ -116,7 +120,7 @@ export const EDIT_NOTE =
   "Your earlier version and what followed it are kept. Use the arrows to go back.";
 
 /** How to save or leave an edit from the keyboard. */
-export const EDIT_KEYS = "Ctrl+Enter saves; Escape cancels.";
+export const EDIT_KEYS = "Ctrl+Enter (Cmd+Enter on a Mac) saves; Escape cancels.";
 
 /** Why the arrows wait: a running answer stays where its Stop is. */
 export const VERSIONS_WAIT = "Wait for the answer, or stop it.";

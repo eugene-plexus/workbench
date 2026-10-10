@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { api, del, post } from "../lib/api";
 import type { FolderGrants } from "../lib/types";
+import { CopyButton } from "./CopyButton";
 import { SiteLinkNote } from "./SiteLinkNote";
 
 const problemOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -55,6 +56,11 @@ export function Folders({ owner }: { owner: boolean }) {
           {problem}
         </p>
       )}
+      {data === null && !problem && (
+        <p role="status" className="text-sm">
+          Loading folders…
+        </p>
+      )}
       {data && !data.available && <p className="text-sm">{data.reason}</p>}
       {data?.nodeReason && <p className="text-sm text-muted">Node folders: {data.nodeReason}</p>}
       {owner && data?.manageUrl && (
@@ -81,7 +87,12 @@ export function Folders({ owner }: { owner: boolean }) {
             {grant.writable ? "Read and write text" : "Read only"}
             {owner && ` · ${people.find((p) => p.sub === grant.subject)?.name ?? grant.subject}`}
           </p>
-          {grant.path && <p className="break-all text-muted">{grant.path}</p>}
+          {grant.path && (
+            <p className="flex flex-wrap items-center gap-2 text-muted">
+              <span className="break-all">{grant.path}</span>
+              <CopyButton text={grant.path} label={`the path of ${grant.name}`} />
+            </p>
+          )}
           {grant.available === false && (
             <p>{grant.reason || "This folder is currently unavailable."}</p>
           )}
@@ -99,9 +110,13 @@ export function Folders({ owner }: { owner: boolean }) {
             grant.source !== "node" &&
             (removing === grant.id ? (
               <div className="flex flex-wrap gap-3">
-                <p>Remove access? Pending calls will fail. Files and saved chat results remain.</p>
+                <p>
+                  Remove access to {grant.name}? Pending calls will fail. Files and saved chat
+                  results remain.
+                </p>
                 <button
                   disabled={busy}
+                  aria-label={`Remove access to ${grant.name}`}
                   className="text-error"
                   onClick={async () => {
                     setBusy(true);
@@ -119,13 +134,18 @@ export function Folders({ owner }: { owner: boolean }) {
                 >
                   Remove access
                 </button>
-                <button disabled={busy} onClick={() => setRemoving(null)}>
+                <button
+                  disabled={busy}
+                  aria-label={`Keep access to ${grant.name}`}
+                  onClick={() => setRemoving(null)}
+                >
                   Keep access
                 </button>
               </div>
             ) : (
               <button
                 disabled={busy}
+                aria-label={`Remove grant for ${grant.name}`}
                 className="self-start text-error"
                 onClick={() => setRemoving(grant.id)}
               >
@@ -269,6 +289,7 @@ export function FolderSelection({
           {problem}
         </p>
       )}
+      {data === null && !problem && <p role="status">Loading folders…</p>}
       {data && !data.available && <p>{data.reason}</p>}
       {data?.nodeReason && <p className="text-muted">Node folders: {data.nodeReason}</p>}
       {grants?.length === 0 && (

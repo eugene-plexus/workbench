@@ -127,3 +127,34 @@ it("explains missing app-account access and disables adding a folder", async () 
   expect(await screen.findByText("Use a service install.")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Grant folder access" })).toBeDisabled();
 });
+
+it("says it is loading folders, then names the folder on removal and copies its path", async () => {
+  vi.mocked(api).mockImplementation(async (path) =>
+    path === "/api/folders/people"
+      ? { people: [] }
+      : {
+          grants: [{ ...grant, source: "local", path: "D:\\notes" }],
+          available: true,
+          reason: null,
+        },
+  );
+  render(<Folders owner />);
+  expect(screen.getByRole("status")).toHaveTextContent("Loading folders…");
+  await screen.findByText("Project notes");
+  expect(screen.queryByText("Loading folders…")).toBeNull();
+  expect(
+    screen.getByRole("button", { name: "Copy the path of Project notes" }),
+  ).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Remove grant for Project notes" }));
+  expect(screen.getByText(/^Remove access to Project notes\?/)).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "Remove access to Project notes" }),
+  ).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Keep access to Project notes" })).toBeInTheDocument();
+});
+
+it("says it is loading folders in a chat's picker", () => {
+  vi.mocked(api).mockReturnValue(new Promise(() => undefined));
+  render(<FolderSelection selected={[]} onChange={() => undefined} />);
+  expect(screen.getByRole("status")).toHaveTextContent("Loading folders…");
+});

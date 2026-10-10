@@ -34,6 +34,7 @@ export default function App() {
   // An image sent to a new chat waits in that chat's composer (M7).
   const [handoff, setHandoff] = useState<{ chatId: string; attachments: Handoff[] } | null>(null);
   const [chats, setChats] = useState<Chat[]>([]);
+  const [chatsLoaded, setChatsLoaded] = useState(false);
   const [models, setModels] = useState<Models | null>(null);
   const [modelsError, setModelsError] = useState<string | null>(null);
   const [showTools, setShowTools] = useState(false);
@@ -131,6 +132,7 @@ export default function App() {
   const refreshChats = useCallback(async () => {
     try {
       setChats((await api<{ chats: Chat[] }>("/api/chats")).chats);
+      setChatsLoaded(true);
       setChatsError(null);
     } catch (error) {
       if (!(error instanceof SignedOut))
@@ -209,7 +211,13 @@ export default function App() {
     return () => window.removeEventListener("keydown", shortcuts);
   }, [phase.kind, newChat]);
 
-  if (phase.kind === "loading") return null;
+  if (phase.kind === "loading") {
+    return (
+      <p role="status" className="p-6 text-muted">
+        Loading Workbench…
+      </p>
+    );
+  }
   if (phase.kind === "signed-out") {
     return <SignIn message={phase.message} unavailable={phase.unavailable} />;
   }
@@ -220,6 +228,7 @@ export default function App() {
         <Sidebar
           me={phase.me}
           chats={chats}
+          chatsLoaded={chatsLoaded}
           current={chatId}
           onOpen={open}
           onOpenMedia={(person) => openMedia("images", person)}
@@ -232,6 +241,7 @@ export default function App() {
             await post("/api/signout").catch(() => undefined);
             forget();
             setChats([]);
+            setChatsLoaded(false);
             setPhase({ kind: "signed-out", message: "You signed out.", unavailable: null });
           }}
         />

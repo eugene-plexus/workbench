@@ -27,12 +27,21 @@ export function SignIn({
           </p>
         )}
         {unavailable ? (
-          <p
-            role="alert"
-            className="rounded-plexus border border-error-line bg-error-bg px-3 py-2 text-error"
-          >
-            {unavailable}
-          </p>
+          <>
+            <p
+              role="alert"
+              className="rounded-plexus border border-error-line bg-error-bg px-3 py-2 text-error"
+            >
+              {unavailable}
+            </p>
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              className="rounded-plexus border border-line bg-soft px-4 py-2 hover:bg-hover"
+            >
+              Check again
+            </button>
+          </>
         ) : (
           <a
             href="/signin"

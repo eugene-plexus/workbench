@@ -71,6 +71,9 @@ export function VideoForm({
   const [sending, setSending] = useState(false);
   const [uploading, setUploading] = useState(false);
   const upload = useRef<HTMLInputElement>(null);
+  const notYet = useRef<HTMLButtonElement>(null);
+  const makeButton = useRef<HTMLButtonElement>(null);
+  const cancelled = useRef(false);
   const model = models.find((m) => m.id === form.model);
 
   // Any change asks again: the price asked about is always what is sent.
@@ -93,6 +96,16 @@ export function VideoForm({
   useEffect(() => {
     if (model?.firstFrame) void loadImages();
   }, [model?.firstFrame, loadImages]);
+
+  // The price asks a question: focus moves to the safe answer, and returns to
+  // "Make the video" if it is declined.
+  useEffect(() => {
+    if (confirming) notYet.current?.focus();
+    else if (cancelled.current) {
+      cancelled.current = false;
+      makeButton.current?.focus();
+    }
+  }, [confirming]);
 
   // "Edit and send" fills the form with what a result asked for.
   useEffect(() => {
@@ -335,7 +348,15 @@ export function VideoForm({
             >
               {sending ? "Sending…" : "Make it"}
             </button>
-            <button type="button" className="underline" onClick={() => setConfirming(false)}>
+            <button
+              ref={notYet}
+              type="button"
+              className="underline"
+              onClick={() => {
+                cancelled.current = true;
+                setConfirming(false);
+              }}
+            >
               Not yet
             </button>
           </div>
@@ -343,6 +364,7 @@ export function VideoForm({
       ) : (
         <div className="flex items-center gap-3">
           <button
+            ref={makeButton}
             type="submit"
             data-testid="make-video"
             disabled={Boolean(why)}

@@ -339,16 +339,16 @@ export function Composer({
             }
           }}
           rows={3}
-          placeholder="Ask anything. Enter sends; Shift+Enter starts a new line."
+          placeholder="Ask anything"
           className="w-full resize-none overflow-y-auto rounded-plexus border border-line bg-soft p-2"
         />
         <p id="composer-hint" className="text-xs text-muted">
-          Drop files here or paste an image.{" "}
+          Enter sends; Shift+Enter adds a line. Drop files here or paste an image.{" "}
           {text
             ? draftSaved
               ? "Text draft kept in this tab until you send or sign out."
               : "This browser cannot save your draft after you leave this chat."
-            : "Enter sends; Shift+Enter adds a line."}
+            : ""}
         </p>
         <div className="flex flex-wrap items-center gap-3 text-sm">
           <input

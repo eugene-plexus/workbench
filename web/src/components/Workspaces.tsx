@@ -8,6 +8,7 @@ import type {
   JobSiteWorkspaceDetail,
   SiteCommands,
 } from "../lib/types";
+import { CopyButton } from "./CopyButton";
 
 type Act = (work: () => Promise<unknown>) => Promise<void>;
 
@@ -210,7 +211,12 @@ function Workspace({
         {workspace.name}
         {workspace.writable ? "" : " · read only"}
       </h4>
-      {detail && <p className="break-all text-muted">{detail.path}</p>}
+      {detail && (
+        <p className="flex flex-wrap items-center gap-2 text-muted">
+          <span className="break-all">{detail.path}</span>
+          <CopyButton text={detail.path} label={`the path of ${workspace.name}`} />
+        </p>
+      )}
       <DecisionSelect label="Read and search" value={shownRead} onChange={setRead} />
       <DecisionSelect
         label="Change files"
@@ -238,9 +244,14 @@ function Workspace({
           aria-label={`Paths to hide in ${workspace.name}`}
         />
       </label>
-      {bad && <p className="text-error">{bad}</p>}
+      {bad && (
+        <p role="alert" className="text-error">
+          {bad}
+        </p>
+      )}
       <div className="flex flex-wrap gap-3">
         <button
+          aria-label={`Save rules for ${workspace.name}`}
           disabled={busy || Boolean(bad) || detail === undefined}
           className="rounded-plexus border border-line px-3 py-1"
           onClick={() =>
@@ -261,6 +272,7 @@ function Workspace({
           Save rules
         </button>
         <button
+          aria-label={`Remove workspace ${workspace.name}`}
           disabled={busy}
           className="text-error"
           onClick={() => void act(() => post(`${path}/remove`))}
@@ -274,6 +286,7 @@ function Workspace({
           shared={detail?.people ?? workspace.people}
           writable={workspace.writable}
           workspaceId={workspace.id}
+          workspaceName={workspace.name}
           busy={busy}
           act={act}
           onSaved={onSaved}
@@ -289,6 +302,7 @@ function Sharing({
   shared,
   writable,
   workspaceId,
+  workspaceName,
   busy,
   act,
   onSaved,
@@ -297,6 +311,7 @@ function Sharing({
   shared: JobSiteWorkspace["people"];
   writable: boolean;
   workspaceId: string;
+  workspaceName: string;
   busy: boolean;
   act: Act;
   onSaved: () => void;
@@ -352,6 +367,7 @@ function Sharing({
         </label>
         <button
           type="button"
+          aria-label={`Add to those sharing ${workspaceName}`}
           className="rounded-plexus border border-line px-3 py-1"
           onClick={() => {
             const name = adding.trim();
@@ -364,7 +380,13 @@ function Sharing({
           Add
         </button>
       </div>
+      {edited !== null && (
+        <p role="status" className="text-muted">
+          Not saved yet.
+        </p>
+      )}
       <button
+        aria-label={`Save sharing for ${workspaceName}`}
         disabled={busy}
         className="self-start rounded-plexus border border-line px-3 py-1"
         onClick={() =>
@@ -381,7 +403,7 @@ function Sharing({
           })
         }
       >
-        Save whom it is shared with
+        Save sharing
       </button>
     </div>
   );
@@ -516,7 +538,11 @@ function AddWorkspace({
           className="rounded-plexus border border-line bg-transparent px-2 py-1 font-mono"
         />
       </label>
-      {bad && <p className="text-error">{bad}</p>}
+      {bad && (
+        <p role="alert" className="text-error">
+          {bad}
+        </p>
+      )}
       <p className="text-muted">
         It waits on {label} until you approve it with your own key there, or with your passkey here.
       </p>

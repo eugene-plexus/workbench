@@ -2,6 +2,7 @@ import { useState } from "react";
 
 import { post } from "../lib/api";
 import type { SiteLinking } from "../lib/types";
+import { CopyButton } from "./CopyButton";
 
 const problemOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
@@ -28,10 +29,14 @@ export function SiteLinkNote({
     <div className="flex flex-col gap-1 text-sm" data-testid={`site-link-${site}`}>
       {account && <p>Runs as {account}</p>}
       {linked === false && linkPage && (
-        <p>
-          To work as yourself there, link your own account: on {label}, open {linkPage} and sign in.
-          Until then your calls run as the machine&apos;s owner, inside the folders shared with you.
-        </p>
+        <>
+          <p>
+            To work as yourself there, link your own account: on {label}, open {linkPage} and sign
+            in. Until then your calls run as the machine&apos;s owner, inside the folders shared
+            with you.
+          </p>
+          <CopyButton text={linkPage} label={`the link page for ${label}`} />
+        </>
       )}
       {linked === true && (
         <button
@@ -51,7 +56,7 @@ export function SiteLinkNote({
             }
           }}
         >
-          Remove my link
+          Remove my link on {label}
         </button>
       )}
       {problem && (

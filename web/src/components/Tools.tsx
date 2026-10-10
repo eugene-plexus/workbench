@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { api, del, post } from "../lib/api";
 import type { ToolServer, ToolServers } from "../lib/types";
+import { CopyButton } from "./CopyButton";
 import { LocalToolForm } from "./LocalToolForm";
 import { SiteLinkNote } from "./SiteLinkNote";
 import { Folders } from "./Folders";
@@ -19,6 +20,8 @@ export function Tools({ owner, onClose }: { owner: boolean; onClose: () => void 
   const [checks, setChecks] = useState<Record<string, string>>({});
   const [local, setLocal] = useState<ToolServers["localProcesses"] | null>(null);
   const [reload, setReload] = useState(0);
+  const [checking, setChecking] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -27,6 +30,7 @@ export function Tools({ owner, onClose }: { owner: boolean; onClose: () => void 
         if (!cancelled) {
           setServers(result.servers);
           setLocal(result.localProcesses);
+          setLoaded(true);
         }
       })
       .catch((error) => {
@@ -58,6 +62,8 @@ export function Tools({ owner, onClose }: { owner: boolean; onClose: () => void 
             {problem}
           </p>
         )}
+        {!loaded && !problem && <p role="status">Loading tool servers…</p>}
+        {loaded && servers.length === 0 && <p className="text-sm">No tool servers yet.</p>}
         {servers.map((server) => (
           <article
             key={server.id}
@@ -81,7 +87,10 @@ export function Tools({ owner, onClose }: { owner: boolean; onClose: () => void 
             ) : server.transport === "stdio" ? (
               <>
                 <p className="text-sm">Local server · Owner only</p>
-                <p className="break-all text-sm text-muted">{server.command}</p>
+                <p className="flex flex-wrap items-center gap-2 text-sm text-muted">
+                  <span className="break-all">{server.command}</span>
+                  <CopyButton text={server.command} label={`the command of ${server.name}`} />
+                </p>
                 <pre className="whitespace-pre-wrap break-all text-sm">
                   {JSON.stringify(server.args)}
                 </pre>
@@ -95,7 +104,10 @@ export function Tools({ owner, onClose }: { owner: boolean; onClose: () => void 
               </>
             ) : (
               <>
-                <p className="break-all text-sm text-muted">{server.url}</p>
+                <p className="flex flex-wrap items-center gap-2 text-sm text-muted">
+                  <span className="break-all">{server.url}</span>
+                  <CopyButton text={server.url} label={`the address of ${server.name}`} />
+                </p>
                 <p className="text-sm">
                   {server.hasToken ? "A credential is stored." : "No credential is stored."}
                 </p>
@@ -104,8 +116,15 @@ export function Tools({ owner, onClose }: { owner: boolean; onClose: () => void 
             <div className="flex flex-wrap gap-3 text-sm">
               <button
                 disabled={busy || (server.transport === "stdio" && !local?.available)}
+                aria-label={`${server.transport === "stdio" ? "Start and check" : "Check connection to"} ${server.name}`}
                 onClick={async () => {
                   setBusy(true);
+                  setChecking(server.id);
+                  setChecks((old) => {
+                    const next = { ...old };
+                    delete next[server.id];
+                    return next;
+                  });
                   try {
                     const result = await post<{ tools: { name: string }[] }>(
                       `/api/tools/servers/${encodeURIComponent(server.id)}/check`,
@@ -119,6 +138,7 @@ export function Tools({ owner, onClose }: { owner: boolean; onClose: () => void 
                   } catch (error) {
                     setChecks((old) => ({ ...old, [server.id]: problemOf(error) }));
                   } finally {
+                    setChecking(null);
                     setBusy(false);
                   }
                 }}
@@ -130,11 +150,12 @@ export function Tools({ owner, onClose }: { owner: boolean; onClose: () => void 
                 (remove === server.id ? (
                   <>
                     <span>
-                      Remove this connection? Pending calls will not run. Saved server files will
+                      Remove {server.name}? Pending calls will not run. Saved server files will
                       remain.
                     </span>
                     <button
                       disabled={busy}
+                      aria-label={`Remove connection ${server.name}`}
                       onClick={async () => {
                         setBusy(true);
                         try {
@@ -150,12 +171,24 @@ export function Tools({ owner, onClose }: { owner: boolean; onClose: () => void 
                     >
                       Remove connection
                     </button>
-                    <button onClick={() => setRemove(null)}>Keep it</button>
+                    <button
+                      aria-label={`Keep ${server.name}: do not remove it`}
+                      onClick={() => setRemove(null)}
+                    >
+                      Keep it
+                    </button>
                   </>
                 ) : (
-                  <button onClick={() => setRemove(server.id)}>Remove</button>
+                  <button aria-label={`Remove ${server.name}`} onClick={() => setRemove(server.id)}>
+                    Remove
+                  </button>
                 ))}
             </div>
+            {checking === server.id && (
+              <p role="status" className="text-sm">
+                Checking…
+              </p>
+            )}
             {checks[server.id] && (
               <p role="status" className="whitespace-pre-wrap break-words text-sm">
                 {checks[server.id]}
@@ -279,7 +312,7 @@ export function ToolSelection({
           {problem}
         </p>
       )}
-      {servers === null && !problem && <p>Loading servers…</p>}
+      {servers === null && !problem && <p role="status">Loading servers…</p>}
       {servers?.length === 0 && <p>No servers available. The owner can add one in Tools.</p>}
       {servers?.map((server) => (
         <label key={server.id} className="flex items-center gap-2">

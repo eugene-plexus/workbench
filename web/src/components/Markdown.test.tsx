@@ -44,6 +44,6 @@ describe("an answer is untrusted (W5)", () => {
 
   it("gives a code block a copy button", () => {
     const { getByRole } = render(<Markdown text={"```py\nprint(1)\n```"} />);
-    expect(getByRole("button", { name: /copy/i })).toBeInTheDocument();
+    expect(getByRole("button", { name: "Copy code" })).toBeInTheDocument();
   });
 });

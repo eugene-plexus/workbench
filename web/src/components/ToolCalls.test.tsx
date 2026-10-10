@@ -46,7 +46,7 @@ it("shows exact arguments and submits one approval for the displayed answer", as
   const changed = vi.fn();
   render(<ToolCalls chatId="chat" message={message} readOnly={false} onChanged={changed} />);
   expect(screen.getByText(/"from": "a"/)).toBeInTheDocument();
-  const approve = screen.getByRole("button", { name: "Approve call" });
+  const approve = screen.getByRole("button", { name: "Approve rename call" });
   fireEvent.click(approve);
   expect(approve).toBeDisabled();
   await waitFor(() => expect(changed).toHaveBeenCalledOnce());
@@ -61,7 +61,7 @@ it("declines without approving", async () => {
   render(
     <ToolCalls chatId="chat" message={message} readOnly={false} onChanged={() => undefined} />,
   );
-  fireEvent.click(screen.getByRole("button", { name: "Decline" }));
+  fireEvent.click(screen.getByRole("button", { name: "Decline rename call" }));
   await waitFor(() =>
     expect(post).toHaveBeenCalledWith(expect.any(String), { callId: "call", approve: false }),
   );
@@ -69,7 +69,7 @@ it("declines without approving", async () => {
 
 it("cannot approve while reading another person's chat", () => {
   render(<ToolCalls chatId="chat" message={message} readOnly onChanged={() => undefined} />);
-  expect(screen.queryByRole("button")).toBeNull();
+  expect(screen.queryByRole("button", { name: /Approve|Decline/ })).toBeNull();
   expect(screen.getByText("Waiting for approval")).toBeInTheDocument();
 });
 
@@ -78,9 +78,9 @@ it("shows failures and lets the person retry a decision", async () => {
   render(
     <ToolCalls chatId="chat" message={message} readOnly={false} onChanged={() => undefined} />,
   );
-  fireEvent.click(screen.getByRole("button", { name: "Approve call" }));
+  fireEvent.click(screen.getByRole("button", { name: "Approve rename call" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("no longer waiting");
-  expect(screen.getByRole("button", { name: "Approve call" })).not.toBeDisabled();
+  expect(screen.getByRole("button", { name: "Approve rename call" })).not.toBeDisabled();
 });
 
 it("renders tool output as text without fetching images or running HTML", () => {
@@ -105,7 +105,7 @@ it("renders tool output as text without fetching images or running HTML", () => 
   expect(container.querySelector("img")).toBeNull();
   expect(screen.getByText(/<img src=/)).toBeInTheDocument();
   expect(screen.getByText(/Result unknown/)).toBeInTheDocument();
-  expect(screen.queryByRole("button")).toBeNull();
+  expect(screen.queryByRole("button", { name: /Approve|Decline/ })).toBeNull();
 });
 
 it("runs a call the site's rules allow without offering to approve it (J70)", () => {
@@ -118,8 +118,8 @@ it("runs a call the site's rules allow without offering to approve it (J70)", ()
   render(
     <ToolCalls chatId="chat" message={allowed} readOnly={false} onChanged={() => undefined} />,
   );
-  expect(screen.getByRole("status")).toHaveTextContent("Allowed by the rules");
-  expect(screen.queryByRole("button", { name: "Approve call" })).toBeNull();
+  expect(screen.getByText(/Allowed by the rules/)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Approve read_text call" })).toBeNull();
 });
 
 const held: Message = {
@@ -162,13 +162,15 @@ it("shows what the machine holds for a signature, and where to sign it", () => {
     "http://127.0.0.1:8079/link/approve",
   );
   // No approval of Workbench's own: the machine checks the signature itself.
-  expect(screen.queryByRole("button", { name: "Approve call" })).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Approve run_command call" }),
+  ).not.toBeInTheDocument();
 });
 
 it("says no to a held call without signing it", async () => {
   vi.mocked(post).mockResolvedValue(undefined);
   render(<ToolCalls chatId="chat" message={held} readOnly={false} onChanged={vi.fn()} />);
-  fireEvent.click(screen.getByRole("button", { name: "Do not sign" }));
+  fireEvent.click(screen.getByRole("button", { name: "Do not sign run_command call" }));
   await waitFor(() =>
     expect(post).toHaveBeenCalledWith("/api/chats/chat/messages/answer/tools/decision", {
       callId: "cmd",
@@ -195,4 +197,36 @@ it("offers a window for an hour of allowed tools", () => {
   };
   render(<ToolCalls chatId="chat" message={windowed} readOnly={false} onChanged={vi.fn()} />);
   expect(screen.getByText("Open a 60-minute window on desk")).toBeInTheDocument();
+});
+
+it("names the tool on every decision button, and none submits a form", () => {
+  render(<ToolCalls chatId="chat" message={message} readOnly={false} onChanged={vi.fn()} />);
+  for (const name of ["Approve rename call", "Decline rename call"]) {
+    expect(screen.getByRole("button", { name })).toHaveAttribute("type", "button");
+  }
+});
+
+it("names the tool on the signing buttons", () => {
+  render(<ToolCalls chatId="chat" message={held} readOnly={false} onChanged={vi.fn()} />);
+  expect(screen.getByRole("button", { name: "Do not sign run_command call" })).toHaveAttribute(
+    "type",
+    "button",
+  );
+});
+
+it("copies a call's arguments and its result", () => {
+  const writeText = vi.fn(() => Promise.resolve());
+  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+  const done: Message = {
+    ...message,
+    status: "done",
+    toolRounds: [
+      { calls: [{ ...message.toolRounds![0]!.calls[0]!, status: "done", result: "renamed" }] },
+    ],
+  };
+  render(<ToolCalls chatId="chat" message={done} readOnly={false} onChanged={vi.fn()} />);
+  fireEvent.click(screen.getByRole("button", { name: "Copy rename call arguments" }));
+  expect(writeText).toHaveBeenLastCalledWith(JSON.stringify({ from: "a", to: "b" }, null, 2));
+  fireEvent.click(screen.getByRole("button", { name: "Copy rename call result" }));
+  expect(writeText).toHaveBeenLastCalledWith("renamed");
 });

@@ -95,7 +95,7 @@ describe("a searched answer (W6)", () => {
     const writeText = vi.fn(() => Promise.resolve());
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
     show(answer({ content: "Draft.\n\nThe answer.", answerFrom: 6, searches: 1 }));
-    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+    fireEvent.click(screen.getByRole("button", { name: "Copy this answer" }));
     expect(writeText).toHaveBeenCalledWith("The answer.");
   });
 
@@ -165,7 +165,7 @@ describe("versions of a message (workbench-answer-versions.md)", () => {
 
   it("chooses the next version and reloads", async () => {
     const { onChanged } = view(answer({ versions }));
-    fireEvent.click(screen.getByRole("button", { name: "Next version" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next version of this answer" }));
     await waitFor(() => expect(onChanged).toHaveBeenCalled());
     expect(post).toHaveBeenCalledWith("/api/chats/c/messages/a3/choose");
   });
@@ -173,12 +173,12 @@ describe("versions of a message (workbench-answer-versions.md)", () => {
   it("names a message's versions, and stops at the first", () => {
     view(answer({ role: "user", content: "Hi", versions: { ...versions, index: 1 } }));
     expect(screen.getByRole("group", { name: "Message 1 of 3" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Previous version" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Previous version of this message" })).toBeDisabled();
   });
 
   it("waits while an answer runs, and says so", () => {
     view(answer({ versions }), { busy: true });
-    for (const name of ["Previous version", "Next version"]) {
+    for (const name of ["Previous version of this answer", "Next version of this answer"]) {
       const button = screen.getByRole("button", { name });
       expect(button).toBeDisabled();
       expect(button).toHaveAttribute("title", "Wait for the answer, or stop it.");
@@ -187,7 +187,7 @@ describe("versions of a message (workbench-answer-versions.md)", () => {
 
   it("only looks for the owner, even while an answer runs", () => {
     const { onLook, onChanged } = view(answer({ versions }), { busy: true, readOnly: true });
-    fireEvent.click(screen.getByRole("button", { name: "Previous version" }));
+    fireEvent.click(screen.getByRole("button", { name: "Previous version of this answer" }));
     expect(onLook).toHaveBeenCalledWith("a1");
     expect(post).not.toHaveBeenCalled();
     expect(onChanged).not.toHaveBeenCalled();
@@ -197,7 +197,7 @@ describe("versions of a message (workbench-answer-versions.md)", () => {
   it("keeps a hidden message's arrows for the owner (V5)", () => {
     const { onLook } = view(answer({ versions, redacted: { site: "desk" } }), { readOnly: true });
     expect(screen.getByTestId("redacted-message")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Next version" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next version of this answer" }));
     expect(onLook).toHaveBeenCalledWith("a3");
   });
 
@@ -212,9 +212,29 @@ describe("versions of a message (workbench-answer-versions.md)", () => {
     expect(post).toHaveBeenCalledWith("/api/chats/c/messages/early/retry");
   });
 
+  it("names what Try again and Copy act on, on an answer", () => {
+    view(answer({}));
+    expect(
+      screen.getByRole("button", { name: "Try again: write a new version of this answer" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy this answer" })).toBeInTheDocument();
+  });
+
+  it("names what Copy and Edit act on, on your message", () => {
+    view(answer({ role: "user", content: "Hi" }));
+    expect(screen.getByRole("button", { name: "Copy your message" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Edit your message" })).toBeInTheDocument();
+  });
+
+  it("names the Mac key in the edit hint", () => {
+    view(answer({ role: "user", content: "Hi" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit your message" }));
+    expect(screen.getByTestId("edit-note")).toHaveTextContent("Cmd+Enter on a Mac");
+  });
+
   it("says an edit keeps the earlier version", () => {
     view(answer({ role: "user", content: "Hi" }));
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit your message" }));
     expect(screen.getByTestId("edit-note")).toHaveTextContent(
       "Your earlier version and what followed it are kept. Use the arrows to go back.",
     );
