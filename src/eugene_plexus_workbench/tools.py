@@ -394,8 +394,8 @@ class Tools:
 
 def _ask_rule(tool: dict[str, Any]) -> frozenset[str] | bool | None:
     """Where the site says a call to `tool` must be asked about (2b.3b):
-    the workspace names, or a yes or no; None from a site that says nothing,
-    one older than 2b.3b, where every call is asked about as before."""
+    the workspace names, or a yes or no; None when its `_meta` says neither,
+    where every call is asked about."""
     meta = tool.get("_meta")
     rule = meta.get(ASK_META) if isinstance(meta, dict) else None
     if isinstance(rule, bool):
@@ -534,8 +534,8 @@ class ToolSession:
         elif isinstance(rule, frozenset):
             ask = arguments.get("folder") in rule
         else:
-            # Workbench's own folders (J75), other MCP servers, and a job site
-            # that says nothing: every call is asked about, as before.
+            # Workbench's own folders (J75), other MCP servers, and a job-site
+            # tool whose `_meta` says nothing: every call is asked about.
             ask = True
         return {
             "id": call["id"],
@@ -548,8 +548,6 @@ class ToolSession:
             "result": None,
             # Asked about here, or run under the site's `allow` (J70, J71).
             "ask": ask,
-            # The site gave rules, so it is told the person's word (J72).
-            "rules": rule is not None,
             # The site checks the person's signature itself (J14b).
             "signed": signed,
             **(
@@ -583,9 +581,8 @@ class ToolSession:
                             tool,
                             call["arguments"],
                             # Only an approved call is ever executed when it
-                            # asks; a site with no rules is never told (an
-                            # older root would refuse the field).
-                            asked=bool(call.get("ask")) and bool(call.get("rules")),
+                            # asks (J72).
+                            asked=bool(call.get("ask")),
                             approval=approval,
                         )
                         break

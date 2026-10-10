@@ -228,15 +228,6 @@ export interface JobSiteWorkspaceDetail extends JobSiteWorkspace {
   deny: string[];
 }
 
-export interface JobSiteFolder {
-  id: string;
-  name: string;
-  /** Absent since 2b.3b: Eugene keeps no paths (J76). */
-  path?: string | null;
-  writable: boolean;
-  people: { person: string; name: string; writable: boolean }[];
-}
-
 export interface SiteTool {
   name: string;
   title?: string | null;
@@ -283,8 +274,8 @@ export interface JobSite {
   /** The site's own id (`s-` and 26 characters), never its label. */
   id: string;
   /** `owner`: yours. `linked`: you linked your account on it (2b.3b), and
-   * see only your own there. Absent from an older Eugene: `owner`. */
-  role?: "owner" | "linked";
+   * see only your own there. */
+  role: "owner" | "linked";
   /** Your own workspaces there (2b.3b), by id and name. */
   workspaces?: JobSiteWorkspace[];
   /** The machine's name; not unique. */
@@ -295,7 +286,6 @@ export interface JobSite {
   reason: string | null;
   account: string | null;
   lastContactAt: string | null;
-  folders: JobSiteFolder[];
   /** The local servers its administrator added at the machine. */
   servers?: JobSiteServer[];
   /** Whether Eugene's owner may use folders here while Eugene is in developer mode (J6e). */
@@ -307,10 +297,10 @@ export interface JobSite {
   /** False where only the machine's owner is served (macOS). */
   sharing?: boolean;
   /** Whether the machine checks its owner's changes with the owner's own key
-   * (J14a). Absent from a machine older than that. */
+   * (J14a). Absent until the machine has reported. */
   signing?: SiteSigning;
   /** Whether the machine runs commands from Workbench (2b.4, J89). Absent
-   * from a machine older than that, which also does not check signed calls. */
+   * until the machine has reported. */
   commands?: SiteCommands;
 }
 
@@ -332,8 +322,6 @@ export interface SiteSigning {
   approvePage?: string | null;
   /** The machine takes a passkey from here, paired with a code it shows (J14a.3). */
   passkeys?: boolean;
-  /** The machine keeps each linked person's own workspaces and keys (2b.3b). */
-  people?: boolean;
 }
 
 /** What this Workbench needs to make a passkey (J14a.3): its relying party,
@@ -392,7 +380,7 @@ export interface SiteLink {
 }
 
 /** What Eugene says about whose account a person's calls run as on a machine.
- * Absent for a machine that predates linking. */
+ * Nothing for Eugene's own owner, who links no account. */
 export interface SiteLinking {
   linked?: boolean;
   account?: string;
@@ -435,7 +423,7 @@ export interface Models {
 export interface Progress {
   stage: "prompt" | "working" | "tool";
   tool?: string;
-  /** On `tool`: absent from a gateway before alpha.6, which sends only the start. */
+  /** On `tool`: whether the call started, finished or waits for approval. */
   phase?: "started" | "finished" | "approval";
   prompt_tokens?: number;
   cached_tokens?: number;

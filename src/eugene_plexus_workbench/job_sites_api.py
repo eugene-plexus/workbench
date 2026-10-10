@@ -73,28 +73,6 @@ class ServerEnable(BaseModel):
     enabled: StrictBool
 
 
-class FolderCreate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    name: str = Field(min_length=1, max_length=80)
-    path: str = Field(min_length=1, max_length=4096)
-    writable: StrictBool = False
-
-    _clean = field_validator("name", "path")(classmethod(lambda cls, v: _clean(v)))
-
-
-class Grant(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    name: str = Field(min_length=1, max_length=256)
-    writable: StrictBool = False
-
-    _clean = field_validator("name")(classmethod(lambda cls, v: _clean(v)))
-
-
-class People(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    people: list[Grant] = Field(max_length=256)
-
-
 class ToolGrant(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=128)
@@ -333,39 +311,12 @@ async def invite(request: Request, body: Invite) -> dict[str, Any]:
     }
 
 
-@router.post("/api/job-sites/{site}/folders", status_code=status.HTTP_201_CREATED)
-async def add_folder(request: Request, site: str, body: FolderCreate) -> dict[str, Any]:
-    answer = await _call(
-        request,
-        f"job-sites/{_site(site)}/folders",
-        {"name": body.name, "path": body.path, "writable": body.writable},
-    )
-    return answer or {}
-
-
-@router.post("/api/job-sites/{site}/folders/{folder_id}/remove")
-async def remove_folder(request: Request, site: str, folder_id: str) -> Response:
-    await _call(request, f"job-sites/{_site(site)}/folders/{quote(folder_id, safe='')}/remove", {})
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-
-@router.post("/api/job-sites/{site}/folders/{folder_id}/people")
-async def people(request: Request, site: str, folder_id: str, body: People) -> dict[str, Any]:
-    answer = await _call(
-        request,
-        f"job-sites/{_site(site)}/folders/{quote(folder_id, safe='')}/people",
-        {"people": [g.model_dump() for g in body.people]},
-    )
-    return answer or {}
-
-
 @router.post("/api/job-sites/{site}/workspaces", status_code=status.HTTP_201_CREATED)
 async def add_workspace(request: Request, site: str, body: WorkspaceCreate) -> dict[str, Any]:
     """A workspace of your own: your own account on the machine opens it.
     The machine holds it until you approve it with your own key (J68)."""
     payload: dict[str, Any] = {"name": body.name, "path": body.path, "writable": body.writable}
     if body.rules is not None:
-        # Without `command` when not given: an older Eugene refuses the field.
         payload["rules"] = body.rules.model_dump(exclude_none=True)
     if body.deny:
         payload["deny"] = body.deny

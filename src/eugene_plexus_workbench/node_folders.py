@@ -57,7 +57,8 @@ def rpc(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
 
 def _linking(entry: dict[str, Any]) -> dict[str, Any]:
     """What Eugene says about whose account a person's calls run as on a
-    machine (`linked`, `account`, `linkPage`); absent for an older Eugene."""
+    machine (`linked`, `account`, `linkPage`); absent for Eugene's own owner,
+    who links no account."""
     out: dict[str, Any] = {}
     if isinstance(entry.get("linked"), bool):
         out["linked"] = entry["linked"]

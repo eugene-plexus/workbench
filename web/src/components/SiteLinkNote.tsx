@@ -7,8 +7,8 @@ const problemOf = (error: unknown) => (error instanceof Error ? error.message : 
 
 /** Whose account a person's calls run as on one machine, and how to change
  * that: link their own account at the machine, or take the link away. Shown
- * only when Eugene says anything (a machine that predates linking says
- * nothing). */
+ * only when Eugene says anything (it says nothing of Eugene's own owner, who
+ * links no account). */
 export function SiteLinkNote({
   site,
   label,

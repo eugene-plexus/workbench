@@ -214,7 +214,7 @@ function Linking({
   const solo = site.sharing === false;
   const links = site.links;
   const names = new Map<string, string>();
-  for (const folder of site.folders) for (const p of folder.people) names.set(p.person, p.name);
+  for (const w of site.workspaces ?? []) for (const p of w.people) names.set(p.person, p.name);
   for (const entry of site.servers ?? []) for (const p of entry.people) names.set(p.person, p.name);
   const own = links?.find((l) => l.subject === sub);
   const others = (links ?? []).filter((l) => l.subject !== sub);
@@ -416,18 +416,11 @@ function LinkedSite({
       </p>
       <Linking site={site} sub={sub} base={base} busy={busy} act={act} />
       <Signing site={site} own />
-      {site.signing?.passkeys && site.signing.people && passkeys && (
+      {site.signing?.passkeys && passkeys && (
         <Passkeys site={site} base={base} context={passkeys} busy={busy} act={act} />
       )}
       <Calls site={site} sub={sub} base={base} busy={busy} act={act} owner={false} />
-      {site.signing?.people ? (
-        <Workspaces site={site} base={base} busy={busy} act={act} owner={false} />
-      ) : (
-        <p className="text-muted">
-          Eugene on {site.label} keeps only its owner&apos;s folders. Once it is updated, you can
-          keep workspaces of your own there.
-        </p>
-      )}
+      <Workspaces site={site} base={base} busy={busy} act={act} owner={false} />
       <Audit base={base} label={site.label} />
     </article>
   );
@@ -446,9 +439,6 @@ function Site({
   act: Act;
   passkeys?: PasskeyContext;
 }) {
-  const [name, setName] = useState("");
-  const [path, setPath] = useState("");
-  const [writable, setWritable] = useState(false);
   const [leaving, setLeaving] = useState(false);
   const base = `/api/job-sites/${encodeURIComponent(site.id)}`;
   return (
@@ -467,63 +457,7 @@ function Site({
         <Passkeys site={site} base={base} context={passkeys} busy={busy} act={act} />
       )}
       <Calls site={site} sub={sub} base={base} busy={busy} act={act} owner />
-      {site.signing?.people && <Workspaces site={site} base={base} busy={busy} act={act} owner />}
-      {!site.signing?.people &&
-        site.folders.map((folder) => (
-          <Folder
-            key={folder.id}
-            base={base}
-            folder={folder}
-            busy={busy}
-            act={act}
-            solo={site.sharing === false}
-          />
-        ))}
-      <form
-        hidden={Boolean(site.signing?.people)}
-        aria-label={`Add a folder on ${site.label}`}
-        className="flex flex-wrap items-end gap-3"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void act(async () => {
-            const value = await post(`${base}/folders`, { name, path, writable });
-            setName("");
-            setPath("");
-            setWritable(false);
-            return value;
-          });
-        }}
-      >
-        <label className="flex flex-col gap-1">
-          Folder name
-          <input
-            required
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-            className="rounded-plexus border border-line bg-transparent px-2 py-1"
-          />
-        </label>
-        <label className="flex flex-col gap-1">
-          Path on the machine
-          <input
-            required
-            value={path}
-            onChange={(event) => setPath(event.target.value)}
-            className="rounded-plexus border border-line bg-transparent px-2 py-1"
-          />
-        </label>
-        <label className="flex items-center gap-2">
-          <input
-            type="checkbox"
-            checked={writable}
-            onChange={(event) => setWritable(event.target.checked)}
-          />
-          Allow text writes
-        </label>
-        <button disabled={busy} className="rounded-plexus border border-line px-3 py-1">
-          Add folder
-        </button>
-      </form>
+      <Workspaces site={site} base={base} busy={busy} act={act} owner />
       {(site.servers ?? []).map((entry) => (
         <LocalServer
           key={entry.server.id}
@@ -938,115 +872,6 @@ function Passkeys({
         </div>
       ))}
     </section>
-  );
-}
-
-const READ = "read";
-const CHANGE = "change";
-
-function Folder({
-  base,
-  folder,
-  busy,
-  act,
-  solo,
-}: {
-  base: string;
-  folder: JobSite["folders"][number];
-  busy: boolean;
-  act: Act;
-  solo: boolean;
-}) {
-  const [people, setPeople] = useState(() =>
-    folder.people.map((p) => ({ name: p.name, access: p.writable ? CHANGE : READ })),
-  );
-  const [adding, setAdding] = useState("");
-  return (
-    <div
-      className="flex flex-col gap-2 rounded-plexus border border-line p-2"
-      data-testid={`folder-${folder.id}`}
-    >
-      <h3 className="font-semibold">
-        {folder.name} · {folder.writable ? "read and write text" : "read only"}
-      </h3>
-      <p className="break-all text-muted">{folder.path}</p>
-      <p>Who may use it. Include yourself to use it.</p>
-      {people.length === 0 && <p className="text-muted">Nobody yet.</p>}
-      {people.map((person, index) => (
-        <div key={person.name} className="flex flex-wrap items-center gap-2">
-          <span className="min-w-24">{person.name}</span>
-          <select
-            aria-label={`What ${person.name} may do in ${folder.name}`}
-            value={person.access}
-            onChange={(event) =>
-              setPeople((old) =>
-                old.map((p, i) => (i === index ? { ...p, access: event.target.value } : p)),
-              )
-            }
-            className="rounded-plexus border border-line bg-soft px-2 py-1"
-          >
-            <option value={READ}>Read</option>
-            {folder.writable && <option value={CHANGE}>May change files without asking you</option>}
-          </select>
-          <button
-            type="button"
-            className="text-error"
-            onClick={() => setPeople((old) => old.filter((_, i) => i !== index))}
-          >
-            Remove {person.name}
-          </button>
-        </div>
-      ))}
-      {!solo && (
-        <div className="flex flex-wrap items-end gap-2">
-          <label className="flex flex-col gap-1">
-            Add a person (how they sign in)
-            <input
-              value={adding}
-              onChange={(event) => setAdding(event.target.value)}
-              className="rounded-plexus border border-line bg-transparent px-2 py-1"
-            />
-          </label>
-          <button
-            type="button"
-            className="rounded-plexus border border-line px-3 py-1"
-            onClick={() => {
-              const name = adding.trim();
-              if (name && !people.some((p) => p.name.toLowerCase() === name.toLowerCase())) {
-                setPeople((old) => [...old, { name, access: READ }]);
-              }
-              setAdding("");
-            }}
-          >
-            Add
-          </button>
-        </div>
-      )}
-      <div className="flex flex-wrap gap-3">
-        <button
-          disabled={busy}
-          className="rounded-plexus border border-line px-3 py-1"
-          onClick={() =>
-            void act(() =>
-              post(`${base}/folders/${encodeURIComponent(folder.id)}/people`, {
-                people: people.map((p) => ({ name: p.name, writable: p.access === CHANGE })),
-              }),
-            )
-          }
-        >
-          Save who may use it
-        </button>
-        <button
-          disabled={busy}
-          className="text-error"
-          onClick={() =>
-            void act(() => post(`${base}/folders/${encodeURIComponent(folder.id)}/remove`))
-          }
-        >
-          Remove folder
-        </button>
-      </div>
-    </div>
   );
 }
 
