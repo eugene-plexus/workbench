@@ -43,7 +43,7 @@ it("removes a person's own link and asks the page to reload", async () => {
     />,
   );
   expect(screen.getByText("Runs as DESK\\ada")).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Remove my link" }));
+  fireEvent.click(screen.getByRole("button", { name: "Remove my link on desk" }));
   await waitFor(() => expect(changed).toHaveBeenCalled());
   expect(post).toHaveBeenCalledWith(`/api/job-sites/${SITE}/links/remove`, {});
 });
@@ -58,7 +58,7 @@ it("shows Eugene's own words when removing is refused", async () => {
       onChanged={() => undefined}
     />,
   );
-  fireEvent.click(screen.getByRole("button", { name: "Remove my link" }));
+  fireEvent.click(screen.getByRole("button", { name: "Remove my link on desk" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("elevated one-liner");
 });
 
@@ -92,4 +92,16 @@ it("shows the link prompt on a machine's tool in Tools", async () => {
   render(<Tools owner={false} onClose={() => undefined} />);
   expect(await screen.findByText("Runs as DESK\\owner")).toBeInTheDocument();
   expect(screen.getByText(/open http:\/\/127.0.0.1:8079\/link and sign in/)).toBeInTheDocument();
+});
+
+it("offers the link page to copy", () => {
+  render(
+    <SiteLinkNote
+      site={SITE}
+      label="desk"
+      linking={{ linked: false, account: "DESK\\owner", linkPage: "http://127.0.0.1:8079/link" }}
+      onChanged={() => undefined}
+    />,
+  );
+  expect(screen.getByRole("button", { name: "Copy the link page for desk" })).toBeInTheDocument();
 });

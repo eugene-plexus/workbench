@@ -1,5 +1,5 @@
 import { Download, ImagePlus, MessageSquarePlus, RotateCcw, Square, Trash2 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 
 import { api, del, fileUrl, post } from "../lib/api";
 import { watchStream } from "../lib/events";
@@ -81,7 +81,11 @@ export function Media({
   const [draft, setDraft] = useState<Draft | null>(null);
   const [addReference, setAddReference] = useState<MediaFile | null>(null);
   const [confirmEmpty, setConfirmEmpty] = useState(false);
+  // Which bin the list on screen was last read for: "Nothing here yet" waits for it.
+  const [listedFor, setListedFor] = useState<string | null>(null);
+  const tabRefs = useRef(new Map<Door, HTMLButtonElement>());
   const readOnly = person !== null;
+  const binKey = `${person?.sub ?? ""}|${door}`;
 
   const loadDoors = useCallback(async () => {
     try {
@@ -108,7 +112,8 @@ export function Media({
     } catch (error) {
       setListError(problemOf(error));
     }
-  }, [door, person]);
+    setListedFor(binKey);
+  }, [door, person, binKey]);
 
   useEffect(() => {
     void loadList();
@@ -187,6 +192,25 @@ export function Media({
     }
   }
 
+  /** WAI-ARIA tabs: arrows, Home and End move to a tab and show it. */
+  function moveTab(event: KeyboardEvent, from: Door) {
+    const at = tabs.indexOf(from);
+    const to =
+      event.key === "ArrowRight"
+        ? tabs[(at + 1) % tabs.length]
+        : event.key === "ArrowLeft"
+          ? tabs[(at - 1 + tabs.length) % tabs.length]
+          : event.key === "Home"
+            ? tabs[0]
+            : event.key === "End"
+              ? tabs[tabs.length - 1]
+              : undefined;
+    if (!to) return;
+    event.preventDefault();
+    tabRefs.current.get(to)?.focus();
+    if (to !== door) onDoor(to);
+  }
+
   return (
     <section aria-label="Bins · Media" className="min-h-0 flex-1 overflow-y-auto p-4">
       <div className="mx-auto flex max-w-4xl flex-col gap-4">
@@ -205,136 +229,174 @@ export function Media({
           {tabs.map((d) => (
             <button
               key={d}
+              ref={(el) => {
+                if (el) tabRefs.current.set(d, el);
+                else tabRefs.current.delete(d);
+              }}
+              type="button"
               role="tab"
+              id={`media-tab-${d}`}
               aria-selected={d === door}
+              aria-controls="media-panel"
+              tabIndex={d === door ? 0 : -1}
               onClick={() => d !== door && onDoor(d)}
+              onKeyDown={(event) => moveTab(event, d)}
               className={`px-2 pb-1 text-sm ${d === door ? "border-b-2 border-accent font-medium" : "text-muted"}`}
             >
               {DOOR_WORDS[d].tab}
             </button>
           ))}
         </div>
-        {readOnly && (
-          <p
-            role="status"
-            className="rounded-plexus border border-warn-line bg-warn-bg p-3 text-sm text-warn"
-          >
-            You are reading {person.name}&apos;s media. You cannot change, send or delete it.
-          </p>
-        )}
-        {doorsError && (
-          <p role="alert" className="text-error">
-            {doorsError}
-          </p>
-        )}
-        {!readOnly && nothingServes && <NothingServes me={me} door={door} />}
-        {!readOnly && !nothingServes && doors && door === "speech" && (
-          <SpeechForm
-            me={me}
-            models={doors.doors.speech.models}
-            draft={draft}
-            onMade={(made) => setItems((shown) => [made, ...shown.filter((i) => i.id !== made.id)])}
-          />
-        )}
-        {!readOnly && !nothingServes && doors && door === "transcription" && (
-          <TranscriptionForm
-            me={me}
-            models={doors.doors.transcription.models}
-            onMade={(made) => setItems((shown) => [made, ...shown.filter((i) => i.id !== made.id)])}
-          />
-        )}
-        {!readOnly && !nothingServes && doors && door === "video" && (
-          <VideoForm
-            me={me}
-            models={doors.doors.video.models}
-            draft={draft}
-            onMade={(made) => setItems((shown) => [made, ...shown.filter((i) => i.id !== made.id)])}
-          />
-        )}
-        {!readOnly && !nothingServes && doors && door === "images" && (
-          <ImageForm
-            me={me}
-            models={doors.doors.images.models}
-            draft={draft}
-            bin={items}
-            addReference={addReference}
-            onReferenceTaken={() => setAddReference(null)}
-            onMade={(made) => setItems((shown) => [made, ...shown.filter((i) => i.id !== made.id)])}
-            onBroughtIn={(item) =>
-              setItems((shown) => [item, ...shown.filter((i) => i.id !== item.id)])
-            }
-          />
-        )}
-        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line pt-3">
-          <h2 className="font-semibold">
-            {door === "video" ? "Work orders · Long jobs" : readOnly ? "Their bin" : "Your bin"}
-          </h2>
-          {!readOnly && (
-            <p className="text-sm text-muted" data-testid="bin-total">
-              Your bins hold {bytesWords(bytes)}.
+        <div
+          role="tabpanel"
+          id="media-panel"
+          aria-labelledby={`media-tab-${door}`}
+          className="flex flex-col gap-4"
+        >
+          {readOnly && (
+            <p
+              role="status"
+              className="rounded-plexus border border-warn-line bg-warn-bg p-3 text-sm text-warn"
+            >
+              You are reading {person.name}&apos;s media. You cannot change, send or delete it.
             </p>
           )}
-          {!readOnly && items.length > 0 && !confirmEmpty && (
-            <button className="text-sm text-muted underline" onClick={() => setConfirmEmpty(true)}>
-              Empty this bin
-            </button>
+          {doorsError && (
+            <p role="alert" className="text-error">
+              {doorsError}
+            </p>
           )}
-          {confirmEmpty && (
-            <span className="flex items-center gap-2 text-sm">
-              Delete everything in this bin? This cannot be undone.
-              <button className="text-error underline" onClick={() => void emptyBin()}>
-                Delete them all
-              </button>
-              <button className="underline" onClick={() => setConfirmEmpty(false)}>
-                Keep them
-              </button>
-            </span>
+          {!readOnly && nothingServes && <NothingServes me={me} door={door} />}
+          {!readOnly && !nothingServes && doors && door === "speech" && (
+            <SpeechForm
+              me={me}
+              models={doors.doors.speech.models}
+              draft={draft}
+              onMade={(made) =>
+                setItems((shown) => [made, ...shown.filter((i) => i.id !== made.id)])
+              }
+            />
           )}
-        </div>
-        {(listError || actionError) && (
-          <p role="alert" className="text-error">
-            {listError ?? actionError}{" "}
-            {actionError && (
-              <button className="ml-2 underline" onClick={() => setActionError(null)}>
-                Dismiss
+          {!readOnly && !nothingServes && doors && door === "transcription" && (
+            <TranscriptionForm
+              me={me}
+              models={doors.doors.transcription.models}
+              onMade={(made) =>
+                setItems((shown) => [made, ...shown.filter((i) => i.id !== made.id)])
+              }
+            />
+          )}
+          {!readOnly && !nothingServes && doors && door === "video" && (
+            <VideoForm
+              me={me}
+              models={doors.doors.video.models}
+              draft={draft}
+              onMade={(made) =>
+                setItems((shown) => [made, ...shown.filter((i) => i.id !== made.id)])
+              }
+            />
+          )}
+          {!readOnly && !nothingServes && doors && door === "images" && (
+            <ImageForm
+              me={me}
+              models={doors.doors.images.models}
+              draft={draft}
+              bin={items}
+              addReference={addReference}
+              onReferenceTaken={() => setAddReference(null)}
+              onMade={(made) =>
+                setItems((shown) => [made, ...shown.filter((i) => i.id !== made.id)])
+              }
+              onBroughtIn={(item) =>
+                setItems((shown) => [item, ...shown.filter((i) => i.id !== item.id)])
+              }
+            />
+          )}
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line pt-3">
+            <h2 className="font-semibold">
+              {door === "video" ? "Work orders · Long jobs" : readOnly ? "Their bin" : "Your bin"}
+            </h2>
+            {!readOnly && (
+              <p className="text-sm text-muted" data-testid="bin-total">
+                Your bins hold {bytesWords(bytes)}.
+              </p>
+            )}
+            {!readOnly && items.length > 0 && !confirmEmpty && (
+              <button
+                type="button"
+                className="text-sm text-muted underline"
+                onClick={() => setConfirmEmpty(true)}
+              >
+                Empty this bin
               </button>
             )}
-          </p>
-        )}
-        {items.length === 0 && !listError && (
-          <p className="text-sm text-muted">
-            {readOnly ? "Nothing here yet." : "Nothing here yet. What you make appears here."}
-          </p>
-        )}
-        <ul className="flex flex-col gap-3" data-testid="media-bin">
-          {items.map((item) => (
-            <MediaCard
-              key={item.id}
-              item={item}
-              focused={item.id === focus}
-              readOnly={readOnly}
-              onDelete={() => void remove(item)}
-              onStop={() =>
-                void post(`/api/media/${encodeURIComponent(item.id)}/stop`).catch((error) =>
-                  setActionError(problemOf(error)),
-                )
-              }
-              onAgain={() => void again(item)}
-              onEdit={() => {
-                // A refused request comes back with the field the gateway named marked.
-                setDraft({
-                  request: { ...item.request },
-                  field: fieldOf(item.error?.param),
-                  message: item.status === "failed" ? (item.error?.message ?? null) : null,
-                });
-                window.scrollTo({ top: 0 });
-              }}
-              onToChat={(file) => void toChat(item, file)}
-              onReference={(file) => setAddReference(file)}
-              onTextToChat={onTextToChat}
-            />
-          ))}
-        </ul>
+            {confirmEmpty && (
+              <span className="flex items-center gap-2 text-sm">
+                Delete all {items.length} {items.length === 1 ? "result" : "results"} in this bin?
+                This cannot be undone.
+                <button
+                  type="button"
+                  className="text-error underline"
+                  onClick={() => void emptyBin()}
+                >
+                  Delete them all
+                </button>
+                <button type="button" className="underline" onClick={() => setConfirmEmpty(false)}>
+                  Keep them
+                </button>
+              </span>
+            )}
+          </div>
+          {(listError || actionError) && (
+            <p role="alert" className="text-error">
+              {listError ?? actionError}{" "}
+              {actionError && (
+                <button className="ml-2 underline" onClick={() => setActionError(null)}>
+                  Dismiss
+                </button>
+              )}
+            </p>
+          )}
+          {items.length === 0 && !listError && listedFor !== binKey && (
+            <p role="status" className="text-sm text-muted">
+              Loading…
+            </p>
+          )}
+          {items.length === 0 && !listError && listedFor === binKey && (
+            <p className="text-sm text-muted">
+              {readOnly ? "Nothing here yet." : "Nothing here yet. What you make appears here."}
+            </p>
+          )}
+          <ul className="flex flex-col gap-3" data-testid="media-bin">
+            {items.map((item) => (
+              <MediaCard
+                key={item.id}
+                item={item}
+                focused={item.id === focus}
+                readOnly={readOnly}
+                onDelete={() => void remove(item)}
+                onStop={() =>
+                  void post(`/api/media/${encodeURIComponent(item.id)}/stop`).catch((error) =>
+                    setActionError(problemOf(error)),
+                  )
+                }
+                onAgain={() => void again(item)}
+                onEdit={() => {
+                  // A refused request comes back with the field the gateway named marked.
+                  setDraft({
+                    request: { ...item.request },
+                    field: fieldOf(item.error?.param),
+                    message: item.status === "failed" ? (item.error?.message ?? null) : null,
+                  });
+                  window.scrollTo({ top: 0 });
+                }}
+                onToChat={(file) => void toChat(item, file)}
+                onReference={(file) => setAddReference(file)}
+                onTextToChat={onTextToChat}
+              />
+            ))}
+          </ul>
+        </div>
       </div>
     </section>
   );
@@ -846,6 +908,9 @@ function MediaCard({
   const billed = billedWords(item);
   const upload = item.kind === "upload";
   const caption = captionOf(item);
+  // Each button says which card it acts on, by the start of the caption.
+  const start = caption.trim().length > 40 ? `${caption.trim().slice(0, 40)}…` : caption.trim();
+  const about = start || "this result";
   const heard = heardWords(item);
   const remakes = item.door !== "transcription";
   // A video costs money: it is sent again only through the form, which asks first.
@@ -880,9 +945,11 @@ function MediaCard({
                   </span>
                 )}
                 <span className="flex flex-wrap gap-2 text-sm">
-                  <DownloadButton file={file} />
+                  <DownloadButton file={file} about={about} />
                   {!readOnly && (image || item.door === "speech") && (
                     <button
+                      type="button"
+                      aria-label={`Send to a chat: ${file.name}, ${about}`}
                       className="flex items-center gap-1 text-accent"
                       onClick={() => onToChat(file)}
                     >
@@ -890,7 +957,12 @@ function MediaCard({
                     </button>
                   )}
                   {!readOnly && image && (
-                    <button className="text-accent" onClick={() => onReference(file)}>
+                    <button
+                      type="button"
+                      aria-label={`Use as reference: ${file.name}, ${about}`}
+                      className="text-accent"
+                      onClick={() => onReference(file)}
+                    >
                       Use as reference
                     </button>
                   )}
@@ -906,9 +978,11 @@ function MediaCard({
             {item.text}
           </p>
           <span className="flex flex-wrap items-center gap-3 text-sm">
-            <CopyButton text={item.text} />
+            <CopyButton text={item.text} label={`transcript: ${about}`} />
             {!readOnly && (
               <button
+                type="button"
+                aria-label={`Send to a chat: transcript, ${about}`}
                 className="flex items-center gap-1 text-accent"
                 onClick={() => onTextToChat(item.text ?? "")}
               >
@@ -958,33 +1032,63 @@ function MediaCard({
       {!readOnly && (
         <div className="flex flex-wrap items-center gap-3 text-sm">
           {item.status === "running" && (
-            <button className="flex items-center gap-1 text-accent" onClick={onStop}>
+            <button
+              type="button"
+              aria-label={`Stop: ${about}`}
+              className="flex items-center gap-1 text-accent"
+              onClick={onStop}
+            >
               <Square size={14} aria-hidden /> Stop
             </button>
           )}
           {!upload && remakes && item.status !== "running" && (
             <>
               {item.status === "done" && again && (
-                <button className="flex items-center gap-1 text-accent" onClick={onAgain}>
+                <button
+                  type="button"
+                  aria-label={`Again: ${about}`}
+                  className="flex items-center gap-1 text-accent"
+                  onClick={onAgain}
+                >
                   <RotateCcw size={14} aria-hidden /> Again
                 </button>
               )}
-              <button className="text-accent" onClick={onEdit}>
+              <button
+                type="button"
+                aria-label={`Edit and send: ${about}`}
+                className="text-accent"
+                onClick={onEdit}
+              >
                 Edit and send
               </button>
             </>
           )}
           {!confirm ? (
-            <button className="flex items-center gap-1 text-muted" onClick={() => setConfirm(true)}>
+            <button
+              type="button"
+              aria-label={`Delete: ${about}`}
+              className="flex items-center gap-1 text-muted"
+              onClick={() => setConfirm(true)}
+            >
               <Trash2 size={14} aria-hidden /> Delete
             </button>
           ) : (
             <span className="flex items-center gap-2">
               Delete this {upload ? "image" : "result"}? This cannot be undone.
-              <button className="text-error underline" onClick={onDelete}>
+              <button
+                type="button"
+                aria-label={`Delete for good: ${about}`}
+                className="text-error underline"
+                onClick={onDelete}
+              >
                 Delete
               </button>
-              <button className="underline" onClick={() => setConfirm(false)}>
+              <button
+                type="button"
+                aria-label={`Keep: ${about}`}
+                className="underline"
+                onClick={() => setConfirm(false)}
+              >
                 Keep
               </button>
             </span>
@@ -1015,7 +1119,13 @@ function BinImage({ file, alt }: { file: MediaFile; alt: string }) {
       if (made) URL.revokeObjectURL(made);
     };
   }, [file.id]);
-  if (failed) return <p className="text-sm text-error">{failed}</p>;
+  if (failed) {
+    return (
+      <p role="alert" className="text-sm text-error">
+        Could not load {file.name}: {failed}
+      </p>
+    );
+  }
   if (!url) return <div className="h-40 w-40 rounded-plexus bg-hover" aria-hidden />;
   return (
     <img
@@ -1066,7 +1176,13 @@ function BinVideo({
       if (made) URL.revokeObjectURL(made);
     };
   }, [file.id]);
-  if (failed) return <p className="text-sm text-error">{failed}</p>;
+  if (failed) {
+    return (
+      <p role="alert" className="text-sm text-error">
+        Could not load {file.name}: {failed}
+      </p>
+    );
+  }
   if (!url) return <div className="h-40 w-72 rounded-plexus bg-hover" aria-hidden />;
   const said = videoWords(asked, got);
   return (
@@ -1111,25 +1227,46 @@ function BinAudio({ file }: { file: MediaFile }) {
       if (made) URL.revokeObjectURL(made);
     };
   }, [file.id]);
-  if (failed) return <p className="text-sm text-error">{failed}</p>;
+  if (failed) {
+    return (
+      <p role="alert" className="text-sm text-error">
+        Could not load {file.name}: {failed}
+      </p>
+    );
+  }
   if (!url) return <div className="h-10 w-72 rounded-plexus bg-hover" aria-hidden />;
   return <audio controls src={url} data-testid="bin-audio" className="w-72 max-w-full" />;
 }
 
-function DownloadButton({ file }: { file: MediaFile }) {
+function DownloadButton({ file, about }: { file: MediaFile; about: string }) {
+  const [failed, setFailed] = useState<string | null>(null);
   return (
-    <button
-      className="flex items-center gap-1 text-accent"
-      onClick={async () => {
-        const url = await fileUrl(file.id);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = file.name;
-        link.click();
-        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-      }}
-    >
-      <Download size={14} aria-hidden /> Download
-    </button>
+    <>
+      <button
+        type="button"
+        aria-label={`Download: ${file.name}, ${about}`}
+        className="flex items-center gap-1 text-accent"
+        onClick={async () => {
+          setFailed(null);
+          try {
+            const url = await fileUrl(file.id);
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = file.name;
+            link.click();
+            window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+          } catch (error) {
+            setFailed(problemOf(error));
+          }
+        }}
+      >
+        <Download size={14} aria-hidden /> Download
+      </button>
+      {failed && (
+        <span role="alert" className="text-error">
+          Could not download {file.name}: {failed}
+        </span>
+      )}
+    </>
   );
 }

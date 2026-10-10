@@ -25,6 +25,7 @@ export function Sidebar({
   creating,
   error,
   onRetry,
+  chatsLoaded = true,
 }: {
   me: Me;
   chats: Chat[];
@@ -38,6 +39,8 @@ export function Sidebar({
   creating: boolean;
   error: string | null;
   onRetry: () => void;
+  /** False until the first list of chats has come back (or failed). */
+  chatsLoaded?: boolean;
 }) {
   const [query, setQuery] = useState("");
   const groups = chatGroups(chats, query);
@@ -138,7 +141,16 @@ export function Sidebar({
         </div>
       )}
       <ul className="flex-1 overflow-y-auto px-2" data-testid="chat-list">
-        {chats.length === 0 && <li className="px-2 py-1 text-sm text-muted">No chats yet.</li>}
+        {!chatsLoaded && !error && (
+          <li role="status" className="px-2 py-1 text-sm text-muted">
+            Loading chats…
+          </li>
+        )}
+        {chatsLoaded && chats.length === 0 && (
+          <li className="px-2 py-1 text-sm text-muted">
+            No chats yet. Choose New chat to start one.
+          </li>
+        )}
         {chats.length > 0 && groups.length === 0 && (
           <li role="status" className="px-2 py-2 text-sm text-muted">
             No chats match “{query}”.
@@ -239,6 +251,11 @@ function PeoplesChats({
           {error}
         </p>
       )}
+      {people === null && !error && (
+        <p role="status" className="py-1 text-muted">
+          Loading people…
+        </p>
+      )}
       {people?.length === 0 && (
         <p className="py-1 text-muted">Nobody else has used Workbench yet.</p>
       )}
@@ -247,6 +264,7 @@ function PeoplesChats({
           <li key={person.sub}>
             <button
               type="button"
+              aria-expanded={chats[person.sub] !== undefined}
               className="w-full truncate py-1 text-left hover:underline"
               onClick={async () => {
                 setError(null);
@@ -273,6 +291,7 @@ function PeoplesChats({
                 Their images ({person.media})
               </button>
             )}
+            {chats[person.sub]?.length === 0 && <p className="py-0.5 pl-3 text-muted">No chats.</p>}
             <ul className="pl-3">
               {chats[person.sub]?.map((chat) => (
                 <li key={chat.id}>

@@ -77,7 +77,7 @@ export function JobSites({ onClose, sub }: { onClose: () => void; sub?: string }
       <div className="flex items-center justify-between">
         <h1 className="text-lg font-semibold">Job sites (your machines)</h1>
         <button className="text-sm text-accent" onClick={onClose}>
-          Back to chats
+          Back to chat
         </button>
       </div>
       <p className="text-sm text-muted">
@@ -96,6 +96,7 @@ export function JobSites({ onClose, sub }: { onClose: () => void; sub?: string }
           {notice}
         </p>
       )}
+      {data === null && !problem && <p role="status">Loading job sites…</p>}
       {data?.sites.length === 0 && <p className="text-sm">You have no job sites yet.</p>}
       {data?.sites.map((site) =>
         site.role === "linked" ? (
@@ -169,12 +170,12 @@ export function JobSites({ onClose, sub }: { onClose: () => void; sub?: string }
             <pre className="whitespace-pre-wrap break-all rounded-plexus bg-soft p-2 text-xs">
               {invite.commands.windows}
             </pre>
-            <CopyButton text={invite.commands.windows} />
+            <CopyButton text={invite.commands.windows} label="the Windows command" />
             <h3 className="font-semibold">Linux</h3>
             <pre className="whitespace-pre-wrap break-all rounded-plexus bg-soft p-2 text-xs">
               {invite.commands.posix}
             </pre>
-            <CopyButton text={invite.commands.posix} />
+            <CopyButton text={invite.commands.posix} label="the Linux command" />
           </div>
         )}
       </section>
@@ -231,6 +232,7 @@ function Linking({
           <button
             type="button"
             disabled={busy}
+            aria-label={`Remove my link on ${site.label}`}
             className="text-error"
             onClick={() => void act(() => post(`${base}/links/remove`, {}))}
           >
@@ -286,6 +288,7 @@ function Linking({
           <pre className="whitespace-pre-wrap break-all rounded-plexus bg-soft p-2 text-xs">
             {LINUX_LINK}
           </pre>
+          <CopyButton text={LINUX_LINK} label="the Linux link command" />
           <p>Run it on the machine as an administrator, naming the person as they sign in.</p>
         </div>
       )}
@@ -338,6 +341,7 @@ export function Calls({
           </p>
           <button
             disabled={busy}
+            aria-label={`Close it now: your window on ${site.label}`}
             className="rounded-plexus border border-line px-3 py-1"
             onClick={() => void act(() => post(`${base}/window/close`))}
           >
@@ -358,7 +362,12 @@ export function Calls({
             rules ask about them.
           </p>
           {owner && !confirming && (
-            <button disabled={busy} className="text-error" onClick={() => setConfirming(true)}>
+            <button
+              disabled={busy}
+              aria-label={`Turn commands off on ${site.label}`}
+              className="text-error"
+              onClick={() => setConfirming(true)}
+            >
               Turn commands off
             </button>
           )}
@@ -367,6 +376,7 @@ export function Calls({
               Only an administrator at {site.label} can turn them back on.
               <button
                 disabled={busy}
+                aria-label={`Turn them off on ${site.label}`}
                 className="rounded-plexus border border-line px-3 py-1 text-error"
                 onClick={() =>
                   void act(() => post(`${base}/commands/withdraw`)).then(() => setConfirming(false))
@@ -374,7 +384,11 @@ export function Calls({
               >
                 Turn them off
               </button>
-              <button className="px-3 py-1" onClick={() => setConfirming(false)}>
+              <button
+                aria-label={`Keep them on ${site.label}`}
+                className="px-3 py-1"
+                onClick={() => setConfirming(false)}
+              >
                 Keep them
               </button>
             </span>
@@ -490,17 +504,26 @@ function Site({
           </p>
           <button
             disabled={busy}
+            aria-label={`Take it out: ${site.label}`}
             className="text-error"
             onClick={() => void act(() => post(`${base}/leave`))}
           >
             Take it out
           </button>
-          <button disabled={busy} onClick={() => setLeaving(false)}>
+          <button
+            disabled={busy}
+            aria-label={`Keep it: ${site.label}`}
+            onClick={() => setLeaving(false)}
+          >
             Keep it
           </button>
         </div>
       ) : (
-        <button className="self-start text-error" onClick={() => setLeaving(true)}>
+        <button
+          aria-label={`Take this machine out: ${site.label}`}
+          className="self-start text-error"
+          onClick={() => setLeaving(true)}
+        >
           Take this machine out
         </button>
       )}
@@ -711,6 +734,7 @@ function Passkeys({
         <button
           type="button"
           disabled={busy || working}
+          aria-label={`Review changes waiting on ${site.label}`}
           className="rounded-plexus border border-line px-3 py-1"
           onClick={() => void review()}
         >
@@ -719,6 +743,7 @@ function Passkeys({
         <button
           type="button"
           disabled={busy || working}
+          aria-label={`Add a passkey for ${site.label}`}
           className="rounded-plexus border border-line px-3 py-1"
           onClick={() => setPairing(!pairing)}
         >
@@ -747,6 +772,7 @@ function Passkeys({
             />
           </label>
           <button
+            aria-label={`Make and pair a passkey for ${site.label}`}
             disabled={busy || working || !looksLikeCode(code)}
             className="rounded-plexus border border-line px-3 py-1"
           >
@@ -811,12 +837,18 @@ function Passkeys({
                   <button
                     type="button"
                     disabled={busy || working}
+                    aria-label={`Remove it: ${p.label}`}
                     className="text-error"
                     onClick={() => void remove(p.id)}
                   >
                     Remove it
                   </button>
-                  <button type="button" disabled={working} onClick={() => setRemoving(null)}>
+                  <button
+                    type="button"
+                    disabled={working}
+                    aria-label={`Keep it: ${p.label}`}
+                    onClick={() => setRemoving(null)}
+                  >
                     Keep it
                   </button>
                 </>
@@ -824,6 +856,7 @@ function Passkeys({
                 <button
                   type="button"
                   disabled={busy || working}
+                  aria-label={`Remove passkey ${p.label}`}
                   className="text-error"
                   onClick={() => setRemoving(p.id)}
                 >
@@ -853,6 +886,7 @@ function Passkeys({
             <button
               type="button"
               disabled={busy || working || !key}
+              aria-label={`Approve with your passkey: ${item.id === "rules" ? `${site.label}'s rules` : `a change on ${site.label}`}`}
               className="rounded-plexus border border-line px-3 py-1"
               onClick={() => void approve(item.id)}
             >
@@ -862,6 +896,7 @@ function Passkeys({
               <button
                 type="button"
                 disabled={busy || working}
+                aria-label={`Turn down: a change on ${site.label}`}
                 className="text-error"
                 onClick={() => void reject(item.id)}
               >
@@ -988,6 +1023,7 @@ function LocalServer({
               </label>
               <button
                 type="button"
+                aria-label={`Add to those who may use ${server.name}`}
                 className="rounded-plexus border border-line px-3 py-1"
                 onClick={() => {
                   const name = adding.trim();
@@ -1029,6 +1065,9 @@ function LocalServer({
 }
 
 /** The machine's own audit log: who asked for what, and what it decided. */
+/** The most entries this page asks a machine for each time. */
+const AUDIT_LIMIT = 50;
+
 function Audit({ base, label }: { base: string; label: string }) {
   const [entries, setEntries] = useState<SiteAuditEntry[] | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
@@ -1037,11 +1076,12 @@ function Audit({ base, label }: { base: string; label: string }) {
       <button
         type="button"
         className="self-start text-accent"
+        aria-label={entries ? `Refresh what ${label} was asked` : undefined}
         onClick={async () => {
           setProblem(null);
           try {
             const page = await post<{ entries: SiteAuditEntry[] }>(`${base}/audit`, {
-              limit: 50,
+              limit: AUDIT_LIMIT,
             });
             setEntries(page.entries);
           } catch (error) {
@@ -1049,7 +1089,7 @@ function Audit({ base, label }: { base: string; label: string }) {
           }
         }}
       >
-        Show what {label} was asked
+        {entries ? "Refresh" : `Show what ${label} was asked`}
       </button>
       {problem && (
         <p role="alert" className="text-error">
@@ -1057,6 +1097,12 @@ function Audit({ base, label }: { base: string; label: string }) {
         </p>
       )}
       {entries?.length === 0 && <p className="text-muted">Nothing has been asked of it yet.</p>}
+      {entries && entries.length > 0 && (
+        <p role="status" className="text-xs text-muted">
+          Showing the latest {entries.length} {entries.length === 1 ? "entry" : "entries"}, newest
+          first. This list shows at most the latest {AUDIT_LIMIT}.
+        </p>
+      )}
       {entries && entries.length > 0 && (
         <ul className="flex flex-col gap-1 text-xs" aria-label={`What ${label} was asked`}>
           {entries.map((entry, index) => (

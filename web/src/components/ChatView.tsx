@@ -224,7 +224,7 @@ export function ChatView({
               if (e.key === "Escape" && !acting) setConfirmDelete(false);
             }}
           >
-            Delete this chat and its files?
+            {`Delete "${chat.title}" and the files attached to it?`}
             <button
               type="button"
               data-testid="confirm-delete"
@@ -245,7 +245,7 @@ export function ChatView({
               }}
               className="rounded-plexus border border-error-line bg-error-bg px-2 py-0.5 text-error"
             >
-              Delete
+              Delete chat
             </button>
             {/* Focus starts on the safe answer: Enter on a reflex keeps the chat. */}
             <button
@@ -267,15 +267,15 @@ export function ChatView({
           className="border-b border-error-line bg-error-bg px-4 py-2 text-sm text-error"
         >
           {actionError ?? error}{" "}
-          <button
-            onClick={() => {
-              setActionError(null);
-              void reload();
-            }}
-            className="underline"
-          >
-            Reload chat
-          </button>
+          {actionError ? (
+            <button type="button" onClick={() => setActionError(null)} className="underline">
+              Dismiss
+            </button>
+          ) : (
+            <button type="button" onClick={() => void reload()} className="underline">
+              Reload chat
+            </button>
+          )}
         </p>
       )}
       {chat.readOnly && (

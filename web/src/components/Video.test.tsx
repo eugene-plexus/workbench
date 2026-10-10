@@ -178,6 +178,18 @@ it("lists long jobs with how long each has run, and what a finished one cost", a
   expect(statuses[1]).toHaveTextContent("Eugene cannot cancel a video job");
   // A video is sent again only through the form, which asks first.
   expect(screen.queryByRole("button", { name: /Again/ })).toBeNull();
-  expect(screen.getAllByRole("button", { name: "Edit and send" })).toHaveLength(2);
+  expect(screen.getAllByRole("button", { name: /^Edit and send/ })).toHaveLength(2);
   expect(screen.queryByRole("button", { name: /Send to a chat/ })).toBeNull();
+});
+
+it("moves focus to the safe answer when the price appears, and back when declined", async () => {
+  serve([grok]);
+  show();
+  fireEvent.change(await screen.findByTestId("video-model"), { target: { value: grok.id } });
+  fireEvent.change(screen.getByTestId("video-prompt"), { target: { value: "a red ball" } });
+  fireEvent.click(screen.getByTestId("make-video"));
+  const notYet = screen.getByRole("button", { name: "Not yet" });
+  expect(notYet).toHaveFocus();
+  fireEvent.click(notYet);
+  expect(screen.getByTestId("make-video")).toHaveFocus();
 });

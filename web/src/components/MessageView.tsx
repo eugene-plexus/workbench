@@ -151,11 +151,14 @@ export function MessageView({
         )}
         <div className="flex flex-wrap items-center justify-end gap-3 text-xs text-muted">
           <MessageTime message={message} />
-          {editing === null && message.content && <CopyButton text={message.content} />}
+          {editing === null && message.content && (
+            <CopyButton text={message.content} label="your message" />
+          )}
           {arrows}
           {!readOnly && editing === null && !busy && (
             <button
               type="button"
+              aria-label="Edit your message"
               onClick={() => setEditing(message.content)}
               className="flex items-center gap-1 text-xs text-muted hover:text-fg"
             >
@@ -272,12 +275,13 @@ export function MessageView({
       )}
       <div className="flex flex-wrap items-center gap-3 break-all text-xs text-muted">
         {!running && <MessageTime message={message} />}
-        {!running && answer && <CopyButton text={answer} />}
+        {!running && answer && <CopyButton text={answer} label="this answer" />}
         {/* On any answer (V6); while one runs, it is stopped and kept (V2). */}
         {!readOnly && (
           <button
             type="button"
             data-testid="try-again"
+            aria-label="Try again: write a new version of this answer"
             disabled={acting}
             title={
               running
@@ -383,11 +387,21 @@ function VersionArrows({
       data-testid="versions"
       className="flex items-center gap-0.5 whitespace-nowrap"
     >
-      {arrow(-1, "Previous version", ChevronLeft, versions.index <= 1)}
+      {arrow(
+        -1,
+        `Previous version of this ${what.toLowerCase()}`,
+        ChevronLeft,
+        versions.index <= 1,
+      )}
       <span aria-hidden>
         {versions.index} of {versions.count}
       </span>
-      {arrow(1, "Next version", ChevronRight, versions.index >= versions.count)}
+      {arrow(
+        1,
+        `Next version of this ${what.toLowerCase()}`,
+        ChevronRight,
+        versions.index >= versions.count,
+      )}
     </span>
   );
 }

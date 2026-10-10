@@ -3,7 +3,7 @@ import { parseFrames } from "./events";
 import { SECRET_KEY, takeFragment } from "./session";
 import type { ChatDetail, Message, Model, Models } from "./types";
 import { applyEvent, place } from "./useChat";
-import { modelLabel, progressWords, statusWords } from "./words";
+import { EDIT_KEYS, modelLabel, progressWords, statusWords } from "./words";
 
 const model = (over: Partial<Model> = {}): Model => ({
   id: "qwen3-14b",
@@ -149,6 +149,13 @@ describe("what Workbench says", () => {
       "the key was refused",
     );
     expect(statusWords(message({ status: "done", finish: "length" }))).toMatch(/length limit/);
+  });
+
+  it("tells a length-limited answer what to do, by the setting's real label", () => {
+    const words = statusWords(message({ status: "done", finish: "length" }));
+    expect(words).toContain("Ask it to continue");
+    expect(words).toContain("Longest answer (tokens)");
+    expect(EDIT_KEYS).toContain("Cmd+Enter on a Mac");
   });
 });
 

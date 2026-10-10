@@ -183,3 +183,31 @@ it("offers translation only on a model that translates, and sends no language th
   expect(body.get("translate")).toBe("true");
   expect(body.get("language")).toBeNull();
 });
+
+it("shows a chosen recording's size against the limit, and removes it", async () => {
+  render(<TranscriptionForm me={me} models={[turbo]} onMade={() => undefined} />);
+  const file = new File([new Uint8Array(2 * 1024 * 1024)], "talk.webm", { type: "audio/webm" });
+  fireEvent.change(screen.getByTestId("choose-recording"), { target: { files: [file] } });
+  expect(await screen.findByTestId("chosen-recording")).toHaveTextContent(
+    "2.0 MiB of 25.0 MiB allowed",
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Remove recording" }));
+  expect(screen.queryByTestId("chosen-recording")).toBeNull();
+  expect(screen.getByRole("button", { name: "Choose a recording" })).toHaveFocus();
+});
+
+it("names the size when a recording is over the limit", async () => {
+  render(<TranscriptionForm me={me} models={[turbo]} onMade={() => undefined} />);
+  fireEvent.change(screen.getByTestId("transcription-model"), {
+    target: { value: "openrouter/whisper-turbo" },
+  });
+  const file = new File([new Uint8Array(26 * 1024 * 1024)], "long.webm", { type: "audio/webm" });
+  fireEvent.change(screen.getByTestId("choose-recording"), { target: { files: [file] } });
+  await screen.findByTestId("chosen-recording");
+  expect(
+    screen.getByText(
+      "That recording is 26.0 MiB, and Eugene carries at most 25.0 MiB to be transcribed.",
+    ),
+  ).toBeInTheDocument();
+  expect(screen.getByTestId("make-transcript")).toBeDisabled();
+});

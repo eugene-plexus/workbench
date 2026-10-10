@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
-import { api, del, post } from "../lib/api";
+import { api, del, fileUrl, post } from "../lib/api";
 import type { ImageModel, MediaItem } from "../lib/media";
 import type { Me } from "../lib/types";
 import { Media } from "./Media";
@@ -138,9 +138,9 @@ it("shows what was asked beside what came back, and deletes only when confirmed"
   expect(await screen.findByTestId("size-words")).toHaveTextContent(
     "Asked 333 × 333, got 1024 × 1024",
   );
-  fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+  fireEvent.click(screen.getByRole("button", { name: /^Delete/ }));
   expect(del).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+  fireEvent.click(screen.getByRole("button", { name: /^Delete/ }));
   await waitFor(() => expect(del).toHaveBeenCalledWith("/api/media/m1"));
 });
 
@@ -155,7 +155,7 @@ it("marks the field a refusal named when the request is edited", async () => {
   serve([flux], [failed]);
   show();
   expect(await screen.findByText(/the gateway named: size/)).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Edit and send" }));
+  fireEvent.click(screen.getByRole("button", { name: /^Edit and send/ }));
   expect(await screen.findByTestId("image-problem")).toHaveTextContent("size: not taken");
   expect(screen.getByRole("group", { name: "Shape" })).toHaveClass("border-error-line");
   expect(screen.getByTestId("image-prompt")).toHaveValue("a red barn");
@@ -233,7 +233,124 @@ it("shows someone else's bin read only, with no form or actions", async () => {
   expect(await screen.findByText(/You are reading Bo's media/)).toBeInTheDocument();
   expect(api).toHaveBeenCalledWith("/api/people/p-bo/media?door=images");
   expect(screen.queryByTestId("image-model")).toBeNull();
-  expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+  expect(screen.queryByRole("button", { name: /^Delete/ })).toBeNull();
   expect(screen.queryByRole("button", { name: /Send to a chat/ })).toBeNull();
   expect(screen.getByRole("button", { name: /Download/ })).toBeInTheDocument();
+});
+
+it("names the card on each bin action, and the confirm asks about that card", async () => {
+  serve([flux], [done]);
+  show();
+  fireEvent.click(await screen.findByRole("button", { name: "Delete: a red barn" }));
+  expect(screen.getByRole("button", { name: "Keep: a red barn" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Delete for good: a red barn" }));
+  await waitFor(() => expect(del).toHaveBeenCalledWith("/api/media/m1"));
+});
+
+it("names the card on the other bin actions too", async () => {
+  serve([flux], [done]);
+  show();
+  expect(
+    await screen.findByRole("button", { name: "Edit and send: a red barn" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "Download: image-1.png, a red barn" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "Use as reference: image-1.png, a red barn" }),
+  ).toBeInTheDocument();
+});
+
+it("labels the transcript's copy button with its card", async () => {
+  const heard: MediaItem = {
+    ...done,
+    door: "transcription",
+    request: { model: "m", name: "note.mp3" },
+    text: "The bench is ready.",
+    files: [],
+  };
+  serve([], [heard]);
+  show({ door: "transcription" });
+  expect(
+    await screen.findByRole("button", { name: "Copy transcript: Transcribed: note.mp3" }),
+  ).toBeInTheDocument();
+});
+
+it("says the bin is loading until its first list, then that it is empty", async () => {
+  let release: (v: unknown) => void = () => undefined;
+  vi.mocked(api).mockImplementation((path: string) =>
+    path === "/api/media/doors"
+      ? Promise.resolve({ doors: { images: { models: [flux] } } })
+      : new Promise((resolve) => (release = resolve)),
+  );
+  show();
+  expect(await screen.findByRole("status")).toHaveTextContent("Loading…");
+  expect(screen.queryByText(/Nothing here yet/)).toBeNull();
+  release({ items: [], bytes: 0 });
+  expect(await screen.findByText(/Nothing here yet/)).toBeInTheDocument();
+  expect(screen.queryByText("Loading…")).toBeNull();
+});
+
+it("gives the count when emptying a bin, and says it cannot be undone", async () => {
+  serve([flux], [done, { ...done, id: "m2" }]);
+  show();
+  fireEvent.click(await screen.findByRole("button", { name: "Empty this bin" }));
+  expect(
+    screen.getByText("Delete all 2 results in this bin? This cannot be undone."),
+  ).toBeInTheDocument();
+});
+
+it("says a failed download failed, naming the file and the cause", async () => {
+  serve([flux], [done]);
+  show();
+  const button = await screen.findByRole("button", { name: /^Download/ });
+  vi.mocked(fileUrl).mockRejectedValueOnce(new Error("The file is gone."));
+  fireEvent.click(button);
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Could not download image-1.png: The file is gone.",
+  );
+});
+
+it("names the file a bin image could not load", async () => {
+  vi.mocked(fileUrl).mockRejectedValueOnce(new Error("Not found."));
+  serve([flux], [done]);
+  show();
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Could not load image-1.png: Not found.",
+  );
+});
+
+it("follows the tabs pattern: one tab stop, arrows move and show, panel is linked", async () => {
+  vi.mocked(api).mockImplementation((path: string) =>
+    Promise.resolve(
+      path === "/api/media/doors"
+        ? {
+            doors: {
+              images: { models: [flux] },
+              speech: {
+                models: [
+                  { ...flux, id: "openrouter/kokoro", voices: ["af_heart"], formats: ["mp3"] },
+                ],
+              },
+              transcription: { models: [] },
+            },
+          }
+        : { items: [], bytes: 0 },
+    ),
+  );
+  const onDoor = vi.fn();
+  show({ door: "images", onDoor });
+  await screen.findByTestId("image-model");
+  const images = screen.getByRole("tab", { name: "Images" });
+  const speech = screen.getByRole("tab", { name: "Speech" });
+  expect(images).toHaveAttribute("tabindex", "0");
+  expect(speech).toHaveAttribute("tabindex", "-1");
+  expect(images).toHaveAttribute("type", "button");
+  expect(screen.getByRole("tabpanel")).toHaveAttribute("id", images.getAttribute("aria-controls"));
+  expect(screen.getByRole("tabpanel")).toHaveAccessibleName("Images");
+  fireEvent.keyDown(images, { key: "ArrowRight" });
+  expect(onDoor).toHaveBeenCalledWith("speech");
+  expect(speech).toHaveFocus();
+  fireEvent.keyDown(speech, { key: "Home" });
+  expect(images).toHaveFocus();
 });
