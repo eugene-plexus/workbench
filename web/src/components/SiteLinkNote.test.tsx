@@ -62,7 +62,7 @@ it("shows Eugene's own words when removing is refused", async () => {
   expect(await screen.findByRole("alert")).toHaveTextContent("elevated one-liner");
 });
 
-it("says nothing for a machine that predates linking", () => {
+it("says nothing when Eugene says nothing of linking", () => {
   const { container } = render(
     <SiteLinkNote site={SITE} label="desk" linking={{}} onChanged={() => undefined} />,
   );

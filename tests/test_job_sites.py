@@ -406,13 +406,13 @@ def test_a_change_the_machine_holds_reaches_the_page_as_202_with_its_words(
     ada = world.browser()
     ada.sign_in("p-ada")
     held = ada.post(
-        f"/api/job-sites/{DESK}/folders/site-notes/people",
-        json={"people": [{"name": "bo", "writable": False}]},
+        f"/api/job-sites/{DESK}/workspaces/{'a' * 32}/people",
+        json={"people": [{"name": "bo", "read": "allow", "change": "deny"}]},
     )
     assert held.status_code == 202, held.text
     assert held.json() == {"held": True, "message": words}
     assert held.headers["cache-control"] == "no-store"
-    assert state["managed"][-1][:3] == ("folders", "site-notes", "people")
+    assert state["managed"][-1][:3] == ("workspaces", "a" * 32, "people")
 
 
 # --- passkeys (J14a.3) --------------------------------------------------------------------

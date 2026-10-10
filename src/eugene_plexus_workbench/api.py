@@ -282,9 +282,7 @@ async def models(request: Request) -> dict[str, Any]:
                 "imageInput": bool(info.get("image_input")),
                 "audioInput": bool(info.get("audio_input")),
                 "fileInput": bool(info.get("file_input")),
-                # A gateway older than C3 does not say; offering search there
-                # is the old behaviour, and its refusal still names the reason.
-                "webSearch": info.get("web_search", True) is not False,
+                "webSearch": bool(info.get("web_search")),
                 "ready": (info.get("ready_backends") or 0) > 0,
                 "onDemand": bool(info.get("on_demand")),
             }

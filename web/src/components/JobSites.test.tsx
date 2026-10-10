@@ -15,47 +15,21 @@ const site = {
   reason: null,
   account: "NT SERVICE\\eugene-plexus-app-node-files",
   lastContactAt: new Date().toISOString(),
-  folders: [
+  workspaces: [
     {
       id: "f1",
       name: "Notes",
-      path: "C:\\Notes",
       writable: true,
-      people: [{ person: "p-bo", name: "bo", writable: true }],
+      rules: { read: "allow", change: "ask" },
+      people: [{ person: "p-bo", name: "bo", read: "allow", change: "allow" }],
     },
   ],
 };
 
 beforeEach(() => {
   vi.resetAllMocks();
-});
-
-it("shows a site's folders and who may use them, and saves the list its owner writes", async () => {
-  vi.mocked(api).mockResolvedValue({ sites: [site], canInvite: true });
-  vi.mocked(post).mockResolvedValue({});
-  render(<JobSites onClose={() => undefined} />);
-  const bo = await screen.findByLabelText("What bo may do in Notes");
-  expect(bo).toHaveValue("change");
-  expect(screen.getByRole("option", { name: "May change files without asking you" })).toBeTruthy();
-  fireEvent.change(screen.getByLabelText("Add a person (how they sign in)"), {
-    target: { value: "ada" },
-  });
-  fireEvent.click(screen.getByRole("button", { name: "Add" }));
-  fireEvent.change(bo, { target: { value: "read" } });
-  fireEvent.click(screen.getByRole("button", { name: "Save who may use it" }));
-  await waitFor(() =>
-    expect(post).toHaveBeenCalledWith(
-      "/api/job-sites/s-deskdeskdeskdeskdeskdeskde/folders/f1/people",
-      {
-        people: [
-          { name: "bo", writable: false },
-          { name: "ada", writable: false },
-        ],
-      },
-    ),
-  );
-  expect(screen.queryByText(/permission to a folder/)).toBeNull();
-  expect(screen.queryByText(/NT SERVICE/)).toBeNull();
+  // Each owner's page reads its workspaces from the machine when it opens.
+  vi.mocked(post).mockResolvedValue({ workspaces: [] });
 });
 
 const linked = {
@@ -120,14 +94,6 @@ it("serves only the owner where there is no folder boundary", async () => {
   expect(await screen.findByText(/This machine serves only you/)).toBeInTheDocument();
   expect(screen.queryByLabelText("Add a person (how they sign in)")).toBeNull();
   expect(screen.queryByText(/On a Linux machine/)).toBeNull();
-});
-
-it("offers only reading in a read-only folder", async () => {
-  const readOnly = { ...site, folders: [{ ...site.folders[0], writable: false }] };
-  vi.mocked(api).mockResolvedValue({ sites: [readOnly], canInvite: true });
-  render(<JobSites onClose={() => undefined} />);
-  await screen.findByLabelText("What bo may do in Notes");
-  expect(screen.queryByRole("option", { name: "May change files without asking you" })).toBeNull();
 });
 
 it("turns a local server on and says who may use which of its tools", async () => {
@@ -307,10 +273,12 @@ it("asks for the rules to be approved, and counts what is waiting once signed", 
 it("shows a held change as waiting at the machine, not as a refusal", async () => {
   vi.mocked(api).mockResolvedValue({ sites: [site], canInvite: true });
   const words = `Waiting for your approval on desk, at ${approvePage}.`;
-  vi.mocked(post).mockResolvedValue({ held: true, message: words });
+  vi.mocked(post).mockImplementation(async (path: string) =>
+    path.endsWith("/workspaces/list") ? { workspaces: [] } : { held: true, message: words },
+  );
   render(<JobSites onClose={() => undefined} />);
-  await screen.findByLabelText("What bo may do in Notes");
-  fireEvent.click(screen.getByRole("button", { name: "Save who may use it" }));
+  await screen.findByLabelText("bo changes files");
+  fireEvent.click(screen.getByRole("button", { name: "Save whom it is shared with" }));
   expect(await screen.findByTestId("job-site-held")).toHaveTextContent(words);
   expect(screen.queryByRole("alert")).toBeNull();
 });
@@ -385,7 +353,7 @@ describe("passkeys from here (J14a.3)", () => {
   it("offers nothing for a machine that does not take passkeys", async () => {
     vi.mocked(api).mockResolvedValue({ sites: [site], canInvite: true, passkeys: context });
     render(<JobSites onClose={() => undefined} sub="p-ada" />);
-    await screen.findByLabelText("What bo may do in Notes");
+    await screen.findByTestId(`job-site-${site.id}`);
     expect(screen.queryByTestId(`passkeys-${site.id}`)).toBeNull();
   });
 
@@ -517,7 +485,7 @@ describe("passkeys from here (J14a.3)", () => {
   });
 });
 
-const people = { state: "signed", held: 0, approvePage: null, passkeys: true, people: true };
+const people = { state: "signed", held: 0, approvePage: null, passkeys: true };
 
 it("shows a site you are linked to with only your own: your workspaces and your keys", async () => {
   const linked = {
@@ -529,7 +497,6 @@ it("shows a site you are linked to with only your own: your workspaces and your 
     reason: null,
     account: null,
     lastContactAt: new Date().toISOString(),
-    folders: [],
     servers: [],
     workspaces: [
       {
@@ -570,7 +537,7 @@ it("shows a site you are linked to with only your own: your workspaces and your 
   await waitFor(() =>
     expect(post).toHaveBeenCalledWith(
       `/api/job-sites/${site.id}/workspaces/${"a".repeat(32)}/rules`,
-      { rules: { read: "allow", change: "deny" }, deny: [".env", "secrets/"] },
+      { rules: { read: "allow", change: "deny", command: "deny" }, deny: [".env", "secrets/"] },
     ),
   );
 });
@@ -583,7 +550,7 @@ it("shows the rules in effect after a change held for the key, never the change 
     rules: { read: "allow", change: "deny" },
     people: [{ person: "p-bo", name: "bo", read: "allow", change: "deny" }],
   };
-  const owned = { ...site, folders: [], workspaces: [workspace], signing: people };
+  const owned = { ...site, workspaces: [workspace], signing: people };
   vi.mocked(api).mockResolvedValue({ sites: [owned], canInvite: true });
   const live = { ...workspace, path: "D:\\notes", deny: [".env"] };
   vi.mocked(post).mockImplementation(async (path: string) =>
@@ -617,7 +584,7 @@ it("shows the rules in effect after a change held for the key, never the change 
 });
 
 it("adds a workspace by its path, with its rules and paths to hide", async () => {
-  const owned = { ...site, folders: [], workspaces: [], signing: people };
+  const owned = { ...site, workspaces: [], signing: people };
   vi.mocked(api).mockResolvedValue({ sites: [owned], canInvite: true });
   vi.mocked(post).mockResolvedValue({ held: true, message: "Waiting for your approval." });
   render(<JobSites onClose={() => undefined} />);
@@ -634,7 +601,8 @@ it("adds a workspace by its path, with its rules and paths to hide", async () =>
       name: "Code",
       path: "D:\\code",
       writable: true,
-      rules: { read: "ask", change: "ask" },
+      // This machine reports no commands: the choice was not shown, so denied.
+      rules: { read: "ask", change: "ask", command: "deny" },
       deny: ["*.pem", ".env"],
     }),
   );
@@ -651,7 +619,7 @@ it("shares an owner's workspace with each person's rules there (J69)", async () 
     rules: { read: "allow", change: "deny" },
     people: [{ person: "p-bo", name: "bo", read: "allow", change: "deny" }],
   };
-  const owned = { ...site, folders: [], workspaces: [workspace], signing: people };
+  const owned = { ...site, workspaces: [workspace], signing: people };
   vi.mocked(api).mockResolvedValue({ sites: [owned], canInvite: true });
   vi.mocked(post).mockResolvedValue({ workspaces: [] });
   render(<JobSites onClose={() => undefined} />);
@@ -682,7 +650,7 @@ it("shares an owner's workspace with each person's rules there (J69)", async () 
 const commands = { allowed: true, consentedAt: "2026-10-08T12:00:00Z" };
 
 it("adds a workspace whose commands ask for a signature, where the machine runs them", async () => {
-  const owned = { ...site, folders: [], workspaces: [], signing: people, commands };
+  const owned = { ...site, workspaces: [], signing: people, commands };
   vi.mocked(api).mockResolvedValue({ sites: [owned], canInvite: true });
   vi.mocked(post).mockResolvedValue({ held: true, message: "Waiting for your approval." });
   render(<JobSites onClose={() => undefined} />);
@@ -709,7 +677,6 @@ it("shows your open window, closes it, and lets the owner turn commands off", as
   const until = new Date(Date.now() + 30 * 60_000).toISOString();
   const owned = {
     ...site,
-    folders: [],
     workspaces: [],
     signing: people,
     commands,
@@ -734,7 +701,6 @@ it("says how an administrator allows commands where they are not allowed", async
   const reason = "An administrator has not allowed commands on desk.";
   const owned = {
     ...site,
-    folders: [],
     workspaces: [],
     signing: people,
     commands: { allowed: false, reason },

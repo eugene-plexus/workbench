@@ -299,19 +299,6 @@ def test_allow_runs_without_asking_and_ask_waits_for_the_person(
     assert remote["calls"][1]["asked"] is True
 
 
-def test_a_site_that_gives_no_rules_is_asked_about_and_never_told(
-    remote_world: tuple[World, dict[str, Any]],
-) -> None:
-    """A site from before 2b.3b: every call is asked about, and `asked` is
-    not sent, since a root from before then would refuse the field."""
-    world, remote = remote_world
-    ada, _, chat = select(world)
-    reading = offer(world, ada, chat, "read_text", folder="Notes", path="note.txt")
-    assert reading["toolRounds"][0]["calls"][0]["ask"] is True
-    assert finish(ada, chat, reading)["status"] == "done"
-    assert "asked" not in remote["calls"][0]
-
-
 def test_forty_calls_the_rules_allow_finish_without_a_prompt(
     remote_world: tuple[World, dict[str, Any]],
 ) -> None:

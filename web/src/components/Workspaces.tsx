@@ -249,9 +249,9 @@ function Workspace({
                 rules: {
                   read: shownRead,
                   change: workspace.writable ? shownChange : "deny",
-                  // Only to a machine that runs commands: an older Eugene
-                  // would refuse the field.
-                  ...(commands ? { command: workspace.writable ? shownCommand : "deny" } : {}),
+                  // Never a choice the person was not shown: a machine that
+                  // runs no commands keeps them denied.
+                  command: workspace.writable && commands ? shownCommand : "deny",
                 },
                 deny: parsed,
               }),
@@ -452,7 +452,7 @@ function AddWorkspace({
             rules: {
               read,
               change: writable ? change : "deny",
-              ...(commands ? { command: writable ? command : "deny" } : {}),
+              command: writable && commands ? command : "deny",
             },
             deny: parsed,
           });
