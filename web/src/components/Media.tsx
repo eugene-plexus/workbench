@@ -39,6 +39,7 @@ import { CopyButton } from "./CopyButton";
 import { Mascot } from "./Mascot";
 import { VideoForm } from "./VideoForm";
 import { WorkingScene } from "./WorkingScene";
+import { useClock } from "../lib/useClock";
 
 const problemOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
@@ -1135,18 +1136,6 @@ function BinImage({ file, alt }: { file: MediaFile; alt: string }) {
       className="max-h-64 max-w-xs rounded-plexus border border-line object-contain"
     />
   );
-}
-
-/** The time now, in seconds, ticking each second while `running`: a running
- * video says how long it has run (§5). */
-function useClock(running: boolean): number {
-  const [now, setNow] = useState(() => Date.now() / 1000);
-  useEffect(() => {
-    if (!running) return;
-    const tick = window.setInterval(() => setNow(Date.now() / 1000), 1000);
-    return () => window.clearInterval(tick);
-  }, [running]);
-  return running ? now : Date.now() / 1000;
 }
 
 /** A bin video, played from a blob: address as images are, with its own

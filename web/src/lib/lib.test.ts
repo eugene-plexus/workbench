@@ -2,8 +2,8 @@ import { attachmentProblem, searchProblem } from "../components/Composer";
 import { parseFrames } from "./events";
 import { SECRET_KEY, takeFragment } from "./session";
 import type { ChatDetail, Message, Model, Models } from "./types";
-import { applyEvent, place } from "./useChat";
-import { EDIT_KEYS, modelLabel, progressWords, statusWords } from "./words";
+import { applyEvent, place, progressAfter } from "./useChat";
+import { EDIT_KEYS, modelLabel, progressWords, statusWords, workingWords } from "./words";
 
 const model = (over: Partial<Model> = {}): Model => ({
   id: "qwen3-14b",
@@ -151,11 +151,82 @@ describe("what Workbench says", () => {
     expect(statusWords(message({ status: "done", finish: "length" }))).toMatch(/length limit/);
   });
 
-  it("tells a length-limited answer what to do, by the setting's real label", () => {
-    const words = statusWords(message({ status: "done", finish: "length" }));
-    expect(words).toContain("Ask it to continue");
-    expect(words).toContain("Longest answer (tokens)");
+  it("tells a length-limited answer what to do, by the setting that capped it", () => {
+    // 2026-10-10: the cap was the install's 4,096, and this told Troy to raise
+    // his chat's own setting.
+    const capped = (outputCap: Message["outputCap"]) =>
+      statusWords(message({ status: "done", finish: "length", outputCap }));
+    expect(capped({ tokens: 4096, source: "install" })).toContain(
+      "this install's output cap of 4,096 tokens (Default max output tokens",
+    );
+    expect(capped({ tokens: 2000, source: "profile" })).toContain(
+      "the 2,000-token cap on this model's Library profile",
+    );
+    expect(capped({ tokens: 512, source: "request" })).toContain(
+      "this chat's “Longest answer (tokens)”, 512",
+    );
+    // Not said, or none sent: no setting is blamed.
+    const unsaid = capped(null);
+    expect(unsaid).toContain(
+      "an output cap, the model's context window, or its backend's own limit",
+    );
+    expect(unsaid).not.toContain("Longest answer");
+    for (const said of [capped(null), capped({ tokens: 1, source: "install" })]) {
+      expect(said?.toLowerCase()).toContain("ask it to continue");
+    }
     expect(EDIT_KEYS).toContain("Cmd+Enter on a Mac");
+  });
+});
+
+describe("what an answer being written is doing (2026-10-10)", () => {
+  const at = 1_000;
+  const writing = (over: Partial<Message> = {}) => message({ createdAt: at, ...over });
+
+  it("waits until something comes, then says thinking or writing", () => {
+    expect(workingWords(null, writing(), at + 5)).toBe("Waiting for the model…");
+    expect(workingWords({ stage: "working" }, writing(), at + 5)).toBe("The model is working…");
+    // Troy's case: Strata counts only at the end, so the time it has run.
+    expect(workingWords(null, writing({ reasoning: "Let me see" }), at + 72)).toBe(
+      "Thinking · 1 min 12 s",
+    );
+    expect(workingWords(null, writing({ content: "The answer" }), at + 18)).toBe(
+      "Writing the answer · 18 s",
+    );
+  });
+
+  it("says the backend's own count where it gives one", () => {
+    const count = {
+      stage: "generating" as const,
+      generated_tokens: 1234,
+      tokens_per_second: 83.14,
+    };
+    expect(workingWords(count, writing({ reasoning: "Let me see" }), at + 72)).toBe(
+      "Thinking · 1,234 tokens · 83.1 tok/s",
+    );
+    expect(
+      workingWords({ stage: "generating", generated_tokens: 7 }, writing({ content: "Hi" }), at),
+    ).toBe("Writing the answer · 7 tokens");
+  });
+
+  it("keeps saying what it reads and which tool it runs", () => {
+    expect(
+      workingWords({ stage: "tool", tool: "web_search" }, writing({ reasoning: "x" }), at + 3),
+    ).toBe("Searching the web…");
+    expect(
+      workingWords(
+        { stage: "prompt", prompt_tokens: 100, processed_tokens: 50, cached_tokens: 0 },
+        writing(),
+        at,
+      ),
+    ).toBe("Reading your message: 50%");
+  });
+
+  it("keeps a running count across the pieces it counts, and clears anything else", () => {
+    const delta = { type: "delta" as const, id: "a", reasoning: "more" };
+    const count = { stage: "generating" as const, generated_tokens: 10 };
+    expect(progressAfter(delta, count)).toBeUndefined();
+    expect(progressAfter(delta, { stage: "working" })).toBeNull();
+    expect(progressAfter({ type: "delta", id: "a" }, { stage: "working" })).toBeUndefined();
   });
 });
 

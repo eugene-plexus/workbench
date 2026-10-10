@@ -508,6 +508,9 @@ class FakeGateway:
     #: Search Suggestions HTML a searched answer's final chunk carries; `{n}`
     #: is the request's number (google-search-account.md GS4).
     suggestions: list[str] = field(default_factory=list)
+    #: How an answer ends, and the output cap its final chunk says was sent.
+    finish: str = "stop"
+    output_cap: dict[str, Any] | None = None
     #: The image models listed (media screens), as the gateway lists them.
     image_models: list[dict[str, Any]] = field(default_factory=lambda: list(IMAGE_MODELS))
     audio_models: list[dict[str, Any]] = field(default_factory=lambda: list(AUDIO_MODELS))
@@ -780,6 +783,8 @@ class FakeGateway:
                     found["search_suggestions"] = [
                         s.replace("{n}", str(number)) for s in self.suggestions
                     ]
+                if self.output_cap is not None:
+                    found["output_cap"] = self.output_cap
                 return found
 
             async def frames() -> AsyncIterator[str]:
@@ -870,7 +875,7 @@ class FakeGateway:
                         }
                     ]
                     yield chunk({"annotations": annotations})
-                yield chunk({}, finish="stop", extension=extension(bool(annotations)))
+                yield chunk({}, finish=self.finish, extension=extension(bool(annotations)))
                 yield "data: [DONE]\n\n"
 
             return StreamingResponse(frames(), media_type="text/event-stream")

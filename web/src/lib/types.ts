@@ -44,6 +44,14 @@ export interface Message {
   /** Its place among its versions, from 1: the edits of a message, or the
    * tries of an answer, oldest first (workbench-answer-versions.md). */
   versions?: Versions;
+  /** The output cap the gateway sent for this answer and where it came
+   * from; null when it sent none or did not say (2026-10-10). */
+  outputCap?: OutputCap | null;
+}
+
+export interface OutputCap {
+  tokens: number;
+  source: "request" | "profile" | "install";
 }
 
 export interface Versions {
@@ -421,13 +429,17 @@ export interface Models {
 }
 
 export interface Progress {
-  stage: "prompt" | "working" | "tool";
+  stage: "prompt" | "working" | "tool" | "generating";
   tool?: string;
   /** On `tool`: whether the call started, finished or waits for approval. */
   phase?: "started" | "finished" | "approval";
   prompt_tokens?: number;
   cached_tokens?: number;
   processed_tokens?: number;
+  /** On `generating`: tokens written so far, thinking included, as the
+   * backend counted them. Only a backend that counts as it writes sends it. */
+  generated_tokens?: number;
+  tokens_per_second?: number;
 }
 
 export type ChatEvent =
