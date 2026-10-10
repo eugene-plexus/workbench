@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -93,7 +93,8 @@ CREATE TABLE IF NOT EXISTS messages (
     tool_rounds TEXT NOT NULL DEFAULT '[]',
     parent_id TEXT,
     chosen INTEGER NOT NULL DEFAULT 1,
-    search_suggestions TEXT NOT NULL DEFAULT '[]'
+    search_suggestions TEXT NOT NULL DEFAULT '[]',
+    output_cap TEXT
 );
 CREATE INDEX IF NOT EXISTS messages_by_chat ON messages (chat_id, seq);
 CREATE TABLE IF NOT EXISTS files (
@@ -192,6 +193,11 @@ _MIGRATIONS: dict[int, list[str]] = {
     # person sees them in their own history (google-search-account.md GS4).
     8: [
         "ALTER TABLE messages ADD COLUMN search_suggestions TEXT NOT NULL DEFAULT '[]'",
+    ],
+    # The output cap the gateway sent for the answer and where it came from,
+    # so a length stop names the setting that made it (2026-10-10).
+    9: [
+        "ALTER TABLE messages ADD COLUMN output_cap TEXT",
     ],
 }
 
@@ -327,6 +333,10 @@ class Message:
     #: had any, in the order the searches ran. Shown unmodified to the person
     #: who asked; never logged, measured, or sent to a model (GS4).
     search_suggestions: list[str] = field(default_factory=list)
+    #: The output cap the gateway sent for this answer and where it came
+    #: from (`{"tokens", "source"}`, gateway.yaml `OutputCap`); None when it
+    #: sent none or did not say.
+    output_cap: dict[str, Any] | None = None
 
 
 @dataclass
@@ -418,6 +428,7 @@ def _message(row: sqlite3.Row) -> Message:
         parent_id=row["parent_id"],
         chosen=bool(row["chosen"]),
         search_suggestions=json.loads(row["search_suggestions"] or "[]"),
+        output_cap=json.loads(row["output_cap"]) if row["output_cap"] else None,
     )
 
 
@@ -479,9 +490,17 @@ _MESSAGE_FIELDS = {
     "reasoning_from",
     "tool_rounds",
     "search_suggestions",
+    "output_cap",
 }
 _CHAT_FIELDS = {"title", "model", "settings", "search", "updated_at"}
-_JSON_FIELDS = {"attachments", "sources", "settings", "tool_rounds", "search_suggestions"}
+_JSON_FIELDS = {
+    "attachments",
+    "sources",
+    "settings",
+    "tool_rounds",
+    "search_suggestions",
+    "output_cap",
+}
 
 
 def interrupt_tools(rounds: list[dict[str, Any]]) -> None:

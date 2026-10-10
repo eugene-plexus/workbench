@@ -3,6 +3,7 @@
  * Eugene's own terms where they are Eugene's (model, key, gateway).
  */
 
+import { elapsedWords } from "./media";
 import type { Message, Model, Progress } from "./types";
 
 /** `32k`, as the console says it (ui/src/lib/starter.ts `contextLabel`). */
@@ -50,6 +51,31 @@ export function progressWords(progress: Progress | null | undefined): string {
 }
 
 /**
+ * What an answer still being written is doing (2026-10-10, Troy: it said
+ * "Waiting for the model" through minutes of reasoning). Thinking, or
+ * writing the answer, with the backend's own count of tokens where it
+ * gives one, and otherwise how long the answer has run. Never an estimate.
+ * `now` is in seconds, as `createdAt` is.
+ */
+export function workingWords(
+  progress: Progress | null | undefined,
+  message: Pick<Message, "content" | "reasoning" | "createdAt">,
+  now: number,
+): string {
+  if (progress && progress.stage !== "generating" && progress.stage !== "working") {
+    return progressWords(progress);
+  }
+  const doing = message.content ? "Writing the answer" : message.reasoning ? "Thinking" : null;
+  const written = progress?.stage === "generating" ? progress.generated_tokens : undefined;
+  if (written) {
+    const speed = progress?.tokens_per_second;
+    return `${doing ?? "Writing"} · ${written.toLocaleString()} tokens${speed ? ` · ${speed.toFixed(1)} tok/s` : ""}`;
+  }
+  if (doing) return `${doing} · ${elapsedWords(Math.max(0, now - message.createdAt))}`;
+  return progressWords(progress?.stage === "working" ? progress : null);
+}
+
+/**
  * A reply split where its last web search fell (workbench#1). A model told
  * to search can write a whole answer first; that text is a draft, shown
  * folded, and the answer is what it wrote after reading the results. A reply
@@ -74,9 +100,26 @@ export const DRAFT_LABEL = "Written before searching";
 export const DRAFT_HINT = "The model wrote this before it read what the search found.";
 export const SEARCHED_MARK = "Searched the web";
 
-/** Names the setting by its label in Chat settings (ChatSettings.tsx). */
-export const LENGTH_LIMIT_NOTE =
-  "The answer reached its length limit. Ask it to continue, or raise “Longest answer (tokens)” in this chat's settings.";
+/**
+ * Why an answer stopped at a length, naming the setting that made it when
+ * the gateway said (2026-10-10: a Strata answer stopped at the install's
+ * 4,096 and this told Troy to raise his chat's own setting).
+ */
+export function lengthLimitNote(message: Pick<Message, "outputCap">): string {
+  const cap = message.outputCap;
+  if (!cap) {
+    return "The answer reached a length limit: an output cap, the model's context window, or its backend's own limit. Ask it to continue.";
+  }
+  const tokens = cap.tokens.toLocaleString();
+  switch (cap.source) {
+    case "request":
+      return `The answer reached this chat's “Longest answer (tokens)”, ${tokens}. Raise it in Chat settings, or ask it to continue.`;
+    case "profile":
+      return `The answer reached the ${tokens}-token cap on this model's Library profile (Maximum output tokens, in the console). Change it there, or ask it to continue.`;
+    case "install":
+      return `The answer reached this install's output cap of ${tokens} tokens (Default max output tokens, in the console's gateway settings). Clear it there for no cap, or ask it to continue.`;
+  }
+}
 
 /** Why an answer is not a finished one, or null when it is. */
 export function statusWords(message: Message): string | null {
@@ -91,7 +134,7 @@ export function statusWords(message: Message): string | null {
     case "failed":
       return message.error ?? "This answer failed.";
     default:
-      return message.finish === "length" ? LENGTH_LIMIT_NOTE : null;
+      return message.finish === "length" ? lengthLimitNote(message) : null;
   }
 }
 

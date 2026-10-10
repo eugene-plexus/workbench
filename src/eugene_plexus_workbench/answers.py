@@ -114,6 +114,7 @@ def message_view(message: Message) -> dict[str, Any]:
         "answerFrom": _js_offset(message.content, message.answer_from),
         "reasoningFrom": _js_offset(message.reasoning, message.reasoning_from),
         "toolRounds": message.tool_rounds,
+        "outputCap": message.output_cap,
     }
 
 
@@ -252,7 +253,11 @@ class Answers:
         }
         if final:
             values.update(
-                status=m.status, error=m.error, finish=m.finish, finished_at=m.finished_at
+                status=m.status,
+                error=m.error,
+                finish=m.finish,
+                finished_at=m.finished_at,
+                output_cap=m.output_cap,
             )
         await self._store.update_message(m.id, **values)
         running.saved_at = time.perf_counter()
@@ -555,7 +560,21 @@ class Answers:
         finish = choice.get("finish_reason")
         if isinstance(finish, str):
             m.finish = finish
-        if running.progress is not None and ("content" in event or "reasoning" in event):
+            # What capped this request, from its final frame: each tool round
+            # is a request of its own, and the last one's is the answer's.
+            cap = extension.get("output_cap")
+            m.output_cap = (
+                {"tokens": cap["tokens"], "source": cap["source"]}
+                if isinstance(cap, dict)
+                and isinstance(cap.get("tokens"), int)
+                and cap.get("source") in ("request", "profile", "install")
+                else None
+            )
+        if (
+            running.progress is not None
+            and running.progress.get("stage") != "generating"
+            and ("content" in event or "reasoning" in event)
+        ):
             running.progress = None
         if set(event) - {"type", "id"}:
             self.publish(running.chat_id, event)

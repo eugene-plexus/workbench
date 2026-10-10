@@ -9,7 +9,7 @@ import {
   DRAFT_LABEL,
   EDIT_KEYS,
   EDIT_NOTE,
-  progressWords,
+  workingWords,
   redactedNote,
   reasoningParts,
   SEARCHED_MARK,
@@ -20,6 +20,7 @@ import { Markdown } from "./Markdown";
 import { CopyButton } from "./CopyButton";
 import { ToolCalls } from "./ToolCalls";
 import { WorkingScene } from "./WorkingScene";
+import { useClock } from "../lib/useClock";
 
 export function MessageView({
   chatId,
@@ -42,6 +43,8 @@ export function MessageView({
   const [editing, setEditing] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [acting, setActing] = useState(false);
+  // Ticks while an answer runs, for how long it has been thinking.
+  const now = useClock(message.role === "assistant" && message.status === "running");
   const arrows = (
     <VersionArrows
       chatId={chatId}
@@ -217,7 +220,7 @@ export function MessageView({
         // approval is not work, so he steps away then.
         <WorkingScene active={!(progress?.stage === "tool" && progress.phase === "approval")}>
           <p aria-live="polite" className="text-muted" data-testid="progress">
-            {progressWords(progress)}
+            {workingWords(progress, message, now)}
           </p>
         </WorkingScene>
       )}

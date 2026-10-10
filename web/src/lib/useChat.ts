@@ -85,8 +85,13 @@ export function applyEvent(detail: ChatDetail, event: ChatEvent): Outcome {
   }
 }
 
-/** What an event says about progress: a new value, cleared, or no change. */
-export function progressAfter(event: ChatEvent): Progress | null | undefined {
+/** What an event says about progress: a new value, cleared, or no change.
+ * A running count (`generating`) outlives the text it counts: it arrives
+ * between pieces, and clearing it at each would flicker. */
+export function progressAfter(
+  event: ChatEvent,
+  previous: Progress | null = null,
+): Progress | null | undefined {
   switch (event.type) {
     case "answer":
       return event.progress;
@@ -95,7 +100,8 @@ export function progressAfter(event: ChatEvent): Progress | null | undefined {
     case "done":
       return null;
     case "delta":
-      return event.content || event.reasoning ? null : undefined;
+      if (!(event.content || event.reasoning)) return undefined;
+      return previous?.stage === "generating" ? undefined : null;
     default:
       return undefined;
   }
@@ -165,8 +171,10 @@ export function useChat(chatId: string | null) {
           void reload();
           return;
         }
-        const after = progressAfter(event);
-        if (after !== undefined) setProgress(after);
+        setProgress((previous) => {
+          const after = progressAfter(event, previous);
+          return after === undefined ? previous : after;
+        });
         const shown = current.current;
         if (shown === null) {
           held.current.push(event);
