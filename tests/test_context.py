@@ -335,8 +335,10 @@ def test_where_each_limit_falls_in_a_window_of_8192(total: int, kind: str) -> No
 def test_a_document_longer_than_the_default_is_offered_all_or_the_first_part_and_not_sent() -> None:
     got = one(doc(3000, pages=30))
     assert got.kind == "choose" and not got.send and got.block_tokens == 0 and got.cut is None
-    assert [o["action"] for o in got.offers] == ["readAll", "readFirst"]
-    read_all, first = got.offers
+    # Whatever else is offered, a file may be searched instead of read (MR4), last.
+    assert [o["action"] for o in got.offers] == ["readAll", "readFirst", "search"]
+    read_all, first, search = got.offers
+    assert search == {"action": "search"}
     assert read_all["tokens"] == 3000 and read_all["where"] == "30 pages"
     # The first part is what would have been read by default: 2048 less the wrapper.
     assert first["tokens"] == 1900 and first["where"] == "pages 1 to 19 of 30"
@@ -348,7 +350,7 @@ def test_a_document_longer_than_the_default_is_offered_all_or_the_first_part_and
 def test_a_document_too_long_for_the_window_is_offered_the_first_part_that_fits_the_room() -> None:
     got = one(doc(12000, pages=30))
     assert got.kind == "too_long" and not got.send
-    assert [o["action"] for o in got.offers] == ["readFirst"]
+    assert [o["action"] for o in got.offers] == ["readFirst", "search"]
     assert got.offers[0]["tokens"] == 4400 and got.offers[0]["where"] == "pages 1 to 11 of 30"
     assert got.message == (
         "About 12,000 tokens. That is too long for this model's window of 8,192 tokens: it has "
@@ -359,7 +361,10 @@ def test_a_document_too_long_for_the_window_is_offered_the_first_part_that_fits_
 def test_what_is_offered_never_exceeds_what_the_window_has_room_for() -> None:
     for total in (3000, 4000, 9000, 40000):
         got = one(doc(total, pages=60))
-        for offer in got.offers:
+        assert got.offers[-1] == {"action": "search"}, (
+            "searching it reads none of it into the window"
+        )
+        for offer in got.offers[:-1]:
             assert offer["tokens"] + OVERHEAD <= 4807, offer
 
 
@@ -476,7 +481,8 @@ def test_a_window_nobody_knows_reads_by_default_and_asks_for_more_without_a_cap(
     short = one(doc(3000, pages=30), window=None)
     assert short.kind == "whole" and short.view()["readAllLimit"] is None
     long = one(doc(9000, pages=30), window=None)
-    assert long.kind == "choose" and [o["action"] for o in long.offers] == ["readAll", "readFirst"]
+    assert long.kind == "choose"
+    assert [o["action"] for o in long.offers] == ["readAll", "readFirst", "search"]
     assert long.offers[0]["tokens"] == 9000, "no cap is known, so none is claimed"
     assert one(doc(90000, pages=30, choice=Choice("whole")), window=None).send
     assert not any(d.kind == "too_long" for d in [long])

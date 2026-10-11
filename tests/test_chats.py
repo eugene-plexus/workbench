@@ -442,6 +442,8 @@ def test_settings_are_changed_only_with_the_agents_admin_token(world: World) -> 
         "documentsEnabled",
         "documentsMaxFileMB",
         "documentsWholeUpToTokens",
+        "documentsMaxPassagesPerPerson",
+        "documentsExternalModels",
     ]
     assert schema["fields"][0]["default"] is False
     assert httpx.get(f"{world.workbench}/v1/config", headers=good, trust_env=False).json() == {
@@ -452,6 +454,8 @@ def test_settings_are_changed_only_with_the_agents_admin_token(world: World) -> 
         "documentsEnabled": True,
         "documentsMaxFileMB": 50,
         "documentsWholeUpToTokens": 6000,
+        "documentsMaxPassagesPerPerson": 100000,
+        "documentsExternalModels": "ask",
     }
     result = httpx.patch(
         f"{world.workbench}/v1/config",

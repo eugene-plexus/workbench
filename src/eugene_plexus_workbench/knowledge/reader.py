@@ -26,6 +26,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -195,10 +196,29 @@ def failure(
 @dataclass
 class Outcome:
     """How one reading ended: `changes` is what to set in the file's reading,
-    and `cancelled` says the file was removed meanwhile."""
+    and `cancelled` says the file was removed meanwhile. `extracted` is the text
+    itself, kept only for a reading that is not of an attached file (`Reader.extract`)."""
 
     changes: dict[str, Any]
     cancelled: bool = False
+    extracted: extract.Extracted | None = None
+
+
+@dataclass
+class Extraction:
+    """What `Reader.extract` came to: the text read from a file (and `summary`, how
+    large it is and what was noticed in it), or why there is none (`failure`, as
+    `failure()` says it), or that it was removed meanwhile (`cancelled`)."""
+
+    extracted: extract.Extracted | None = None
+    summary: dict[str, Any] | None = None
+    failure: dict[str, Any] | None = None
+    cancelled: bool = False
+
+
+def _safe(key: str) -> str:
+    """A key as a file name: Windows allows no colon in one."""
+    return re.sub(r"[^A-Za-z0-9_.-]", "-", key)
 
 
 class Reader:
@@ -329,8 +349,20 @@ class Reader:
         """One file, start to end, in a thread: the child, its result, the text
         kept beside the original."""
         reading = record.reading or {}
-        kind = str(reading.get("kind") or "text")
-        source = files.path_of(self._root, record.owner, record.id)
+        return self._run_file(
+            record.id,
+            files.path_of(self._root, record.owner, record.id),
+            str(reading.get("kind") or "text"),
+            reading.get("language"),
+            record,
+        )
+
+    def _run_file(
+        self, key: str, source: Path, kind: str, language: str | None, record: FileRecord | None
+    ) -> Outcome:
+        """The child that reads `source`, and what it left. For an attached file
+        (`record`) the text is moved beside it; without one it is handed back in the
+        outcome."""
         if not source.is_file():
             return Outcome(
                 failure(
@@ -342,27 +374,45 @@ class Reader:
             )
         work = self._root / "reading"
         work.mkdir(parents=True, exist_ok=True)
-        output = work / f"{record.id}.json"
+        output = work / f"{_safe(key)}.json"
         try:
-            return self._read_in_child(record, source, kind, reading.get("language"), work, output)
+            return self._read_in_child(key, source, kind, language, work, output, record)
         finally:
             # Whatever ended it, no result file or half of one is left lying about.
             output.unlink(missing_ok=True)
             output.with_name(output.name + ".part").unlink(missing_ok=True)
 
+    async def extract(
+        self, key: str, source: Path, kind: str, language: str | None = None
+    ) -> Extraction:
+        """Read one file in a child and hand the text back, for a reader that keeps it
+        in its own way (saved documents: `ingest.py`). `key` names the reading, so
+        `cancel([key])` can end it; it must not be a file id (`doc:` and the like).
+        The same child, limits and words as a file that is attached, sharing its
+        slots, so a person who adds twenty files does not start twenty readers."""
+        self._cancelled.discard(key)
+        async with self._slots:
+            outcome = await asyncio.to_thread(self._run_file, key, source, kind, language, None)
+        if outcome.cancelled:
+            return Extraction(cancelled=True)
+        if outcome.extracted is None:
+            return Extraction(failure=outcome.changes)
+        return Extraction(extracted=outcome.extracted, summary=outcome.changes)
+
     def _read_in_child(
         self,
-        record: FileRecord,
+        key: str,
         source: Path,
         kind: str,
         language: str | None,
         work: Path,
         output: Path,
+        record: FileRecord | None,
     ) -> Outcome:
         output.unlink(missing_ok=True)
         try:
             argv = worker_command(worker_python(), source, output, kind, language)
-            child = self._start_child(record.id, argv, work)
+            child = self._start_child(key, argv, work)
         except (OSError, FileNotFoundError) as exc:
             return Outcome(
                 failure(
@@ -372,7 +422,7 @@ class Reader:
                     detail=f"{type(exc).__name__}: {exc}",
                 )
             )
-        if record.id in self._cancelled:
+        if key in self._cancelled:
             kill_tree(child)  # removed between its being started and its child's
         timed_out = False
         try:
@@ -386,8 +436,8 @@ class Reader:
                 except subprocess.TimeoutExpired:
                     stderr = b""
         finally:
-            self._children.pop(record.id, None)
-        if record.id in self._cancelled:
+            self._children.pop(key, None)
+        if key in self._cancelled:
             return Outcome({}, cancelled=True)
         if timed_out:
             return Outcome(
@@ -427,7 +477,9 @@ class Reader:
         self._children[file_id] = child
         return child
 
-    def _result(self, record: FileRecord, code: int | None, stderr: str, output: Path) -> Outcome:
+    def _result(
+        self, record: FileRecord | None, code: int | None, stderr: str, output: Path
+    ) -> Outcome:
         """What the child left: its result file, or the cause it died."""
         try:
             data = json.loads(output.read_text(encoding="utf-8"))
@@ -476,6 +528,7 @@ class Reader:
                     detail=str(exc),
                 )
             )
-        sidecar = files.read_path_of(self._root, record.owner, record.id)
-        os.replace(output, sidecar)
+        if record is None:
+            return Outcome({**summarize(extracted), "state": "ready"}, extracted=extracted)
+        os.replace(output, files.read_path_of(self._root, record.owner, record.id))
         return Outcome({**summarize(extracted), "state": "ready"})

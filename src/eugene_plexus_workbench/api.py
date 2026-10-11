@@ -26,7 +26,7 @@ from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import config, files
-from .answers import Answers, Progress, message_view
+from .answers import Answers, Preparation, Progress, message_view
 from .context import reading_view
 from .conversation import SAMPLING, request_for
 from .hub import Hub, HubError
@@ -329,6 +329,16 @@ class ChatSettings(BaseModel):
     #: The person chose to send their notes to this chat's model even though it
     #: runs outside their machines ("Send for this chat").
     memoryExternal: bool | None = None
+    #: Documents in this chat (MR4): `on` searches the person's saved documents for each
+    #: question and sends the best passages; unset is off. The chat's own files the
+    #: person chose to search instead are searched whatever this says.
+    documents: Literal["on", "off"] | None = None
+    #: "Answer only from my documents": when nothing is found Workbench says so itself
+    #: and does not ask the model.
+    documentsOnly: bool | None = None
+    #: The person chose to send passages of their saved documents to this chat's model
+    #: even though it runs outside their machines ("Send for this chat").
+    documentsExternal: bool | None = None
 
 
 class ChatUpdate(BaseModel):
@@ -364,6 +374,9 @@ def chat_view(chat: Chat, *, running: bool, read_only: bool = False) -> dict[str
                 "repetitionMode",
                 "memory",
                 "memoryExternal",
+                "documents",
+                "documentsOnly",
+                "documentsExternal",
                 *SAMPLING,
             )
         },
@@ -411,6 +424,9 @@ async def list_chats(request: Request) -> dict[str, Any]:
 async def create_chat(request: Request, body: ChatCreate) -> dict[str, Any]:
     person = await _person(request)
     now = time.time()
+    store: Store = _state(request).store
+    # Documents are off in a new chat unless the person has said otherwise for new chats.
+    prefs = await store.documents_prefs(person.sub)
     chat = Chat(
         id=_new_id(),
         owner=person.sub,
@@ -418,8 +434,9 @@ async def create_chat(request: Request, body: ChatCreate) -> dict[str, Any]:
         model=body.model,
         created_at=now,
         updated_at=now,
+        settings={"documents": "on"} if prefs["new_chats"] else {},
     )
-    await _state(request).store.create_chat(chat)
+    await store.create_chat(chat)
     return chat_view(chat, running=False)
 
 
@@ -511,15 +528,46 @@ def hidden_from_owner(tree: list[Message], mode: str) -> dict[str, str]:
     return hidden
 
 
+def hide_saved_documents(view: dict[str, Any]) -> dict[str, Any]:
+    """A message as the install's owner may read it, with the passages of a person's
+    saved documents hidden: "a document", and no name, no words, no headings, no page
+    (MR4). Saved documents are never the owner's to read, even where the person's chats
+    are; a file the person attached to the chat is in the chat and stays readable."""
+    sources = view.get("sources") or []
+    if not any(s.get("kind") == "document" and s.get("passage") for s in sources):
+        return view
+    hidden = [
+        {
+            "kind": "document",
+            "passage": True,
+            "name": "a document",
+            "scope": s.get("scope"),
+            "rank": s.get("rank"),
+            "via": s.get("via"),
+            "redacted": True,
+        }
+        if s.get("kind") == "document" and s.get("passage")
+        else s
+        for s in sources
+    ]
+    retrieval = view.get("retrieval")
+    if isinstance(retrieval, dict):
+        # What was searched for is the person's own question, which the owner reads in
+        # the chat where they may; what the person keeps, and what was found, is not.
+        retrieval = {**retrieval, "cited": [], "searched": None, "budget": None}
+    return {**view, "sources": hidden, "retrieval": retrieval}
+
+
 def redact_for_owner(views: list[dict[str, Any]], hidden: dict[str, str]) -> list[dict[str, Any]]:
     """The owner sees each hidden message as one line saying which machine's
     files it used. Its place among its versions stays, so every branch can
-    still be reached (V5)."""
+    still be reached (V5). The passages of saved documents are hidden in every
+    message (`hide_saved_documents`)."""
     out: list[dict[str, Any]] = []
     for view in views:
         site = hidden.get(view["id"])
         if site is None:
-            out.append(view)
+            out.append(hide_saved_documents(view))
             continue
         out.append(
             {
@@ -623,6 +671,17 @@ async def delete_chat(request: Request, chat_id: str) -> Response:
     records = await store.files_for_chat(chat.id)
     await store.delete_chat(chat.id)
     await _state(request).reader.cancel([r.id for r in records])
+    # The documents made from this chat's files go with it: they are in the person's own
+    # index, another store, so a failure here is said in the log and the boot reconcile
+    # removes what is left. It never keeps a chat from being deleted.
+    try:
+        await _state(request).saved.drop_chat(person.sub, chat.id)
+    except Exception as exc:
+        log.warning(
+            "a deleted chat's documents were not all removed (%s: %s); the next start will",
+            type(exc).__name__,
+            exc,
+        )
     root = _state(request).settings.data_dir
 
     def unlink() -> None:
@@ -691,12 +750,15 @@ async def _ask(
     search: bool,
     records: list[FileRecord],
     version: bool = False,
+    ask_anyway: bool = False,
 ) -> Message:
     """Start an answer to the person's message `parent_id`.
 
     The model is sent the path through it and nothing else. With `version`,
     the answer is another version on a branch of its own (Try again, or an
-    edit), and every tab watching is told the path changed."""
+    edit), and every tab watching is told the path changed. With `ask_anyway`, a
+    chat that answers only from the person's documents asks the model all the same
+    (the "Ask the model anyway" of an answer that said it found nothing)."""
     store: Store = _state(request).store
     person = await _person(request)
     answer = await store.add_message(
@@ -717,20 +779,38 @@ async def _ask(
     fresh = await store.chat(chat.id) or chat
     # The person's notes, as this chat was first sent them (or as they are now,
     # at its first request that carries any). Never raises; None is none.
-    from . import documents_api, memory_api
+    from . import documents_api, memory_api, saved_api
 
     notes = await memory_api.block_for(request, person, fresh, model)
     by_id = {r.id: r for r in records}
     # How each document goes is decided in the answer's own task, once its files
-    # have been read (`documents_api.prepare`), and the request is built from it.
+    # have been read (`documents_api.prepare`), and the request is built from it. Then
+    # the person's saved documents are searched for what they just asked, and the
+    # passages found go in their latest message only (`saved_api.retrieve`).
     decided: dict[str, Any] = {}
 
-    async def prepare(progress: Progress) -> list[dict[str, Any]]:
+    async def prepare(progress: Progress) -> Preparation:
         prepared = await documents_api.prepare(
             request, fresh, history, by_id, model, notes, progress
         )
         decided["documents"] = prepared.sent
-        return prepared.sources
+        found = await saved_api.retrieve(
+            request,
+            person,
+            fresh,
+            history,
+            model,
+            used=prepared.used,
+            sent_whole=prepared.sent_whole,
+            progress=progress,
+            ask_anyway=ask_anyway,
+        )
+        decided["retrieved"] = found.block
+        return Preparation(
+            sources=[*prepared.sources, *found.sources],
+            retrieval=found.retrieval,
+            reply=found.reply,
+        )
 
     def build() -> dict[str, Any]:
         return request_for(
@@ -742,6 +822,7 @@ async def _ask(
             search=search,
             memory=notes,
             documents=decided.get("documents"),
+            retrieved=decided.get("retrieved"),
         )
 
     answers = _answers(request)
@@ -837,10 +918,19 @@ async def send(request: Request, chat_id: str, body: Send) -> dict[str, Any]:
     return sent
 
 
-async def _try_again(request: Request, chat: Chat, message_id: str) -> dict[str, Any]:
+class Retry(BaseModel):
+    #: Ask the model even though this chat answers only from the person's documents
+    #: and found nothing in them: "Ask the model anyway".
+    askAnyway: bool = False
+
+
+async def _try_again(
+    request: Request, chat: Chat, message_id: str, ask_anyway: bool = False
+) -> dict[str, Any]:
     """Another version of an answer, after the same message (V6). The old
     one and everything after it stay. An answer still being written is
-    stopped first and kept as a version (V2)."""
+    stopped first and kept as a version (V2). Its passages are looked for again, so
+    an edited or removed document is reflected as it is now."""
     store: Store = _state(request).store
     target = await store.message(message_id)
     if target is None or target.chat_id != chat.id or target.role != "assistant":
@@ -858,29 +948,33 @@ async def _try_again(request: Request, chat: Chat, message_id: str) -> dict[str,
         search=chat.search,
         records=await _chat_files(request, chat),
         version=True,
+        ask_anyway=ask_anyway,
     )
     return {"answer": message_view(answer)}
 
 
 @router.post("/api/chats/{chat_id}/retry", status_code=status.HTTP_201_CREATED)
-async def retry(request: Request, chat_id: str) -> dict[str, Any]:
-    """Try again on the last answer shown (W1)."""
+async def retry(request: Request, chat_id: str, body: Retry | None = None) -> dict[str, Any]:
+    """Try again on the last answer shown (W1). With `askAnyway`, a chat that answers only
+    from the person's documents asks the model although nothing in them matched."""
     person = await _person(request)
     chat = await _own_chat(request, person, chat_id)
     messages = await _state(request).store.messages(chat.id)
     if not messages or messages[-1].role != "assistant":
         raise _problem(status.HTTP_409_CONFLICT, "There is no answer to try again.")
-    return await _try_again(request, chat, messages[-1].id)
+    return await _try_again(request, chat, messages[-1].id, bool(body and body.askAnyway))
 
 
 @router.post(
     "/api/chats/{chat_id}/messages/{message_id}/retry", status_code=status.HTTP_201_CREATED
 )
-async def retry_message(request: Request, chat_id: str, message_id: str) -> dict[str, Any]:
+async def retry_message(
+    request: Request, chat_id: str, message_id: str, body: Retry | None = None
+) -> dict[str, Any]:
     """Try again on any answer (V6)."""
     person = await _person(request)
     chat = await _own_chat(request, person, chat_id)
-    return await _try_again(request, chat, message_id)
+    return await _try_again(request, chat, message_id, bool(body and body.askAnyway))
 
 
 @router.post("/api/chats/{chat_id}/messages/{message_id}/edit", status_code=status.HTTP_201_CREATED)
@@ -1190,6 +1284,14 @@ async def remove_upload(request: Request, chat_id: str, file_id: str) -> Respons
     if record is None:
         raise _problem(status.HTTP_404_NOT_FOUND, "There is no such file in this chat.")
     await _state(request).reader.cancel([record.id])
+    try:
+        await _state(request).saved.drop_attachment(person.sub, chat.id, record.id)
+    except Exception as exc:
+        log.warning(
+            "the document made from a removed file was not removed (%s: %s); the next start will",
+            type(exc).__name__,
+            exc,
+        )
     await asyncio.to_thread(
         files.remove_stored, _state(request).settings.data_dir, record.owner, record.id
     )

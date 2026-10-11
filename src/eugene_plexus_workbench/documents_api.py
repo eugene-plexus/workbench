@@ -26,6 +26,7 @@ by name, with the pages or lines that went and whether it was all of it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -41,7 +42,9 @@ from .answers import Progress, Refused
 from .api import _may_read_file, _own_chat, _person, _problem, _state
 from .hub import HubError
 from .knowledge import extract
+from .knowledge import index as index_module
 from .knowledge import reader as reading_module
+from .knowledge.index import Document, IndexUnavailable, chat_scope
 from .store import Chat, FileRecord, Message, Person, Store
 
 log = logging.getLogger(__name__)
@@ -82,9 +85,14 @@ def _choice_of(record: FileRecord) -> context.Choice | None:
     return context.Choice.from_json((record.reading or {}).get("choice"))
 
 
-def _attached(path: list[Message], records: dict[str, FileRecord]) -> list[context.Attached]:
+def _attached(
+    path: list[Message],
+    records: dict[str, FileRecord],
+    searches: dict[str, dict[str, Any]] | None = None,
+) -> list[context.Attached]:
     """Every document the path carries, in order. Those on its last message are
-    decided now; the rest were attached earlier and are replayed."""
+    decided now; the rest were attached earlier and are replayed. `searches` is how each
+    file the person chose to search instead is getting on (`_search_states`)."""
     out: list[context.Attached] = []
     last = path[-1] if path else None
     for message in path:
@@ -104,9 +112,73 @@ def _attached(path: list[Message], records: dict[str, FileRecord]) -> list[conte
                     reading=record.reading,
                     choice=_choice_of(record),
                     nonce=str((record.reading or {}).get("nonce") or ""),
+                    search=(searches or {}).get(record.id),
                 )
             )
     return out
+
+
+def _searched(record: FileRecord) -> bool:
+    """Whether the person chose to search this file instead of reading it whole."""
+    choice = _choice_of(record)
+    return choice is not None and choice.mode == "search"
+
+
+def _search_view(doc: Document) -> dict[str, Any]:
+    return {
+        "docId": doc.id,
+        "status": doc.status,
+        "message": doc.reason,
+        "passages": doc.chunks,
+    }
+
+
+async def _search_states(
+    request: Request, chat: Chat, records: dict[str, FileRecord]
+) -> dict[str, dict[str, Any]]:
+    """For each file of the chat the person chose to search instead ("Search it
+    instead"): how its own document in their index is getting on, by file id. A file
+    with no document (yet) is not in it. An index that cannot be used is said, in each
+    such file's state, so a chat never fails to open because of it."""
+    wanted = [r for r in records.values() if _searched(r)]
+    if not wanted:
+        return {}
+    index = _state(request).saved.index(chat.owner, create=False)
+    if index is None:
+        return {}
+    try:
+        mine = {d.source: d for d in await index.documents(chat_scope(chat.id))}
+    except IndexUnavailable as exc:
+        return {
+            r.id: {"docId": None, "status": "failed", "message": exc.message, "passages": 0}
+            for r in wanted
+        }
+    return {
+        r.id: _search_view(mine[f"attachment:{r.id}"])
+        for r in wanted
+        if f"attachment:{r.id}" in mine
+    }
+
+
+async def _make_searchable(request: Request, chat: Chat, record: FileRecord) -> Document:
+    """The document made from a file the person chose to search instead: made if it
+    is not there, as it is when asked again."""
+    root = _state(request).settings.data_dir
+    reading = record.reading or {}
+    found = files.Detected(
+        media_type=record.media_type,
+        kind=str(reading.get("kind") or "text"),
+        language=reading.get("language"),
+    )
+    doc: Document = await _state(request).saved.search_attachment(
+        chat.owner,
+        chat_id=chat.id,
+        file_id=record.id,
+        name=record.name,
+        detected=found,
+        source_path=files.path_of(root, record.owner, record.id),
+    )
+    return doc
 
 
 async def _model(request: Request, model_id: str | None) -> tuple[context.Model, dict[str, Any]]:
@@ -203,7 +275,8 @@ async def plan_for(
     root = _state(request).settings.data_dir
     settings = await config.document_settings(store)
     model, about = await _model(request, model_id)
-    attached = _attached(path, records)
+    searches = await _search_states(request, chat, records)
+    attached = _attached(path, records, searches)
     if wait:
         reader: reading_module.Reader = _state(request).reader
         # A model that takes the PDF as a file does not need its text.
@@ -220,10 +293,13 @@ async def plan_for(
                 await reader.start(record)  # one whose task is gone is started again
             await reader.wait([r.id for r in need], _wait_seconds())
             records = {r.id: r for r in await store.files_for_chat(chat.id)}
-            attached = _attached(path, records)
+        # A file chosen to be searched is searched once its own document can be: made
+        # if it is gone (derived data heals), and waited for, as a file being read is.
+        searches = await _await_searches(request, chat, records, progress)
+        attached = _attached(path, records, searches)
     if override is not None:
         records = {**records, override.id: override}
-        attached = _attached(path, records)
+        attached = _attached(path, records, await _search_states(request, chat, records))
 
     async def decide(now: dict[str, FileRecord], items: list[context.Attached]) -> context.Plan:
         return await asyncio.to_thread(
@@ -242,11 +318,35 @@ async def plan_for(
         records = await _read_again(request, chat, lost, wait=wait)
         if override is not None:
             records = {**records, override.id: override}
-        attached = _attached(path, records)
+        attached = _attached(path, records, await _search_states(request, chat, records))
         plan = await decide(records, attached)
         if wait and (still := next((d for d in plan.decisions if d.repair), None)):
             raise context.TextMissing(still.id, still.name)
     return plan, attached, model, about, records
+
+
+async def _await_searches(
+    request: Request, chat: Chat, records: dict[str, FileRecord], progress: Progress | None
+) -> dict[str, dict[str, Any]]:
+    """Before a send: make the document of each file chosen to be searched if it is
+    gone, and wait for it to be read (for at most as long as a file is). The states
+    as they are after."""
+    wanted = [r for r in records.values() if _searched(r)]
+    if not wanted:
+        return {}
+    waiting: list[str] = []
+    try:
+        for record in wanted:
+            doc = await _make_searchable(request, chat, record)
+            if doc.status in index_module.PENDING:
+                waiting.append(doc.id)
+        if waiting:
+            if progress is not None:
+                progress({"stage": "documents", "phase": "reading", "files": len(waiting)})
+            await _state(request).saved.ingest.wait(chat.owner, waiting, _wait_seconds())
+    except IndexUnavailable as exc:
+        log.warning("a file chosen to be searched could not be made searchable: %s", exc.message)
+    return await _search_states(request, chat, records)
 
 
 async def _read_again(
@@ -356,10 +456,14 @@ async def check_send(
 @dataclass
 class Prepared:
     """What an answer is built from: how each document goes, and the sources the
-    answer starts with."""
+    answer starts with; and, for the search of the person's saved documents that comes
+    next (`saved_api.retrieve`), the tokens the request already holds and whether a
+    document goes whole in it."""
 
     sent: dict[str, conversation.SentDocument]
     sources: list[dict[str, Any]]
+    used: int = 0
+    sent_whole: bool = False
 
 
 async def prepare(
@@ -375,7 +479,8 @@ async def prepare(
     model it goes to, with their text. Raises `Blocked` (an answer fails with its
     words) when they cannot go: the model, or the person's choices, changed since."""
     if not _has_documents(path, records):
-        return Prepared({}, [])
+        root = _state(request).settings.data_dir
+        return Prepared({}, [], used=_room(chat, path, records, root, model_id, notes).history)
     try:
         plan, attached, _, _, fresh = await plan_for(
             request,
@@ -399,10 +504,17 @@ async def prepare(
         sent[decision.id] = conversation.SentDocument(
             id=decision.id, text=decision.text, native=decision.native
         )
+        if decision.kind == "search":
+            continue  # not sent whole: its passages are what is sent, and they are listed
         sources.append(
             context.source_entry(decision, by_id[decision.id], fresh[decision.id].reading)
         )
-    return Prepared(sent, sources)
+    return Prepared(
+        sent,
+        sources,
+        used=plan.used,
+        sent_whole=any(d.send and d.kind != "search" for d in plan.decisions),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -410,7 +522,13 @@ async def prepare(
 # --------------------------------------------------------------------------- #
 
 
-def _item(record: FileRecord, *, sent: bool, decision: context.Decision | None) -> dict[str, Any]:
+def _item(
+    record: FileRecord,
+    *,
+    sent: bool,
+    decision: context.Decision | None,
+    search: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     return {
         "id": record.id,
         "name": record.name,
@@ -421,6 +539,9 @@ def _item(record: FileRecord, *, sent: bool, decision: context.Decision | None) 
         "sent": sent,
         "reading": context.reading_view(record),
         "decision": decision.view() if decision is not None else None,
+        #: For a file the person chose to search instead: how its own document is
+        #: getting on (`docId`, `status`, `message`, `passages`); None otherwise.
+        "search": search,
     }
 
 
@@ -457,6 +578,7 @@ async def files_view(
     decisions: dict[str, context.Decision] = {}
     request_view: dict[str, Any] | None = None
     about: dict[str, Any]
+    searches = await _search_states(request, chat, by_id)
     if _has_documents(path, by_id):
         person = await _person(request)
         notes = await memory_api.block_for(request, person, chat, model_id or "", freeze=False)
@@ -483,7 +605,10 @@ async def files_view(
         _, about = await _model(request, model_id)
     return {
         "model": about,
-        "files": [_item(r, sent=r.id in sent_ids, decision=decisions.get(r.id)) for r in records],
+        "files": [
+            _item(r, sent=r.id in sent_ids, decision=decisions.get(r.id), search=searches.get(r.id))
+            for r in records
+        ],
         "request": request_view,
     }
 
@@ -499,10 +624,12 @@ async def list_files(request: Request, chat_id: str, model: str | None = None) -
 
 class ReadingChoice(BaseModel):
     """How much of a document to read: `whole` ("read it all anyway"), `first`
-    with `tokens` (the first part, at most that many), or `null` to clear it."""
+    with `tokens` (the first part, at most that many), `search` ("search it instead":
+    nothing of it is read into the message; its passages are searched for each question,
+    and its own document is deleted with the chat), or `null` to clear it."""
 
     model_config = ConfigDict(extra="forbid")
-    mode: Literal["whole", "first"] | None = None
+    mode: Literal["whole", "first", "search"] | None = None
     tokens: int | None = Field(default=None, ge=1, le=100_000_000, strict=True)
 
 
@@ -545,9 +672,22 @@ async def choose_reading(
         if body.mode is None
         else context.Choice("whole")
         if body.mode == "whole"
+        else context.Choice("search")
+        if body.mode == "search"
         else context.Choice("first", body.tokens)
     )
     stored = choice.to_json() if choice else None
+    was_searched = _searched(record)
+    if choice is not None and choice.mode == "search":
+        if not (await config.document_settings(store)).enabled:
+            raise _problem(
+                status.HTTP_403_FORBIDDEN, "The owner of this Workbench has turned off documents."
+            )
+        try:
+            # Its own document is made first, so the answer shows it getting ready.
+            await _make_searchable(request, chat, record)
+        except IndexUnavailable as exc:
+            raise _problem(status.HTTP_503_SERVICE_UNAVAILABLE, exc.message) from None
     trial = replace(record, reading={**reading, "choice": stored})
     model_id = model or chat.model or None
     view = await files_view(request, chat, model_id, override=trial)
@@ -563,6 +703,11 @@ async def choose_reading(
             },
         )
     await store.merge_file_reading(record.id, {"choice": stored}, chat_id=chat.id)
+    if was_searched and (choice is None or choice.mode != "search"):
+        # Taken back, or another way chosen: the document made from it goes.
+        with contextlib.suppress(IndexUnavailable):
+            await _state(request).saved.drop_attachment(person.sub, chat.id, record.id)
+        item["search"] = None
     return item
 
 

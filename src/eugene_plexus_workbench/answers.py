@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -58,9 +59,44 @@ class Refused(Exception):
 #: What `prepare` is given to say what is going on while it waits: it sets the
 #: answer's progress (`None` clears it) and every tab watching is told.
 Progress = Callable[[dict[str, Any] | None], None]
-#: A step run before the request is built: it may wait (for a file to be read),
-#: raise `Refused`, and returns the sources the answer starts with.
-Prepare = Callable[[Progress], Awaitable[list[dict[str, Any]]]]
+
+
+@dataclass
+class Preparation:
+    """What the step before an answer decided: the sources it starts with, what
+    searching the person's saved documents came to (`Message.retrieval`), and, for a
+    chat set to answer only from them, Workbench's own words in place of a model's
+    when there is nothing to answer from (`reply`: the model is not asked)."""
+
+    sources: list[dict[str, Any]] = field(default_factory=list)
+    retrieval: dict[str, Any] | None = None
+    reply: str | None = None
+    #: How a `reply` ends, as a message's `finish` says it.
+    finish: str = "documents_only"
+
+
+#: A step run before the request is built: it may wait (for a file to be read, a
+#: search of the person's documents), raise `Refused`, and returns what the answer
+#: starts with.
+Prepare = Callable[[Progress], Awaitable[Preparation]]
+
+
+_CITATION = re.compile(r"\[(\d{1,3})\]")
+
+
+def mark_cited(message: Message) -> None:
+    """Which of the passages an answer was sent are numbered in it: a passage's source
+    says `cited`, and `retrieval.cited` lists the numbers. Only the markers are read;
+    the answer is never rewritten, and a number the model made up is not a source."""
+    passages = [s for s in message.sources if s.get("kind") == "document" and s.get("passage")]
+    if not passages:
+        return
+    said = {int(n) for n in _CITATION.findall(answer_text(message))}
+    for source in passages:
+        source["cited"] = source.get("rank") in said
+    if message.retrieval is not None:
+        ranks = {s["rank"] for s in passages if isinstance(s.get("rank"), int)}
+        message.retrieval["cited"] = sorted(said & ranks)
 
 
 def _tool_problem(exc: BaseException) -> str:
@@ -133,6 +169,7 @@ def message_view(message: Message) -> dict[str, Any]:
         "reasoningFrom": _js_offset(message.reasoning, message.reasoning_from),
         "toolRounds": message.tool_rounds,
         "outputCap": message.output_cap,
+        "retrieval": message.retrieval,
     }
 
 
@@ -271,6 +308,8 @@ class Answers:
             "answer_from": m.answer_from,
             "reasoning_from": m.reasoning_from,
             "tool_rounds": m.tool_rounds,
+            "retrieval": m.retrieval,
+            "model": m.model,
         }
         if final:
             values.update(
@@ -301,12 +340,27 @@ class Answers:
 
         try:
             if prepare is not None:
-                sources = await prepare(progress)
+                prepared = await prepare(progress)
                 running.progress = None
-                if sources:
-                    m.sources = [*sources, *m.sources]
-                    self.publish(chat_id, {"type": "delta", "id": m.id, "sources": m.sources})
+                told: dict[str, Any] = {}
+                if prepared.sources:
+                    m.sources = [*prepared.sources, *m.sources]
+                    told["sources"] = m.sources
+                if prepared.retrieval is not None:
+                    m.retrieval = prepared.retrieval
+                    told["retrieval"] = m.retrieval
+                if prepared.reply is not None:
+                    # Nothing to answer from, and the chat answers only from the
+                    # person's documents: these are Workbench's words, not a model's.
+                    m.model, m.finish = None, prepared.finish
+                    told["contentAt"] = 0
+                    told["content"] = m.content = prepared.reply
+                if told:
+                    self.publish(chat_id, {"type": "delta", "id": m.id, **told})
                     await self._save(running)
+                if prepared.reply is not None:
+                    m.status = "done"
+                    return
             body = await asyncio.to_thread(build)
             if tool_servers or folder_grants:
                 await self._with_tools(running, body, tool_servers, folder_grants)
@@ -339,6 +393,8 @@ class Answers:
             interrupt_tools(m.tool_rounds)
             m.finished_at = time.time()
             running.progress = None
+            with contextlib.suppress(Exception):
+                mark_cited(m)  # never in the way of saving what was written
             try:
                 await asyncio.shield(self._save(running, final=True))
             finally:
