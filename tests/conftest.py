@@ -264,6 +264,29 @@ DRAFT = "A first answer 🎉, before searching."
 DRAFT_REASONING = "No tools needed."
 
 
+def chat_model(
+    model_id: str,
+    *,
+    locality: str | None,
+    window: int | None = 32768,
+    owned_by: str | None = None,
+) -> dict[str, Any]:
+    """A chat model as the gateway lists it: where it runs and how much it
+    holds. `locality=None` leaves the key out; an outside model names its
+    provider, as a cloud account's driver does."""
+    info: dict[str, Any] = {"surfaces": ["chat"], "ready_backends": 1}
+    if window is not None:
+        info["context_length"] = window
+    if locality is not None:
+        info["locality"] = locality
+    if owned_by is not None:
+        info["drivers"] = [owned_by]
+    entry: dict[str, Any] = {"id": model_id, "object": "model", "x_eugene_plexus": info}
+    if owned_by is not None:
+        entry["owned_by"] = owned_by
+    return entry
+
+
 # --------------------------------------------------------------------------- #
 # servers
 # --------------------------------------------------------------------------- #
@@ -503,6 +526,14 @@ class FakeGateway:
     tools_per_round: int = 1
     repetition_modes: list[str | None] = field(default_factory=list)
     search: dict[str, Any] = field(default_factory=lambda: {"available": True, "reason": None})
+    #: Where the chat model runs and how much it holds, as the gateway lists
+    #: them: memory keeps a person's notes off a model that is not local and
+    #: gives none to a small window. None leaves the key out, as an older
+    #: gateway would.
+    locality: str | None = "local"
+    context_length: int | None = 32768
+    #: Other chat models listed, whole, as `chat_model` builds them.
+    more_chat_models: list[dict[str, Any]] = field(default_factory=list)
     #: End each answer with ` #N`, N its request's number, to tell versions apart.
     numbered: bool = False
     #: Search Suggestions HTML a searched answer's final chunk carries; `{n}`
@@ -567,12 +598,18 @@ class FakeGateway:
                         "object": "model",
                         "x_eugene_plexus": {
                             "surfaces": ["chat"],
-                            "context_length": 32768,
+                            **(
+                                {"context_length": self.context_length}
+                                if self.context_length is not None
+                                else {}
+                            ),
                             "image_input": True,
                             "web_search": True,
                             "ready_backends": 1,
+                            **({"locality": self.locality} if self.locality is not None else {}),
                         },
                     },
+                    *self.more_chat_models,
                     {
                         "id": "embedder",
                         "object": "model",
@@ -932,6 +969,9 @@ class Browser:
 
     def patch(self, path: str, **kw: Any) -> httpx.Response:
         return self.http.patch(path, headers=self.headers(kw.pop("headers", None)), **kw)
+
+    def put(self, path: str, **kw: Any) -> httpx.Response:
+        return self.http.put(path, headers=self.headers(kw.pop("headers", None)), **kw)
 
     def delete(self, path: str, **kw: Any) -> httpx.Response:
         return self.http.delete(path, headers=self.headers(kw.pop("headers", None)), **kw)

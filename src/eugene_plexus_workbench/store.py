@@ -25,6 +25,13 @@ whole chat.
 `media` row per request a media screen sent, or per file brought in, and
 its files under `files/` like an attachment's, with `media_id` in place of
 `chat_id`. A media row and its files can be deleted on their own (M8).
+
+**Memory is a person's notes** (`workbench-memory.md`, schema 10): short
+notes the person wrote, each filtered by `owner` *in its own query* -- a
+note that is not yours is a note that does not exist. A full-text index
+over their words (FTS5, kept by triggers) finds what "forget ..." means.
+Deleting a note is real: its row and its index entry go, the text of every
+event in its log is nulled, and any chat's frozen copy of it is dropped.
 """
 
 from __future__ import annotations
@@ -33,13 +40,14 @@ import asyncio
 import json
 import sqlite3
 import time
-from collections.abc import Callable
+import unicodedata
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -68,7 +76,8 @@ CREATE TABLE IF NOT EXISTS chats (
     settings TEXT NOT NULL DEFAULT '{}',
     search INTEGER NOT NULL DEFAULT 0,
     created_at REAL NOT NULL,
-    updated_at REAL NOT NULL
+    updated_at REAL NOT NULL,
+    memory_snapshot TEXT
 );
 CREATE INDEX IF NOT EXISTS chats_by_owner ON chats (owner, updated_at);
 CREATE TABLE IF NOT EXISTS messages (
@@ -140,6 +149,56 @@ CREATE TABLE IF NOT EXISTS folder_grants (
 );
 """
 
+#: Memory (schema 10), one statement each: a trigger holds semicolons, so these
+#: are never split the way `_SCHEMA` is. Every one is `IF NOT EXISTS`, so the
+#: same list makes a new store's memory tables and is migration 10's body.
+#:
+#: Times are epoch seconds, as everywhere in this store. `expires_at` and
+#: `revisit_at` are dates, kept for the slices that use them. The index is an
+#: *external content* FTS5 table over `memory_notes`; its triggers keep it in
+#: step, and the delete trigger also nulls the text of the note's events, so
+#: no path that deletes a note can leave its words in the log.
+_MEMORY_SCHEMA: list[str] = [
+    "CREATE TABLE IF NOT EXISTS memory_notes ("
+    "id TEXT PRIMARY KEY, owner TEXT NOT NULL, "
+    "text TEXT NOT NULL CHECK (length(text) <= 240), "
+    "kind TEXT NOT NULL CHECK (kind IN ('fact','preference','instruction','project','event')), "
+    "status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','pending','dismissed')), "
+    "pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)), "
+    "source TEXT NOT NULL CHECK (source IN ('typed','said','button','suggested','imported')), "
+    "source_chat_id TEXT, source_message_id TEXT, quote TEXT, "
+    "expires_at TEXT, revisit_at TEXT, "
+    "created_at REAL NOT NULL, updated_at REAL NOT NULL, last_used_at REAL, "
+    "use_count INTEGER NOT NULL DEFAULT 0)",
+    "CREATE INDEX IF NOT EXISTS memory_notes_by_owner ON memory_notes (owner, status)",
+    "CREATE TABLE IF NOT EXISTS memory_events ("
+    "id INTEGER PRIMARY KEY, owner TEXT NOT NULL, note_id TEXT NOT NULL, ts REAL NOT NULL, "
+    "event TEXT NOT NULL, actor TEXT NOT NULL, old_text TEXT, new_text TEXT)",
+    "CREATE INDEX IF NOT EXISTS memory_events_by_note ON memory_events (note_id)",
+    # `external` is NULL until the person chooses, and then follows the
+    # install's own default (`memoryExternalModels`); a row made by changing
+    # some other setting must not pin the person to today's default.
+    "CREATE TABLE IF NOT EXISTS memory_prefs ("
+    "owner TEXT PRIMARY KEY, "
+    "enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)), "
+    "learn TEXT NOT NULL DEFAULT 'off' CHECK (learn IN ('off','suggest','auto')), "
+    "external TEXT CHECK (external IS NULL OR external IN ('never','ask','always')), "
+    "use_mode TEXT NOT NULL DEFAULT 'relevant' CHECK (use_mode IN ('relevant','all')), "
+    "budget_tokens INTEGER)",
+    "CREATE VIRTUAL TABLE IF NOT EXISTS memory_notes_fts USING fts5("
+    "text, content='memory_notes', tokenize='porter unicode61 remove_diacritics 2')",
+    "CREATE TRIGGER IF NOT EXISTS memory_notes_ai AFTER INSERT ON memory_notes BEGIN "
+    "INSERT INTO memory_notes_fts (rowid, text) VALUES (new.rowid, new.text); END",
+    "CREATE TRIGGER IF NOT EXISTS memory_notes_ad AFTER DELETE ON memory_notes BEGIN "
+    "INSERT INTO memory_notes_fts (memory_notes_fts, rowid, text) "
+    "VALUES ('delete', old.rowid, old.text); "
+    "UPDATE memory_events SET old_text = NULL, new_text = NULL WHERE note_id = old.id; END",
+    "CREATE TRIGGER IF NOT EXISTS memory_notes_au AFTER UPDATE OF text ON memory_notes BEGIN "
+    "INSERT INTO memory_notes_fts (memory_notes_fts, rowid, text) "
+    "VALUES ('delete', old.rowid, old.text); "
+    "INSERT INTO memory_notes_fts (rowid, text) VALUES (new.rowid, new.text); END",
+]
+
 #: What brings a store written at version N-1 to N. `_SCHEMA` already holds
 #: the result, for a store made new.
 _MIGRATIONS: dict[int, list[str]] = {
@@ -199,16 +258,30 @@ _MIGRATIONS: dict[int, list[str]] = {
     9: [
         "ALTER TABLE messages ADD COLUMN output_cap TEXT",
     ],
+    # Memory (2026-10-11): a person's notes, their log, their settings, a
+    # full-text index over the notes, and the copy of what a chat was first
+    # sent (JSON: the notes' ids and words, the block's hash and tokens, what
+    # did not fit). `chats` as schema 1 made it comes first for a file that
+    # has none, as `files` did at 7.
+    10: [
+        "CREATE TABLE IF NOT EXISTS chats (id TEXT PRIMARY KEY, owner TEXT NOT NULL, "
+        "title TEXT NOT NULL, model TEXT, settings TEXT NOT NULL DEFAULT '{}', "
+        "search INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, updated_at REAL NOT NULL)",
+        "ALTER TABLE chats ADD COLUMN memory_snapshot TEXT",
+        *_MEMORY_SCHEMA,
+    ],
 }
 
 
 def _initialize_schema(db: sqlite3.Connection, path: Path) -> None:
     """Commit schema changes and their version together, including first boot.
 
-    Do not use executescript here: it commits an existing transaction. The
-    schema contains only individual DDL statements, with no triggers or scripts.
-    Version 2 also accepts the partial additions left by the old autocommit
-    migration runner; subsequent migrations must be transactional.
+    Do not use executescript here: it commits an existing transaction. `_SCHEMA`
+    contains only individual DDL statements, which is why it may be split on
+    semicolons; the memory triggers hold semicolons, so `_MEMORY_SCHEMA` is a
+    list of whole statements. Version 2 also accepts the partial additions
+    left by the old autocommit migration runner; subsequent migrations must be
+    transactional.
     """
     db.execute("BEGIN IMMEDIATE")
     try:
@@ -253,6 +326,8 @@ def _initialize_schema(db: sqlite3.Connection, path: Path) -> None:
         for statement in _SCHEMA.split(";"):
             if statement.strip():
                 db.execute(statement)
+        for statement in _MEMORY_SCHEMA:
+            db.execute(statement)
         db.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?)",
             (str(SCHEMA_VERSION),),
@@ -298,6 +373,49 @@ class Chat:
     updated_at: float
     settings: dict[str, Any] = field(default_factory=dict)
     search: bool = False
+    #: What the first request that carried notes was sent, kept so every later
+    #: turn sends the same bytes (the engine's prompt cache) and the page can
+    #: say exactly what was sent (`memory.Snapshot`'s JSON). None until then.
+    memory_snapshot: dict[str, Any] | None = None
+
+
+@dataclass
+class MemoryNote:
+    """One thing a person asked Workbench to remember (`memory.py`)."""
+
+    id: str
+    owner: str
+    text: str
+    kind: str
+    created_at: float
+    updated_at: float
+    status: str = "active"
+    pinned: bool = False
+    #: Who wrote it: `typed` on the Memory page, `said` as a command in a
+    #: chat, `button` from a message's Remember, `suggested` and `imported`
+    #: for the slices that follow.
+    source: str = "typed"
+    source_chat_id: str | None = None
+    source_message_id: str | None = None
+    quote: str | None = None
+    expires_at: str | None = None
+    revisit_at: str | None = None
+    last_used_at: float | None = None
+    use_count: int = 0
+
+
+class MemoryFull(Exception):
+    """The person has as many notes as this install allows."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(f"{limit} notes is the limit")
+        self.limit = limit
+
+
+def note_key(text: str) -> str:
+    """What makes two notes the same note: their words, ignoring case,
+    spacing and the forms Unicode allows for one character."""
+    return " ".join(unicodedata.normalize("NFKC", text).casefold().split())
 
 
 @dataclass
@@ -391,6 +509,18 @@ class MediaRow:
     job: dict[str, Any] | None = None
 
 
+def _snapshot(value: str | None) -> dict[str, Any] | None:
+    """A chat's saved copy of its notes, or None when it has none or the
+    column holds something that is not one (the chat then takes a new copy)."""
+    if not value:
+        return None
+    try:
+        found = json.loads(value)
+    except ValueError:
+        return None
+    return found if isinstance(found, dict) else None
+
+
 def _chat(row: sqlite3.Row) -> Chat:
     return Chat(
         id=row["id"],
@@ -401,7 +531,40 @@ def _chat(row: sqlite3.Row) -> Chat:
         updated_at=row["updated_at"],
         settings=json.loads(row["settings"] or "{}"),
         search=bool(row["search"]),
+        memory_snapshot=_snapshot(row["memory_snapshot"]),
     )
+
+
+def _note(row: sqlite3.Row) -> MemoryNote:
+    return MemoryNote(
+        id=row["id"],
+        owner=row["owner"],
+        text=row["text"],
+        kind=row["kind"],
+        status=row["status"],
+        pinned=bool(row["pinned"]),
+        source=row["source"],
+        source_chat_id=row["source_chat_id"],
+        source_message_id=row["source_message_id"],
+        quote=row["quote"],
+        expires_at=row["expires_at"],
+        revisit_at=row["revisit_at"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        last_used_at=row["last_used_at"],
+        use_count=row["use_count"],
+    )
+
+
+#: What a person's memory settings are until they change one. `external` None
+#: is "whatever the install's default is" (it is `ask` unless the owner says).
+MEMORY_PREFS_DEFAULT: dict[str, Any] = {
+    "enabled": True,
+    "learn": "off",
+    "external": None,
+    "use_mode": "relevant",
+    "budget_tokens": None,
+}
 
 
 def _message(row: sqlite3.Row) -> Message:
@@ -637,6 +800,17 @@ class Store:
             db.execute("PRAGMA foreign_keys=ON")
             try:
                 _initialize_schema(db, self._path)
+            except sqlite3.OperationalError as exc:
+                db.close()
+                if "fts5" in str(exc).lower():
+                    # Memory's search needs it; name the cause rather than a
+                    # bare "no such module".
+                    raise RuntimeError(
+                        f"{self._path}: this Python's SQLite was built without full-text search "
+                        f"(FTS5), which Workbench's memory needs ({exc}). Reinstall Workbench "
+                        "from Eugene's console, which brings a Python that has it."
+                    ) from exc
+                raise
             except BaseException:
                 db.close()
                 raise
@@ -1199,6 +1373,342 @@ class Store:
                 (time.time(),),
             )
             return cursor.rowcount
+
+        return await self._run(go)
+
+    # --- memory ---------------------------------------------------------
+    #
+    # Every method takes the owner and puts it in its own query. None of them
+    # can be asked for a note by id alone.
+
+    @staticmethod
+    def _event(
+        db: sqlite3.Connection,
+        owner: str,
+        note_id: str,
+        event: str,
+        actor: str,
+        old: str | None,
+        new: str | None,
+    ) -> None:
+        db.execute(
+            "INSERT INTO memory_events (owner, note_id, ts, event, actor, old_text, new_text) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (owner, note_id, time.time(), event, actor, old, new),
+        )
+
+    @staticmethod
+    def _drop_from_chats(db: sqlite3.Connection, owner: str, note_ids: set[str] | None) -> None:
+        """Take the person's chats' saved copies of these notes (all notes when
+        None) away, so the next request in each takes a new copy without them.
+        A deleted note is not sent again, and its words are kept nowhere."""
+        if note_ids is None:
+            db.execute(
+                "UPDATE chats SET memory_snapshot = NULL "
+                "WHERE owner = ? AND memory_snapshot IS NOT NULL",
+                (owner,),
+            )
+            return
+        for row in db.execute(
+            "SELECT id, memory_snapshot FROM chats WHERE owner = ? AND memory_snapshot IS NOT NULL",
+            (owner,),
+        ).fetchall():
+            saved = _snapshot(row["memory_snapshot"])
+            # A copy that cannot be read is dropped too: it is not worth keeping.
+            if saved is None or note_ids & set(saved.get("ids") or []):
+                db.execute("UPDATE chats SET memory_snapshot = NULL WHERE id = ?", (row["id"],))
+
+    async def memory_notes(self, owner: str, *, status: str | None = "active") -> list[MemoryNote]:
+        """The person's notes, newest first; every status when `status` is None."""
+
+        def go() -> list[MemoryNote]:
+            sql, params = "SELECT * FROM memory_notes WHERE owner = ?", [owner]
+            if status is not None:
+                sql += " AND status = ?"
+                params.append(status)
+            rows = self._conn().execute(sql + " ORDER BY created_at DESC, rowid DESC", params)
+            return [_note(r) for r in rows]
+
+        return await self._run(go)
+
+    async def memory_note(self, owner: str, note_id: str) -> MemoryNote | None:
+        def go() -> MemoryNote | None:
+            row = (
+                self._conn()
+                .execute("SELECT * FROM memory_notes WHERE id = ? AND owner = ?", (note_id, owner))
+                .fetchone()
+            )
+            return _note(row) if row is not None else None
+
+        return await self._run(go)
+
+    async def memory_count(self, owner: str) -> int:
+        def go() -> int:
+            row = (
+                self._conn()
+                .execute("SELECT COUNT(*) AS n FROM memory_notes WHERE owner = ?", (owner,))
+                .fetchone()
+            )
+            return int(row["n"])
+
+        return await self._run(go)
+
+    async def add_memory_note(
+        self, note: MemoryNote, *, limit: int, actor: str = "person"
+    ) -> tuple[MemoryNote, bool]:
+        """Keep a note: `(the note, True)`. The same words already kept are not
+        kept twice: `(the one already there, False)`. Raises `MemoryFull` at
+        `limit` notes. The count, the check and the insert are one step."""
+
+        def go() -> tuple[MemoryNote, bool]:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                wanted = note_key(note.text)
+                kept = db.execute(
+                    "SELECT * FROM memory_notes WHERE owner = ? AND status = 'active'",
+                    (note.owner,),
+                ).fetchall()
+                twin = next((r for r in kept if note_key(r["text"]) == wanted), None)
+                if twin is not None:
+                    db.execute("COMMIT")
+                    return _note(twin), False
+                total = db.execute(
+                    "SELECT COUNT(*) AS n FROM memory_notes WHERE owner = ?", (note.owner,)
+                ).fetchone()["n"]
+                if total >= limit:
+                    raise MemoryFull(limit)
+                # "Newest first" must be a fact, not a coin toss: a clock that
+                # ticks in 15 ms steps gives two notes made together one moment,
+                # so a note is always later than the person's latest.
+                latest = db.execute(
+                    "SELECT MAX(created_at) AS at FROM memory_notes WHERE owner = ?", (note.owner,)
+                ).fetchone()["at"]
+                if latest is not None and note.created_at <= latest:
+                    note.created_at = note.updated_at = latest + 1e-6
+                db.execute(
+                    "INSERT INTO memory_notes (id, owner, text, kind, status, pinned, source, "
+                    "source_chat_id, source_message_id, quote, expires_at, revisit_at, "
+                    "created_at, updated_at, last_used_at, use_count) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        note.id,
+                        note.owner,
+                        note.text,
+                        note.kind,
+                        note.status,
+                        int(note.pinned),
+                        note.source,
+                        note.source_chat_id,
+                        note.source_message_id,
+                        note.quote,
+                        note.expires_at,
+                        note.revisit_at,
+                        note.created_at,
+                        note.updated_at,
+                        note.last_used_at,
+                        note.use_count,
+                    ),
+                )
+                self._event(db, note.owner, note.id, "add", actor, None, note.text)
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return note, True
+
+        return await self._run(go)
+
+    async def update_memory_note(
+        self,
+        owner: str,
+        note_id: str,
+        *,
+        text: str | None = None,
+        kind: str | None = None,
+        pinned: bool | None = None,
+        actor: str = "person",
+    ) -> MemoryNote | None:
+        """Change a note's words, kind or pin. None when the person has no such
+        note. The log keeps the words before and after, until the note goes."""
+
+        def go() -> MemoryNote | None:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute(
+                    "SELECT * FROM memory_notes WHERE id = ? AND owner = ?", (note_id, owner)
+                ).fetchone()
+                if row is None:
+                    db.execute("COMMIT")
+                    return None
+                changes: dict[str, Any] = {}
+                if text is not None and text != row["text"]:
+                    changes["text"] = text
+                if kind is not None and kind != row["kind"]:
+                    changes["kind"] = kind
+                if pinned is not None and int(pinned) != row["pinned"]:
+                    changes["pinned"] = int(pinned)
+                if changes:
+                    columns = ", ".join(f"{k} = ?" for k in changes)
+                    db.execute(
+                        f"UPDATE memory_notes SET {columns}, updated_at = ? "
+                        "WHERE id = ? AND owner = ?",
+                        (*changes.values(), time.time(), note_id, owner),
+                    )
+                    self._event(
+                        db,
+                        owner,
+                        note_id,
+                        "edit",
+                        actor,
+                        row["text"] if "text" in changes else None,
+                        changes.get("text"),
+                    )
+                fresh = db.execute("SELECT * FROM memory_notes WHERE id = ?", (note_id,)).fetchone()
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return _note(fresh)
+
+        return await self._run(go)
+
+    async def delete_memory_note(self, owner: str, note_id: str) -> bool:
+        """Forget a note, for real: its row and its index entry go, its log
+        keeps no words, and no chat keeps a copy. False when it is not theirs."""
+
+        def go() -> bool:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = db.execute(
+                    "DELETE FROM memory_notes WHERE id = ? AND owner = ?", (note_id, owner)
+                )
+                gone = cursor.rowcount == 1
+                if gone:
+                    self._event(db, owner, note_id, "delete", "person", None, None)
+                    self._drop_from_chats(db, owner, {note_id})
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return gone
+
+        return await self._run(go)
+
+    async def delete_memory_notes(self, owner: str) -> int:
+        """Forget every note the person has, as `delete_memory_note` does each."""
+
+        def go() -> int:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                db.execute(
+                    "INSERT INTO memory_events (owner, note_id, ts, event, actor) "
+                    "SELECT owner, id, ?, 'delete', 'person' FROM memory_notes WHERE owner = ?",
+                    (time.time(), owner),
+                )
+                count = db.execute("DELETE FROM memory_notes WHERE owner = ?", (owner,)).rowcount
+                self._drop_from_chats(db, owner, None)
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return count
+
+        return await self._run(go)
+
+    async def search_memory(self, owner: str, match: str, *, limit: int = 5) -> list[MemoryNote]:
+        """The person's active notes that match an FTS5 expression, best first.
+        The owner is part of the query that finds them, so what ranks is never
+        someone else's note."""
+
+        def go() -> list[MemoryNote]:
+            rows = self._conn().execute(
+                "SELECT n.* FROM memory_notes_fts JOIN memory_notes AS n "
+                "ON n.rowid = memory_notes_fts.rowid "
+                "WHERE memory_notes_fts MATCH ? AND n.owner = ? AND n.status = 'active' "
+                "ORDER BY bm25(memory_notes_fts), n.created_at DESC LIMIT ?",
+                (match, owner, limit),
+            )
+            return [_note(r) for r in rows]
+
+        return await self._run(go)
+
+    async def mark_memory_used(self, owner: str, note_ids: Sequence[str], now: float) -> None:
+        """These notes went into a chat's first request."""
+        if not note_ids:
+            return
+
+        def go() -> None:
+            marks = ", ".join("?" for _ in note_ids)
+            self._conn().execute(
+                "UPDATE memory_notes SET last_used_at = ?, use_count = use_count + 1 "
+                f"WHERE owner = ? AND id IN ({marks})",
+                (now, owner, *note_ids),
+            )
+
+        await self._run(go)
+
+    async def memory_prefs(self, owner: str) -> dict[str, Any]:
+        """The person's memory settings, with every one filled in."""
+
+        def go() -> dict[str, Any]:
+            row = (
+                self._conn()
+                .execute("SELECT * FROM memory_prefs WHERE owner = ?", (owner,))
+                .fetchone()
+            )
+            if row is None:
+                return dict(MEMORY_PREFS_DEFAULT)
+            return {
+                "enabled": bool(row["enabled"]),
+                "learn": row["learn"],
+                "external": row["external"],
+                "use_mode": row["use_mode"],
+                "budget_tokens": row["budget_tokens"],
+            }
+
+        return await self._run(go)
+
+    async def put_memory_prefs(self, owner: str, **values: Any) -> dict[str, Any]:
+        """Change the settings named; the others stay as they were."""
+        unknown = set(values) - set(MEMORY_PREFS_DEFAULT)
+        if unknown:
+            raise ValueError(f"not memory settings: {sorted(unknown)}")
+
+        def go() -> None:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                db.execute("INSERT OR IGNORE INTO memory_prefs (owner) VALUES (?)", (owner,))
+                if values:
+                    columns = ", ".join(f"{k} = ?" for k in values)
+                    params = [_encode(k, v) for k, v in values.items()]
+                    db.execute(
+                        f"UPDATE memory_prefs SET {columns} WHERE owner = ?", (*params, owner)
+                    )
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+
+        await self._run(go)
+        return await self.memory_prefs(owner)
+
+    async def set_memory_snapshot(
+        self, chat_id: str, owner: str, snapshot: dict[str, Any] | None
+    ) -> bool:
+        """Keep what this chat was first sent (None drops it). False when the
+        person has no such chat."""
+
+        def go() -> bool:
+            cursor = self._conn().execute(
+                "UPDATE chats SET memory_snapshot = ? WHERE id = ? AND owner = ?",
+                (json.dumps(snapshot) if snapshot is not None else None, chat_id, owner),
+            )
+            return cursor.rowcount == 1
 
         return await self._run(go)
 

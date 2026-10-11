@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI
 
-from . import api, config, folders_api, job_sites_api, media_api, tools_api, web
+from . import api, config, folders_api, job_sites_api, media_api, memory_api, tools_api, web
 from ._build import commit
 from ._http import ssl_context
 from .answers import Answers
@@ -99,6 +99,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(config.router)
     app.include_router(api.router)
     app.include_router(media_api.router)
+    app.include_router(memory_api.router)
     app.include_router(tools_api.router)
     app.include_router(folders_api.router)
     app.include_router(job_sites_api.router)
