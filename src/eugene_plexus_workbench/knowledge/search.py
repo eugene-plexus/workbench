@@ -3,13 +3,26 @@
 A person's question becomes a search of their documents, and what it finds becomes
 the passages a model is shown. This module is the middle of that: it turns the words
 of a chat into a query (`plan_query`), asks each way of searching for candidates
-(`Signal`; MR4 has one, **words**: FTS5 with BM25 over the passages), joins what they
-found (`fuse`), chooses which to keep (`select`: at most `k`, at most three from one
-document unless the question names it), joins the passages that follow each other
-(`merge`), and fits them to a number of tokens (`pack`). `Retriever` is those steps in
-order, and **the way to add a way of searching**: search by meaning (MR5) is another
-`Signal` whose hits `fuse` joins by reciprocal rank (k = 60), with nothing here
-changed. Everything but a `Signal`'s own search is a function of its arguments.
+(`Signal`: **words**, FTS5 with BM25 over the passages, and **meaning** (MR5,
+`meaning.MeaningSignal`): the passages whose vectors are nearest the question's), joins
+what they found (`fuse`: reciprocal rank fusion, k = 60, equal weights), chooses which to
+keep (`select`: at most `k`, at most three from one document unless the question names it),
+joins the passages that follow each other (`merge`), and fits them to a number of tokens
+(`pack`). `Retriever` is those steps in order, and **the way to add a way of searching**.
+Everything but a `Signal`'s own search is a function of its arguments.
+
+**A way of searching that cannot run does not stop the others.** The search by meaning
+needs a search model, and it is a stranger to this process: it may be stopped, or changed,
+or at its limit. A signal that raises `SignalUnavailable` is left out of that search, the
+rest go on, and what it said (`Report`) is kept with the result, so a person is told "by
+words only: the search model is not running" and is never told "nothing matched" for a
+search that did not run. A way of searching that fails any other way raises, as before.
+
+**The one evidence rule** (design 4.4, item 7): there is no score threshold, and a
+passage is never left out for a low score. But a signal whose scores are similarities
+(meaning) may say a best similarity under its floor is not evidence by itself; then, and
+only when the words found nothing, its passages are dropped and nothing matched. A
+run that names its ways (`ways`: Test a question, to see what each finds) has no such rule.
 
 **What a query is.** The latest message (at most 1,000 characters), then the one
 before it (at most 300), so that "and the second one?" still searches something; no
@@ -34,7 +47,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Protocol
 
@@ -101,6 +114,9 @@ class Query:
 
     terms: tuple[str, ...] = ()
     phrases: tuple[str, ...] = ()
+    #: The question as a search by meaning reads it: the latest message and, after it,
+    #: the start of the one before (design 4.4, step 1). The words search reads `terms`.
+    asked: str = ""
 
     @property
     def empty(self) -> bool:
@@ -143,7 +159,11 @@ def plan_query(latest: str, previous: str | None = None) -> Query:
             phrases.append(phrase)
         if len(phrases) >= MAX_PHRASES:
             break
-    return Query(tuple(terms), tuple(phrases))
+    asked = latest.strip()
+    before = (previous or "")[:PREVIOUS_CHARS].strip()
+    if before:
+        asked = f"{asked}\n\n{before}"
+    return Query(tuple(terms), tuple(phrases), asked)
 
 
 # --------------------------------------------------------------------------- #
@@ -151,8 +171,26 @@ def plan_query(latest: str, previous: str | None = None) -> Query:
 # --------------------------------------------------------------------------- #
 
 
+class SignalUnavailable(Exception):
+    """A way of searching could not run now, and why, in the words a person reads. The
+    search goes on without it, and says so (`Report`)."""
+
+    def __init__(self, code: str, message: str, *, quiet: bool = False) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        #: Not worth saying beside every answer: the way of searching was never in play
+        #: (a person with no search model is not told, each time, that it is not running).
+        self.quiet = quiet
+
+
 class Signal(Protocol):
-    """One way of finding passages. Its hits are best first."""
+    """One way of finding passages. Its hits are best first.
+
+    It may also have `similarity = True` (its hits' scores are similarities, cosine, higher
+    better), and `async floor(index) -> float | None`, the best similarity that is not by
+    itself an answer; `Retriever` uses both for the one evidence rule. Raises
+    `SignalUnavailable` when it cannot run now."""
 
     #: What a person is told found a passage: `words`, and `meaning` (MR5).
     name: str
@@ -183,29 +221,44 @@ class Candidate:
 
     hit: Hit
     via: tuple[str, ...]
+    #: Where each way that found it put it (1 is best), `(name, rank)`: why it is where it is.
+    ranks: tuple[tuple[str, int], ...] = ()
+    #: How near the question it was, for a way whose scores are similarities (meaning).
+    similarity: float | None = None
 
 
-def fuse(found: dict[str, list[Hit]]) -> list[Candidate]:
+def fuse(found: dict[str, list[Hit]], similar: Collection[str] = frozenset()) -> list[Candidate]:
     """What several ways of searching found, as one list, best first.
 
     One way: its own order. Several: reciprocal rank fusion (each list adds
     `1 / (60 + rank)` to a passage, so a passage found by both is first, and one found
-    by a single way still appears), equal weights, ties in the order the ways were given."""
+    by a single way still appears), equal weights, ties in the order the ways were given.
+    `similar` names the ways whose scores are similarities, kept with each candidate."""
     if len(found) == 1:
         [(name, hits)] = found.items()
-        return [Candidate(h, (name,)) for h in hits]
+        return [
+            Candidate(h, (name,), ((name, rank),), h.score if name in similar else None)
+            for rank, h in enumerate(hits, start=1)
+        ]
     scores: dict[int, float] = {}
     first: dict[int, int] = {}
     by_chunk: dict[int, Hit] = {}
     via: dict[int, list[str]] = {}
+    ranks: dict[int, list[tuple[str, int]]] = {}
+    similarity: dict[int, float] = {}
     for name, hits in found.items():
         for rank, hit in enumerate(hits, start=1):
             scores[hit.chunk_id] = scores.get(hit.chunk_id, 0.0) + 1.0 / (RRF_K + rank)
             first.setdefault(hit.chunk_id, len(first))
             by_chunk.setdefault(hit.chunk_id, hit)
             via.setdefault(hit.chunk_id, []).append(name)
+            ranks.setdefault(hit.chunk_id, []).append((name, rank))
+            if name in similar:
+                similarity[hit.chunk_id] = hit.score
     order = sorted(scores, key=lambda c: (-scores[c], first[c]))
-    return [Candidate(by_chunk[c], tuple(via[c])) for c in order]
+    return [
+        Candidate(by_chunk[c], tuple(via[c]), tuple(ranks[c]), similarity.get(c)) for c in order
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -265,6 +318,11 @@ class Retrieved:
     terms: tuple[str, ...] = ()
     phrases: tuple[str, ...] = ()
     in_heading: tuple[str, ...] = ()
+    #: Where each way of searching put it, `(name, rank)`, 1 best: never a score, which is
+    #: of a scale that means nothing beside another's.
+    ranks: tuple[tuple[str, int], ...] = ()
+    #: How near the question it was by meaning, when meaning found it (cosine).
+    similarity: float | None = None
 
 
 def _via(names: Sequence[str]) -> str:
@@ -305,6 +363,11 @@ def merge(chosen: Sequence[Candidate], *, limit: int = MERGE_MAX_TOKENS) -> list
         pages = [p for c in run for p in (c.hit.page_start, c.hit.page_end) if p is not None]
         starts = [c.hit.line_start for c in run if c.hit.line_start is not None]
         ends = [c.hit.line_end for c in run if c.hit.line_end is not None]
+        best: dict[str, int] = {}
+        for c in run:
+            for name, place in c.ranks:
+                best[name] = min(place, best.get(name, place))
+        similar = [c.similarity for c in run if c.similarity is not None]
         out.append(
             Retrieved(
                 rank=number,
@@ -321,6 +384,8 @@ def merge(chosen: Sequence[Candidate], *, limit: int = MERGE_MAX_TOKENS) -> list
                 chunk_ids=tuple(c.hit.chunk_id for c in run),
                 tokens=token_count.estimate(text),
                 via=_via([v for c in run for v in c.via]),
+                ranks=tuple(sorted(best.items())),
+                similarity=max(similar) if similar else None,
             )
         )
     return out
@@ -398,6 +463,24 @@ def snippet(text: str, terms: Sequence[str] = (), limit: int = SNIPPET) -> str:
 
 
 @dataclass
+class Report:
+    """What one way of searching came to, in what a person is told of it."""
+
+    name: str
+    #: Whether it ran. When not, `code` and `message` say why (`SignalUnavailable`).
+    ran: bool
+    hits: int = 0
+    code: str | None = None
+    message: str | None = None
+    quiet: bool = False
+    #: For a way whose scores are similarities: the best of its hits, the floor under which
+    #: that is not evidence, and whether its hits were set aside for it.
+    best: float | None = None
+    floor: float | None = None
+    below_floor: bool = False
+
+
+@dataclass
 class Retrieval:
     """What a search came to."""
 
@@ -408,8 +491,22 @@ class Retrieval:
     found: int = 0
     #: Passages that were chosen and did not fit the budget.
     did_not_fit: int = 0
+    #: How it searched: `words`, `meaning`, `meaning and words`, or `none` when no way of
+    #: searching could run.
     mode: str = "words"
+    #: The ways that ran, and what each said.
     ways: tuple[str, ...] = ("words",)
+    reports: dict[str, Report] = field(default_factory=dict)
+
+
+def mode_of(ran: Sequence[str]) -> str:
+    """How a search is told to a person, from the ways of searching that ran."""
+    both = "meaning" in ran and "words" in ran
+    if both:
+        return "meaning and words"
+    if "meaning" in ran:
+        return "meaning"
+    return "words" if "words" in ran else "none"
 
 
 class Retriever:
@@ -420,6 +517,8 @@ class Retriever:
 
     @property
     def mode(self) -> str:
+        """The ways of searching this Workbench has, told as a person reads them: not what
+        a search came to (`Retrieval.mode`), for a way may not be able to run now."""
         return "meaning and words" if any(s.name == "meaning" for s in self.signals) else "words"
 
     async def retrieve(
@@ -433,19 +532,36 @@ class Retriever:
         overhead: int,
         k: int = PASSAGES,
         per_document: int = PER_DOCUMENT,
+        ways: Sequence[str] | None = None,
     ) -> Retrieval:
         """Search `scopes` of one person's index for `query`. `question` is what the
         person asked (a file it names is not held to `per_document`); `budget` is the
-        tokens the passages may take, and `overhead` what each one's tags cost.
+        tokens the passages may take, and `overhead` what each one's tags cost. `ways`
+        names the ways of searching to use (Test a question, to see what each finds); none
+        means all, and then the evidence rule applies.
 
         Raises what a search raises (`IndexUnavailable`, an `sqlite3` error): a search
-        that could not run is never an empty result."""
+        that could not run is never an empty result. A way of searching that says it
+        is unavailable (`SignalUnavailable`) is left out and reported."""
+        signals = [s for s in self.signals if ways is None or s.name in ways]
         found: dict[str, list[Hit]] = {}
-        for signal in self.signals:
-            found[signal.name] = await signal.search(index, query, scopes, CANDIDATES)
-        candidates = fuse(found)
+        reports: dict[str, Report] = {}
+        for signal in signals:
+            try:
+                hits = await signal.search(index, query, scopes, CANDIDATES)
+            except SignalUnavailable as exc:
+                reports[signal.name] = Report(
+                    signal.name, False, code=exc.code, message=exc.message, quiet=exc.quiet
+                )
+                continue
+            found[signal.name] = hits
+            reports[signal.name] = Report(signal.name, True, hits=len(hits))
+        await self._weigh(signals, index, found, reports, apply_floor=ways is None)
+        ran = tuple(found)
+        similar = frozenset(s.name for s in signals if getattr(s, "similarity", False))
+        candidates = fuse(found, similar) if found else []
         if not candidates:
-            return Retrieval(query, mode=self.mode, ways=tuple(found))
+            return Retrieval(query, mode=mode_of(ran), ways=ran, reports=reports)
         named = {c.hit.doc_id for c in candidates if names_document(c.hit.name, question)}
         chosen = select(
             candidates, k=max(1, min(k, PASSAGES_MAX)), per_document=per_document, named=named
@@ -456,6 +572,40 @@ class Retriever:
             passages=[explain(query, p) for p in fit],
             found=len(candidates),
             did_not_fit=dropped,
-            mode=self.mode,
-            ways=tuple(found),
+            mode=mode_of(ran),
+            ways=ran,
+            reports=reports,
         )
+
+    @staticmethod
+    async def _weigh(
+        signals: Sequence[Signal],
+        index: Index,
+        found: dict[str, list[Hit]],
+        reports: dict[str, Report],
+        *,
+        apply_floor: bool,
+    ) -> None:
+        """For a way of searching whose scores are similarities: its best, its floor, and the
+        one evidence rule (design 4.4, item 7). Its passages are set aside, and nothing
+        matched, only when it is the only way that found anything and its best is under its
+        floor; any word that matched makes every passage meaning found count as it is."""
+        for signal in signals:
+            hits = found.get(signal.name)
+            if hits is None or not getattr(signal, "similarity", False):
+                continue
+            report = reports[signal.name]
+            if hits:
+                report.best = max(h.score for h in hits)
+            floor_of = getattr(signal, "floor", None)
+            report.floor = await floor_of(index) if floor_of is not None else None
+            others = any(found.get(name) for name in found if name != signal.name)
+            if (
+                apply_floor
+                and report.floor is not None
+                and report.best is not None
+                and not others
+                and report.best < report.floor
+            ):
+                found[signal.name] = []
+                report.below_floor = True

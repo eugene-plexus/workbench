@@ -8,7 +8,9 @@ by hand: **adding** a document (its original goes in place, its row is made, a f
 of the same name it replaces is cancelled and gone, the worker is woken), **removing**
 one (its reader is ended first, so nothing holds its file, and then all of it goes in
 one transaction), reading one **again**, and what happens to a chat's own documents
-when its chat or its file goes.
+when its chat or its file goes. With a gateway it also holds search by meaning (MR5,
+`meaning.py`): the worker that adds meaning to what is read, and the way of searching that
+finds a passage by what it says; a document that goes ends the request that was only for it.
 
 There are two kinds, told by their scope (`index.LIBRARY`, `index.chat_scope`): the
 ones a person keeps in My documents, searched by every chat that has Documents on,
@@ -42,8 +44,9 @@ from .index import (
     chat_scope,
 )
 from .ingest import ChatOwners, Ingest, Owed, Reconciled
+from .meaning import Gateway, Meaning, SettingsReader
 from .reader import Reader
-from .search import Retriever
+from .search import Retriever, WordSignal
 
 log = logging.getLogger(__name__)
 
@@ -91,21 +94,42 @@ class SavedDocuments:
         *,
         retriever: Retriever | None = None,
         owed: Owed | None = None,
+        gateway: Gateway | None = None,
+        settings: SettingsReader | None = None,
     ) -> None:
         self.root = root
         self.indexes = Indexes(root)
+        #: Search by meaning: only with a gateway to ask. Without one, words only.
+        self.meaning: Meaning | None = None
+        if gateway is not None and settings is not None:
+            self.meaning = Meaning(self.indexes, gateway, settings)
+            owed = owed or self.meaning.owed
+            retriever = retriever or Retriever([WordSignal(), self.meaning.signal])
         self.ingest = Ingest(self.indexes, reader, cap, owed=owed)
         self.retriever = retriever or Retriever()
 
     async def start(self, chat_owners: ChatOwners) -> Reconciled:
-        """Boot: put right what a stop left (`Ingest.resume`), then begin reading."""
+        """Boot: put right what a stop left (`Ingest.resume`), then begin reading, and
+        adding meaning to what has none (`Meaning.resume`: the passages whose vector is NULL)."""
         done = await self.ingest.resume(chat_owners)
         self.ingest.start()
+        if self.meaning is not None:
+            await self.meaning.resume()
+            self.meaning.start()
         return done
 
     async def aclose(self) -> None:
         await self.ingest.aclose()
+        if self.meaning is not None:
+            await self.meaning.aclose()
         await self.indexes.aclose()
+
+    async def _cancel(self, sub: str, doc_ids: list[str]) -> None:
+        """These documents are removed, replaced or read again: whatever is reading them,
+        and whatever is adding their meaning, is ended."""
+        await self.ingest.cancel(sub, doc_ids)
+        if self.meaning is not None:
+            await self.meaning.cancel(sub, doc_ids)
 
     def index(self, sub: str, *, create: bool = True) -> Index | None:
         return self.indexes.get(sub, create=create)
@@ -156,7 +180,7 @@ class SavedDocuments:
             index.meta_path(doc_id).unlink(missing_ok=True)
             return added
         if added.replaced:
-            await self.ingest.cancel(sub, [d.id for d in added.replaced])
+            await self._cancel(sub, [d.id for d in added.replaced])
         self.ingest.wake(sub)
         return added
 
@@ -209,7 +233,7 @@ class SavedDocuments:
         if index is None:
             return None
         for attempt in range(3):
-            await self.ingest.cancel(sub, [doc_id])
+            await self._cancel(sub, [doc_id])
             try:
                 return await index.delete(doc_id)
             except DeleteFailed:
@@ -229,7 +253,7 @@ class SavedDocuments:
             return None
         if not await asyncio.to_thread(index.original_path(doc_id).is_file):
             raise OriginalMissing
-        await self.ingest.cancel(sub, [doc_id])
+        await self._cancel(sub, [doc_id])
         again = await index.requeue(doc_id)
         if again is not None:
             self.ingest.wake(sub)
@@ -241,7 +265,7 @@ class SavedDocuments:
         if index is None:
             return 0
         found = [d.id for d in await index.documents(chat_scope(chat_id))]
-        await self.ingest.cancel(sub, found)
+        await self._cancel(sub, found)
         return len(await index.delete_where(chat_scope(chat_id)))
 
     async def drop_attachment(self, sub: str, chat_id: str, file_id: str) -> int:
@@ -253,7 +277,7 @@ class SavedDocuments:
         found = [d.id for d in await index.documents(scope) if d.source == source]
         if not found:
             return 0
-        await self.ingest.cancel(sub, found)
+        await self._cancel(sub, found)
         return len(await index.delete_where(scope, source))
 
     async def rebuild(self, sub: str, chat_owners: ChatOwners) -> Rebuilt:
@@ -265,7 +289,9 @@ class SavedDocuments:
         index = self.indexes.get(sub)
         assert index is not None
         found = await asyncio.to_thread(index.sidecars)
-        await self.ingest.cancel(sub, [d.id for d in found])  # whatever is being read
+        await self._cancel(sub, [d.id for d in found])  # whatever is being read
+        if self.meaning is not None:
+            self.meaning.cache.drop(sub)
         await index.close()
         await asyncio.to_thread(index.quarantine)
         chat_ids = {d.scope[len(CHAT) :] for d in found if d.scope.startswith(CHAT)}

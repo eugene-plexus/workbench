@@ -45,6 +45,7 @@ from .saved import (
 def test_many_files_are_kept_at_once_each_queued_and_then_read_with_its_counts(
     world: World,
 ) -> None:
+    world.gateway.embedder_listed = False  # no search model at all: documents are searched by words
     ada = start(world)
     made = add(
         ada,
@@ -81,8 +82,10 @@ def test_many_files_are_kept_at_once_each_queued_and_then_read_with_its_counts(
     )
     assert (
         done["search"]["mode"] == "words"
-        and done["search"]["headline"] == "Searching by words only."
-    )
+        and done["search"]["headline"] == "Searching by words only. No search model is running."
+        and done["search"]["code"] == "none_set_up"
+        and done["search"]["actions"] == ["get_search_model"]
+    ), "no search model is set up, and the header says so: words only, and where to get one"
 
 
 def test_each_file_shows_its_own_state_as_the_worker_goes_through_them(world: World) -> None:

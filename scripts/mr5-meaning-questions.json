@@ -1,0 +1,302 @@
+[
+  {
+    "question": "Why did we decide against building a native desktop app for each operating system?",
+    "file": "agent-clients-and-tool-calling.md",
+    "heading": "4. Not a native OS application — DECIDED 2026-09-11"
+  },
+  {
+    "question": "Why can't an installed app's web page be served from the same address as the admin console?",
+    "file": "apps-and-spokes.md",
+    "heading": "5.1 Its own origin, never the console's (call #3)"
+  },
+  {
+    "question": "How does the admission check keep answering quickly while state is being saved to disk?",
+    "file": "architecture-debt-paydown.md",
+    "heading": "Admission stays responsive during durable writes"
+  },
+  {
+    "question": "Does a person need an email address on their Eugene account for Open WebUI to work?",
+    "file": "c4-open-webui.md",
+    "heading": "3. Eugene's side: an optional email for each person"
+  },
+  {
+    "question": "When the first message of a new chat arrives and several replicas could take it, how is one picked?",
+    "file": "cache-aware-balancing.md",
+    "heading": "CB2. A new conversation goes where there is room: `spread`"
+  },
+  {
+    "question": "What can a user count on from an engine that carries the Experimental label?",
+    "file": "experimental-engines.md",
+    "heading": "What Experimental means"
+  },
+  {
+    "question": "How many clicks does a brand-new user need to reach a first chat, compared with other local-AI tools?",
+    "file": "hobbyist-ux.md",
+    "heading": "0.2 First chat is fifteen clicks away, and the field does it in one to three"
+  },
+  {
+    "question": "How can the app tell whether a firewall is stopping other devices from connecting to it?",
+    "file": "hobbyist-ux.md",
+    "heading": "6.6 Reach: detecting the firewall"
+  },
+  {
+    "question": "Why was the KV cache size estimated at many times its real size for a common 12B model?",
+    "file": "hobbyist-ux.md",
+    "heading": "▶ THE FINDING WITH THE LONGEST REACH IS NOT ABOUT DISCOVERY: the KV cache was 43× too large on a mainstream 12B"
+  },
+  {
+    "question": "How does an install running in a container learn which update steps apply to its hosting platform?",
+    "file": "in-app-updates.md",
+    "heading": "1.5 A container is told how, in its platform's words"
+  },
+  {
+    "question": "Why did we choose uv over shipping everything as one self-contained executable?",
+    "file": "install-paths-and-distribution.md",
+    "heading": "5. `uv`, and why not a single binary"
+  },
+  {
+    "question": "How does the agent stop the processes it launched when it shuts down?",
+    "file": "install-paths-and-distribution.md",
+    "heading": "Step 2 — children are asked to stop, not killed. DONE 2026-09-11."
+  },
+  {
+    "question": "Does the control-plane container need any special permissions or devices to run?",
+    "file": "install-paths-and-distribution.md",
+    "heading": "What the container needs turned out to be nothing at all"
+  },
+  {
+    "question": "What does the gateway do about client keys when it can't reach the control root?",
+    "file": "install-wide-client-keys.md",
+    "heading": "Gateway policy and outage behavior"
+  },
+  {
+    "question": "What different routes could file contents take when they are copied between two sites?",
+    "file": "job-sites-cross-site-copy.md",
+    "heading": "2. Three roads for the bytes (J92)"
+  },
+  {
+    "question": "When someone logs out of a Windows machine, do their tools on that job site keep running?",
+    "file": "job-sites-own-enrollment.md",
+    "heading": "J25. Windows, while the person is signed out"
+  },
+  {
+    "question": "How do older folder records that lack the new fields keep working?",
+    "file": "library-folders-and-reach.md",
+    "heading": "2.2 Leniency, so nothing that exists breaks"
+  },
+  {
+    "question": "How does the Library find out which model formats each engine can run?",
+    "file": "library-sources-and-engines.md",
+    "heading": "4.1 Engines declare what they accept"
+  },
+  {
+    "question": "Why can't llama.cpp's memory-fit estimate be used to judge whether a model fits on the other engines?",
+    "file": "library-sources-and-engines.md",
+    "heading": "6.1 L11: why llama.cpp's fit cannot stand in for every engine"
+  },
+  {
+    "question": "Which parts of the old codebase were marked for deletion?",
+    "file": "local-inference-control-plane.md",
+    "heading": "Kill list"
+  },
+  {
+    "question": "What can the guarantee that a request stays on local backends not protect against?",
+    "file": "local-only-routing.md",
+    "heading": "Trust boundary and limits"
+  },
+  {
+    "question": "How can we verify an engine download when upstream doesn't publish checksum files?",
+    "file": "m1-engine-acquisition.md",
+    "heading": "Trap 5 — no checksums are published, but the API has digests"
+  },
+  {
+    "question": "At what moment in a streamed reply does the gateway lose the ability to retry on another backend?",
+    "file": "m10-token-streaming.md",
+    "heading": "1. The commit point — the one rule that matters"
+  },
+  {
+    "question": "When a worker's copy is compared with the library's, is the whole model folder measured or only the weights file?",
+    "file": "m11-compute-storage-separation.md",
+    "heading": "14.2 The size compared is the weights file, not the model"
+  },
+  {
+    "question": "Why is pulling details out of a GGUF file more expensive than reading a short header?",
+    "file": "m2-model-library.md",
+    "heading": "Trap 2 — reading GGUF metadata is not a cheap header read"
+  },
+  {
+    "question": "Can we launch llama.cpp with the option that makes it download a model from Hugging Face by itself?",
+    "file": "m2-model-library.md",
+    "heading": "Trap 9 — never pass `-hf`"
+  },
+  {
+    "question": "Why does checking only the first file of a multi-part model give a misleading fit result?",
+    "file": "m3-discovery-download-guidance.md",
+    "heading": "Trap 8 — scoring shard 1 of a split model understates it"
+  },
+  {
+    "question": "Why does a model's fit result have four possible values instead of just yes or no?",
+    "file": "m3-discovery-download-guidance.md",
+    "heading": "The verdict, and why four values"
+  },
+  {
+    "question": "Can GGUF models be served through vLLM in Eugene?",
+    "file": "m4-second-engine-vllm.md",
+    "heading": "Trap 3 — GGUF via vLLM is not a feature we can offer"
+  },
+  {
+    "question": "Who is able to decrypt a node's sealed secrets if the node itself is lost?",
+    "file": "m5-multi-host-and-trust.md",
+    "heading": "The recovery recipient"
+  },
+  {
+    "question": "What happens when there isn't enough GPU memory to start another model?",
+    "file": "m6-lifecycle-policy.md",
+    "heading": "6. VRAM-aware admission — refuse, never queue"
+  },
+  {
+    "question": "How does a component choose the address it tells other machines to use for reaching it?",
+    "file": "m7-second-host-readiness.md",
+    "heading": "4. The advertise address"
+  },
+  {
+    "question": "What did recording only a single total duration for each request conceal?",
+    "file": "m8-retained-request-metrics.md",
+    "heading": "What one `total_ms` was hiding"
+  },
+  {
+    "question": "How do you remove a machine from an install after it has been enrolled?",
+    "file": "m9-networked-polish.md",
+    "heading": "Un-enroll — the missing operation"
+  },
+  {
+    "question": "How does the MLX engine tell that a model is ready without generating a token on every health check?",
+    "file": "mlx-engine.md",
+    "heading": "Readiness: one token once, not one token per poll"
+  },
+  {
+    "question": "Can I still change a node's labels if the control root is unreachable?",
+    "file": "node-labels.md",
+    "heading": "What happens when the root is down"
+  },
+  {
+    "question": "What stops a node from starting a model from a file that was only partly copied?",
+    "file": "node-local-model-copy.md",
+    "heading": "3.3 A partial copy must never be usable"
+  },
+  {
+    "question": "When someone connects a cloud account, does it get its own driver that serves all of that account's models?",
+    "file": "openai-inference-compatibility.md",
+    "heading": "2.1 A provider account is one driver serving many models"
+  },
+  {
+    "question": "What damage can someone do with a stolen node key?",
+    "file": "per-node-token-keys.md",
+    "heading": "2. What a leaked key costs afterwards"
+  },
+  {
+    "question": "How can a site be sure the central server hasn't swapped in a different public key for someone?",
+    "file": "person-held-keys.md",
+    "heading": "4. Pinning the key so the root cannot substitute it (J43)"
+  },
+  {
+    "question": "Who actually runs a tool when a model asks for one in the playground?",
+    "file": "playground-diagnostic.md",
+    "heading": "4.3 Results — the operator is the tool runtime"
+  },
+  {
+    "question": "How much answer quality do you lose by lowering the precision of the KV cache?",
+    "file": "profile-builder.md",
+    "heading": "M7. What cache precision costs in quality"
+  },
+  {
+    "question": "Why shouldn't a request that fails because of its own contents mark the backend as unhealthy?",
+    "file": "prompt-cache.md",
+    "heading": "PC3. A request's own failure does not trip the circuit (gateway#7)"
+  },
+  {
+    "question": "If an engine is slow to answer but still generating, should the gateway give up on it?",
+    "file": "release-roadmap.md",
+    "heading": "3.5 R2.5 — A backend that is still computing has not failed"
+  },
+  {
+    "question": "If a machine is a member of the install, does that automatically let people use its files?",
+    "file": "remote-nodes.md",
+    "heading": "3.3 Membership is not access"
+  },
+  {
+    "question": "What happens to a stream once repeated output is detected, and is the backend request cancelled?",
+    "file": "repetition-protection.md",
+    "heading": "Stop and cancellation semantics"
+  },
+  {
+    "question": "Should the legacy text-completions endpoint for editor autocomplete be built yet?",
+    "file": "responses-and-completions.md",
+    "heading": "Recommendation: not yet — capture a real IDE client first"
+  },
+  {
+    "question": "Once a request has used the search tool, why can't the gateway retry it on another backend?",
+    "file": "server-run-tools.md",
+    "heading": "4. Failover ends at the first search"
+  },
+  {
+    "question": "Which problems with settings did the audit spot but leave alone on purpose?",
+    "file": "settings-accuracy.md",
+    "heading": "Found, not fixed (recorded, each its own call)"
+  },
+  {
+    "question": "Which sign-in flow do apps use to log in with Eugene?",
+    "file": "sign-in-with-eugene.md",
+    "heading": "D1. OIDC Authorization Code with PKCE, and nothing else"
+  },
+  {
+    "question": "What details must we get right so the Strata integration doesn't mislead users about what it can do?",
+    "file": "strata-engine.md",
+    "heading": "Details that prevent a misleading integration"
+  },
+  {
+    "question": "Why do we test tool-calling behaviour separately for each model?",
+    "file": "tool-call-repair.md",
+    "heading": "Why measure per model"
+  },
+  {
+    "question": "Do any options in the console overlap so that several of them control one behaviour?",
+    "file": "ui-settings-reorganisation.md",
+    "heading": "0.4 Two settings for the same thing, and three for a third"
+  },
+  {
+    "question": "Why can't every node get its own free-form URL path in the web interface?",
+    "file": "ui-tree-navigation.md",
+    "heading": "0.5 Static export forbids arbitrary path segments"
+  },
+  {
+    "question": "How does the standby report how far it has fallen behind the root?",
+    "file": "warm-standby.md",
+    "heading": "3.4 Lag (SB4)"
+  },
+  {
+    "question": "Which per-user resources are unavailable when Eugene runs as a Windows service?",
+    "file": "windows-comes-back-by-itself.md",
+    "heading": "0.4 The service loses FOUR per-user things, not one"
+  },
+  {
+    "question": "After I switch to an earlier version of an answer, which version does the model see on my next message?",
+    "file": "workbench-answer-versions.md",
+    "heading": "6. What the next turn sees, and what others see"
+  },
+  {
+    "question": "What does the screen show when no model is available for that kind of media?",
+    "file": "workbench-media-screens.md",
+    "heading": "2.6 When nothing serves a door"
+  },
+  {
+    "question": "How wide is the reading column, and how was that width worked out?",
+    "file": "workbench-reading.md",
+    "heading": "5.4 Widths and the arithmetic"
+  },
+  {
+    "question": "How does Workbench guard against harmful content in a model's reply?",
+    "file": "workbench-v1.md",
+    "heading": "W5. Model output is untrusted"
+  }
+]

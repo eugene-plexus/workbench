@@ -29,6 +29,14 @@ unless the person has said otherwise (`ask` by default: "Send for this chat"; th
 owner's `never` is final), as notes are. A file attached to the chat is their own act
 and is not held back.
 
+**Search by meaning** (MR5, `knowledge/meaning.py`) is the second way a passage is found,
+beside its words. The Documents screen's header says which is in effect from a live look
+(`search`: `Searching by meaning and words.`, `Searching by words only. No search model is
+running.`, or `Search by meaning is paused: ...` with Rebuild), each document says how much of its
+meaning is added (`meaning`), and each passage found says how it was found (`via`: `words`,
+`meaning` or `both`). The words search never depends on it: when meaning cannot run, the answer
+says it was searched by words only (`retrieval.meaning`), and never that nothing matched.
+
 **A search that cannot run is never "nothing matched".** What searching came to is kept
 with the answer (`Message.retrieval`): `used`, `nothing_matched` (a normal result),
 `skipped` (and why: the window, the room, the model, no words) or `failed` (and the
@@ -47,7 +55,7 @@ import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse
@@ -60,6 +68,7 @@ from .hub import HubError
 from .knowledge import extract
 from .knowledge import index as index_module
 from .knowledge import reader as reading_module
+from .knowledge.embedders import Identity
 from .knowledge.index import (
     FOUND,
     LIBRARY,
@@ -71,8 +80,9 @@ from .knowledge.index import (
     chat_scope,
     valid_id,
 )
+from .knowledge.meaning import Queue, Status
 from .knowledge.saved import OriginalMissing, SavedDocuments, hash_file, new_id
-from .knowledge.search import Retrieved, plan_query
+from .knowledge.search import Retrieval, Retrieved, plan_query
 from .store import Chat, Message, Person, Store
 
 log = logging.getLogger(__name__)
@@ -119,10 +129,12 @@ async def index_unavailable(request: Request, exc: Exception) -> JSONResponse:
 # --------------------------------------------------------------------------- #
 
 
-def document_view(doc: Document) -> dict[str, Any]:
+def document_view(doc: Document, meaning: dict[str, Any] | None = None) -> dict[str, Any]:
     """A document as the Documents screen reads it. `state` is `queued`, `reading`,
-    `searchable` (it can be found by words), `ready`, `skipped` or `failed`; for the last
-    two `message` says why, in words a person reads."""
+    `searchable` (it can be found by words, and its meaning is waiting to be added),
+    `embedding` (its meaning is being added), `ready`, `skipped` or `failed`; for the last
+    two `message` says why, in words a person reads. `meaning` is how much of its meaning
+    is added, and what is true of it now (`Meaning.document_view`); null until it is read."""
     return {
         "id": doc.id,
         "name": doc.name,
@@ -145,19 +157,47 @@ def document_view(doc: Document) -> dict[str, Any]:
         "addedAt": doc.added_at,
         "readAt": doc.read_at,
         "indexedAt": doc.indexed_at,
-    }
-
-
-def search_facts(saved: SavedDocuments) -> dict[str, Any]:
-    """How documents are searched right now, for the Documents screen's header: in
-    MR4, by words only, and the way to say it that does not claim what is not so."""
-    meaning = saved.retriever.mode != "words"
-    return {
-        "mode": saved.retriever.mode,
-        "words": True,
         "meaning": meaning,
-        "headline": "Searching by meaning and words." if meaning else "Searching by words only.",
     }
+
+
+async def meaning_status(request: Request, person: Person) -> Status | None:
+    """How this person's documents are searched now, from a live look; None when this
+    Workbench has no gateway to ask about a search model (words only)."""
+    saved = _saved(request)
+    if saved.meaning is None:
+        return None
+    return await saved.meaning.status(saved.index(person.sub, create=False), person.sub)
+
+
+def search_facts(status: Status | None) -> dict[str, Any]:
+    """How documents are searched right now, for the Documents screen's header: the mode in
+    effect (`meaning and words` or `words`), the sentence that says it, why when it is not
+    both, what the person can do (`actions`: `rebuild`, `get_search_model`), which search model
+    and whether its prefixes are known, and how adding meaning is going (`adding`). Said from a
+    live look, never from what was true when the last document was added."""
+    if status is None:
+        return {
+            "mode": "words",
+            "words": True,
+            "meaning": False,
+            "headline": "Searching by words only.",
+            "code": "no_gateway",
+            "detail": None,
+            "actions": [],
+            "model": None,
+            "adding": None,
+            "rebuild": None,
+        }
+    return status.view()
+
+
+def meaning_row(
+    saved: SavedDocuments, doc: Document, status: Status | None
+) -> dict[str, Any] | None:
+    if saved.meaning is None:
+        return None
+    return saved.meaning.document_view(doc, status.queue if status else Queue(), status)
 
 
 def prefs_view(prefs: dict[str, Any], install: config.DocumentSettings) -> dict[str, Any]:
@@ -228,17 +268,21 @@ async def list_documents(request: Request) -> dict[str, Any]:
         documents = await index.documents(LIBRARY)
         totals = await index.totals(LIBRARY)
         kept = await index.passages_total()
+    status = await meaning_status(request, person)
     return {
-        "documents": [document_view(d) for d in documents],
+        "documents": [document_view(d, meaning_row(saved, d, status)) for d in documents],
         "totals": {
             "documents": totals.documents if totals else 0,
             "passages": totals.passages if totals else 0,
             "bytes": totals.bytes if totals else 0,
             "byState": dict(totals.by_state) if totals else dict.fromkeys(index_module.STATES, 0),
             "passagesKept": kept,
+            #: Passages that have their meaning, and passages still owed it.
+            "embedded": totals.embedded if totals else 0,
+            "owed": totals.owed if totals else 0,
         },
         "limits": limits_view(install),
-        "search": search_facts(saved),
+        "search": search_facts(status),
         "prefs": prefs_view(prefs, install),
         "installEnabled": install.enabled,
         # The standing line: an answer can quote a document, so a person who is in an
@@ -404,6 +448,28 @@ async def rebuild_documents(request: Request) -> dict[str, Any]:
     return {"documents": made.documents, "left": made.left}
 
 
+@router.post("/api/documents/meaning/rebuild")
+async def rebuild_meaning(request: Request) -> dict[str, Any]:
+    """Add meaning again with the search model that is running ("Rebuild", on the paused
+    header): every vector of this person's documents goes, with the record of the model that
+    made them, and each document is owed all of its meaning again, `searchable` while it is
+    added. **Words are never touched**: documents are found by their words throughout, and
+    nothing is read again from the files. Poll `GET /api/documents`. `passages` is how many
+    are owed; `search` is the header as it is now. 409 when this Workbench has no gateway to
+    ask."""
+    person = await _person(request)
+    store, saved = _store(request), _saved(request)
+    if not (await config.document_settings(store)).enabled:
+        raise _problem(status.HTTP_403_FORBIDDEN, _OWNER_OFF)
+    if saved.meaning is None:
+        raise _problem(
+            status.HTTP_409_CONFLICT,
+            "Workbench has no gateway to ask about a search model, so it cannot add meaning.",
+        )
+    owed = await saved.meaning.rebuild(person.sub)
+    return {"passages": owed, "search": search_facts(await meaning_status(request, person))}
+
+
 @router.get("/api/documents/prefs")
 async def get_prefs(request: Request) -> dict[str, Any]:
     person = await _person(request)
@@ -448,6 +514,12 @@ class QuestionToTry(BaseModel):
     model: str | None = Field(default=None, max_length=256)
     #: How many passages at most (1 to 10; 5 when not said).
     passages: int | None = Field(default=None, ge=1, le=10, strict=True)
+    #: Search by only these ways, to see what each finds: `words`, `meaning`, or both (the
+    #: default). A run that names its ways has no evidence rule: it shows what each way
+    #: found, whatever it scored.
+    ways: Annotated[list[Literal["words", "meaning"]], Field(min_length=1, max_length=2)] | None = (
+        None
+    )
 
 
 def _hit_view(passage: Retrieved) -> dict[str, Any]:
@@ -467,29 +539,76 @@ def _hit_view(passage: Retrieved) -> dict[str, Any]:
         "tokens": passage.tokens,
         "chunkIds": list(passage.chunk_ids),
         "via": passage.via,
-        # Why it matched: which of the words searched for are in it, and in its heading.
+        # Why it matched: which of the words searched for are in it, and in its heading;
+        # where each way put it (1 is best), and how near the question it was by meaning.
         "why": {
             "via": passage.via,
             "terms": list(passage.terms),
             "phrases": list(passage.phrases),
             "inHeading": list(passage.in_heading),
+            "ranks": dict(passage.ranks),
+            "similarity": (
+                round(passage.similarity, 3) if passage.similarity is not None else None
+            ),
         },
     }
+
+
+def meaning_block(result: Retrieval | None, model: str | None, configured: bool) -> dict[str, Any]:
+    """What a search by meaning came to, for a person to be told: whether it ran and with
+    which search model; if not, why, in words (`quiet` when it was never in play, and is not
+    worth saying beside every answer); and its best similarity, the floor under which that
+    is not an answer, and whether its passages were set aside for it."""
+    report = result.reports.get("meaning") if result is not None else None
+    if report is None:
+        return {
+            "used": False,
+            "code": "not_asked" if configured else "none",
+            "message": None,
+            "quiet": True,
+            "model": None,
+            "best": None,
+            "floor": None,
+            "belowFloor": False,
+        }
+    return {
+        "used": report.ran,
+        "code": report.code,
+        "message": report.message,
+        "quiet": report.quiet,
+        "model": model if report.ran else None,
+        "best": round(report.best, 3) if report.best is not None else None,
+        "floor": report.floor,
+        "belowFloor": report.below_floor,
+    }
+
+
+async def built_model(index: Index) -> str | None:
+    """The search model this person's meaning was built with, or None while there is none."""
+    try:
+        built = Identity.from_json(await index.embedder())
+    except ValueError:
+        return None
+    return built.model if built is not None else None
 
 
 @router.post("/api/documents/test")
 async def test_question(request: Request, body: QuestionToTry) -> dict[str, Any]:
     """The passages Workbench would send for this question, with the file, page and
-    headings of each and why it matched. **No model is asked**, and nothing leaves: it is
-    the asker's own documents. `status` is `found`, `nothing_matched` (a normal result),
-    `no_words` (nothing in the question to search for) or `no_documents`; a search that
-    cannot run is a 503 with its words, never `nothing_matched`."""
+    headings of each and why it matched. **No model is asked** (the question is embedded by
+    the search model, which is not a model that answers), and nothing leaves: it is the asker's
+    own documents. `status` is `found`, `nothing_matched` (a normal result), `no_words`
+    (nothing in the question to search for), `no_documents`, or `unavailable` (only with
+    `ways`: none of the ways asked for could run; `meaning` says why); a search that cannot
+    run is a 503 with its words, never `nothing_matched`. `mode` is how it searched, and
+    `meaning` says whether meaning ran, with which search model, or why not."""
     person = await _person(request)
     store, saved = _store(request), _saved(request)
     install = await config.document_settings(store)
     if not install.enabled:
         raise _problem(status.HTTP_403_FORBIDDEN, _OWNER_OFF)
     scopes = [LIBRARY]
+    ways = list(dict.fromkeys(body.ways)) if body.ways else None
     model_id = body.model
     if body.chatId is not None:
         chat = await _own_chat(request, person, body.chatId)
@@ -512,6 +631,7 @@ async def test_question(request: Request, body: QuestionToTry) -> dict[str, Any]
         "didNotFit": 0,
         "budget": {**budget.view(), "block": block, "perPassage": each},
         "searched": {"documents": 0, "passages": 0, "waiting": 0},
+        "meaning": meaning_block(None, None, saved.meaning is not None),
     }
     index = saved.index(person.sub, create=False)
     documents, passages, waiting = (
@@ -532,11 +652,17 @@ async def test_question(request: Request, body: QuestionToTry) -> dict[str, Any]
         budget=max(0, budget.allowed - block),
         overhead=each,
         k=body.passages or 5,
+        ways=ways,
     )
+    out["mode"] = result.mode
+    out["meaning"] = meaning_block(result, await built_model(index), saved.meaning is not None)
     out["passages"] = [_hit_view(p) for p in result.passages]
     out["found"] = result.found
     out["didNotFit"] = result.did_not_fit
-    out["status"] = "found" if result.passages else "nothing_matched"
+    if result.mode == "none":
+        out["status"] = "unavailable"  # every way asked for was unable to run: said, not "nothing"
+    else:
+        out["status"] = "found" if result.passages else "nothing_matched"
     return out
 
 
@@ -544,7 +670,8 @@ async def test_question(request: Request, body: QuestionToTry) -> dict[str, Any]
 async def get_document(request: Request, doc_id: str) -> dict[str, Any]:
     person = await _person(request)
     _, doc = await _own_document(request, person, doc_id)
-    return document_view(doc)
+    status = await meaning_status(request, person)
+    return document_view(doc, meaning_row(_saved(request), doc, status))
 
 
 @router.delete("/api/documents/{doc_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -802,6 +929,7 @@ async def chat_documents_view(
         mine = await index.count_found([chat_scope(chat.id)])
         chat_docs = await index.documents(chat_scope(chat.id))
     access = await decide_access(request, person, chat, model or chat.model)
+    status = await meaning_status(request, person)
     facts = access.facts
     searching_library = switch == "on" and access.library
     searching_chat = bool(chat_docs) and not access.too_small and access.code != "install_off"
@@ -844,12 +972,12 @@ async def chat_documents_view(
             "library": {"documents": library[0], "passages": library[1], "waiting": library[2]},
             "chat": {"documents": mine[0], "passages": mine[1], "waiting": mine[2]},
         },
-        "chatDocuments": [document_view(d) for d in chat_docs],
+        "chatDocuments": [document_view(d, meaning_row(saved, d, status)) for d in chat_docs],
         "budget": {
             "limit": context.retrieval_limit(access.window),
             "window": access.window,
         },
-        "search": search_facts(saved),
+        "search": search_facts(status),
     }
 
 
@@ -910,6 +1038,7 @@ def retrieval_view(
     notes: list[dict[str, str]] | None = None,
     searched: tuple[int, int, int] | None = None,
     took: float | None = None,
+    meaning: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """What a message keeps of a search of the person's documents. `status` is `used`
     (passages were sent), `nothing_matched` (a normal result), `skipped` (not searched,
@@ -942,6 +1071,9 @@ def retrieval_view(
         "notes": notes or [],
         "cited": [],
         "ms": None if took is None else round(took * 1000),
+        #: Whether search by meaning ran (`used`), and with which search model; if not, why
+        #: (`code`, `message`; `quiet` when it was never in play): "searched by words only: ...".
+        "meaning": meaning,
     }
 
 
@@ -950,13 +1082,22 @@ def _strict_reply(retrieval: dict[str, Any]) -> str:
     has none to answer from: what was observed, and that the model was not asked."""
     status_, message = retrieval["status"], retrieval.get("message")
     if status_ == "nothing_matched":
-        return context.NOTHING_IN_DOCUMENTS
+        return context.NOTHING_IN_DOCUMENTS + _meaning_was_off(retrieval)
     if status_ == "no_documents":
         return _NO_DOCUMENTS
     tail = " This chat answers only from your documents, so it did not ask the model."
     if status_ == "failed":
         return f"{message}{tail}"
     return f"{message}{tail}" if message else context.NOTHING_IN_DOCUMENTS
+
+
+def _meaning_was_off(retrieval: dict[str, Any]) -> str:
+    """A sentence to follow "nothing matched" when search by meaning could not run: the
+    nothing was by words only, and is said so (never a failed search as a plain "nothing")."""
+    block = retrieval.get("meaning") or {}
+    if block.get("used") or block.get("quiet") or not block.get("message"):
+        return ""
+    return f" {block['message']}"
 
 
 async def retrieve(
@@ -1071,11 +1212,21 @@ async def retrieve(
         )
         known.update(mode=result.mode, found=result.found, did_not_fit=result.did_not_fit)
         known["took"] = time.perf_counter() - started
+        known["meaning"] = meaning_block(
+            result, await built_model(index), saved.meaning is not None
+        )
+        gone = result.reports.get("meaning")
+        if gone is not None and not gone.ran and not gone.quiet:
+            # Meaning could not run for this answer: searched by words only, and said so.
+            notes.append({"code": f"meaning_{gone.code}", "message": str(gone.message)})
         if not result.passages:
             if result.found:
                 # Found, and not one fits what the window leaves: said, never "nothing matched".
                 return done("skipped", code="chat_full", message=_no_room(used, reserve, budget))
-            return done("nothing_matched", message="Nothing in your documents matched.")
+            return done(
+                "nothing_matched",
+                message="Nothing in your documents matched." + _meaning_was_off(known),
+            )
     except IndexUnavailable as exc:
         log.warning("searching a person's documents failed: %s (%s)", exc.code, exc.message)
         return done("failed", code=exc.code, message=exc.message)

@@ -205,16 +205,18 @@ async def test_a_migration_brings_an_older_index_forward_and_keeps_its_documents
     assert index is not None
     await put(index, "doc00001", f"The {RARE} word.")
     await index.close()
-    monkeypatch.setattr(index_module, "SCHEMA_VERSION", 2)
+    monkeypatch.setattr(index_module, "SCHEMA_VERSION", index_module.SCHEMA_VERSION + 1)
     monkeypatch.setitem(
-        index_module._MIGRATIONS, 2, ["ALTER TABLE documents ADD COLUMN later TEXT"]
+        index_module._MIGRATIONS,
+        index_module.SCHEMA_VERSION,
+        ["ALTER TABLE documents ADD COLUMN later TEXT"],
     )
     newer = Index(ADA, index.dir, indexes._executor)
     docs = await newer.documents()
     assert [d.id for d in docs] == ["doc00001"]
     assert await words(newer, RARE) == ["doc00001"]
     with raw(newer) as db:
-        assert db.execute("PRAGMA user_version").fetchone() == (2,)
+        assert db.execute("PRAGMA user_version").fetchone() == (index_module.SCHEMA_VERSION,)
         assert "later" in {r[1] for r in db.execute("PRAGMA table_info(documents)")}
     await newer.close()
     # A second boot does not run it again (ALTER TABLE would fail).

@@ -132,15 +132,22 @@ class Ingest:
         await self._announce()
 
     async def wait(self, sub: str, doc_ids: list[str], seconds: float) -> set[str]:
-        """Wait for these documents to be read (searchable, or ended), for at most
-        `seconds`. The ids still waiting or being read after that."""
+        """Wait for these documents to be read (searchable, or ended) and for the worker
+        to be done with them, for at most `seconds`. The ids still waiting or being read
+        after that. A document can be found by its words a moment before the worker has
+        made it `ready` (or left it owed its meaning); a caller that waits for it and
+        then looks must not see that moment."""
         index = self.indexes.get(sub, create=False)
         if index is None or not doc_ids:
             return set()
         deadline = time.perf_counter() + seconds
         while True:
             found = [await index.document(i) for i in doc_ids]
-            waiting = {d.id for d in found if d is not None and d.status in PENDING}
+            waiting = {
+                d.id
+                for d in found
+                if d is not None and (d.status in PENDING or self.current == (sub, d.id))
+            }
             left = deadline - time.perf_counter()
             if not waiting or left <= 0:
                 return waiting
