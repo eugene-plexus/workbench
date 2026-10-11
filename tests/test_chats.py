@@ -24,7 +24,7 @@ from eugene_plexus_workbench.store import (
     Store,
 )
 
-from .conftest import ADMIN_TOKEN, DRAFT, DRAFT_REASONING, MODEL, PNG, Browser, World
+from .conftest import ADMIN_TOKEN, DRAFT, DRAFT_REASONING, MODEL, PNG, Browser, World, wav
 
 
 def _events(
@@ -241,7 +241,9 @@ def test_the_search_switch_asks_as_any_client_does_and_the_sources_are_kept(worl
     ada.post(f"/api/chats/{chat}/messages", json={"content": "News?", "search": True})
     answer = ada.wait_answer(chat)
     assert world.gateway.requests[-1]["web_search_options"] == {}
-    assert answer["sources"] == [{"url": "https://example.org/page", "title": "A page"}]
+    assert answer["sources"] == [
+        {"kind": "web", "url": "https://example.org/page", "title": "A page"}
+    ]
     assert answer["searches"] == 1 and answer["reasoning"] == "Searching first."
     assert ada.get(f"/api/chats/{chat}").json()["chat"]["search"] is True, "the switch is kept"
 
@@ -437,6 +439,9 @@ def test_settings_are_changed_only_with_the_agents_admin_token(world: World) -> 
         "memoryEnabled",
         "memoryMaxNotes",
         "memoryExternalModels",
+        "documentsEnabled",
+        "documentsMaxFileMB",
+        "documentsWholeUpToTokens",
     ]
     assert schema["fields"][0]["default"] is False
     assert httpx.get(f"{world.workbench}/v1/config", headers=good, trust_env=False).json() == {
@@ -444,6 +449,9 @@ def test_settings_are_changed_only_with_the_agents_admin_token(world: World) -> 
         "memoryEnabled": True,
         "memoryMaxNotes": 300,
         "memoryExternalModels": "ask",
+        "documentsEnabled": True,
+        "documentsMaxFileMB": 50,
+        "documentsWholeUpToTokens": 6000,
     }
     result = httpx.patch(
         f"{world.workbench}/v1/config",
@@ -506,15 +514,17 @@ def test_the_gateways_size_limits_are_said_before_an_upload(world: World) -> Non
     big = PNG + b"\0" * (5 * 1024 * 1024)
     refused = ada.post(f"/api/chats/{chat}/files", files={"file": ("big.png", big, "image/png")})
     assert refused.status_code == 413 and "5 MiB" in refused.json()["detail"]["message"]
-    pdf = b"%PDF-1.7\n" + b"0" * (4 * 1024 * 1024)
+    # What one chat carries together is what travels: images and audio. A document
+    # is read, and its bytes never go, so it is not counted (it has its own limit).
+    clip = wav(250)  # a little over 3.8 MiB
     for _ in range(2):
         assert (
             ada.post(
-                f"/api/chats/{chat}/files", files={"file": ("a.pdf", pdf, "application/pdf")}
+                f"/api/chats/{chat}/files", files={"file": ("a.wav", clip, "audio/wav")}
             ).status_code
             == 201
         )
-    full = ada.post(f"/api/chats/{chat}/files", files={"file": ("c.pdf", pdf, "application/pdf")})
+    full = ada.post(f"/api/chats/{chat}/files", files={"file": ("c.wav", clip, "audio/wav")})
     assert full.status_code == 413 and "start a new chat" in full.json()["detail"]["message"]
 
 

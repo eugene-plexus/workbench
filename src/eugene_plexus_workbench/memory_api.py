@@ -399,6 +399,8 @@ class ModelFacts:
     window: int | None
     locality: str
     who: str | None
+    #: Whether it takes a PDF as a file (`file_input`): documents use this.
+    file_input: bool = False
 
 
 @dataclass
@@ -432,6 +434,7 @@ async def model_facts(hub: Hub, model_id: str) -> ModelFacts:
         window=window if isinstance(window, int) and not isinstance(window, bool) else None,
         locality=str(common["locality"]),
         who=common["provider"] or common["account"],
+        file_input=bool(info.get("file_input")),
     )
 
 
@@ -527,12 +530,16 @@ async def _freeze(
     return snapshot
 
 
-async def block_for(request: Request, person: Person, chat: Chat, model_id: str) -> str | None:
+async def block_for(
+    request: Request, person: Person, chat: Chat, model_id: str, *, freeze: bool = True
+) -> str | None:
     """The block of notes the next request carries, or None for none.
 
     Reuses the chat's snapshot byte for byte; takes one at the first request
     that carries notes, and again for another model. Never raises: memory
-    does not stop an answer."""
+    does not stop an answer. With `freeze=False` nothing is kept and no note
+    is counted as used: the block a request *would* carry, for a check made
+    before one is sent."""
     try:
         store = _store(request)
         install = await config.memory_settings(store)
@@ -546,7 +553,16 @@ async def block_for(request: Request, person: Person, chat: Chat, model_id: str)
         if not _placement(facts, install, prefs, chat).send:
             return None
         if snapshot is None or snapshot.model != model_id:
-            snapshot = await _freeze(store, person, chat, facts, prefs)
+            if freeze:
+                snapshot = await _freeze(store, person, chat, facts, prefs)
+            else:
+                snapshot = memory.build_snapshot(
+                    await store.memory_notes(person.sub),
+                    budget=memory.budget_for(facts.window, prefs["budget_tokens"]),
+                    window=facts.window,
+                    model=facts.id,
+                    now=time.time(),
+                )
         return snapshot.text or None
     except Exception as exc:
         log.warning("a chat's notes were left out of its request: %s: %s", type(exc).__name__, exc)

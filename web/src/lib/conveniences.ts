@@ -1,3 +1,4 @@
+import { isDocumentSource, sourceLine } from "./documents";
 import type { Chat, ChatDetail } from "./types";
 import { answerParts, EXPORT_BRANCHES_NOTE, statusWords } from "./words";
 
@@ -91,9 +92,14 @@ export function chatMarkdown(detail: ChatDetail): string {
         }
       }
       if (message.sources.length) {
+        // Files are listed as what was sent to the model, not as what it used.
         lines.push(
           "### Sources",
-          ...message.sources.map((s) => `${oneLine(s.title)}: ${oneLine(s.url)}`),
+          ...message.sources.map((s) =>
+            isDocumentSource(s)
+              ? `Sent to the model: ${oneLine(sourceLine(s))}`
+              : `${oneLine(s.title)}: ${oneLine(s.url)}`,
+          ),
         );
       }
       if (message.status === "running") lines.push("Answer still in progress when exported.");

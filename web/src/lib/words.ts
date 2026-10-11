@@ -33,6 +33,8 @@ export function takes(model: Model): string[] {
 /** What an answer that has not started is waiting on, said plainly. */
 export function progressWords(progress: Progress | null | undefined): string {
   if (!progress) return "Waiting for the model…";
+  // The answer is held for its files to be read (MR2): not the model's wait.
+  if (progress.stage === "documents") return "Reading your files…";
   if (progress.stage === "tool") {
     if (progress.phase === "approval") return "Review the tool calls to continue.";
     if (progress.tool !== "web_search") return `Using ${progress.tool}…`;

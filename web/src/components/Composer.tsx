@@ -7,24 +7,22 @@ import {
   Square,
   TriangleAlert,
   Wrench,
-  X,
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { api, del, patch, post } from "../lib/api";
 import { readDraft, saveDraft } from "../lib/conveniences";
-import type { Chat, Me, MemoryCommand, Message, Model, Models } from "../lib/types";
+import { ACCEPT, asAttached, endSentence, holdWords, refusalFor } from "../lib/documents";
+import type { Chat, ChatFile, Me, MemoryCommand, Message, Model, Models } from "../lib/types";
+import { useChatFiles, useFileAnnouncements } from "../lib/useChatFiles";
 import { modelLabel, SEARCH_HINT, SEARCH_LABEL, SEARCH_PRIVACY, takes } from "../lib/words";
+import { Attachments } from "./Attachments";
 
 const MODEL_KEY = "workbench-model";
-const ACCEPT =
-  "image/png,image/jpeg,image/webp,image/gif,application/pdf,audio/wav,audio/x-wav,audio/mpeg";
 
-export interface Pending {
-  id: string;
-  name: string;
-  mediaType: string;
-}
+/** A file attached to the message being written: at least its id, name and type;
+ * a document also says how it was read and what the picked model would do with it. */
+export type Pending = ChatFile;
 
 function remembered(person: string): string | null {
   try {
@@ -56,12 +54,14 @@ export function needs(mediaType: string): "image" | "file" | "audio" | null {
   return null;
 }
 
-/** Why `model` cannot take `pending`, or null when it can. */
+/** Why `model` cannot take `pending`, or null when it can. A PDF that Workbench
+ * reads is sent as text, which any model takes; one it did not read (the owner
+ * has turned reading off) goes as the file itself, which only some do. */
 export function attachmentProblem(model: Model | undefined, pending: Pending[]): string | null {
   if (!model || pending.length === 0) return null;
   const missing = new Set<string>();
   for (const file of pending) {
-    const kind = needs(file.mediaType);
+    const kind = file.reading ? null : needs(file.mediaType);
     if (kind === "image" && !model.imageInput) missing.add("images");
     if (kind === "file" && !model.fileInput) missing.add("PDFs");
     if (kind === "audio" && !model.audioInput) missing.add("audio");
@@ -119,7 +119,6 @@ export function Composer({
 }) {
   const [text, setText] = useState(() => readDraft(me.sub, chat.id));
   const [draftSaved, setDraftSaved] = useState(true);
-  const [pending, setPending] = useState<Pending[]>(() => initialAttachments ?? []);
   const [problem, setProblem] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   // The switch and the picker change the moment they are used; the chat on
@@ -162,7 +161,12 @@ export function Composer({
   const chosen = available.find((m) => m.id === chosenId);
   const searchOff = searchProblem(models, chosen);
   const searchOn = searchWanted && !searchOff;
+  // The files the message carries, and what the picked model would do with each.
+  const docs = useChatFiles(chat.id, chosenId, initialAttachments);
+  const pending = docs.files;
   const cannotTake = attachmentProblem(chosen, pending);
+  const hold = holdWords(pending, docs.facts, docs.checking, chosenId);
+  const filesSaid = useFileAnnouncements(pending, docs.facts?.model ?? null);
 
   // A new chat has no model on the server until one is sent or picked, yet the
   // picker already shows one. Telling the chat now keeps whatever asks the
@@ -210,11 +214,13 @@ export function Composer({
         const file = await asSendable(original);
         const form = new FormData();
         form.append("file", file);
-        const stored = await api<Pending>(`/api/chats/${chat.id}/files`, {
+        // Asked for the model that is picked, so a document's first decision is for it.
+        const query = chosenId ? `?model=${encodeURIComponent(chosenId)}` : "";
+        const stored = await api<Pending>(`/api/chats/${chat.id}/files${query}`, {
           method: "POST",
           body: form,
         });
-        setPending((current) => [...current, stored]);
+        docs.add(stored);
       } catch (error) {
         failures.push(
           `${original.name}: ${error instanceof Error ? error.message : String(error)}`,
@@ -230,11 +236,15 @@ export function Composer({
   /** An upload taken back before it is sent is deleted, so it stops counting
    * against the chat's limit (workbench#3). A refusal keeps the chip. */
   async function remove(file: Pending) {
+    // The button that was pressed goes with its file: if the keyboard was on a
+    // chip, it goes back to the message box, where the person was writing.
+    const fromKeyboard = document.activeElement?.closest('[data-testid="attached"]') != null;
     setRemoving(file.id);
     setProblem(null);
     try {
       await del(`/api/chats/${chat.id}/files/${encodeURIComponent(file.id)}`);
-      setPending((current) => current.filter((p) => p.id !== file.id));
+      docs.drop(file.id);
+      if (fromKeyboard) textarea.current?.focus();
     } catch (error) {
       setProblem(
         `${file.name} was not removed: ${error instanceof Error ? error.message : String(error)}`,
@@ -246,7 +256,7 @@ export function Composer({
 
   async function send() {
     if (!chosen || sendPending.current || uploadPending.current || running || cannotTake) return;
-    if (removing !== null) return;
+    if (removing !== null || hold !== null) return;
     if (!text.trim() && pending.length === 0) return;
     sendPending.current = true;
     setSending(true);
@@ -262,11 +272,14 @@ export function Composer({
         },
       );
       remember(me.sub, chosen.id);
-      onSent({ ...sent.user, files: pending }, sent.answer, sent.memory);
+      onSent({ ...sent.user, files: pending.map(asAttached) }, sent.answer, sent.memory);
       changeText("");
-      setPending([]);
+      docs.clear();
     } catch (error) {
-      setProblem(error instanceof Error ? error.message : String(error));
+      // A file that cannot go says so on its own chip; nothing was stored.
+      const refused = refusalFor(error, "documents");
+      if (refused && refused.files.length > 0) docs.refuse(refused.files);
+      else setProblem(refused?.message ?? (error instanceof Error ? error.message : String(error)));
     } finally {
       setSending(false);
       sendPending.current = false;
@@ -333,27 +346,35 @@ export function Composer({
             {uploading}
           </p>
         )}
-        {pending.length > 0 && (
-          <ul className="flex flex-wrap gap-2" aria-label="Attached">
-            {pending.map((file) => (
-              <li
-                key={file.id}
-                className="flex min-w-0 max-w-full items-center gap-1 rounded-plexus border border-line bg-soft py-0.5 pl-2 pr-0.5 text-sm wrap-anywhere"
-              >
-                {file.name}
-                <button
-                  type="button"
-                  aria-label={`Remove ${file.name}`}
-                  disabled={sending || removing !== null}
-                  onClick={() => void remove(file)}
-                  className="icon-btn shrink-0"
-                >
-                  <X size={14} />
-                </button>
-              </li>
-            ))}
-          </ul>
+        <Attachments
+          files={pending}
+          facts={docs.facts}
+          problems={docs.problems}
+          choosing={docs.choosing}
+          locked={sending}
+          removing={removing}
+          onRemove={(file) => void remove(file)}
+          onChoose={docs.choose}
+        />
+        {docs.error && pending.some((file) => file.kind === "document") && (
+          <p
+            data-testid="files-error"
+            role="alert"
+            className="flex items-start gap-1.5 text-sm text-warn"
+          >
+            <TriangleAlert size={14} aria-hidden className="mt-1 shrink-0" />
+            Workbench could not check on your files: {endSentence(docs.error)} It keeps trying.
+          </p>
         )}
+        {/* What a screen reader is told as a file is read, or stops fitting. */}
+        <div
+          aria-live="polite"
+          aria-atomic="true"
+          className="sr-only"
+          data-testid="files-announcer"
+        >
+          {filesSaid}
+        </div>
         <div className="flex flex-col gap-1">
           <textarea
             id="message-composer"
@@ -409,12 +430,14 @@ export function Composer({
             multiple
             accept={ACCEPT}
             className="hidden"
+            aria-label="Choose files to attach"
             data-testid="attach-input"
             onChange={(e) => void attach(e.target.files)}
           />
           <div className="flex min-w-0 flex-[1_1_16rem] items-center gap-3">
             <button
               type="button"
+              data-testid="attach"
               onClick={() => files.current?.click()}
               disabled={uploading !== null || sending}
               className="btn"
@@ -469,8 +492,10 @@ export function Composer({
               <button
                 type="button"
                 data-testid="send"
+                aria-describedby={hold ? "send-held" : undefined}
                 disabled={
                   blocked !== null ||
+                  hold !== null ||
                   sending ||
                   uploading !== null ||
                   removing !== null ||
@@ -484,6 +509,18 @@ export function Composer({
             )}
           </div>
         </div>
+        {hold && (
+          // Why Send waits, beside it: a file still being read, or one that
+          // needs a choice. Not an error, so not an alert.
+          <p
+            id="send-held"
+            data-testid="send-held"
+            className="flex items-start justify-end gap-1.5 text-right text-sm text-muted wrap-anywhere"
+          >
+            <Info size={14} aria-hidden className="mt-1 shrink-0" />
+            {hold}
+          </p>
+        )}
         {searchOff && (
           <p
             className="flex items-start gap-1.5 text-sm text-muted wrap-anywhere"

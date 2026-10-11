@@ -20,7 +20,7 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -43,6 +43,24 @@ _SIGN_POLL_SECONDS = 4.0
 MAX_CALLS = 200
 MAX_ROUNDS = 50
 MAX_ASKED = 16
+
+
+class Refused(Exception):
+    """A request that was stopped before it was sent, for a reason said in words
+    a person reads (`message`): the answer fails with that, and nothing reached
+    the model. Documents are the case (`documents_api.Blocked`)."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+#: What `prepare` is given to say what is going on while it waits: it sets the
+#: answer's progress (`None` clears it) and every tab watching is told.
+Progress = Callable[[dict[str, Any] | None], None]
+#: A step run before the request is built: it may wait (for a file to be read),
+#: raise `Refused`, and returns the sources the answer starts with.
+Prepare = Callable[[Progress], Awaitable[list[dict[str, Any]]]]
 
 
 def _tool_problem(exc: BaseException) -> str:
@@ -199,15 +217,18 @@ class Answers:
         tool_servers: list[str] | None = None,
         folder_grants: list[str] | None = None,
         person: Person | None = None,
+        prepare: Prepare | None = None,
     ) -> None:
         """Run the answer `message` holds. `build` makes the request body
-        (in a thread: it reads the attachments' bytes)."""
+        (in a thread: it reads the attachments' bytes). `prepare`, if given, runs
+        first, in the answer's own task: what it waits for does not hold up the
+        request that started the answer, and what it refuses fails the answer."""
         if chat_id in self._running:
             raise RuntimeError(f"an answer is already being written in chat {chat_id}")
         running = Running(chat_id=chat_id, message=message, person=person)
         self._running[chat_id] = running
         running.task = asyncio.create_task(
-            self._run(running, build, tool_servers or [], folder_grants or []),
+            self._run(running, build, tool_servers or [], folder_grants or [], prepare),
             name=f"answer-{message.id}",
         )
 
@@ -268,10 +289,24 @@ class Answers:
         build: Callable[[], Any],
         tool_servers: list[str],
         folder_grants: list[str],
+        prepare: Prepare | None = None,
     ) -> None:
         m = running.message
         chat_id = running.chat_id
+
+        def progress(value: dict[str, Any] | None) -> None:
+            running.progress = value
+            if value is not None:
+                self.publish(chat_id, {"type": "progress", "id": m.id, "progress": value})
+
         try:
+            if prepare is not None:
+                sources = await prepare(progress)
+                running.progress = None
+                if sources:
+                    m.sources = [*sources, *m.sources]
+                    self.publish(chat_id, {"type": "delta", "id": m.id, "sources": m.sources})
+                    await self._save(running)
             body = await asyncio.to_thread(build)
             if tool_servers or folder_grants:
                 await self._with_tools(running, body, tool_servers, folder_grants)
@@ -284,6 +319,8 @@ class Answers:
             m.status, m.error = "stopped" if exc.kind == "repetition" else "failed", exc.message
             if exc.kind == "repetition":
                 m.finish = "repetition_detected"
+        except Refused as exc:
+            m.status, m.error = "failed", exc.message
         except ToolError as exc:
             m.status, m.error = "failed", str(exc)
         except Exception as exc:
@@ -554,8 +591,8 @@ class Answers:
         for annotation in delta.get("annotations") or []:
             citation = (annotation or {}).get("url_citation") or {}
             url = citation.get("url")
-            if isinstance(url, str) and all(s["url"] != url for s in m.sources):
-                m.sources.append({"url": url, "title": citation.get("title") or url})
+            if isinstance(url, str) and all(s.get("url") != url for s in m.sources):
+                m.sources.append({"kind": "web", "url": url, "title": citation.get("title") or url})
                 event["sources"] = m.sources
         finish = choice.get("finish_reason")
         if isinstance(finish, str):

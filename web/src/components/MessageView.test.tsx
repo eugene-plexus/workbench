@@ -53,7 +53,12 @@ it("keeps a repetition-stopped answer and explains the intentional repetition ov
 
 describe("a searched answer (W6)", () => {
   it("lists what it cites as links", () => {
-    show(answer({ searches: 1, sources: [{ url: "https://example.org/a", title: "A page" }] }));
+    show(
+      answer({
+        searches: 1,
+        sources: [{ kind: "web", url: "https://example.org/a", title: "A page" }],
+      }),
+    );
     expect(screen.getByRole("link", { name: "A page" })).toHaveAttribute(
       "href",
       "https://example.org/a",
@@ -582,7 +587,12 @@ describe("what is said under an answer that is not a finished one", () => {
 
 describe("sources", () => {
   it("are headed by a glyph and the count, and the count keeps its space", () => {
-    show(answer({ searches: 2, sources: [{ url: "https://example.org/a", title: "A page" }] }));
+    show(
+      answer({
+        searches: 2,
+        sources: [{ kind: "web", url: "https://example.org/a", title: "A page" }],
+      }),
+    );
     const sources = screen.getByTestId("sources");
     const heading = sources.querySelector("h3")!;
     expect(heading).toHaveClass("eyebrow");
@@ -595,7 +605,7 @@ describe("sources", () => {
     show(
       answer({
         searches: 1,
-        sources: [{ url: "https://example.org/a", title: "x".repeat(200) }],
+        sources: [{ kind: "web", url: "https://example.org/a", title: "x".repeat(200) }],
       }),
     );
     expect(screen.getByRole("link", { name: "x".repeat(200) })).toHaveClass("link");

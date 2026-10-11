@@ -186,12 +186,12 @@ def test_a_character_this_python_has_not_met_is_not_hidden_text() -> None:
         ("hf_" + "aB3dE5gH7jK9mN1pQ3rS5tU7vW9xY1zA3b", "an API key"),
         ("sk_live_" + "4eC39HqLyjWDarjtT1zdp7dc", "an API key"),
         (
-            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r",  # gitleaks:allow
             "an API key",
         ),
         ("Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456", "an API key"),
         ("the key is q8Zr3KmP0vXw7LtB1nYc5HjD9sFg2AeU4oRi6", "an API key"),
-        ("api key: abcdef1234567890", "an API key"),
+        ("api key: abcdef1234567890", "an API key"),  # gitleaks:allow
         ("-----BEGIN OPENSSH PRIVATE KEY-----", "a private key"),
         ("-----BEGIN RSA PRIVATE KEY-----", "a private key"),
         # passwords, said as people say them

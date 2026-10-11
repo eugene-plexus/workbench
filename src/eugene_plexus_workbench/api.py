@@ -17,7 +17,8 @@ import secrets
 import time
 from collections.abc import AsyncIterator
 from dataclasses import replace
-from typing import Any, Literal
+from pathlib import Path
+from typing import Any, BinaryIO, Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile, status
@@ -25,7 +26,8 @@ from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import config, files
-from .answers import Answers, message_view
+from .answers import Answers, Progress, message_view
+from .context import reading_view
 from .conversation import SAMPLING, request_for
 from .hub import Hub, HubError
 from .sessions import (
@@ -454,7 +456,12 @@ async def _chat_detail(
     for m in path(tree, via):
         view = message_view(m)
         view["files"] = [
-            {"id": i, "name": attached[i].name, "mediaType": attached[i].media_type}
+            {
+                "id": i,
+                "name": attached[i].name,
+                "mediaType": attached[i].media_type,
+                "reading": reading_view(attached[i]),
+            }
             for i in m.attachments
             if i in attached
         ]
@@ -615,11 +622,12 @@ async def delete_chat(request: Request, chat_id: str) -> Response:
     await _answers(request).stop(chat.id)
     records = await store.files_for_chat(chat.id)
     await store.delete_chat(chat.id)
+    await _state(request).reader.cancel([r.id for r in records])
     root = _state(request).settings.data_dir
 
     def unlink() -> None:
         for record in records:
-            files.path_of(root, record.owner, record.id).unlink(missing_ok=True)
+            files.remove_stored(root, record.owner, record.id)
 
     await asyncio.to_thread(unlink)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -709,13 +717,31 @@ async def _ask(
     fresh = await store.chat(chat.id) or chat
     # The person's notes, as this chat was first sent them (or as they are now,
     # at its first request that carries any). Never raises; None is none.
-    from . import memory_api
+    from . import documents_api, memory_api
 
     notes = await memory_api.block_for(request, person, fresh, model)
+    by_id = {r.id: r for r in records}
+    # How each document goes is decided in the answer's own task, once its files
+    # have been read (`documents_api.prepare`), and the request is built from it.
+    decided: dict[str, Any] = {}
+
+    async def prepare(progress: Progress) -> list[dict[str, Any]]:
+        prepared = await documents_api.prepare(
+            request, fresh, history, by_id, model, notes, progress
+        )
+        decided["documents"] = prepared.sent
+        return prepared.sources
 
     def build() -> dict[str, Any]:
         return request_for(
-            fresh, history, records, root=root, model=model, search=search, memory=notes
+            fresh,
+            history,
+            records,
+            root=root,
+            model=model,
+            search=search,
+            memory=notes,
+            documents=decided.get("documents"),
         )
 
     answers = _answers(request)
@@ -729,6 +755,7 @@ async def _ask(
         list(fresh.settings.get("toolServers") or []),
         list(fresh.settings.get("folderGrants") or []),
         person=person,
+        prepare=prepare,
     )
     return answer
 
@@ -764,6 +791,15 @@ async def send(request: Request, chat_id: str, body: Send) -> dict[str, Any]:
     search = chat.search if body.search is None else body.search
     store: Store = _state(request).store
     shown = await store.messages(chat.id)
+    # Files are read when they are attached, and a message does not go before
+    # they are: this waits, and refuses (409, nothing stored) what cannot go.
+    from . import documents_api
+
+    await documents_api.check_send(
+        request, person, chat, shown, body.content, body.attachments, by_id, model
+    )
+    # Waiting for a file to be read can take a while; an answer may have started.
+    _no_running(request, chat)
     try:
         user = await store.add_message(
             Message(
@@ -981,53 +1017,159 @@ async def events(request: Request, chat_id: str) -> StreamingResponse:
 # --------------------------------------------------------------------------- #
 
 
+UPLOAD_CHUNK = 1024 * 1024
+
+
+def _open_for_write(target: Path) -> BinaryIO:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return target.open("wb")
+
+
+def _discard(target: Path) -> None:
+    """Take a half-written upload off the disk: a refusal or a lost connection."""
+    target.unlink(missing_ok=True)
+
+
+async def _save_upload(file: UploadFile, head: bytes, target: Path, limit: int) -> int | None:
+    """Write an upload to `target` a megabyte at a time, so a large document is
+    never held in memory. The bytes written, or None when it is larger than `limit`
+    (what was written is left for the caller to remove)."""
+    handle = await asyncio.to_thread(_open_for_write, target)
+    written = 0
+    try:
+        chunk = head
+        while chunk:
+            written += len(chunk)
+            if written > limit:
+                return None
+            await asyncio.to_thread(handle.write, chunk)
+            chunk = await file.read(UPLOAD_CHUNK)
+    finally:
+        await asyncio.to_thread(handle.close)
+    return written
+
+
+def _too_large(found: files.Detected, limit: int, reads: bool) -> str:
+    """Why a file is refused for its size, in the limit that applies to it."""
+    if found.kind in ("image", "audio"):
+        return (
+            f"That file is larger than Eugene carries for a {found.kind} "
+            f"({files.describe_limit(found.kind)})."
+        )
+    if reads:
+        return (
+            f"That file is larger than the {files.describe_size(limit)} Workbench reads "
+            "of one file."
+        )
+    return f"That file is larger than Eugene carries for a file ({files.describe_limit('file')})."
+
+
 @router.post("/api/chats/{chat_id}/files", status_code=status.HTTP_201_CREATED)
-async def upload(request: Request, chat_id: str, file: UploadFile = File(...)) -> dict[str, Any]:
+async def upload(
+    request: Request, chat_id: str, file: UploadFile = File(...), model: str | None = None
+) -> dict[str, Any]:
+    """Attach a file to the chat. Its type is what its bytes say (`files.detect`),
+    and what Workbench neither reads nor sends is refused with a 415 that names
+    what it is and what is taken. An image or audio clip is kept as it is; a
+    document is read in the background (`knowledge/reader.py`), and the answer says
+    so: `reading.state` is `reading` until it ends, and `decision` is what a request
+    to `model` (the chat's own when not said) would do with it."""
     person = await _person(request)
     chat = await _own_chat(request, person, chat_id)
-    head = await file.read(16)
-    media_type = files.media_type(file.content_type, head)
-    if media_type is None:
-        raise _problem(
-            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            "Workbench can send images (PNG or JPEG), PDFs and audio (WAV or MP3). "
-            "Other kinds of file are not carried to a model.",
-        )
-    kind = files.KINDS[media_type]
-    limit = files.LIMITS[kind]
-    data = head + await file.read(limit + 1 - len(head))
-    if len(data) > limit:
-        raise _problem(
-            status.HTTP_413_CONTENT_TOO_LARGE,
-            f"That file is larger than Eugene carries for a {kind} ({files.describe_limit(kind)}).",
-        )
     store: Store = _state(request).store
+    head = await file.read(files.HEAD_BYTES)
+    try:
+        found = files.detect(head, file.content_type, file.filename or "")
+    except files.Unsupported as exc:
+        raise _problem(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, exc.message) from None
+    settings = await config.document_settings(store)
+    # With reading off, Workbench is as it was before documents: a PDF is carried
+    # as a file to a model that takes one, and nothing else is read.
+    reads = found.is_document and settings.enabled
+    legacy_pdf = found.is_document and not settings.enabled and found.media_type == files.PDF
+    if found.is_document and not reads and not legacy_pdf:
+        raise _problem(
+            status.HTTP_403_FORBIDDEN,
+            "The owner of this Workbench has turned off reading files. It still sends "
+            "images and audio, and PDFs to models that take them as files.",
+        )
+    limit = files.upload_limit(found, settings.max_bytes if reads else files.LIMITS["file"])
+    root = _state(request).settings.data_dir
+    record_id = _new_id()
+    target = files.path_of(root, person.sub, record_id)
+    try:
+        size = await _save_upload(file, head, target, limit)
+    except BaseException:
+        _discard(target)  # a connection that was lost part-way leaves nothing
+        raise
+    if size is None:
+        await asyncio.to_thread(_discard, target)
+        raise _problem(status.HTTP_413_CONTENT_TOO_LARGE, _too_large(found, limit, reads))
+    if found.zipped:
+        holds = await asyncio.to_thread(files.zip_holds_document, target)
+        if holds is False:
+            await asyncio.to_thread(_discard, target)
+            raise _problem(
+                status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, files.not_word(file.filename or "").message
+            )
+
+    def counts(media_type: str) -> bool:
+        return files.travels(media_type) or (legacy_pdf and media_type == files.PDF)
+
     existing = await store.files_for_chat(chat.id)
-    if sum(r.size for r in existing) + len(data) > files.CHAT_LIMIT:
+    if counts(found.media_type) and (
+        sum(r.size for r in existing if counts(r.media_type)) + size > files.CHAT_LIMIT
+    ):
+        await asyncio.to_thread(_discard, target)
         raise _problem(
             status.HTTP_413_CONTENT_TOO_LARGE,
             "This chat's attachments would add up to more than Eugene carries in one request "
             f"({files.CHAT_LIMIT // files.MIB} MiB), because the whole chat is sent each time. "
             "Remove a file not yet sent, or start a new chat to attach more.",
         )
+    from . import documents_api
+    from .context import new_nonce
+
     record = FileRecord(
-        id=_new_id(),
+        id=record_id,
         owner=person.sub,
         chat_id=chat.id,
         name=(file.filename or "attachment")[:255],
-        media_type=media_type,
-        size=len(data),
+        media_type=found.media_type,
+        size=size,
         created_at=time.time(),
+        reading=(
+            {
+                "state": "reading",
+                "kind": found.kind,
+                "language": found.language,
+                "nonce": new_nonce(),
+                "choice": None,
+                "startedAt": time.time(),
+            }
+            if reads
+            else None
+        ),
     )
-    path = files.path_of(_state(request).settings.data_dir, person.sub, record.id)
-
-    def write() -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
-
-    await asyncio.to_thread(write)
     await store.add_file(record)
-    return {"id": record.id, "name": record.name, "mediaType": media_type, "size": record.size}
+    if reads:
+        await _state(request).reader.start(record)
+    out: dict[str, Any] = {
+        "id": record.id,
+        "name": record.name,
+        "mediaType": record.media_type,
+        "size": record.size,
+        "kind": documents_api.kind_of(record),
+        "reading": reading_view(record),
+        "decision": None,
+    }
+    if reads:
+        try:
+            view = await documents_api.files_view(request, chat, model or chat.model or None)
+            out["decision"] = next(i for i in view["files"] if i["id"] == record.id)["decision"]
+        except Exception as exc:  # the file is kept; the page asks again for its decision
+            log.warning("could not decide a new upload: %s: %s", type(exc).__name__, exc)
+    return out
 
 
 @router.delete("/api/chats/{chat_id}/files/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -1047,8 +1189,10 @@ async def remove_upload(request: Request, chat_id: str, file_id: str) -> Respons
         ) from None
     if record is None:
         raise _problem(status.HTTP_404_NOT_FOUND, "There is no such file in this chat.")
-    stored = files.path_of(_state(request).settings.data_dir, record.owner, record.id)
-    await asyncio.to_thread(stored.unlink, True)
+    await _state(request).reader.cancel([record.id])
+    await asyncio.to_thread(
+        files.remove_stored, _state(request).settings.data_dir, record.owner, record.id
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -1058,7 +1202,11 @@ async def _may_read_file(request: Request, person: Person, record: FileRecord) -
     owner is checked too, so an id is never the only thing guarding it."""
     store: Store = _state(request).store
     if record.chat_id is not None:
-        chat, _ = await _readable_chat(request, person, record.chat_id)
+        try:
+            chat, _ = await _readable_chat(request, person, record.chat_id)
+        except HTTPException:
+            # Not "no such chat": the same words as for a file that is not there.
+            raise _problem(status.HTTP_404_NOT_FOUND, "There is no such file.") from None
         if chat.owner == record.owner:
             return
     elif record.media_id is not None:

@@ -40,6 +40,13 @@ dependencies = [
     "joserfc>=1.6.1,<2",
     # Attachments arrive as multipart uploads.
     "python-multipart>=0.0.20,<0.1",
+    # Reading the files people attach (MR2, `knowledge/extract.py`), in a child
+    # process: PDFium for PDFs (BSD-3 and Apache-2.0) with pypdf (BSD-3) for what
+    # it refuses, and python-docx (MIT) for Word. Never PyMuPDF: it is AGPL,
+    # and Eugene is Apache-2.0.
+    "pypdfium2>=5,<6",
+    "pypdf>=6,<7",
+    "python-docx>=1.2,<2",
 ]
 
 [project.optional-dependencies]
@@ -102,6 +109,8 @@ ignore = []
 "scripts/check-media-sabotage.py" = ["E501"]
 "scripts/check-memory-sabotage.py" = ["E501"]
 "scripts/check-memory-page-sabotage.py" = ["E501"]
+"scripts/check-documents-sabotage.py" = ["E501"]
+"scripts/check-documents-page-sabotage.py" = ["E501"]
 
 # -----------------------------------------------------------------------------
 # Mypy
@@ -125,7 +134,7 @@ module = "eugene_plexus_workbench._generated.*"
 ignore_errors = true
 
 [[tool.mypy.overrides]]
-module = ["authlib.*", "jsonschema.*"]
+module = ["authlib.*", "jsonschema.*", "pypdfium2.*"]
 ignore_missing_imports = true
 
 # -----------------------------------------------------------------------------

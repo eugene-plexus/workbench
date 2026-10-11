@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from . import documents as docs
 from .conftest import World
 
 # What a local model writes when it is asked something technical: headings,
@@ -139,10 +140,18 @@ def test_reading_in_chrome(world: World, tmp_path: Path) -> None:
     person = world.browser()
     person.sign_in("p-ada")
 
-    def ask(chat: str, content: str, words: str, *, search: bool = False) -> None:
+    def ask(
+        chat: str,
+        content: str,
+        words: str,
+        *,
+        search: bool = False,
+        attachments: list[str] | None = None,
+    ) -> None:
         world.gateway.words = pieces(words)
         sent = person.post(
-            f"/api/chats/{chat}/messages", json={"content": content, "search": search}
+            f"/api/chats/{chat}/messages",
+            json={"content": content, "search": search, "attachments": attachments or []},
         )
         assert sent.status_code == 201, sent.text
         person.wait_answer(chat)
@@ -174,6 +183,26 @@ def test_reading_in_chrome(world: World, tmp_path: Path) -> None:
         kept = person.post("/api/memory/notes", json=note)
         assert kept.status_code == 201, kept.text
 
+    # A chat whose message carried a PDF, so its file, its answer and the files named
+    # under the answer are among the things read; and files to attach in its composer.
+    documents = person.new_chat()
+    report = person.post(
+        f"/api/chats/{documents}/files",
+        files={"file": ("annual-report.pdf", docs.three_pages(), "application/pdf")},
+    )
+    assert report.status_code == 201, report.text
+    person.wait_read(documents, report.json()["id"])
+    ask(
+        documents,
+        "What is the code word in the annual report?",
+        f"The code word is **{docs.CODE_WORD}**, on page 3 of the report.",
+        attachments=[report.json()["id"]],
+    )
+    files = tmp_path / "files"
+    files.mkdir()
+    (files / "long-12-pages.pdf").write_bytes(docs.long_pdf(12))
+    (files / "scan.pdf").write_bytes(docs.pdf_pictures(2))
+
     # What the page asks while the pictures are taken: slow enough to see.
     world.gateway.reasoning = pieces(REASONING[0] + REASONING[1], 12)
     world.gateway.words = [w + " " for w in LIVE.split()]
@@ -199,7 +228,11 @@ def test_reading_in_chrome(world: World, tmp_path: Path) -> None:
                     }
                     for c in person.http.cookies.jar
                 ],
-                "chats": {"rich": rich, "story": story, "cut": cut},
+                "chats": {"rich": rich, "story": story, "cut": cut, "documents": documents},
+                "documents": {
+                    "long": str(files / "long-12-pages.pdf"),
+                    "scan": str(files / "scan.pdf"),
+                },
                 "live": "Why are there two tides a day?",
                 "shots": str(shots),
             }

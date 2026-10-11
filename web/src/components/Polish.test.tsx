@@ -223,7 +223,7 @@ it("shows the site each source is on", () => {
       role: "assistant",
       content: "An answer.",
       searches: 1,
-      sources: [{ url: "https://www.example.org/a", title: "A page" }],
+      sources: [{ kind: "web", url: "https://www.example.org/a", title: "A page" }],
     }),
   );
   expect(screen.getByRole("link", { name: "A page" })).toBeInTheDocument();

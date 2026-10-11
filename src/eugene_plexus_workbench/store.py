@@ -32,6 +32,12 @@ note that is not yours is a note that does not exist. A full-text index
 over their words (FTS5, kept by triggers) finds what "forget ..." means.
 Deleting a note is real: its row and its index entry go, the text of every
 event in its log is nulled, and any chat's frozen copy of it is dropped.
+
+**A document is read** (schema 11): a file row of a PDF, Word, Markdown, text,
+CSV, HTML or code file carries `reading`, JSON saying how reading it went and
+what the person chose to have read of it; the text itself is beside the original
+on disk (`files.read_path_of`). A message's `sources` are a union, each with a
+`kind`: `web` for a search's citation, `document` for a file sent with the answer.
 """
 
 from __future__ import annotations
@@ -47,7 +53,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -116,7 +122,8 @@ CREATE TABLE IF NOT EXISTS files (
     created_at REAL NOT NULL,
     media_id TEXT,
     width INTEGER,
-    height INTEGER
+    height INTEGER,
+    reading TEXT
 );
 CREATE INDEX IF NOT EXISTS files_by_chat ON files (chat_id);
 CREATE INDEX IF NOT EXISTS files_by_media ON files (media_id);
@@ -199,9 +206,30 @@ _MEMORY_SCHEMA: list[str] = [
     "INSERT INTO memory_notes_fts (rowid, text) VALUES (new.rowid, new.text); END",
 ]
 
+
+def _sources_get_kinds(db: sqlite3.Connection) -> None:
+    """Schema 11: a source is `{kind: "web", url, title}` or `{kind: "document", ...}`.
+    Every source an answer already has came from a web search, so it gains its
+    kind here; the reader of a message adds none (no shim for an older store)."""
+    for row in db.execute("SELECT id, sources FROM messages WHERE sources != '[]'").fetchall():
+        try:
+            found = json.loads(row["sources"])
+        except ValueError:
+            continue  # unreadable before this, and left as it was
+        if not isinstance(found, list) or not any(
+            isinstance(s, dict) and "kind" not in s for s in found
+        ):
+            continue
+        rebuilt = [
+            {"kind": "web", **s} if isinstance(s, dict) and "kind" not in s else s for s in found
+        ]
+        db.execute("UPDATE messages SET sources = ? WHERE id = ?", (json.dumps(rebuilt), row["id"]))
+
+
 #: What brings a store written at version N-1 to N. `_SCHEMA` already holds
-#: the result, for a store made new.
-_MIGRATIONS: dict[int, list[str]] = {
+#: the result, for a store made new. A step is a statement, or a function of
+#: the connection for what SQL alone cannot say.
+_MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
     # Where a reply's text after its last search begins (workbench#1).
     2: [
         "ALTER TABLE messages ADD COLUMN answer_from INTEGER",
@@ -270,6 +298,13 @@ _MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE chats ADD COLUMN memory_snapshot TEXT",
         *_MEMORY_SCHEMA,
     ],
+    # Documents in the prompt (2026-10-11): what was read from an attached file
+    # (JSON: its state, size in tokens, the person's choice of how much to read),
+    # and a kind on every source an answer lists.
+    11: [
+        "ALTER TABLE files ADD COLUMN reading TEXT",
+        _sources_get_kinds,
+    ],
 }
 
 
@@ -303,6 +338,9 @@ def _initialize_schema(db: sqlite3.Connection, path: Path) -> None:
         if version is not None:
             for target in range(version + 1, SCHEMA_VERSION + 1):
                 for statement in _MIGRATIONS[target]:
+                    if callable(statement):
+                        statement(db)
+                        continue
                     if target == 2:
                         columns = {
                             row[1]: row[2] for row in db.execute("PRAGMA table_info(messages)")
@@ -472,6 +510,11 @@ class FileRecord:
     #: An image's own pixel size, read from its bytes (§2.4).
     width: int | None = None
     height: int | None = None
+    #: What was read from a document (`knowledge/reader.py`): its `state`
+    #: (`reading`, `ready`, `skipped`, `failed`), how large its text is in
+    #: tokens, the delimiter suffix its text is sent in, and how much of it the
+    #: person chose to read. None for a file that is not a document.
+    reading: dict[str, Any] | None = None
 
 
 class AttachmentGone(Exception):
@@ -595,6 +638,18 @@ def _message(row: sqlite3.Row) -> Message:
     )
 
 
+def _reading(value: str | None) -> dict[str, Any] | None:
+    """A file's saved reading, or None when it has none or the column holds
+    something that is not one."""
+    if not value:
+        return None
+    try:
+        found = json.loads(value)
+    except ValueError:
+        return None
+    return found if isinstance(found, dict) else None
+
+
 def _file(row: sqlite3.Row) -> FileRecord:
     return FileRecord(
         id=row["id"],
@@ -607,6 +662,7 @@ def _file(row: sqlite3.Row) -> FileRecord:
         media_id=row["media_id"],
         width=row["width"],
         height=row["height"],
+        reading=_reading(row["reading"]),
     )
 
 
@@ -1157,7 +1213,7 @@ class Store:
         def go() -> None:
             self._conn().execute(
                 "INSERT INTO files (id, owner, chat_id, name, media_type, size, created_at, "
-                "media_id, width, height) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "media_id, width, height, reading) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     record.id,
                     record.owner,
@@ -1169,10 +1225,59 @@ class Store:
                     record.media_id,
                     record.width,
                     record.height,
+                    json.dumps(record.reading) if record.reading is not None else None,
                 ),
             )
 
         await self._run(go)
+
+    async def merge_file_reading(
+        self, file_id: str, changes: dict[str, Any], *, chat_id: str | None = None
+    ) -> FileRecord | None:
+        """Set these keys of a file's reading, and keep the others. The file
+        after the change; None when there is no such file (it was removed while
+        it was being read), or, with `chat_id`, when it is not that chat's.
+        Read, change and write are one step, so a choice made while the reader
+        finishes is not lost to it."""
+
+        def go() -> FileRecord | None:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                sql, params = "SELECT * FROM files WHERE id = ?", [file_id]
+                if chat_id is not None:
+                    sql, params = sql + " AND chat_id = ?", [file_id, chat_id]
+                row = db.execute(sql, params).fetchone()
+                if row is None:
+                    db.execute("COMMIT")
+                    return None
+                reading = _reading(row["reading"]) or {}
+                reading.update(changes)
+                db.execute(
+                    "UPDATE files SET reading = ? WHERE id = ?", (json.dumps(reading), file_id)
+                )
+                fresh = db.execute("SELECT * FROM files WHERE id = ?", (file_id,)).fetchone()
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return _file(fresh)
+
+        return await self._run(go)
+
+    async def files_reading(self) -> list[FileRecord]:
+        """The files whose reading had not ended (Workbench was stopped while it
+        ran): the reader starts them again at boot."""
+
+        def go() -> list[FileRecord]:
+            rows = self._conn().execute("SELECT * FROM files WHERE reading IS NOT NULL")
+            return [
+                r
+                for r in (_file(row) for row in rows)
+                if (r.reading or {}).get("state") == "reading"
+            ]
+
+        return await self._run(go)
 
     async def file(self, file_id: str) -> FileRecord | None:
         def go() -> FileRecord | None:

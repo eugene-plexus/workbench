@@ -10,9 +10,17 @@ import {
   Scissors,
   TriangleAlert,
 } from "lucide-react";
-import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 
 import { fileUrl, post } from "../lib/api";
+import {
+  about,
+  isDocumentSource,
+  isWebSource,
+  readingMeta,
+  sourceTags,
+  sourceWhere,
+} from "../lib/documents";
 import type { AttachedFile, Message, Progress } from "../lib/types";
 import {
   answerParts,
@@ -30,6 +38,7 @@ import {
 } from "../lib/words";
 import { Markdown } from "./Markdown";
 import { CopyButton } from "./CopyButton";
+import { useDocumentText } from "./DocumentText";
 import { type RememberProps, useRemember } from "./RememberThis";
 import { ToolCalls } from "./ToolCalls";
 import { WorkingScene } from "./WorkingScene";
@@ -115,10 +124,21 @@ export function MessageView({
         data-testid="user-message"
       >
         {message.files && message.files.length > 0 && (
-          <div className="flex flex-wrap justify-end gap-2">
-            {message.files.map((file) => (
-              <Attachment key={file.id} file={file} />
-            ))}
+          // A document says how it was read, and lets the person see the text;
+          // an image or a sound is its name (or itself).
+          <div className="flex w-full flex-col items-end gap-1" data-testid="message-files">
+            <div className="flex flex-wrap justify-end gap-2">
+              {message.files
+                .filter((file) => !file.reading)
+                .map((file) => (
+                  <Attachment key={file.id} file={file} />
+                ))}
+            </div>
+            {message.files
+              .filter((file) => file.reading)
+              .map((file) => (
+                <DocumentFile key={file.id} file={file} />
+              ))}
           </div>
         )}
         {editing !== null ? (
@@ -234,6 +254,11 @@ export function MessageView({
     : DRAFT_HINT;
   const look = statusLook(message);
   const canCopy = !running && Boolean(answer);
+  // What a search found and the answer linked, and the files that were sent
+  // with the message. They are listed apart: a file in the list was sent to the
+  // model, which says nothing of whether the answer used it.
+  const web = message.sources.filter(isWebSource);
+  const documents = message.sources.filter(isDocumentSource);
   // The working line says "Thinking" once to a screen reader; what ticks (the
   // seconds, the count, the speed) is shown and not spoken.
   const working = waiting ? splitWorking(workingWords(progress, message, now)) : null;
@@ -293,7 +318,11 @@ export function MessageView({
       {(message.sources.length > 0 || message.searches > 0) && (
         <div className="mt-1 max-w-measure border-t border-line pt-3 text-sm" data-testid="sources">
           <h3 className="eyebrow flex items-center gap-2 text-muted">
-            <Globe size={14} aria-hidden className="shrink-0" />
+            {web.length === 0 && message.searches === 0 ? (
+              <FileText size={14} aria-hidden className="shrink-0" />
+            ) : (
+              <Globe size={14} aria-hidden className="shrink-0" />
+            )}
             Sources
             {message.searches ? (
               <span className="font-normal normal-case tracking-normal">
@@ -303,31 +332,55 @@ export function MessageView({
           </h3>
           {/* A search ran and the answer linked none of what it found: said,
               so a searched answer never looks like an unsearched one. */}
-          {message.sources.length === 0 && (
+          {web.length === 0 && message.searches > 0 && (
             <p className="mt-2 text-muted">
               The answer does not link to any page the search found.
             </p>
           )}
-          <ol className="mt-2 list-decimal space-y-1 pl-5 marker:text-muted wrap-anywhere">
-            {message.sources.map((source) => (
-              <li key={source.url}>
-                <a
-                  href={safe(source.url)}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="link"
-                >
-                  {source.title}
-                </a>
-                {siteOf(source.url) && (
-                  <span className="text-muted" data-testid="source-site">
-                    {" "}
-                    · {siteOf(source.url)}
-                  </span>
-                )}
-              </li>
-            ))}
-          </ol>
+          {web.length > 0 && (
+            <ol className="mt-2 list-decimal space-y-1 pl-5 marker:text-muted wrap-anywhere">
+              {web.map((source) => (
+                <li key={source.url}>
+                  <a
+                    href={safe(source.url)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="link"
+                  >
+                    {source.title}
+                  </a>
+                  {siteOf(source.url) && (
+                    <span className="text-muted" data-testid="source-site">
+                      {" "}
+                      · {siteOf(source.url)}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ol>
+          )}
+          {documents.length > 0 && (
+            <div data-testid="document-sources" className={web.length > 0 ? "mt-3" : "mt-2"}>
+              <p className="text-muted">Files sent to the model</p>
+              <ul className="mt-1 list-disc space-y-1 pl-5 marker:text-muted wrap-anywhere">
+                {documents.map((source) => (
+                  <li key={source.doc_id} data-testid="document-source">
+                    <span>{source.name}</span>
+                    <span>, {sourceWhere(source)}</span>
+                    {sourceTags(source).map((tag) => (
+                      <span key={tag} className="text-muted">
+                        {" "}
+                        · {tag}
+                      </span>
+                    ))}
+                    {source.tokens != null && (
+                      <span className="text-muted"> · {about(source.tokens)}</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           {(message.searchSuggestions ?? []).map((html, i) => (
             <SearchSuggestions key={i} html={html} />
           ))}
@@ -670,6 +723,35 @@ function SearchSuggestions({ html }: { html: string }) {
 
 function safe(url: string): string | undefined {
   return /^https?:/i.test(url) ? url : undefined;
+}
+
+/** A document a message carried: its name, what Workbench found in it, and a way
+ * to see the text it read, which is the place to look when an answer misses
+ * something that is in the file. */
+function DocumentFile({ file }: { file: AttachedFile }) {
+  const uid = useId();
+  const text = useDocumentText({ id: file.id, name: file.name, describedBy: `${uid}-name` });
+  const meta = readingMeta(file.reading);
+  const ready = file.reading?.state === "ready";
+  return (
+    <div data-testid="document-file" className="flex w-full max-w-xl flex-col items-end gap-0.5">
+      <span
+        id={`${uid}-name`}
+        title={file.name}
+        className="flex max-w-xs items-center gap-1 rounded-plexus border border-line bg-soft px-2 py-1 text-sm"
+      >
+        <FileText size={14} aria-hidden className="shrink-0" />
+        <span className="truncate">{file.name}</span>
+      </span>
+      {(meta || ready) && (
+        <span className="flex flex-wrap items-center justify-end gap-x-1 text-xs text-muted">
+          {meta && <span data-testid="document-file-meta">{meta}</span>}
+          {ready && text.action}
+        </span>
+      )}
+      {text.panel && <div className="w-full">{text.panel}</div>}
+    </div>
+  );
 }
 
 function Attachment({ file }: { file: AttachedFile }) {

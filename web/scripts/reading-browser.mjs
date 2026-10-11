@@ -1,8 +1,9 @@
 /* global process, console, document, getComputedStyle, window, NodeFilter */
 // Reading Workbench in Chrome (workbench-reading.md): what each kind of text
 // looks like, in pictures and in numbers. Screenshots of a rich answer, a
-// story, a length stop, the settings, a chat's Memory drawer, the Memory page
-// and an answer being written, dark and light, at a desk and a phone; and the
+// story, a length stop, the settings, a chat's Memory drawer, the Memory page,
+// a chat whose message carried a PDF and a composer holding files that need the
+// person, and an answer being written, dark and light, at a desk and a phone; and the
 // computed type of each kind of text (styles-<scheme>.json), with its contrast
 // against what is behind it; and what only a window's width decides: the top
 // bar keeping to one row on a phone, and the chat title keeping room to read
@@ -255,6 +256,23 @@ function structure() {
   };
 }
 
+// Two files in the open chat's composer: a long one, which needs a choice, and a
+// scan, which is skipped. Both are read before the picture is taken.
+async function attachFiles(page) {
+  await page.getByTestId("attach-input").setInputFiles([cfg.documents.long, cfg.documents.scan]);
+  await page.locator("[data-testid=document-chip][data-state=choose]").waitFor();
+  await page.locator("[data-testid=document-chip][data-state=skipped]").waitFor();
+  await settle(page);
+}
+
+// And taken back, so the next look at this chat starts with an empty composer.
+async function takeFilesBack(page) {
+  for (const name of ["long-12-pages.pdf", "scan.pdf"]) {
+    await page.getByRole("button", { name: `Remove ${name}` }).click();
+  }
+  await page.waitForFunction(() => !document.querySelector("[data-testid=document-chip]"));
+}
+
 // The acceptance: each look the design promises, held to a number.
 const failures = [];
 function check(name, ok, detail, { always = false } = {}) {
@@ -395,6 +413,17 @@ try {
       await page.screenshot(shot(`drawer-${scheme}-desk`));
       judgeFaint(scheme, "the Memory drawer", await page.evaluate(probe));
 
+      // Documents: a chat whose message carried a file, with the file named under
+      // its answer, and the composer holding files that need the person.
+      await chat(page, cfg.chats.documents);
+      await toTop(page);
+      await page.screenshot(shot(`documents-${scheme}-desk`));
+      judgeFaint(scheme, "a chat with a document", await page.evaluate(probe));
+      await attachFiles(page);
+      await page.screenshot(shot(`documents-composer-${scheme}-desk`));
+      judgeFaint(scheme, "the composer with files", await page.evaluate(probe));
+      await takeFilesBack(page);
+
       // The other screens a person reads: the top bar's pages and the keys.
       for (const [name, file] of [
         [/Tools/, "tools"],
@@ -436,6 +465,36 @@ try {
       await chat(page, cfg.chats.story);
       await toTop(page);
       await page.screenshot(shot(`story-${scheme}-phone`));
+      // A chat with a document, and the composer with files, on a phone.
+      await chat(page, cfg.chats.documents);
+      await toTop(page);
+      await page.screenshot(shot(`documents-${scheme}-phone`));
+      const documentsWide = (await page.evaluate(structure)).overflow;
+      check(
+        `${scheme} phone: a chat with a document is nothing wider than the screen`,
+        documentsWide <= 1,
+        `${documentsWide}px too wide`,
+      );
+      await attachFiles(page);
+      // Two files that need the person must not push the message box and Send off the screen.
+      const fit = await page.evaluate(() => ({
+        scroll: document.documentElement.scrollHeight - window.innerHeight,
+        sendBottom: document.querySelector("[data-testid=send]").getBoundingClientRect().bottom,
+        height: window.innerHeight,
+      }));
+      check(
+        `${scheme} phone: the composer with files keeps Send on the screen`,
+        fit.scroll <= 1 && fit.sendBottom <= fit.height,
+        `the page scrolls ${fit.scroll}px, Send ends at ${Math.round(fit.sendBottom)} of ${fit.height}`,
+      );
+      await page.screenshot(shot(`documents-composer-${scheme}-phone`));
+      const filesWide = (await page.evaluate(structure)).overflow;
+      check(
+        `${scheme} phone: the composer with files is nothing wider than the screen`,
+        filesWide <= 1,
+        `${filesWide}px too wide`,
+      );
+      await takeFilesBack(page);
       // The Memory page, on a phone: nothing wider than the screen.
       await page.goto(`${cfg.url}/memory`);
       await page.getByTestId("memory-note").first().waitFor();

@@ -3,9 +3,10 @@
  * `data-testid` a check can find it by (MR1 asks for both). Each screen is drawn
  * in each state it has, and every control on it is held to both: a control added
  * later with neither fails here, by name, so nobody has to remember to look.
+ * The check is in test-controls.ts, which the Documents screens use too.
  */
 
-import { fireEvent, getRoles, render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { Memory } from "./components/Memory";
 import { MemoryChip, MemoryDrawer } from "./components/MemoryChip";
@@ -13,6 +14,7 @@ import { MemoryToast, type ToastOutcome } from "./components/MemoryToast";
 import { MessageView } from "./components/MessageView";
 import { api, del, patch, post, put } from "./lib/api";
 import type { Chat, ChatMemoryView, MemoryNote, MemoryPage, Message } from "./lib/types";
+import { controlsIn, lacking, wrong } from "./test-controls";
 import { held, note, notSent, owners, page, prefs, sending } from "./test-memory";
 
 vi.mock("./lib/api", async (importOriginal) => ({
@@ -23,71 +25,6 @@ vi.mock("./lib/api", async (importOriginal) => ({
   post: vi.fn(),
   put: vi.fn(),
 }));
-
-// --- what counts as a control, and what each one needs ---
-
-/** What a person can press, type into or choose. */
-const CONTROLS = [
-  "button",
-  "a[href]",
-  'input:not([type="hidden"])',
-  "select",
-  "textarea",
-  "summary",
-  '[role="switch"]',
-  '[role="button"]',
-  '[role="checkbox"]',
-  '[role="radio"]',
-  '[tabindex]:not([tabindex="-1"])',
-].join(",");
-
-/** The controls in `root`, and `root` itself when it is one. */
-const controlsIn = (root: Element): HTMLElement[] => [
-  ...(root.matches(CONTROLS) ? [root as HTMLElement] : []),
-  ...root.querySelectorAll<HTMLElement>(CONTROLS),
-];
-
-function look(el: Element): string {
-  const id = el.getAttribute("data-testid");
-  const words = (el.getAttribute("aria-label") ?? el.textContent ?? "")
-    .trim()
-    .replace(/\s+/g, " ")
-    .slice(0, 40);
-  return `<${el.tagName.toLowerCase()}${id ? ` data-testid="${id}"` : ""}> "${words}"`;
-}
-
-/** The roles in `root`, hidden things included (the typings leave that option out). */
-const rolesOf = getRoles as (
-  root: HTMLElement,
-  options: { hidden: boolean },
-) => Record<string, HTMLElement[]>;
-
-/** What each of `controls` lacks: a name (as the browser computes one) and a test id. */
-function lacking(controls: HTMLElement[], scope: HTMLElement): string[] {
-  const named = new Set<Element>();
-  for (const role of Object.keys(rolesOf(scope, { hidden: true }))) {
-    for (const el of within(scope).queryAllByRole(role, { name: /\S/, hidden: true })) {
-      named.add(el);
-    }
-  }
-  // The role table the queries use gives a `summary` no role, and a browser names it
-  // from what is inside it.
-  const nameless = (el: HTMLElement) =>
-    el.tagName === "SUMMARY"
-      ? (el.getAttribute("aria-label") ?? el.textContent ?? "").trim() === ""
-      : !named.has(el);
-  return controls.flatMap((el) => {
-    const needs = [
-      ...(nameless(el) ? ["accessible name"] : []),
-      ...(el.hasAttribute("data-testid") ? [] : ["data-testid"]),
-    ];
-    return needs.length > 0 ? [`${look(el)} has no ${needs.join(" and no ")}`] : [];
-  });
-}
-
-/** Everything wrong with every control on what is drawn: nothing, when it is right. */
-const wrong = (view: { container: HTMLElement }) =>
-  lacking(controlsIn(view.container), view.container);
 
 // --- the gate can fail ---
 
