@@ -1,0 +1,1186 @@
+"""A person's saved documents, in one SQLite file of their own (MR4, design 4.1 and 4.9).
+
+`<data dir>/knowledge/<person key>/index.sqlite3` holds that person's documents,
+their passages and a full-text index over the passages (FTS5, BM25), and beside
+it are the originals (`originals/<doc id>`) and the text read from each
+(`<doc id>.txt`). **It is one file per person, and that is what makes it theirs**:
+no query here takes a person, a path or a store from a request, there is no table
+that holds two people's words, and the directory is named by a hash of the
+person's `sub` (`files.person_key`), the same derivation attachments use. The
+index also records whose it is (`meta.owner`) and refuses to open for anyone else,
+so a path that was wrong would be refused, not served.
+
+**Deletion is real.** Removing a document deletes its row, which takes its
+passages with it (a foreign key, `ON DELETE CASCADE`) and their entries in the
+full-text index (a trigger), and its original and its text, **in one
+transaction**: the files go before the commit, so a file that cannot be removed
+(a Windows program holding it) rolls everything back and says so, never leaving a
+document that is half gone. `secure_delete` is on, so a page that held its words
+is overwritten, the full-text index's segments are merged (a deleted word is
+otherwise kept in them), and the log is folded into the file and emptied.
+
+**A document in a state that cannot be searched has no passages**: `queued`,
+`reading`, `skipped` and `failed` hold none, and the search only looks at
+`searchable`, `embedding` and `ready`. So what a state says is what is true of it
+(a state is never claimed ahead of the work), and nothing stale outlives an edit.
+
+One connection per index, used by one thread at a time (a lock), on a few
+threads shared by every index and apart from the chats' store. Every method here
+is `async` and returns data, never a cursor. The schema is versioned with
+`PRAGMA user_version`: `_MIGRATIONS` is the history, an index written by a newer
+Workbench is refused rather than guessed at, and a file that is not a database or
+whose full-text index is gone says so in words (`IndexDamaged`) and never as an
+empty result.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import logging
+import re
+import sqlite3
+import threading
+import time
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from .. import files
+from . import chunk
+
+log = logging.getLogger(__name__)
+
+SCHEMA_VERSION = 1
+INDEX_FILE = "index.sqlite3"
+#: Where a person's saved documents are: the scope of one is `library`, or
+#: `chat:<id>` for one searched only in the chat it was attached to.
+LIBRARY = "library"
+CHAT = "chat:"
+
+QUEUED, READING, SEARCHABLE, EMBEDDING, READY, SKIPPED, FAILED = (
+    "queued",
+    "reading",
+    "searchable",
+    "embedding",
+    "ready",
+    "skipped",
+    "failed",
+)
+STATES = (QUEUED, READING, SEARCHABLE, EMBEDDING, READY, SKIPPED, FAILED)
+#: The states whose passages are searched, and the only ones that have any.
+FOUND = (SEARCHABLE, EMBEDDING, READY)
+#: A document still on its way to being searchable.
+PENDING = (QUEUED, READING)
+
+#: A document's id is made by Workbench; one in a URL is looked for, never joined
+#: to a path before it is known to be one.
+_ID = re.compile(r"[A-Za-z0-9_-]{6,64}")
+
+#: The words a person reads when the index cannot be used.
+NO_FTS = (
+    "Workbench cannot search documents: this Python was built without SQLite full-text "
+    "search. Reinstall Workbench from Eugene's console."
+)
+
+
+class IndexUnavailable(Exception):
+    """The index cannot be used, and why, in words a person reads."""
+
+    code = "unavailable"
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.message = message
+        if code is not None:
+            self.code = code
+
+
+class IndexDamaged(IndexUnavailable):
+    """The file is not an index, or has lost part of itself. Never "no results"."""
+
+    code = "index_damaged"
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(
+            f"The search index for your documents is damaged (SQLite said: {reason}). "
+            "Your files are safe."
+        )
+        self.reason = reason
+
+
+class DeleteFailed(Exception):
+    """A document's files could not be removed, so nothing was: it is all still there."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+def valid_id(value: str) -> bool:
+    return _ID.fullmatch(value) is not None
+
+
+def chat_scope(chat_id: str) -> str:
+    return f"{CHAT}{chat_id}"
+
+
+# --------------------------------------------------------------------------- #
+# the schema
+# --------------------------------------------------------------------------- #
+
+#: Version 1, one statement each (a trigger holds semicolons). Times are epoch
+#: seconds, as everywhere in Workbench. `chunks.vec` is for the search by meaning
+#: that follows (MR5): NULL until embedded. The full-text index is an *external
+#: content* table over `chunks` kept by triggers, so the words are stored once; its
+#: second column is the heading path, which a search weighs twice as much as the
+#: text. Beyond the sketch in the design: a document's `kind`, `language`, `code`,
+#: `detail`, `notes`, `lines` and `attempt`, and a passage's `line_start` and
+#: `line_end` (the locator for a file read as its own lines).
+_SCHEMA: list[str] = [
+    "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS documents ("
+    "id TEXT PRIMARY KEY, scope TEXT NOT NULL, name TEXT NOT NULL, "
+    "media_type TEXT NOT NULL, bytes INTEGER NOT NULL, sha256 TEXT NOT NULL, "
+    "source TEXT NOT NULL, "
+    "status TEXT NOT NULL CHECK (status IN "
+    "('queued','reading','searchable','embedding','ready','skipped','failed')), "
+    "reason TEXT, code TEXT, detail TEXT, "
+    "kind TEXT NOT NULL, language TEXT, pages INTEGER, lines INTEGER, tokens_est INTEGER, "
+    "chunks INTEGER NOT NULL DEFAULT 0, embedded INTEGER NOT NULL DEFAULT 0, "
+    "notes TEXT NOT NULL DEFAULT '[]', attempt INTEGER NOT NULL DEFAULT 0, "
+    "added_at REAL NOT NULL, read_at REAL, indexed_at REAL, source_mtime TEXT)",
+    "CREATE INDEX IF NOT EXISTS documents_by_scope ON documents (scope, status)",
+    "CREATE INDEX IF NOT EXISTS documents_by_name ON documents (scope, name COLLATE NOCASE)",
+    "CREATE TABLE IF NOT EXISTS chunks ("
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+    "doc_id TEXT NOT NULL REFERENCES documents (id) ON DELETE CASCADE, ord INTEGER NOT NULL, "
+    "heading_path TEXT, page_start INTEGER, page_end INTEGER, line_start INTEGER, "
+    "line_end INTEGER, char_start INTEGER, char_end INTEGER, "
+    "text TEXT NOT NULL, tokens_est INTEGER NOT NULL, vec BLOB)",
+    "CREATE INDEX IF NOT EXISTS chunks_by_doc ON chunks (doc_id, ord)",
+    "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5("
+    "text, heading_path, content='chunks', content_rowid='id', "
+    "tokenize='unicode61 remove_diacritics 2')",
+    "CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN "
+    "INSERT INTO chunks_fts (rowid, text, heading_path) "
+    "VALUES (new.id, new.text, COALESCE(new.heading_path, '')); END",
+    "CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN "
+    "INSERT INTO chunks_fts (chunks_fts, rowid, text, heading_path) "
+    "VALUES ('delete', old.id, old.text, COALESCE(old.heading_path, '')); END",
+    "CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE OF text, heading_path ON chunks BEGIN "
+    "INSERT INTO chunks_fts (chunks_fts, rowid, text, heading_path) "
+    "VALUES ('delete', old.id, old.text, COALESCE(old.heading_path, '')); "
+    "INSERT INTO chunks_fts (rowid, text, heading_path) "
+    "VALUES (new.id, new.text, COALESCE(new.heading_path, '')); END",
+]
+
+#: What brings an index at version N-1 to N (`_SCHEMA` is version 1 whole).
+_MIGRATIONS: dict[int, list[str]] = {}
+
+
+def chunker_meta() -> dict[str, Any]:
+    """What this Workbench splits files with, as `meta` records it."""
+    return {
+        "name": chunk.CHUNKER,
+        "version": chunk.CHUNKER_VERSION,
+        "target": chunk.TARGET,
+        "max": chunk.MAX,
+        "min": chunk.MIN,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# what an index says
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class Document:
+    id: str
+    scope: str
+    name: str
+    media_type: str
+    bytes: int
+    sha256: str
+    source: str
+    status: str
+    kind: str
+    added_at: float
+    reason: str | None = None
+    code: str | None = None
+    detail: str | None = None
+    language: str | None = None
+    pages: int | None = None
+    lines: int | None = None
+    tokens_est: int | None = None
+    chunks: int = 0
+    embedded: int = 0
+    notes: list[str] = field(default_factory=list)
+    attempt: int = 0
+    read_at: float | None = None
+    indexed_at: float | None = None
+    source_mtime: str | None = None
+
+    @property
+    def searchable(self) -> bool:
+        return self.status in FOUND
+
+
+@dataclass(frozen=True)
+class NewDocument:
+    """A file just brought in, before it is read: the person's own words for it."""
+
+    id: str
+    scope: str
+    name: str
+    media_type: str
+    bytes: int
+    sha256: str
+    source: str
+    kind: str
+    language: str | None = None
+    source_mtime: str | None = None
+    #: When it was added; None is now. A document made again from what its own
+    #: files say (`Index.sidecars`) keeps the place it had in the list.
+    added_at: float | None = None
+
+
+@dataclass
+class Added:
+    """What adding a document came to: the document, the ones it replaced (the same
+    name, brought in again), and whether it was already there, byte for byte."""
+
+    document: Document
+    replaced: list[Document] = field(default_factory=list)
+    unchanged: bool = False
+
+
+@dataclass(frozen=True)
+class Hit:
+    """A passage a search found, with the file it is in."""
+
+    chunk_id: int
+    doc_id: str
+    ord: int
+    text: str
+    heading_path: str | None
+    page_start: int | None
+    page_end: int | None
+    line_start: int | None
+    line_end: int | None
+    char_start: int | None
+    char_end: int | None
+    tokens_est: int
+    name: str
+    scope: str
+    kind: str
+    #: BM25 as SQLite gives it: lower is better, and it means nothing beside another scale.
+    score: float
+
+
+@dataclass(frozen=True)
+class Totals:
+    documents: int
+    passages: int
+    bytes: int
+    by_state: Mapping[str, int]
+
+
+def _document(row: sqlite3.Row) -> Document:
+    try:
+        notes = json.loads(row["notes"] or "[]")
+    except ValueError:
+        notes = []
+    return Document(
+        id=row["id"],
+        scope=row["scope"],
+        name=row["name"],
+        media_type=row["media_type"],
+        bytes=row["bytes"],
+        sha256=row["sha256"],
+        source=row["source"],
+        status=row["status"],
+        kind=row["kind"],
+        added_at=row["added_at"],
+        reason=row["reason"],
+        code=row["code"],
+        detail=row["detail"],
+        language=row["language"],
+        pages=row["pages"],
+        lines=row["lines"],
+        tokens_est=row["tokens_est"],
+        chunks=row["chunks"],
+        embedded=row["embedded"],
+        notes=[str(n) for n in notes] if isinstance(notes, list) else [],
+        attempt=row["attempt"],
+        read_at=row["read_at"],
+        indexed_at=row["indexed_at"],
+        source_mtime=row["source_mtime"],
+    )
+
+
+def _hit(row: sqlite3.Row) -> Hit:
+    return Hit(
+        chunk_id=row["chunk_id"],
+        doc_id=row["doc_id"],
+        ord=row["ord"],
+        text=row["text"],
+        heading_path=row["heading_path"],
+        page_start=row["page_start"],
+        page_end=row["page_end"],
+        line_start=row["line_start"],
+        line_end=row["line_end"],
+        char_start=row["char_start"],
+        char_end=row["char_end"],
+        tokens_est=row["tokens_est"],
+        name=row["name"],
+        scope=row["scope"],
+        kind=row["kind"],
+        score=float(row["score"]),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# one person's index
+# --------------------------------------------------------------------------- #
+
+_SEARCH = (
+    "SELECT c.id AS chunk_id, c.doc_id, c.ord, c.text, c.heading_path, c.page_start, "
+    "c.page_end, c.line_start, c.line_end, c.char_start, c.char_end, c.tokens_est, "
+    "d.name, d.scope, d.kind, bm25(chunks_fts, 1.0, 2.0) AS score "
+    "FROM chunks_fts JOIN chunks AS c ON c.id = chunks_fts.rowid "
+    "JOIN documents AS d ON d.id = c.doc_id "
+    "WHERE chunks_fts MATCH ? AND d.scope IN ({scopes}) "
+    "AND d.status IN ('searchable', 'embedding', 'ready') "
+    "ORDER BY score, c.doc_id, c.ord LIMIT ?"
+)
+_INSERT_CHUNK = (
+    "INSERT INTO chunks (doc_id, ord, heading_path, page_start, page_end, line_start, "
+    "line_end, char_start, char_end, text, tokens_est) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+#: A damaged file is told from a busy, a full or an unreachable one by what SQLite says.
+_TRANSIENT = ("database is locked", "database table is locked")
+_FULL = ("database or disk is full",)
+_UNREACHABLE = ("disk i/o error", "unable to open database file", "readonly database")
+
+
+class Index:
+    """One person's documents. Use `Indexes.get`; the person is whose `sub` made it."""
+
+    def __init__(self, sub: str, directory: Path, executor: ThreadPoolExecutor) -> None:
+        self.sub = sub
+        self.dir = directory
+        self.path = directory / INDEX_FILE
+        self.originals = directory / "originals"
+        self._executor = executor
+        self._lock = threading.Lock()
+        self._db: sqlite3.Connection | None = None
+
+    # --- where things are ----------------------------------------------
+
+    def original_path(self, doc_id: str) -> Path:
+        if not valid_id(doc_id):
+            raise ValueError("not a document id")
+        return self.originals / doc_id
+
+    def text_path(self, doc_id: str) -> Path:
+        if not valid_id(doc_id):
+            raise ValueError("not a document id")
+        return self.dir / f"{doc_id}.txt"
+
+    def part_path(self, doc_id: str) -> Path:
+        """Where an original is written before it is whole."""
+        return self.original_path(doc_id).with_name(f"{doc_id}.part")
+
+    def meta_path(self, doc_id: str) -> Path:
+        """What a document's own files say of it: its name, type and size (the
+        `.meta.json` beside its text), so that an index that is lost can be made again
+        from them (`Index.sidecars`) and the person's files are never only a pile of ids."""
+        if not valid_id(doc_id):
+            raise ValueError("not a document id")
+        return self.dir / f"{doc_id}.meta.json"
+
+    def write_sidecar(self, new: NewDocument) -> None:
+        """Keep what a document's files say of it, whole or not at all."""
+        said = {
+            "id": new.id,
+            "scope": new.scope,
+            "name": new.name,
+            "mediaType": new.media_type,
+            "bytes": new.bytes,
+            "sha256": new.sha256,
+            "source": new.source,
+            "kind": new.kind,
+            "language": new.language,
+            "sourceMtime": new.source_mtime,
+            "addedAt": new.added_at if new.added_at is not None else time.time(),
+        }
+        target = self.meta_path(new.id)
+        part = target.with_name(target.name + ".part")
+        part.write_text(json.dumps(said, ensure_ascii=False), encoding="utf-8", newline="\n")
+        part.replace(target)
+
+    def sidecars(self) -> list[NewDocument]:
+        """Every document the files beside the index describe whose original is still
+        there, oldest first. A sidecar that cannot be read, or whose original is gone, is
+        not one: it is left for the reconcile to remove with the rest that no row claims."""
+        found: list[NewDocument] = []
+        if not self.dir.is_dir():
+            return found
+        for path in self.dir.glob("*.meta.json"):
+            doc_id = path.name.removesuffix(".meta.json")
+            if not valid_id(doc_id) or not self.original_path(doc_id).is_file():
+                continue
+            try:
+                said = json.loads(path.read_text(encoding="utf-8"))
+                found.append(
+                    NewDocument(
+                        id=doc_id,
+                        scope=str(said["scope"]),
+                        name=str(said["name"]),
+                        media_type=str(said["mediaType"]),
+                        bytes=int(said["bytes"]),
+                        sha256=str(said["sha256"]),
+                        source=str(said["source"]),
+                        kind=str(said["kind"]),
+                        language=said.get("language"),
+                        source_mtime=said.get("sourceMtime"),
+                        added_at=float(said["addedAt"]),
+                    )
+                )
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+        return sorted(found, key=lambda n: (n.added_at or 0.0, n.id))
+
+    def quarantine(self) -> None:
+        """Take the index file out of the way, with its log, so a new one is made in its
+        place. Close it first (`close`); nothing is read from it again."""
+        for suffix in ("", "-wal", "-shm"):
+            path = self.path.with_name(self.path.name + suffix)
+            for attempt in range(6):
+                try:
+                    path.unlink(missing_ok=True)
+                    break
+                except OSError:
+                    if attempt == 5:
+                        raise
+                    time.sleep(0.1)
+
+    # --- the connection -------------------------------------------------
+
+    def _connect(self) -> sqlite3.Connection:
+        self.dir.mkdir(parents=True, exist_ok=True)
+        db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None, timeout=5.0)
+        db.row_factory = sqlite3.Row
+        try:
+            db.execute("PRAGMA journal_mode=WAL")
+            db.execute("PRAGMA foreign_keys=ON")
+            db.execute("PRAGMA secure_delete=ON")
+            self._initialize(db)
+        except sqlite3.DatabaseError as exc:
+            db.close()
+            raise self._explain(exc) from exc
+        except BaseException:
+            db.close()
+            raise
+        return db
+
+    def _initialize(self, db: sqlite3.Connection) -> None:
+        version = int(db.execute("PRAGMA user_version").fetchone()[0])
+        if version > SCHEMA_VERSION:
+            raise IndexUnavailable(
+                f"{self.path} was written by a newer Workbench (index version {version}; this "
+                f"Workbench knows up to {SCHEMA_VERSION}). Restore the matching Workbench.",
+                code="index_newer",
+            )
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            if version == 0:
+                for statement in _SCHEMA:
+                    db.execute(statement)
+            for target in range(max(version, 1) + 1, SCHEMA_VERSION + 1):
+                for statement in _MIGRATIONS[target]:
+                    db.execute(statement)
+            owner = db.execute("SELECT value FROM meta WHERE key = 'owner'").fetchone()
+            if owner is None:
+                db.execute("INSERT INTO meta (key, value) VALUES ('owner', ?)", (self.sub,))
+                db.execute(
+                    "INSERT OR IGNORE INTO meta (key, value) VALUES ('chunker', ?)",
+                    (json.dumps(chunker_meta()),),
+                )
+                db.execute(
+                    "INSERT OR IGNORE INTO meta (key, value) VALUES ('created_at', ?)",
+                    (str(time.time()),),
+                )
+            elif owner[0] != self.sub:
+                raise IndexDamaged("this index belongs to someone else")
+            db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            db.execute("COMMIT")
+        except BaseException:
+            with contextlib.suppress(sqlite3.Error):
+                db.execute("ROLLBACK")
+            raise
+
+    @staticmethod
+    def _explain(exc: sqlite3.DatabaseError) -> Exception:
+        """What a person is told of an error SQLite raised in the index."""
+        said = str(exc)
+        low = said.lower()
+        if "no such module: fts5" in low:
+            return IndexUnavailable(NO_FTS, code="fts_missing")
+        if any(word in low for word in _FULL):
+            return IndexUnavailable(
+                f"Workbench could not write to your documents' index: the disk is full ({said}).",
+                code="disk_full",
+            )
+        if any(word in low for word in _UNREACHABLE):
+            return IndexUnavailable(
+                f"Workbench could not use your documents' index ({said}).", code="unreachable"
+            )
+        if any(word in low for word in _TRANSIENT):
+            return IndexUnavailable(
+                f"Your documents' index is busy ({said}). Try again in a moment.", code="busy"
+            )
+        return IndexDamaged(said)
+
+    async def _run[T](self, fn: Callable[[sqlite3.Connection], T]) -> T:
+        def locked() -> T:
+            with self._lock:
+                if self._db is None:
+                    self._db = self._connect()
+                try:
+                    return fn(self._db)
+                except sqlite3.IntegrityError:
+                    raise
+                except sqlite3.DatabaseError as exc:
+                    raise self._explain(exc) from exc
+
+        return await asyncio.get_running_loop().run_in_executor(self._executor, locked)
+
+    async def close(self) -> None:
+        def shut() -> None:
+            with self._lock:
+                if self._db is not None:
+                    with contextlib.suppress(sqlite3.Error):
+                        self._db.close()
+                    self._db = None
+
+        await asyncio.get_running_loop().run_in_executor(self._executor, shut)
+
+    @staticmethod
+    def _transaction[T](db: sqlite3.Connection, body: Callable[[], T]) -> T:
+        """`body` as one transaction: all of it, or none."""
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            result = body()
+            db.execute("COMMIT")
+            return result
+        except BaseException:
+            with contextlib.suppress(sqlite3.Error):
+                db.execute("ROLLBACK")
+            raise
+
+    # --- what is there --------------------------------------------------
+
+    async def documents(self, scope: str | None = None) -> list[Document]:
+        """The documents, newest first: those of one scope, or every one."""
+
+        def go(db: sqlite3.Connection) -> list[Document]:
+            where, params = ("", ()) if scope is None else (" WHERE scope = ?", (scope,))
+            rows = db.execute(
+                f"SELECT * FROM documents{where} ORDER BY added_at DESC, rowid DESC", params
+            )
+            return [_document(r) for r in rows]
+
+        return await self._run(go)
+
+    async def document(self, doc_id: str) -> Document | None:
+        def go(db: sqlite3.Connection) -> Document | None:
+            row = db.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
+            return _document(row) if row is not None else None
+
+        return await self._run(go)
+
+    async def totals(self, scope: str = LIBRARY) -> Totals:
+        def go(db: sqlite3.Connection) -> Totals:
+            by_state = dict.fromkeys(STATES, 0)
+            documents = passages = size = 0
+            for row in db.execute(
+                "SELECT status, COUNT(*) AS n, COALESCE(SUM(chunks), 0) AS c, "
+                "COALESCE(SUM(bytes), 0) AS b FROM documents WHERE scope = ? GROUP BY status",
+                (scope,),
+            ):
+                by_state[row["status"]] = row["n"]
+                documents += row["n"]
+                passages += row["c"]
+                size += row["b"]
+            return Totals(documents, passages, size, by_state)
+
+        return await self._run(go)
+
+    async def passages_total(self) -> int:
+        """Every passage in the index, in every scope: what the person's cap counts."""
+
+        def go(db: sqlite3.Connection) -> int:
+            return int(db.execute("SELECT COALESCE(SUM(chunks), 0) FROM documents").fetchone()[0])
+
+        return await self._run(go)
+
+    async def scopes(self) -> list[str]:
+        def go(db: sqlite3.Connection) -> list[str]:
+            return [r[0] for r in db.execute("SELECT DISTINCT scope FROM documents")]
+
+        return await self._run(go)
+
+    async def count_found(self, scopes: Sequence[str]) -> tuple[int, int, int]:
+        """`(documents, passages, still on their way)` in these scopes: what a
+        search of them can look at, and what it cannot yet."""
+        if not scopes:
+            return 0, 0, 0
+
+        def go(db: sqlite3.Connection) -> tuple[int, int, int]:
+            marks = ", ".join("?" for _ in scopes)
+            row = db.execute(
+                "SELECT "
+                "COALESCE(SUM(status IN ('searchable','embedding','ready')), 0) AS found, "
+                "COALESCE(SUM(CASE WHEN status IN ('searchable','embedding','ready') "
+                "THEN chunks ELSE 0 END), 0) AS passages, "
+                "COALESCE(SUM(status IN ('queued','reading')), 0) AS waiting "
+                f"FROM documents WHERE scope IN ({marks})",
+                tuple(scopes),
+            ).fetchone()
+            return int(row["found"]), int(row["passages"]), int(row["waiting"])
+
+        return await self._run(go)
+
+    async def meta(self, key: str) -> str | None:
+        def go(db: sqlite3.Connection) -> str | None:
+            row = db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+            return str(row[0]) if row is not None else None
+
+        return await self._run(go)
+
+    async def set_meta(self, key: str, value: str) -> None:
+        def go(db: sqlite3.Connection) -> None:
+            db.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+
+        await self._run(go)
+
+    # --- bringing a document in -----------------------------------------
+
+    async def add(self, new: NewDocument) -> Added:
+        """Keep a new document, `queued`. In My documents, a file of the same name
+        (case apart) is **replaced**: the old one goes at once, with its passages and
+        files, so its old words are never found again; unless its bytes are the same
+        and it is still good, when nothing changes. A document for one chat is the
+        same one while its `source` is."""
+
+        def go(db: sqlite3.Connection) -> Added:
+            def body() -> Added:
+                if new.scope == LIBRARY:
+                    twins = [
+                        _document(r)
+                        for r in db.execute(
+                            "SELECT * FROM documents WHERE scope = ? AND name = ? COLLATE NOCASE "
+                            "ORDER BY added_at DESC, rowid DESC",
+                            (LIBRARY, new.name),
+                        )
+                    ]
+                else:
+                    twins = [
+                        _document(r)
+                        for r in db.execute(
+                            "SELECT * FROM documents WHERE scope = ? AND source = ?",
+                            (new.scope, new.source),
+                        )
+                    ]
+                same = next(
+                    (
+                        t
+                        for t in twins
+                        if t.status not in (SKIPPED, FAILED)
+                        and (new.scope != LIBRARY or t.sha256 == new.sha256)
+                    ),
+                    None,
+                )
+                if same is not None:
+                    return Added(same, unchanged=True)
+                for old in twins:
+                    db.execute("DELETE FROM documents WHERE id = ?", (old.id,))
+                    self._remove_files(old.id)
+                db.execute(
+                    "INSERT INTO documents (id, scope, name, media_type, bytes, sha256, source, "
+                    "status, kind, language, added_at, source_mtime) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)",
+                    (
+                        new.id,
+                        new.scope,
+                        new.name,
+                        new.media_type,
+                        new.bytes,
+                        new.sha256,
+                        new.source,
+                        new.kind,
+                        new.language,
+                        new.added_at if new.added_at is not None else time.time(),
+                        new.source_mtime,
+                    ),
+                )
+                row = db.execute("SELECT * FROM documents WHERE id = ?", (new.id,)).fetchone()
+                return Added(_document(row), replaced=twins)
+
+            added = self._transaction(db, body)
+            if added.replaced:
+                self._scrub(db)
+            return added
+
+        return await self._run(go)
+
+    async def requeue(self, doc_id: str) -> Document | None:
+        """Read a document again ("Re-read"): its passages go now, so nothing of
+        the old reading is found, and it waits its turn. None when it is not here."""
+
+        def go(db: sqlite3.Connection) -> Document | None:
+            def body() -> Document | None:
+                found = db.execute("SELECT 1 FROM documents WHERE id = ?", (doc_id,)).fetchone()
+                if found is None:
+                    return None
+                db.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
+                db.execute(
+                    "UPDATE documents SET status = 'queued', attempt = attempt + 1, "
+                    "reason = NULL, code = NULL, detail = NULL, chunks = 0, embedded = 0, "
+                    "indexed_at = NULL WHERE id = ?",
+                    (doc_id,),
+                )
+                row = db.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
+                return _document(row)
+
+            return self._transaction(db, body)
+
+        return await self._run(go)
+
+    async def requeue_interrupted(self) -> int:
+        """Boot: documents a stop cut off while they were read wait their turn again."""
+
+        def go(db: sqlite3.Connection) -> int:
+            def body() -> int:
+                return db.execute(
+                    "UPDATE documents SET status = 'queued', attempt = attempt + 1 "
+                    "WHERE status = 'reading'"
+                ).rowcount
+
+            return self._transaction(db, body)
+
+        return await self._run(go)
+
+    async def claim(self) -> Document | None:
+        """The document that has waited longest, now `reading`; None when none waits.
+        A document made from a file a person is waiting on in a chat comes before the
+        ones they are keeping in My documents: it is a send that waits for it."""
+
+        def go(db: sqlite3.Connection) -> Document | None:
+            def body() -> Document | None:
+                row = db.execute(
+                    "SELECT * FROM documents WHERE status = 'queued' "
+                    "ORDER BY (scope = 'library'), added_at, rowid LIMIT 1"
+                ).fetchone()
+                if row is None:
+                    return None
+                db.execute(
+                    "UPDATE documents SET status = 'reading', read_at = ? WHERE id = ?",
+                    (time.time(), row["id"]),
+                )
+                fresh = db.execute("SELECT * FROM documents WHERE id = ?", (row["id"],)).fetchone()
+                return _document(fresh)
+
+            return self._transaction(db, body)
+
+        return await self._run(go)
+
+    async def commit_reading(
+        self,
+        doc_id: str,
+        attempt: int,
+        summary: Mapping[str, Any],
+        passages: Sequence[chunk.Passage],
+        *,
+        cap: int,
+    ) -> str:
+        """What reading a document came to: its passages and their full-text entries,
+        and its state, `searchable`, **in one transaction**. Returns `searchable`;
+        `capped` when the person would pass `cap` passages (nothing is kept, and the
+        document is skipped, saying so); `gone` when the document was removed, or read
+        again, meanwhile (nothing is kept, and its caller removes what it wrote)."""
+
+        def go(db: sqlite3.Connection) -> str:
+            def body() -> str:
+                row = db.execute(
+                    "SELECT status, attempt FROM documents WHERE id = ?", (doc_id,)
+                ).fetchone()
+                if row is None or row["status"] != READING or row["attempt"] != attempt:
+                    return "gone"
+                others = int(
+                    db.execute(
+                        "SELECT COALESCE(SUM(chunks), 0) FROM documents WHERE id != ?", (doc_id,)
+                    ).fetchone()[0]
+                )
+                if others + len(passages) > cap:
+                    reason = (
+                        f"your documents would come to more than the {cap:,} passages Workbench "
+                        f"keeps for one person ({others:,} already, and this file is "
+                        f"{len(passages):,} more). Remove a document, or ask the owner to raise "
+                        "the limit in Eugene's console."
+                    )
+                    db.execute(
+                        "UPDATE documents SET status = 'skipped', code = 'too_many_passages', "
+                        "reason = ?, detail = ?, chunks = 0 WHERE id = ?",
+                        (
+                            f"Skipped: {reason}",
+                            f"{others} + {len(passages)} > {cap}",
+                            doc_id,
+                        ),
+                    )
+                    return "capped"
+                db.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
+                db.executemany(
+                    _INSERT_CHUNK,
+                    [
+                        (
+                            doc_id,
+                            p.ord,
+                            p.heading_path,
+                            p.page_start,
+                            p.page_end,
+                            p.line_start,
+                            p.line_end,
+                            p.char_start,
+                            p.char_end,
+                            p.text,
+                            p.tokens_est,
+                        )
+                        for p in passages
+                    ],
+                )
+                now = time.time()
+                db.execute(
+                    "UPDATE documents SET status = 'searchable', reason = NULL, code = NULL, "
+                    "detail = NULL, kind = ?, language = ?, pages = ?, lines = ?, tokens_est = ?, "
+                    "chunks = ?, embedded = 0, notes = ?, indexed_at = ? WHERE id = ?",
+                    (
+                        summary["kind"],
+                        summary.get("language"),
+                        summary.get("pages"),
+                        summary.get("lines"),
+                        summary.get("tokens"),
+                        len(passages),
+                        json.dumps(list(summary.get("notes") or [])),
+                        now,
+                        doc_id,
+                    ),
+                )
+                return "searchable"
+
+            return self._transaction(db, body)
+
+        return await self._run(go)
+
+    async def end_unread(
+        self,
+        doc_id: str,
+        attempt: int,
+        *,
+        state: str,
+        code: str,
+        reason: str,
+        detail: str | None = None,
+        pages: int | None = None,
+    ) -> bool:
+        """A document that gave no text: `skipped` or `failed`, with why, in the
+        words a person reads. False when it was removed or read again meanwhile."""
+        if state not in (SKIPPED, FAILED):
+            raise ValueError(f"not an end: {state}")
+
+        def go(db: sqlite3.Connection) -> bool:
+            def body() -> bool:
+                return (
+                    db.execute(
+                        "UPDATE documents SET status = ?, code = ?, reason = ?, detail = ?, "
+                        "pages = COALESCE(?, pages), chunks = 0 "
+                        "WHERE id = ? AND status = 'reading' AND attempt = ?",
+                        (state, code, reason, detail, pages, doc_id, attempt),
+                    ).rowcount
+                    == 1
+                )
+
+            return self._transaction(db, body)
+
+        return await self._run(go)
+
+    async def finish(self, doc_id: str) -> bool:
+        """Everything a document is owed is done: `searchable` is `ready`. False
+        when it is not `searchable` (or `embedding`) any more."""
+
+        def go(db: sqlite3.Connection) -> bool:
+            def body() -> bool:
+                return (
+                    db.execute(
+                        "UPDATE documents SET status = 'ready' "
+                        "WHERE id = ? AND status IN ('searchable', 'embedding')",
+                        (doc_id,),
+                    ).rowcount
+                    == 1
+                )
+
+            return self._transaction(db, body)
+
+        return await self._run(go)
+
+    async def unfinished(self) -> list[Document]:
+        """Documents that can be found by words and are not `ready`: a stop cut
+        off what they were still owed."""
+
+        def go(db: sqlite3.Connection) -> list[Document]:
+            rows = db.execute(
+                "SELECT * FROM documents WHERE status IN ('searchable', 'embedding') "
+                "ORDER BY added_at, rowid"
+            )
+            return [_document(r) for r in rows]
+
+        return await self._run(go)
+
+    # --- taking one away ------------------------------------------------
+
+    def _remove_files(self, doc_id: str) -> None:
+        """A document's files off the disk, inside the transaction that removes its
+        rows. A file that is already gone is fine; one that cannot be removed
+        raises `DeleteFailed`, which rolls the whole removal back. A program that
+        holds a file for a moment (a scanner, a download) is waited out briefly."""
+        for path in (
+            self.original_path(doc_id),
+            self.part_path(doc_id),
+            self.text_path(doc_id),
+            self.text_path(doc_id).with_name(f"{doc_id}.txt.part"),
+            self.meta_path(doc_id),
+            self.meta_path(doc_id).with_name(f"{doc_id}.meta.json.part"),
+        ):
+            for attempt in range(6):
+                try:
+                    path.unlink(missing_ok=True)
+                    break
+                except OSError as exc:
+                    if attempt == 5:
+                        raise DeleteFailed(
+                            f"Workbench could not remove a file of this document ({exc}). "
+                            "Nothing was removed; close whatever is using it and try again."
+                        ) from exc
+                    time.sleep(0.1)
+
+    @staticmethod
+    def _scrub(db: sqlite3.Connection) -> None:
+        """After a removal, leave none of its words in the file. The full-text index
+        keeps a word in its segments after the rows that held it are deleted, until
+        the segments are merged, so they are (about a second for 100,000 passages);
+        then the log is folded into the file and emptied, so the words are not lying
+        in it either. Best effort: the removal is already complete and committed."""
+        with contextlib.suppress(sqlite3.Error):
+            db.execute("INSERT INTO chunks_fts (chunks_fts) VALUES ('optimize')")
+            db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    async def delete(self, doc_id: str) -> Document | None:
+        """Remove a document for real: its row, its passages, their full-text
+        entries, its original and its text, in one transaction. The document as it
+        was, or None when it is not here."""
+
+        def go(db: sqlite3.Connection) -> Document | None:
+            def body() -> Document | None:
+                row = db.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
+                if row is None:
+                    return None
+                db.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+                self._remove_files(doc_id)
+                return _document(row)
+
+            gone = self._transaction(db, body)
+            if gone is not None:
+                self._scrub(db)
+            return gone
+
+        return await self._run(go)
+
+    async def delete_where(self, scope: str, source: str | None = None) -> list[Document]:
+        """Remove every document of a scope (a chat's), or the one made from `source`,
+        as `delete` does each. The documents as they were."""
+
+        def go(db: sqlite3.Connection) -> list[Document]:
+            def body() -> list[Document]:
+                sql, params = "SELECT * FROM documents WHERE scope = ?", [scope]
+                if source is not None:
+                    sql, params = sql + " AND source = ?", [scope, source]
+                gone = [_document(r) for r in db.execute(sql, params).fetchall()]
+                for doc in gone:
+                    db.execute("DELETE FROM documents WHERE id = ?", (doc.id,))
+                    self._remove_files(doc.id)
+                return gone
+
+            found = self._transaction(db, body)
+            if found:
+                self._scrub(db)
+            return found
+
+        return await self._run(go)
+
+    # --- finding ---------------------------------------------------------
+
+    async def search(self, match: str, scopes: Sequence[str], limit: int) -> list[Hit]:
+        """The passages, best first by BM25, that match an FTS5 expression, among the
+        documents of these scopes that can be found. **The scope is part of the query
+        that ranks**, never a filter on its result: a passage of another chat's file is
+        never a candidate, so it cannot take a place a passage of this chat's file
+        should have had. An empty list is a search that found nothing; a search that
+        could not run raises, and is never that."""
+        if not scopes:
+            return []
+
+        def go(db: sqlite3.Connection) -> list[Hit]:
+            marks = ", ".join("?" for _ in scopes)
+            rows = db.execute(_SEARCH.format(scopes=marks), (match, *scopes, limit))
+            return [_hit(r) for r in rows]
+
+        return await self._run(go)
+
+    async def passages(self, doc_id: str, ids: Sequence[int]) -> list[Hit]:
+        """These passages of one document, in reading order, as stored. A passage
+        that is not there (the document was read again) is not returned."""
+        if not ids:
+            return []
+
+        def go(db: sqlite3.Connection) -> list[Hit]:
+            marks = ", ".join("?" for _ in ids)
+            rows = db.execute(
+                "SELECT c.id AS chunk_id, c.doc_id, c.ord, c.text, c.heading_path, c.page_start, "
+                "c.page_end, c.line_start, c.line_end, c.char_start, c.char_end, c.tokens_est, "
+                "d.name, d.scope, d.kind, 0.0 AS score "
+                "FROM chunks AS c JOIN documents AS d ON d.id = c.doc_id "
+                f"WHERE c.doc_id = ? AND c.id IN ({marks}) ORDER BY c.ord",
+                (doc_id, *ids),
+            )
+            return [_hit(r) for r in rows]
+
+        return await self._run(go)
+
+    async def check(self) -> list[str]:
+        """What is wrong with the index, if anything: SQLite's own integrity check,
+        and that the full-text index agrees with the passages. Empty when sound."""
+
+        def go(db: sqlite3.Connection) -> list[str]:
+            problems = [str(r[0]) for r in db.execute("PRAGMA integrity_check") if r[0] != "ok"]
+            try:
+                db.execute(
+                    "INSERT INTO chunks_fts (chunks_fts, rank) VALUES ('integrity-check', 1)"
+                )
+            except sqlite3.DatabaseError as exc:
+                problems.append(f"full-text index: {exc}")
+            return problems
+
+        return await self._run(go)
+
+    # --- the files beside the index --------------------------------------
+
+    async def known_ids(self) -> set[str]:
+        def go(db: sqlite3.Connection) -> set[str]:
+            return {r[0] for r in db.execute("SELECT id FROM documents")}
+
+        return await self._run(go)
+
+    async def orphans(self) -> list[Path]:
+        """Files beside the index that no document row claims: an original or a text
+        whose document is gone, and any half-written file. What a stop between the
+        two steps of an upload, or a removal that could not finish, leaves behind."""
+        ids = await self.known_ids()
+
+        def scan() -> list[Path]:
+            found: list[Path] = []
+            if self.originals.is_dir():
+                for path in self.originals.iterdir():
+                    stem = path.name.removesuffix(".part")
+                    if valid_id(stem) and (stem not in ids or path.name.endswith(".part")):
+                        found.append(path)
+            if self.dir.is_dir():
+                for path in self.dir.iterdir():
+                    name = path.name
+                    if not name.endswith((".txt", ".txt.part", ".meta.json", ".meta.json.part")):
+                        continue
+                    stem = (
+                        name.removesuffix(".part").removesuffix(".txt").removesuffix(".meta.json")
+                    )
+                    if valid_id(stem) and (stem not in ids or name.endswith(".part")):
+                        found.append(path)
+            return found
+
+        return await asyncio.to_thread(scan)
+
+
+# --------------------------------------------------------------------------- #
+# every person's index
+# --------------------------------------------------------------------------- #
+
+
+class Indexes:
+    """The indexes under a data directory, one per person, opened when first used."""
+
+    def __init__(self, root: Path, *, workers: int = 4) -> None:
+        self.root = root / "knowledge"
+        self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="wb-index")
+        self._open: dict[str, Index] = {}
+
+    def dir_of(self, sub: str) -> Path:
+        return self.root / files.person_key(sub)
+
+    def get(self, sub: str, *, create: bool = True) -> Index | None:
+        """The person's index. With `create=False`, None when they have none yet:
+        reading a person's documents never makes a directory for them."""
+        found = self._open.get(sub)
+        if found is None:
+            directory = self.dir_of(sub)
+            if not create and not (directory / INDEX_FILE).is_file():
+                return None
+            found = self._open[sub] = Index(sub, directory, self._executor)
+        elif not create and not found.path.is_file():
+            return None  # asked for by a request that may not make it
+        return found
+
+    def person_dirs(self) -> list[Path]:
+        """Every person's directory that holds an index."""
+        if not self.root.is_dir():
+            return []
+        return sorted(p for p in self.root.iterdir() if (p / INDEX_FILE).is_file())
+
+    @staticmethod
+    def owner_of(directory: Path) -> str | None:
+        """Whose index a directory holds, read straight from it. None when it
+        cannot be read (damaged, or not one): the caller leaves such a directory alone."""
+        try:
+            db = sqlite3.connect(f"file:{directory / INDEX_FILE}?mode=ro", uri=True, timeout=5.0)
+        except sqlite3.Error:
+            return None
+        try:
+            row = db.execute("SELECT value FROM meta WHERE key = 'owner'").fetchone()
+        except sqlite3.Error:
+            return None
+        finally:
+            db.close()
+        return str(row[0]) if row is not None else None
+
+    async def aclose(self) -> None:
+        for index in list(self._open.values()):
+            await index.close()
+        self._open.clear()
+        self._executor.shutdown(wait=True)

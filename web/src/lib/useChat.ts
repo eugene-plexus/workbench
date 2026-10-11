@@ -66,6 +66,9 @@ export function applyEvent(detail: ChatDetail, event: ChatEvent): Outcome {
           reasoning: reasoning.text,
           sources: event.sources ?? m.sources,
           searchSuggestions: event.searchSuggestions ?? m.searchSuggestions,
+          // What searching the person's documents came to arrives with the passages,
+          // before the model's first word.
+          retrieval: event.retrieval === undefined ? m.retrieval : event.retrieval,
         };
       });
       const known = detail.messages.some((m) => m.id === event.id);

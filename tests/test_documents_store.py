@@ -87,7 +87,7 @@ def test_a_schema_10_file_gains_reading_and_every_source_a_kind_and_keeps_every_
         assert db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone() == (
             str(SCHEMA_VERSION),
         )
-        assert SCHEMA_VERSION == 11
+        assert SCHEMA_VERSION == 12
         assert "reading" in {r[1] for r in db.execute("PRAGMA table_info(files)")}
     expected = [{"kind": "web", **s} for s in WEB]
     assert json.loads(sources_of(path, "web")) == expected
@@ -133,14 +133,14 @@ def test_a_source_that_has_a_kind_already_or_is_not_a_list_of_objects_is_left_as
     assert sources_of(path, "broken") == "not json at all", "unreadable before, and not made worse"
 
 
-def test_a_schema_9_file_reaches_schema_11_in_one_boot(tmp_path: Path) -> None:
+def test_a_schema_9_file_reaches_the_current_schema_in_one_boot(tmp_path: Path) -> None:
     path = tmp_path / "w.sqlite3"
     with sqlite3.connect(path) as db:
         db.executescript(_V9)
     put_sources(path, {"web": json.dumps(WEB)})
     run(path, lambda store: store.open())
     with sqlite3.connect(path) as db:
-        assert db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone() == ("11",)
+        assert db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone() == ("12",)
         tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert {"memory_notes", "memory_prefs"} <= tables
     assert json.loads(sources_of(path, "web")) == [{"kind": "web", **s} for s in WEB]

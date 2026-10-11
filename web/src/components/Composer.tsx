@@ -8,7 +8,7 @@ import {
   TriangleAlert,
   Wrench,
 } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { api, del, patch, post } from "../lib/api";
 import { readDraft, saveDraft } from "../lib/conveniences";
@@ -103,6 +103,7 @@ export function Composer({
   models,
   modelsError,
   running,
+  documentsHint,
   onSent,
   onChat,
 }: {
@@ -112,6 +113,9 @@ export function Composer({
   models: Models | null;
   modelsError: string | null;
   running: boolean;
+  /** A quiet line under the tools: the person has documents to ask about and this
+   * chat has Documents off (the chat decides, and says it). */
+  documentsHint?: ReactNode;
   /** `memory`: what the message did to the person's notes, when it began with
    * "remember" or "forget" (the message is sent either way). */
   onSent: (user: Message, answer: Message, memory?: MemoryCommand) => void;
@@ -542,6 +546,9 @@ export function Composer({
             Search is on. {SEARCH_PRIVACY}
           </p>
         )}
+        {/* Not while files are attached: the composer is full enough, and the person is
+            in the middle of something. */}
+        {pending.length === 0 && documentsHint}
         {(blocked || problem || modelsError) && (
           <p role="alert" className="notice notice--error">
             <CircleAlert size={16} aria-hidden />

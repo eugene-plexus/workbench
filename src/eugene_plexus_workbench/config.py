@@ -7,16 +7,19 @@ agent hands Workbench at each start, and nothing else: no person signed
 in to Workbench can change these, the owner included -- they are changed
 from Eugene's console, by its operator.
 
-Seven settings. `ownerReadsChats` (W13): whether the owner may read the chats
+Nine settings. `ownerReadsChats` (W13): whether the owner may read the chats
 of the people they give Workbench to (Troy, C3 call 3: each business
 decides). Three are memory's (`memory.py`, MR1): whether people
 may keep notes at all, how many each may keep, and whether notes may be sent
 to a model that runs outside this install's machines. Memory is not covered
 by `ownerReadsChats`: no setting here lets anyone read another person's
-notes. Three are documents' (`context.py`, MR2): whether Workbench reads the
-files people attach, the most it takes of one, and how long a file may be and
-still be read whole by default. Every one takes effect at once, and `null` puts
-one back to its default.
+notes. Five are documents' (`context.py`, MR2 and MR4): whether Workbench reads
+documents at all (the files people attach, and the ones they keep), the most it
+takes of one file, how long a file may be and still be read whole by default,
+how many passages one person may keep, and whether passages of their saved
+documents may be sent to a model that runs outside this install's machines.
+Saved documents are not covered by `ownerReadsChats` either. Every one takes
+effect at once, and `null` puts one back to its default.
 """
 
 from __future__ import annotations
@@ -45,13 +48,17 @@ MEMORY_EXTERNAL_MODELS = "memoryExternalModels"
 DOCUMENTS_ENABLED = "documentsEnabled"
 DOCUMENTS_MAX_FILE_MB = "documentsMaxFileMB"
 DOCUMENTS_WHOLE_UP_TO_TOKENS = "documentsWholeUpToTokens"
+DOCUMENTS_MAX_PASSAGES = "documentsMaxPassagesPerPerson"
+DOCUMENTS_EXTERNAL_MODELS = "documentsExternalModels"
 
-#: How far a note may travel to a model outside the machines (`memory_api`'s
-#: `resolve_external` says how the owner's and a person's choices meet).
+#: How far a note, or a passage of a saved document, may travel to a model outside
+#: the machines (`memory_api`'s `resolve_external` says how the owner's and a person's
+#: choices meet).
 EXTERNAL_CHOICES = ("never", "ask", "always")
 MAX_NOTES_LIMIT = 2000
 MAX_FILE_MB_LIMIT = 500
 MIN_WHOLE_TOKENS, MAX_WHOLE_TOKENS = 500, 200_000
+MIN_PASSAGES_LIMIT, MAX_PASSAGES_LIMIT = 100, 1_000_000
 
 FIELDS = [
     ConfigField(
@@ -121,13 +128,16 @@ FIELDS = [
     ),
     ConfigField(
         key=DOCUMENTS_ENABLED,
-        label="Workbench reads the files people attach",
+        label="Workbench reads documents",
         description=(
             "When on (the default), a PDF, Word, Markdown, text, CSV, HTML or code file "
             "attached to a chat is read by Workbench, in a process of its own, and its text "
-            "goes to the chat's model, so any model can answer from it. When off, Workbench "
-            "reads no file: only images and audio, and PDFs to models that take them as "
-            "files, are attached, as before. Turning it off does not stop a file already read "
+            "goes to the chat's model, so any model can answer from it; and each person can "
+            "keep documents in My documents, which Workbench reads and searches for the "
+            "chats that have Documents turned on. When off, Workbench reads no file: only "
+            "images and audio, and PDFs to models that take them as files, are attached, as "
+            "before, and no saved document is added or searched (people can still read and "
+            "remove the ones they have). Turning it off does not stop a file already read "
             "from being replayed in the chat it was sent in."
         ),
         category="documents",
@@ -165,6 +175,41 @@ FIELDS = [
         minimum=MIN_WHOLE_TOKENS,
         maximum=MAX_WHOLE_TOKENS,
     ),
+    ConfigField(
+        key=DOCUMENTS_MAX_PASSAGES,
+        label="Most passages one person can keep",
+        description=(
+            "How many passages (about 300 tokens each; a page of text is two or three) the "
+            "documents one person keeps may come to, in My documents and in the files they "
+            "search in chats together (default 100,000). A file that would take a person past "
+            "it is skipped, and says so; a person who is at the limit is told so and removes "
+            "a document to add another. Lowering it deletes nothing."
+        ),
+        category="documents",
+        valueType=ConfigValueType.integer,
+        default=100_000,
+        minimum=MIN_PASSAGES_LIMIT,
+        maximum=MAX_PASSAGES_LIMIT,
+    ),
+    ConfigField(
+        key=DOCUMENTS_EXTERNAL_MODELS,
+        label="Send passages of saved documents to models that run outside your machines",
+        description=(
+            "What a chat does with the passages found in a person's saved documents when its "
+            "model runs on a cloud account or anywhere Eugene cannot confirm is this install's "
+            "own machines. Ask (the default): the passages are held back until the person "
+            "chooses to send them for that chat. Always: they are sent without asking. Each "
+            "person can choose Never, Ask or Always for themselves, and this is what a person "
+            "who has not chosen gets. Never is different: it is this install's rule, passages "
+            "are never sent to such a model, and no person can change that. A file a person "
+            "attaches to a chat is their own act and is not held back by this."
+        ),
+        category="documents",
+        valueType=ConfigValueType.enum,
+        enumValues=list(EXTERNAL_CHOICES),
+        enumLabels=["Never", "Ask for each chat", "Always"],
+        default="ask",
+    ),
 ]
 
 DEFAULTS: dict[str, Any] = {
@@ -175,6 +220,8 @@ DEFAULTS: dict[str, Any] = {
     DOCUMENTS_ENABLED: True,
     DOCUMENTS_MAX_FILE_MB: 50,
     DOCUMENTS_WHOLE_UP_TO_TOKENS: 6000,
+    DOCUMENTS_MAX_PASSAGES: 100_000,
+    DOCUMENTS_EXTERNAL_MODELS: "ask",
 }
 
 
@@ -212,6 +259,10 @@ class DocumentSettings:
     enabled: bool
     max_file_mb: int
     whole_up_to_tokens: int
+    max_passages: int = 100_000
+    #: What the install lets passages of saved documents do, for a model that runs
+    #: outside its machines: `never`, `ask` or `always`.
+    external: str = "ask"
 
     @property
     def max_bytes(self) -> int:
@@ -222,11 +273,21 @@ async def document_settings(store: Store) -> DocumentSettings:
     enabled = await store.setting(DOCUMENTS_ENABLED)
     largest = await store.setting(DOCUMENTS_MAX_FILE_MB)
     whole = await store.setting(DOCUMENTS_WHOLE_UP_TO_TOKENS)
+    passages = await store.setting(DOCUMENTS_MAX_PASSAGES)
+    external = await store.setting(DOCUMENTS_EXTERNAL_MODELS)
     return DocumentSettings(
         enabled=bool(enabled) if enabled is not None else bool(DEFAULTS[DOCUMENTS_ENABLED]),
         max_file_mb=int(largest) if largest is not None else int(DEFAULTS[DOCUMENTS_MAX_FILE_MB]),
         whole_up_to_tokens=(
             int(whole) if whole is not None else int(DEFAULTS[DOCUMENTS_WHOLE_UP_TO_TOKENS])
+        ),
+        max_passages=(
+            int(passages) if passages is not None else int(DEFAULTS[DOCUMENTS_MAX_PASSAGES])
+        ),
+        external=(
+            str(external)
+            if external in EXTERNAL_CHOICES
+            else str(DEFAULTS[DOCUMENTS_EXTERNAL_MODELS])
         ),
     )
 
@@ -271,6 +332,8 @@ async def get_config(request: Request) -> ConfigDocument:
             DOCUMENTS_ENABLED: documents.enabled,
             DOCUMENTS_MAX_FILE_MB: documents.max_file_mb,
             DOCUMENTS_WHOLE_UP_TO_TOKENS: documents.whole_up_to_tokens,
+            DOCUMENTS_MAX_PASSAGES: documents.max_passages,
+            DOCUMENTS_EXTERNAL_MODELS: documents.external,
         }
     )
 
@@ -296,11 +359,19 @@ def _problem_with(key: str, value: Any) -> str | None:
         ):
             return None
         return f"Must be a whole number from {MIN_WHOLE_TOKENS:,} to {MAX_WHOLE_TOKENS:,}."
+    if key == DOCUMENTS_MAX_PASSAGES:
+        if (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and MIN_PASSAGES_LIMIT <= value <= MAX_PASSAGES_LIMIT
+        ):
+            return None
+        return f"Must be a whole number from {MIN_PASSAGES_LIMIT:,} to {MAX_PASSAGES_LIMIT:,}."
     if key == MEMORY_MAX_NOTES:
         if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= MAX_NOTES_LIMIT:
             return None
         return f"Must be a whole number from 1 to {MAX_NOTES_LIMIT:,}."
-    if key == MEMORY_EXTERNAL_MODELS:
+    if key in (MEMORY_EXTERNAL_MODELS, DOCUMENTS_EXTERNAL_MODELS):
         return None if value in EXTERNAL_CHOICES else "Must be never, ask or always."
     return "Workbench has no such setting."
 

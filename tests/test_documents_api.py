@@ -607,7 +607,8 @@ def test_a_document_too_long_for_the_window_is_read_in_part_only_when_the_person
         and decision["wholeLimit"] == 2048
     )
     assert decision["readAllLimit"] == (8192 - decision["room"]["history"] - 1024) * 70 // 100
-    [offer] = decision["offers"]
+    offer, searching = decision["offers"]
+    assert searching == {"action": "search"}, "and it may be searched instead, last"
     assert (
         offer["action"] == "readFirst"
         and offer["tokens"] + decision["overhead"] <= decision["readAllLimit"]
@@ -683,7 +684,7 @@ def test_a_document_longer_than_is_read_by_default_but_that_fits_is_offered_all_
     decision = ada.get(f"/api/chats/{chat}/files").json()["files"][0]["decision"]
     assert decision["kind"] == "choose" and decision["send"] is False
     assert 2048 < decision["tokens"] + decision["overhead"] <= decision["readAllLimit"]
-    assert [o["action"] for o in decision["offers"]] == ["readAll", "readFirst"]
+    assert [o["action"] for o in decision["offers"]] == ["readAll", "readFirst", "search"]
     assert "more than Workbench reads at once by default (2,048)" in decision["message"]
     assert send(ada, chat, "Go.", [file_id]).status_code == 409
     chosen = put_reading(ada, chat, file_id, {"mode": "whole"})
@@ -740,7 +741,7 @@ def test_a_model_whose_window_nobody_knows_reads_by_default_and_never_claims_a_c
     short, long = (f["decision"] for f in ada.get(f"/api/chats/{chat}/files").json()["files"])
     assert short["kind"] == "whole" and short["window"] is None and short["readAllLimit"] is None
     assert long["kind"] == "choose" and long["readAllLimit"] is None
-    assert [o["action"] for o in long["offers"]] == ["readAll", "readFirst"]
+    assert [o["action"] for o in long["offers"]] == ["readAll", "readFirst", "search"]
     assert long["offers"][0]["tokens"] == long["tokens"], "no cap is known, so none is claimed"
 
 

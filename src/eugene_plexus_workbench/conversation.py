@@ -72,9 +72,10 @@ def _user_content(
     root: Path,
     documents: Mapping[str, SentDocument] | None,
     lean: bool,
+    retrieved: str | None = None,
 ) -> str | list[dict[str, Any]]:
     attached = [records[i] for i in message.attachments if i in records]
-    if not attached:
+    if not attached and not retrieved:
         return message.content
     blocks: list[str] = []
     media: list[dict[str, Any]] = []
@@ -98,6 +99,8 @@ def _user_content(
         else:
             data = files.path_of(root, record.owner, record.id).read_bytes()
             media.append(_part(record, data))
+    if retrieved:
+        blocks.append(retrieved)
     words = [*blocks, message.content] if message.content else blocks
     text = "\n\n".join(words)
     if not media:
@@ -117,6 +120,7 @@ def request_for(
     memory: str | None = None,
     documents: Mapping[str, SentDocument] | None = None,
     lean: bool = False,
+    retrieved: str | None = None,
 ) -> dict[str, Any]:
     """The body of `POST /v1/chat/completions` for the next answer.
 
@@ -129,8 +133,15 @@ def request_for(
     `documents` says how each attached document goes (by file id): its block of
     text, or the PDF itself. With `lean`, no file is read and no document is
     included: a part that is not text is a stub, and the request is only good for
-    counting its tokens (`context.count_messages`)."""
+    counting its tokens (`context.count_messages`).
+
+    `retrieved` is the passages found in the person's saved documents for this
+    answer (`context.render_passages`). They go in **the latest user message only**,
+    after any attached document and before the person's words, and are never sent
+    again: the next request has none in that message, so every earlier turn is the
+    bytes it was and the engine's cache is lost only from the last turn on."""
     by_id = {r.id: r for r in records}
+    last_user = history[-1] if history and history[-1].role == "user" else None
     messages: list[dict[str, Any]] = []
     instructions = str(chat.settings.get("instructions") or "").strip()
     system = system_text(instructions, memory)
@@ -141,7 +152,14 @@ def request_for(
             messages.append(
                 {
                     "role": "user",
-                    "content": _user_content(message, by_id, root, documents, lean),
+                    "content": _user_content(
+                        message,
+                        by_id,
+                        root,
+                        documents,
+                        lean,
+                        retrieved if message is last_user else None,
+                    ),
                 }
             )
         elif message.role == "assistant":

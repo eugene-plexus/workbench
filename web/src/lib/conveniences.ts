@@ -1,4 +1,5 @@
-import { isDocumentSource, sourceLine } from "./documents";
+import { isDocumentSource, isPassageSource, sourceLine } from "./documents";
+import { passageLine } from "./savedDocuments";
 import type { Chat, ChatDetail } from "./types";
 import { answerParts, EXPORT_BRANCHES_NOTE, statusWords } from "./words";
 
@@ -96,9 +97,11 @@ export function chatMarkdown(detail: ChatDetail): string {
         lines.push(
           "### Sources",
           ...message.sources.map((s) =>
-            isDocumentSource(s)
-              ? `Sent to the model: ${oneLine(sourceLine(s))}`
-              : `${oneLine(s.title)}: ${oneLine(s.url)}`,
+            isPassageSource(s)
+              ? oneLine(passageLine(s))
+              : isDocumentSource(s)
+                ? `Sent to the model: ${oneLine(sourceLine(s))}`
+                : `${oneLine(s.title)}: ${oneLine(s.url)}`,
           ),
         );
       }

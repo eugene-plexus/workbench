@@ -38,6 +38,14 @@ CSV, HTML or code file carries `reading`, JSON saying how reading it went and
 what the person chose to have read of it; the text itself is beside the original
 on disk (`files.read_path_of`). A message's `sources` are a union, each with a
 `kind`: `web` for a search's citation, `document` for a file sent with the answer.
+
+**Saved documents are not here** (schema 12): a person's documents, their passages
+and their search index are one SQLite file each (`knowledge/index.py`), so that
+removing a document is one transaction and a damaged index never touches a chat.
+What is here is what belongs with the chats: a message's `retrieval`, JSON saying
+what searching the person's documents for that answer came to (the words searched
+for, how many passages went, why none did), and `documents_prefs`, a person's own
+settings for them.
 """
 
 from __future__ import annotations
@@ -47,13 +55,13 @@ import json
 import sqlite3
 import time
 import unicodedata
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -109,7 +117,8 @@ CREATE TABLE IF NOT EXISTS messages (
     parent_id TEXT,
     chosen INTEGER NOT NULL DEFAULT 1,
     search_suggestions TEXT NOT NULL DEFAULT '[]',
-    output_cap TEXT
+    output_cap TEXT,
+    retrieval TEXT
 );
 CREATE INDEX IF NOT EXISTS messages_by_chat ON messages (chat_id, seq);
 CREATE TABLE IF NOT EXISTS files (
@@ -153,6 +162,11 @@ CREATE TABLE IF NOT EXISTS tool_servers (
 CREATE TABLE IF NOT EXISTS folder_grants (
     id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL,
     identity TEXT NOT NULL, subject TEXT NOT NULL, writable INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS documents_prefs (
+    owner TEXT PRIMARY KEY,
+    new_chats INTEGER NOT NULL DEFAULT 0 CHECK (new_chats IN (0, 1)),
+    external TEXT CHECK (external IS NULL OR external IN ('never', 'ask', 'always'))
 );
 """
 
@@ -304,6 +318,15 @@ _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
     11: [
         "ALTER TABLE files ADD COLUMN reading TEXT",
         _sources_get_kinds,
+    ],
+    # Saved documents (2026-10-11): what searching a person's documents came to for
+    # an answer (JSON), and a person's own settings for them. Their documents are in
+    # files of their own (`knowledge/index.py`), not in this store.
+    12: [
+        "ALTER TABLE messages ADD COLUMN retrieval TEXT",
+        "CREATE TABLE IF NOT EXISTS documents_prefs (owner TEXT PRIMARY KEY, "
+        "new_chats INTEGER NOT NULL DEFAULT 0 CHECK (new_chats IN (0, 1)), "
+        "external TEXT CHECK (external IS NULL OR external IN ('never', 'ask', 'always')))",
     ],
 }
 
@@ -493,6 +516,9 @@ class Message:
     #: from (`{"tokens", "source"}`, gateway.yaml `OutputCap`); None when it
     #: sent none or did not say.
     output_cap: dict[str, Any] | None = None
+    #: What searching the person's saved documents came to for this answer
+    #: (`saved_api.retrieval_view`); None when none was searched.
+    retrieval: dict[str, Any] | None = None
 
 
 @dataclass
@@ -610,6 +636,13 @@ MEMORY_PREFS_DEFAULT: dict[str, Any] = {
 }
 
 
+#: What a person's saved-documents settings are until they change one. `external`
+#: None is "whatever the install's default is" (it is `ask` unless the owner says);
+#: `new_chats` is whether a new chat starts with Documents on (off: a switch that
+#: injects passages into every chat is not one a person did not choose).
+DOCUMENTS_PREFS_DEFAULT: dict[str, Any] = {"new_chats": False, "external": None}
+
+
 def _message(row: sqlite3.Row) -> Message:
     return Message(
         id=row["id"],
@@ -635,6 +668,7 @@ def _message(row: sqlite3.Row) -> Message:
         chosen=bool(row["chosen"]),
         search_suggestions=json.loads(row["search_suggestions"] or "[]"),
         output_cap=json.loads(row["output_cap"]) if row["output_cap"] else None,
+        retrieval=_snapshot(row["retrieval"]),
     )
 
 
@@ -710,6 +744,7 @@ _MESSAGE_FIELDS = {
     "tool_rounds",
     "search_suggestions",
     "output_cap",
+    "retrieval",
 }
 _CHAT_FIELDS = {"title", "model", "settings", "search", "updated_at"}
 _JSON_FIELDS = {
@@ -719,6 +754,7 @@ _JSON_FIELDS = {
     "tool_rounds",
     "search_suggestions",
     "output_cap",
+    "retrieval",
 }
 
 
@@ -1814,6 +1850,68 @@ class Store:
                 (json.dumps(snapshot) if snapshot is not None else None, chat_id, owner),
             )
             return cursor.rowcount == 1
+
+        return await self._run(go)
+
+    # --- saved documents' settings --------------------------------------
+
+    async def documents_prefs(self, owner: str) -> dict[str, Any]:
+        """A person's settings for their saved documents, with every one filled in."""
+
+        def go() -> dict[str, Any]:
+            row = (
+                self._conn()
+                .execute("SELECT * FROM documents_prefs WHERE owner = ?", (owner,))
+                .fetchone()
+            )
+            if row is None:
+                return dict(DOCUMENTS_PREFS_DEFAULT)
+            return {"new_chats": bool(row["new_chats"]), "external": row["external"]}
+
+        return await self._run(go)
+
+    async def put_documents_prefs(self, owner: str, **values: Any) -> dict[str, Any]:
+        """Change the settings named; the others stay as they were."""
+        unknown = set(values) - set(DOCUMENTS_PREFS_DEFAULT)
+        if unknown:
+            raise ValueError(f"not documents settings: {sorted(unknown)}")
+
+        def go() -> None:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                db.execute("INSERT OR IGNORE INTO documents_prefs (owner) VALUES (?)", (owner,))
+                if values:
+                    columns = ", ".join(f"{k} = ?" for k in values)
+                    params = [_encode(k, v) for k, v in values.items()]
+                    db.execute(
+                        f"UPDATE documents_prefs SET {columns} WHERE owner = ?", (*params, owner)
+                    )
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+
+        await self._run(go)
+        return await self.documents_prefs(owner)
+
+    async def chat_owners(self, chat_ids: Iterable[str]) -> dict[str, str]:
+        """Whose each of these chats is, for the ones that exist: what the boot
+        reconcile asks to find a chat's own documents whose chat is gone."""
+        ids = list(chat_ids)
+        if not ids:
+            return {}
+
+        def go() -> dict[str, str]:
+            found: dict[str, str] = {}
+            for start in range(0, len(ids), 500):
+                part = ids[start : start + 500]
+                marks = ", ".join("?" for _ in part)
+                for row in self._conn().execute(
+                    f"SELECT id, owner FROM chats WHERE id IN ({marks})", part
+                ):
+                    found[row["id"]] = row["owner"]
+            return found
 
         return await self._run(go)
 

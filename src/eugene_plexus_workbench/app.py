@@ -17,6 +17,7 @@ from . import (
     job_sites_api,
     media_api,
     memory_api,
+    saved_api,
     tools_api,
     web,
 )
@@ -24,7 +25,9 @@ from ._build import commit
 from ._http import ssl_context
 from .answers import Answers
 from .hub import Hub
+from .knowledge.index import IndexUnavailable
 from .knowledge.reader import Reader
+from .knowledge.saved import SavedDocuments
 from .media import MediaJobs
 from .node_folders import NodeFolders
 from .sessions import Sessions
@@ -75,6 +78,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         reading = await reader.resume()
         if reading:
             log.info("reading %d file(s) again after the restart", reading)
+
+        async def passage_limit() -> int:
+            return (await config.document_settings(store)).max_passages
+
+        # The people's saved documents (MR4): put right what the last stop left (a
+        # chat's own documents whose chat is gone, files no row claims, a document cut
+        # off while it was read), and begin reading what is waiting.
+        saved = SavedDocuments(settings.data_dir, reader, passage_limit)
+        reconciled = await saved.start(store.chat_owners)
+        if any(
+            (
+                reconciled.chat_documents,
+                reconciled.orphan_files,
+                reconciled.requeued,
+                reconciled.healed,
+                reconciled.finished,
+                reconciled.unreadable,
+            )
+        ):
+            log.info(
+                "saved documents after the restart: %d chat document(s) of deleted chats and %d "
+                "file(s) no document claims removed; %d read again, %d finished; %d index(es) "
+                "could not be checked",
+                reconciled.chat_documents,
+                reconciled.orphan_files,
+                reconciled.requeued + reconciled.healed,
+                reconciled.finished,
+                reconciled.unreadable,
+            )
         # M11: a video job the gateway accepted is polled again, whatever
         # stopped Workbench, because the provider kept working on it.
         resumed = await media.resume()
@@ -87,6 +119,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.answers = answers
         app.state.media = media
         app.state.reader = reader
+        app.state.saved = saved
         app.state.sessions = Sessions(store, provider)
         for problem in (provider.why_not(), hub.why_not()):
             if problem:
@@ -102,6 +135,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             yield
         finally:
             await answers.aclose()
+            await saved.aclose()
             await reader.aclose()
             await media.aclose()
             await hub.aclose()
@@ -120,9 +154,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(media_api.router)
     app.include_router(memory_api.router)
     app.include_router(documents_api.router)
+    app.include_router(saved_api.router)
     app.include_router(tools_api.router)
     app.include_router(folders_api.router)
     app.include_router(job_sites_api.router)
     app.add_exception_handler(job_sites_api.HeldAtTheMachine, job_sites_api.held_response)
+    app.add_exception_handler(IndexUnavailable, saved_api.index_unavailable)
     web.mount(app, web.static_dir(settings.static_dir))
     return app

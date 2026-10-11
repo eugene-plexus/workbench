@@ -15,6 +15,7 @@ import pytest
 
 from . import documents as docs
 from .conftest import World
+from .saved import chat_on, keep, md, survey_pdf
 
 # What a local model writes when it is asked something technical: headings,
 # bold lead-ins, a formula, a table, steps with nested bullets, a quote, a
@@ -108,6 +109,9 @@ CUT = """## The transistor, from 1947 to today
 
 The story usually starts at **Bell Labs** in December 1947, when John Bardeen and Walter Brattain pressed two gold contacts onto a slab of germanium and saw a signal come out stronger than it went in. William Shockley, who led their group, was"""
 
+#: What the person asks about their saved documents; the code word is on page 4 of the survey.
+QUESTION = "What is the code word for the lighthouse inspection?"
+
 LIVE = (
     "Tides are the ocean answering the moon. The moon pulls hardest on the water nearest "
     "to it, and least on the water on the far side of the Earth, so the sea bulges toward "
@@ -198,6 +202,21 @@ def test_reading_in_chrome(world: World, tmp_path: Path) -> None:
         f"The code word is **{docs.CODE_WORD}**, on page 3 of the report.",
         attachments=[report.json()["id"]],
     )
+    # Saved documents (MR4): three kept, and a chat that was sent passages of them, so the
+    # Documents screen, the chat's Documents drawer and the Sources under an answer have
+    # something to read.
+    keep(
+        person,
+        ("harbour-survey.pdf", survey_pdf(docs.CODE_WORD, page=4), "application/pdf"),
+        ("field-notes.md", md("The tide table is on the wall.", title="Field notes")),
+        ("quarterly-report.docx", docs.docx(code_word="PLUMBAGO-77")),
+    )
+    library = chat_on(person)
+    ask(
+        library,
+        QUESTION,
+        f"The code word is **{docs.CODE_WORD}**, on page 4 of the survey [1].",
+    )
     files = tmp_path / "files"
     files.mkdir()
     (files / "long-12-pages.pdf").write_bytes(docs.long_pdf(12))
@@ -228,7 +247,14 @@ def test_reading_in_chrome(world: World, tmp_path: Path) -> None:
                     }
                     for c in person.http.cookies.jar
                 ],
-                "chats": {"rich": rich, "story": story, "cut": cut, "documents": documents},
+                "chats": {
+                    "rich": rich,
+                    "story": story,
+                    "cut": cut,
+                    "documents": documents,
+                    "library": library,
+                },
+                "library": {"question": QUESTION},
                 "documents": {
                     "long": str(files / "long-12-pages.pdf"),
                     "scan": str(files / "scan.pdf"),

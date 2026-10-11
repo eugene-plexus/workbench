@@ -1,24 +1,43 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
-import App, { memoryFromPath } from "./App";
-import { api, post } from "./lib/api";
+import App, { documentsFromPath, memoryFromPath } from "./App";
+import { api, patch, post } from "./lib/api";
 import type { Chat, Me, Models } from "./lib/types";
 
 vi.mock("./lib/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./lib/api")>()),
   api: vi.fn(),
+  patch: vi.fn(),
   post: vi.fn(),
 }));
 
 // The pages are other files' business; what App does is the frame around them:
 // the top bar, the title, where focus goes.
 vi.mock("./components/ChatView", () => ({
-  ChatView: ({ chatId, onOpenMemory }: { chatId: string; onOpenMemory: () => void }) => (
+  ChatView: ({
+    chatId,
+    onOpenMemory,
+    onOpenDocuments,
+  }: {
+    chatId: string;
+    onOpenMemory: () => void;
+    onOpenDocuments: () => void;
+  }) => (
     <div>
       <h1>Chat {chatId}</h1>
       <div id="conversation" role="region" aria-label="Conversation" tabIndex={0} />
       <button onClick={onOpenMemory}>Manage notes from the chat</button>
+      <button onClick={onOpenDocuments}>Manage documents from the chat</button>
     </div>
+  ),
+}));
+vi.mock("./components/Documents", () => ({
+  Documents: ({ onClose, onAsk }: { onClose: () => void; onAsk: () => void }) => (
+    <section>
+      <h1 id="view-heading">The documents page</h1>
+      <button onClick={onAsk}>Ask about the documents</button>
+      <button onClick={onClose}>Back to chat</button>
+    </section>
   ),
 }));
 vi.mock("./components/Memory", () => ({
@@ -124,6 +143,7 @@ const tab = (name: string | RegExp) => within(bar()).getByRole("button", { name 
 
 beforeEach(() => {
   vi.mocked(api).mockReset();
+  vi.mocked(patch).mockReset();
   vi.mocked(post).mockReset().mockResolvedValue(undefined);
   document.title = "Workbench";
   localStorage.clear();
@@ -420,7 +440,7 @@ describe("the start page", () => {
 });
 
 describe("the Memory page", () => {
-  it("is a page in the top bar, between Media and Job sites, with a glyph that is only a glyph", async () => {
+  it("is a page in the top bar, after Documents and before Job sites, with a glyph that is only a glyph", async () => {
     await open();
     const memory = tab("Memory");
     expect(memory).toHaveClass("nav-tab");
@@ -430,7 +450,7 @@ describe("the Memory page", () => {
     const names = within(bar())
       .getAllByRole("button")
       .map((b) => b.textContent?.trim());
-    expect(names.indexOf("Memory")).toBe(names.indexOf("Bins · Media") + 1);
+    expect(names.indexOf("Memory")).toBe(names.indexOf("Documents") + 1);
     expect(names.indexOf("Job sites (your machines)")).toBe(names.indexOf("Memory") + 1);
   });
 
@@ -562,5 +582,198 @@ describe("what an address says is the Memory page", () => {
     ["/", false],
   ])("%s is %s", (path, is) => {
     expect(memoryFromPath(path)).toBe(is);
+  });
+});
+
+describe("the Documents page", () => {
+  it("is a page in the top bar, between Media and Memory, with a glyph that is only a glyph", async () => {
+    await open();
+    const documents = tab("Documents");
+    expect(documents).toHaveClass("nav-tab");
+    expect(documents).toHaveAttribute("data-testid", "open-documents");
+    expect(documents.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+    expect(documents).not.toHaveAttribute("aria-current");
+    const names = within(bar())
+      .getAllByRole("button")
+      .map((b) => b.textContent?.trim());
+    expect(names.indexOf("Documents")).toBe(names.indexOf("Bins · Media") + 1);
+    expect(names.indexOf("Memory")).toBe(names.indexOf("Documents") + 1);
+  });
+
+  it("is there for the owner as well, who has no Job sites", async () => {
+    await open("/", { me: { owner: true } });
+    expect(tab("Documents")).toBeInTheDocument();
+  });
+
+  it("opens at /documents, marks the page a person is on, and names the tab", async () => {
+    await open("/chats/one", { chats: [chat] });
+    fireEvent.click(tab("Documents"));
+    expect(window.location.pathname).toBe("/documents");
+    expect(screen.getByRole("heading", { name: "The documents page" })).toBeInTheDocument();
+    expect(tab("Documents")).toHaveAttribute("aria-current", "page");
+    for (const other of [
+      "Toolbox · Tools",
+      "Bins · Media",
+      "Memory",
+      "Job sites (your machines)",
+    ]) {
+      expect(tab(other)).not.toHaveAttribute("aria-current");
+    }
+    expect(document.title).toBe("Documents · Workbench");
+    expect(screen.queryByRole("heading", { name: "Chat one" })).toBeNull();
+  });
+
+  it("moves focus to its heading when a person opens it, and not when the address did", async () => {
+    await open();
+    fireEvent.click(tab("Documents"));
+    const heading = screen.getByRole("heading", { name: "The documents page" });
+    expect(heading).toHaveFocus();
+    expect(heading).toHaveAttribute("tabindex", "-1");
+    cleanup();
+    await open("/documents");
+    const direct = screen.getByRole("heading", { name: "The documents page" });
+    expect(direct).not.toHaveFocus();
+    expect(tab("Documents")).toHaveAttribute("aria-current", "page");
+  });
+
+  it("is left alone when its own tab is pressed again", async () => {
+    await open();
+    fireEvent.click(tab("Documents"));
+    const before = window.history.length;
+    fireEvent.click(tab("Documents"));
+    expect(window.history.length).toBe(before);
+    expect(screen.getByRole("heading", { name: "The documents page" })).toBeInTheDocument();
+  });
+
+  it("goes back to the chat it came from, with Back to chat, and to the start page when there was none", async () => {
+    await open("/chats/one", { chats: [chat] });
+    fireEvent.click(tab("Documents"));
+    fireEvent.click(back());
+    expect(window.location.pathname).toBe("/chats/one");
+    expect(screen.getByRole("heading", { name: "Chat one" })).toBeInTheDocument();
+    expect(tab("Documents")).not.toHaveAttribute("aria-current");
+    expect(document.title).toBe("Workbench");
+    cleanup();
+    await open();
+    fireEvent.click(tab("Documents"));
+    fireEvent.click(back());
+    expect(window.location.pathname).toBe("/");
+  });
+
+  it("opens from a chat's own Manage documents", async () => {
+    await open("/chats/one", { chats: [chat] });
+    fireEvent.click(screen.getByRole("button", { name: "Manage documents from the chat" }));
+    expect(window.location.pathname).toBe("/documents");
+    expect(screen.getByRole("heading", { name: "The documents page" })).toBeInTheDocument();
+  });
+
+  it("gives way to another page's tab, and is the page again when that page is left", async () => {
+    await open();
+    fireEvent.click(tab("Documents"));
+    fireEvent.click(tab("Memory"));
+    expect(screen.getByRole("heading", { name: "The memory page" })).toBeInTheDocument();
+    expect(tab("Documents")).not.toHaveAttribute("aria-current");
+    expect(screen.queryByRole("heading", { name: "The documents page" })).toBeNull();
+    fireEvent.click(tab("Documents"));
+    expect(window.location.pathname).toBe("/documents");
+    expect(screen.queryByRole("heading", { name: "The memory page" })).toBeNull();
+    fireEvent.click(tab("Bins · Media"));
+    expect(window.location.pathname).toBe("/media/images");
+    expect(screen.queryByRole("heading", { name: "The documents page" })).toBeNull();
+  });
+
+  it("follows the browser's back button", async () => {
+    await open("/chats/one", { chats: [chat] });
+    fireEvent.click(tab("Documents"));
+    window.history.pushState(null, "", "/chats/one");
+    act(() => void window.dispatchEvent(new PopStateEvent("popstate")));
+    expect(screen.getByRole("heading", { name: "Chat one" })).toBeInTheDocument();
+    window.history.pushState(null, "", "/documents");
+    act(() => void window.dispatchEvent(new PopStateEvent("popstate")));
+    expect(screen.getByRole("heading", { name: "The documents page" })).toBeInTheDocument();
+  });
+
+  it("starts a chat with Documents on from Ask about your documents, and opens it", async () => {
+    vi.mocked(post).mockResolvedValue({ ...chat, id: "fresh" });
+    vi.mocked(patch).mockResolvedValue({ ...chat, id: "fresh", settings: { documents: "on" } });
+    await open("/documents");
+    fireEvent.click(screen.getByRole("button", { name: "Ask about the documents" }));
+    await waitFor(() => expect(window.location.pathname).toBe("/chats/fresh"));
+    expect(post).toHaveBeenCalledWith("/api/chats", {});
+    expect(patch).toHaveBeenCalledExactlyOnceWith("/api/chats/fresh", {
+      settings: { documents: "on" },
+    });
+    expect(screen.getByRole("heading", { name: "Chat fresh" })).toBeInTheDocument();
+    expect(tab("Documents")).not.toHaveAttribute("aria-current");
+  });
+
+  it("opens the chat all the same, and says so, when Documents could not be turned on in it", async () => {
+    vi.mocked(post).mockResolvedValue({ ...chat, id: "fresh" });
+    vi.mocked(patch).mockRejectedValue(new Error("Workbench answered 500."));
+    await open("/documents");
+    fireEvent.click(screen.getByRole("button", { name: "Ask about the documents" }));
+    await waitFor(() => expect(window.location.pathname).toBe("/chats/fresh"));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "The chat was made, but Documents could not be turned on in it: Workbench answered 500.",
+    );
+  });
+
+  it("stays on the screen, and says why, when the chat could not be made", async () => {
+    vi.mocked(post).mockRejectedValue(new Error("Workbench answered 502."));
+    await open("/documents");
+    fireEvent.click(screen.getByRole("button", { name: "Ask about the documents" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Workbench answered 502.");
+    expect(window.location.pathname).toBe("/documents");
+    expect(patch).not.toHaveBeenCalled();
+  });
+});
+
+describe("six pages in the top bar of a phone", () => {
+  it("keeps to one row that scrolls sideways below 640 px, and wraps above it", async () => {
+    await open();
+    const classes = bar().className.split(/\s+/);
+    for (const wanted of ["flex-wrap", "max-sm:flex-nowrap", "max-sm:overflow-x-auto"]) {
+      expect(classes, wanted).toContain(wanted);
+    }
+    // No tab shrinks to make room: each keeps its words whole.
+    expect(classes).toContain("max-sm:[&>*]:shrink-0");
+    // The row holds the words a tab hides from the eye (they are positioned out of the
+    // way), so they scroll with it and do not make the whole page wider than the window.
+    expect(classes).toContain("relative");
+  });
+
+  it("brings the page a person is on into view, whether they opened it or the address did", async () => {
+    const into = vi.fn();
+    HTMLElement.prototype.scrollIntoView = into;
+    try {
+      await open("/documents");
+      expect(into).toHaveBeenCalled();
+      expect(into.mock.instances.at(-1)).toBe(tab("Documents"));
+      expect(into).toHaveBeenLastCalledWith({ block: "nearest", inline: "nearest" });
+      into.mockClear();
+      fireEvent.click(tab("Memory"));
+      expect(into.mock.instances.at(-1)).toBe(tab("Memory"));
+    } finally {
+      delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    }
+  });
+
+  it("is not stopped by a browser that cannot scroll an element into view", async () => {
+    await open("/documents");
+    expect(screen.getByRole("heading", { name: "The documents page" })).toBeInTheDocument();
+  });
+});
+
+describe("what an address says is the Documents page", () => {
+  it.each([
+    ["/documents", true],
+    ["/documents/", true],
+    ["/documents/extra", false],
+    ["/document", false],
+    ["/chats/documents", false],
+    ["/memory", false],
+    ["/", false],
+  ])("%s is %s", (path, is) => {
+    expect(documentsFromPath(path)).toBe(is);
   });
 });

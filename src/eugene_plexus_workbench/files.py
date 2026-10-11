@@ -466,8 +466,16 @@ def extension(media_type: str) -> str:
     }.get(media_type, "bin")
 
 
+def person_key(sub: str) -> str:
+    """What names a person's own directory under the data directory: a hash of
+    their `sub`, which is the provider's string and may hold anything. A person's
+    attachments (`person_dir`) and their saved documents (`knowledge/index.py`)
+    are each in a directory this names, and no other person's `sub` names it."""
+    return hashlib.sha256(sub.encode("utf-8")).hexdigest()[:32]
+
+
 def person_dir(root: Path, sub: str) -> Path:
-    return root / "files" / hashlib.sha256(sub.encode("utf-8")).hexdigest()[:32]
+    return root / "files" / person_key(sub)
 
 
 def path_of(root: Path, sub: str, file_id: str) -> Path:

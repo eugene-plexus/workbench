@@ -16,6 +16,7 @@ import { fileUrl, post } from "../lib/api";
 import {
   about,
   isDocumentSource,
+  isPassageSource,
   isWebSource,
   readingMeta,
   sourceTags,
@@ -40,6 +41,7 @@ import { Markdown } from "./Markdown";
 import { CopyButton } from "./CopyButton";
 import { useDocumentText } from "./DocumentText";
 import { type RememberProps, useRemember } from "./RememberThis";
+import { NothingMatched, PassageList, SearchNotice, WorkbenchReply } from "./SourcePassages";
 import { ToolCalls } from "./ToolCalls";
 import { WorkingScene } from "./WorkingScene";
 import { useClock } from "../lib/useClock";
@@ -53,6 +55,7 @@ export function MessageView({
   onChanged,
   onLook,
   memory,
+  documents,
 }: {
   chatId: string;
   message: Message;
@@ -65,6 +68,9 @@ export function MessageView({
   /** Remember this, in the actions row: absent where notes cannot be kept
    * (the owner's read-only view, a chat whose owner turned Memory off). */
   memory?: RememberProps;
+  /** Open the Documents screen, from a search that went wrong; absent where the
+   * person cannot (the owner's read-only view). */
+  documents?: { onManage: () => void };
 }) {
   const [editing, setEditing] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
@@ -258,7 +264,19 @@ export function MessageView({
   // with the message. They are listed apart: a file in the list was sent to the
   // model, which says nothing of whether the answer used it.
   const web = message.sources.filter(isWebSource);
-  const documents = message.sources.filter(isDocumentSource);
+  const files = message.sources.filter(isDocumentSource);
+  // What searching the person's saved documents came to, and the passages sent: apart
+  // from the files, which were attached to this message and read whole.
+  const passages = message.sources.filter(isPassageSource);
+  const search = message.retrieval ?? null;
+  const nothing = search?.status === "nothing_matched";
+  const ownReply = message.finish === "documents_only";
+  // A search that did not run or failed is said in its own words; a chat that answers
+  // only from the documents says the same in Workbench's reply, so not twice.
+  const notice =
+    search && !ownReply && ["skipped", "failed", "no_documents"].includes(search.status)
+      ? search
+      : null;
   // The working line says "Thinking" once to a screen reader; what ticks (the
   // seconds, the count, the speed) is shown and not spoken.
   const working = waiting ? splitWorking(workingWords(progress, message, now)) : null;
@@ -301,7 +319,35 @@ export function MessageView({
           </p>
         </WorkingScene>
       )}
-      {answer && <Markdown text={answer} />}
+      {answer &&
+        (ownReply ? (
+          <WorkbenchReply
+            text={answer}
+            mine={!readOnly}
+            asking={acting}
+            askAnyway={
+              readOnly
+                ? undefined
+                : async () => {
+                    if (acting) return;
+                    setActing(true);
+                    setProblem(null);
+                    try {
+                      await post(`/api/chats/${chatId}/messages/${message.id}/retry`, {
+                        askAnyway: true,
+                      });
+                      onChanged();
+                    } catch (error) {
+                      setProblem(error instanceof Error ? error.message : String(error));
+                    } finally {
+                      setActing(false);
+                    }
+                  }
+            }
+          />
+        ) : (
+          <Markdown text={answer} />
+        ))}
       {running && answer && (
         // Once the first words are on the page the line is not gone: it moves
         // below them, with the count and the speed, until the answer ends. The
@@ -315,7 +361,8 @@ export function MessageView({
           <span className="tabular-nums">{workingWords(progress, message, now)}</span>
         </p>
       )}
-      {(message.sources.length > 0 || message.searches > 0) && (
+      {notice && <SearchNotice record={notice} onOpenDocuments={documents?.onManage} />}
+      {(message.sources.length > 0 || message.searches > 0 || nothing) && (
         <div className="mt-1 max-w-measure border-t border-line pt-3 text-sm" data-testid="sources">
           <h3 className="eyebrow flex items-center gap-2 text-muted">
             {web.length === 0 && message.searches === 0 ? (
@@ -359,11 +406,24 @@ export function MessageView({
               ))}
             </ol>
           )}
-          {documents.length > 0 && (
-            <div data-testid="document-sources" className={web.length > 0 ? "mt-3" : "mt-2"}>
+          {passages.length > 0 && (
+            <div className={web.length > 0 ? "mt-3" : "mt-2"}>
+              <PassageList passages={passages} record={search} />
+            </div>
+          )}
+          {nothing && search && (
+            <div className={web.length > 0 || passages.length > 0 ? "mt-3" : "mt-2"}>
+              <NothingMatched record={search} />
+            </div>
+          )}
+          {files.length > 0 && (
+            <div
+              data-testid="document-sources"
+              className={web.length > 0 || passages.length > 0 ? "mt-3" : "mt-2"}
+            >
               <p className="text-muted">Files sent to the model</p>
               <ul className="mt-1 list-disc space-y-1 pl-5 marker:text-muted wrap-anywhere">
-                {documents.map((source) => (
+                {files.map((source) => (
                   <li key={source.doc_id} data-testid="document-source">
                     <span>{source.name}</span>
                     <span>, {sourceWhere(source)}</span>

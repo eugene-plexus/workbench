@@ -16,7 +16,9 @@ import type {
   DocumentSource,
   FilesModel,
   FilesRequest,
+  HiddenPassage,
   Offer,
+  PassageSource,
   Reading,
   ReadingChoice,
   Source,
@@ -65,6 +67,17 @@ export const ACCEPT = [
   ...KNOWN_EXTENSIONS,
 ].join(",");
 
+/** What the Documents screen's file picker shows: PDF, Word and text, and no
+ * images or sound, which are not documents. */
+export const DOCUMENT_ACCEPT = [
+  "application/pdf",
+  DOCX,
+  ".docx",
+  "text/*",
+  ...PLAIN_EXTENSIONS,
+  ...KNOWN_EXTENSIONS,
+].join(",");
+
 // --- what a file is, and where it stands ---
 
 /** A file Workbench reads as a document (the server's word for it). */
@@ -83,6 +96,7 @@ export type ChipState =
   | "whole"
   | "partial"
   | "native"
+  | "search"
   | "choose"
   | "too_long"
   | "no_room"
@@ -144,6 +158,7 @@ export function metaWords(file: ChatFile): string {
 
 /** A choice, as a person would say it. */
 export function choiceWords(choice: ReadingChoice): string {
+  if (choice.mode === "search") return "search it instead";
   return choice.mode === "whole"
     ? "read it all"
     : `the first ${choice.tokens.toLocaleString()} tokens`;
@@ -151,14 +166,31 @@ export function choiceWords(choice: ReadingChoice): string {
 
 /** The button for something a person may choose. */
 export function offerWords(offer: Offer): string {
-  return offer.action === "readAll"
-    ? `Read it all (${about(offer.tokens)})`
-    : `Read the first ${offer.tokens.toLocaleString()} tokens (${offer.where})`;
+  switch (offer.action) {
+    case "readAll":
+      return `Read it all (${about(offer.tokens)})`;
+    case "readFirst":
+      return `Read the first ${offer.tokens.toLocaleString()} tokens (${offer.where})`;
+    case "search":
+      return "Search it instead";
+  }
 }
 
 /** What choosing an offer says to the server. */
 export function offerChoice(offer: Offer): ReadingChoice {
-  return offer.action === "readAll" ? { mode: "whole" } : { mode: "first", tokens: offer.tokens };
+  switch (offer.action) {
+    case "readAll":
+      return { mode: "whole" };
+    case "readFirst":
+      return { mode: "first", tokens: offer.tokens };
+    case "search":
+      return { mode: "search" };
+  }
+}
+
+/** What an offer's button is called for a test to find it by. */
+export function offerKey(offer: Offer): "all" | "first" | "search" {
+  return offer.action === "readAll" ? "all" : offer.action === "readFirst" ? "first" : "search";
 }
 
 export type Tone = "busy" | "ok" | "warn" | "error";
@@ -225,6 +257,22 @@ export function chipWords(file: ChatFile, model: FilesModel | null): ChipWords {
           ? `${model?.id ?? "This model"} reads PDFs itself, so Workbench sends the file as it is.`
           : serverSentence(file, "Workbench sends this PDF as the file."),
       };
+    case "search": {
+      // Not read into the message: each question is sent the passages that match
+      // it. The document made of the file goes with this chat.
+      const found = file.search?.passages ?? file.decision?.search?.passages;
+      return {
+        ...base,
+        tone: "ok",
+        sentence: [
+          serverSentence(file, "Will be searched for each question, not read whole."),
+          found ? `${count(found, "passage")} to search.` : null,
+        ]
+          .filter(Boolean)
+          .join(" "),
+        choice: "Your choice: search it instead. It is kept for this chat only.",
+      };
+    }
     case "choose": {
       const limit = decision?.wholeLimit;
       return {
@@ -292,6 +340,7 @@ export interface Facts {
 }
 
 const ATTENTION: Record<ChipState, number> = {
+  search: 9,
   reading: 0,
   choose: 1,
   too_long: 1,
@@ -322,14 +371,15 @@ export function holdWords(
     const name = first.f.name;
     const sentence = {
       reading: `Waiting for Workbench to read ${name}.`,
-      choose: `Choose how much of ${name} to read, or remove it.`,
-      too_long: `Choose how much of ${name} to read, or remove it.`,
+      choose: `Choose how much of ${name} to read, search it instead, or remove it.`,
+      too_long: `Choose how much of ${name} to read, search it instead, or remove it.`,
       skipped: `${name} cannot be read. Remove it to send your message.`,
       failed: `${name} cannot be read. Remove it to send your message.`,
       no_room: `There is no room for ${name} in this model's window. Remove it, or pick a model with a larger window.`,
       whole: `${name} cannot be sent yet.`,
       partial: `${name} cannot be sent yet.`,
       native: `${name} cannot be sent yet.`,
+      search: `${name} cannot be sent yet.`,
     }[chipState(first.f)];
     const more = blocked.length - 1;
     return more > 0
@@ -408,8 +458,12 @@ export function asAttached(file: ChatFile): AttachedFile {
 
 // --- the sources under an answer ---
 
+/** A passage found in the person's saved documents, or one the owner may not read. */
+export const isPassageSource = (source: Source): source is PassageSource | HiddenPassage =>
+  source.kind === "document" && "passage" in source && source.passage === true;
+/** A file that was sent to the model with the message (a passage is not one). */
 export const isDocumentSource = (source: Source): source is DocumentSource =>
-  source.kind === "document";
+  source.kind === "document" && !isPassageSource(source);
 export const isWebSource = (source: Source): source is WebSource => source.kind !== "document";
 
 const grouped = (n: number): string => n.toLocaleString();
