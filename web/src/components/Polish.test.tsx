@@ -155,6 +155,7 @@ it("names the open chat in the tab's title, and gives it back on leaving", () =>
       modelsError={null}
       onChanged={vi.fn()}
       onDeleted={vi.fn()}
+      onOpenMemory={vi.fn()}
     />,
   );
   expect(document.title).toBe("Build a birdhouse · Workbench");
@@ -171,6 +172,7 @@ it("starts the delete question on Keep it, and Escape backs out", () => {
       modelsError={null}
       onChanged={vi.fn()}
       onDeleted={vi.fn()}
+      onOpenMemory={vi.fn()}
     />,
   );
   fireEvent.click(screen.getByRole("button", { name: "Delete this chat" }));

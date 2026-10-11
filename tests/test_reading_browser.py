@@ -115,6 +115,16 @@ LIVE = (
 )
 
 
+# A few notes, so the Memory page and a chat's Memory drawer have something to read.
+NOTES = [
+    {"text": "I use metric units", "kind": "fact", "pinned": True},
+    {"text": "Keep answers short, and give the number first", "kind": "instruction"},
+    {"text": "I am building a birdhouse out of cedar", "kind": "project"},
+    {"text": "I prefer Python to JavaScript", "kind": "preference"},
+    {"text": "My flight to Denver leaves on March 3", "kind": "event"},
+]
+
+
 def pieces(text: str, size: int = 24) -> list[str]:
     return [text[i : i + size] for i in range(0, len(text), size)]
 
@@ -160,6 +170,9 @@ def test_reading_in_chrome(world: World, tmp_path: Path) -> None:
     )
     world.gateway.reasoning = []
     ask(rich, "What if I quantize the cache to q8_0?", FOLLOW_UP, search=True)
+    for note in NOTES:
+        kept = person.post("/api/memory/notes", json=note)
+        assert kept.status_code == 201, kept.text
 
     # What the page asks while the pictures are taken: slow enough to see.
     world.gateway.reasoning = pieces(REASONING[0] + REASONING[1], 12)

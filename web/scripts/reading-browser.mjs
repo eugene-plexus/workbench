@@ -1,9 +1,12 @@
 /* global process, console, document, getComputedStyle, window, NodeFilter */
 // Reading Workbench in Chrome (workbench-reading.md): what each kind of text
 // looks like, in pictures and in numbers. Screenshots of a rich answer, a
-// story, a length stop, the settings and an answer being written, dark and
-// light, at a desk and a phone; and the computed type of each kind of text
-// (styles-<scheme>.json), with its contrast against what is behind it.
+// story, a length stop, the settings, a chat's Memory drawer, the Memory page
+// and an answer being written, dark and light, at a desk and a phone; and the
+// computed type of each kind of text (styles-<scheme>.json), with its contrast
+// against what is behind it; and what only a window's width decides: the top
+// bar keeping to one row on a phone, and the chat title keeping room to read
+// beside the Memory chip from a small tablet to a desk.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 
@@ -321,9 +324,14 @@ function judge(scheme, numbers, shape) {
     `${shape.colours.length}: ${shape.colours.join(", ")}`,
     { always: true },
   );
+  judgeFaint(scheme, "the page", numbers);
+}
+
+// Every text that is on a screen, at least 4.5:1 against what is behind it.
+function judgeFaint(scheme, what, numbers) {
   const faint = Object.entries(numbers.census).filter(([, look]) => look.contrast < 4.5);
   check(
-    `${scheme}: every text on the page is at least 4.5:1`,
+    `${scheme}: every text on ${what} is at least 4.5:1`,
     faint.length === 0,
     faint.map(([key, look]) => `${key} (${look.contrast}:1, ${look.samples[0]})`).join("; "),
   );
@@ -362,10 +370,36 @@ try {
       await settle(page);
       await page.screenshot(shot(`settings-${scheme}-desk`));
 
+      // Memory in a chat: the chip in the header is already among the texts
+      // counted above; its drawer, open, is another screen to read.
+      await chat(page, cfg.chats.rich);
+      // The title keeps room to read beside the chip, from a small tablet to a desk
+      // (at 768 and 800 px the sidebar takes 288 px of the window).
+      for (const width of [640, 768, 800, 1024, 1440]) {
+        await page.setViewportSize({ width, height: 900 });
+        await page.waitForTimeout(150);
+        const room = await page.evaluate(
+          () => document.querySelector("[data-testid=chat-title]").getBoundingClientRect().width,
+        );
+        check(
+          `${scheme} ${width} px: the chat title keeps room beside the Memory chip`,
+          room >= 240,
+          `${Math.round(room)}px`,
+        );
+        if (width === 768) await page.screenshot(shot(`chat-${scheme}-tablet`));
+      }
+      await page.setViewportSize(DESK);
+      await page.getByTestId("memory-chip").click();
+      await page.getByTestId("memory-sent").waitFor();
+      await settle(page);
+      await page.screenshot(shot(`drawer-${scheme}-desk`));
+      judgeFaint(scheme, "the Memory drawer", await page.evaluate(probe));
+
       // The other screens a person reads: the top bar's pages and the keys.
       for (const [name, file] of [
         [/Tools/, "tools"],
         [/Media/, "media"],
+        [/^Memory$/, "memory"],
         [/Job sites/, "jobsites"],
         [/Keyboard shortcuts/, "shortcuts"],
       ]) {
@@ -377,6 +411,10 @@ try {
           .click();
         await settle(page);
         await page.screenshot(shot(`${file}-${scheme}-desk`));
+        if (file === "memory") {
+          await page.getByTestId("memory-note").first().waitFor();
+          judgeFaint(scheme, "the Memory page", await page.evaluate(probe));
+        }
         await page.keyboard.press("Escape");
       }
       await context.close();
@@ -398,6 +436,31 @@ try {
       await chat(page, cfg.chats.story);
       await toTop(page);
       await page.screenshot(shot(`story-${scheme}-phone`));
+      // The Memory page, on a phone: nothing wider than the screen.
+      await page.goto(`${cfg.url}/memory`);
+      await page.getByTestId("memory-note").first().waitFor();
+      await settle(page);
+      await page.screenshot(shot(`memory-${scheme}-phone`));
+      const memoryWide = await page.evaluate(
+        () => document.documentElement.scrollWidth - window.innerWidth,
+      );
+      check(
+        `${scheme} phone: the Memory page is nothing wider than the screen`,
+        memoryWide <= 1,
+        `${memoryWide}px too wide`,
+      );
+      // The top bar keeps to one row with five pages in it (a member's: the owner has no Job sites).
+      for (const width of [390, 375, 360]) {
+        await page.setViewportSize({ width, height: 844 });
+        const rows = await page.evaluate(() => {
+          const tabs = [...document.querySelectorAll("nav[aria-label=Workbench] .nav-tab")].filter(
+            (tab) => getComputedStyle(tab).display !== "none",
+          );
+          return new Set(tabs.map((tab) => Math.round(tab.getBoundingClientRect().top))).size;
+        });
+        check(`${scheme} phone ${width}: the top bar keeps to one row`, rows === 1, `${rows} rows`);
+      }
+      await page.setViewportSize(PHONE);
       await context.close();
     }
   }

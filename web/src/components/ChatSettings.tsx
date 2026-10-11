@@ -51,7 +51,7 @@ export const SHEET_OVERLAY_QUERY = "(max-width: 47.99rem)";
 
 /** Whether the sheet is an overlay now. jsdom and old browsers have no
  * matchMedia: there the sheet is the panel above the chat. */
-function useOverlay(): boolean {
+export function useOverlay(): boolean {
   const ask = () =>
     typeof window.matchMedia === "function" && window.matchMedia(SHEET_OVERLAY_QUERY).matches;
   const [overlay, setOverlay] = useState(ask);
@@ -66,7 +66,7 @@ function useOverlay(): boolean {
   return overlay;
 }
 
-const FOCUSABLE =
+export const FOCUSABLE =
   'a[href], button:not(:disabled), input:not(:disabled):not([type="hidden"]), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
 
 export function ChatSettings({

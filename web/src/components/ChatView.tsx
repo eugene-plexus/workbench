@@ -16,11 +16,15 @@ import { del, patch } from "../lib/api";
 import { exportChat, saveDraft } from "../lib/conveniences";
 import type { ChatSettings as Settings, Me, Message, Models } from "../lib/types";
 import { useChat } from "../lib/useChat";
+import { useChatMemory } from "../lib/useChatMemory";
 import { announce } from "../lib/words";
 import { ChatSettings } from "./ChatSettings";
 import { Composer } from "./Composer";
 import { Mascot } from "./Mascot";
+import { MemoryChip, MemoryDrawer } from "./MemoryChip";
+import { MemoryToast, outcomeOf, type ToastOutcome } from "./MemoryToast";
 import { MessageView } from "./MessageView";
+import type { RememberProps } from "./RememberThis";
 
 export function ChatView({
   chatId,
@@ -30,6 +34,7 @@ export function ChatView({
   modelsError,
   onChanged,
   onDeleted,
+  onOpenMemory,
 }: {
   chatId: string;
   /** Files already in this chat, waiting in its composer: an image sent from the media area (M7). */
@@ -39,9 +44,23 @@ export function ChatView({
   modelsError: string | null;
   onChanged: () => void;
   onDeleted: () => void;
+  /** Open the Memory page (from the drawer, and from a toast's Manage). */
+  onOpenMemory: () => void;
 }) {
   const { detail, update, progress, error, reload, look } = useChat(chatId);
-  const [showSettings, setShowSettings] = useState(false);
+  // The settings and the memory drawer are both panels above the chat, and
+  // only one is open at a time (on a phone each covers the whole window).
+  const [panel, setPanel] = useState<"settings" | "memory" | null>(null);
+  const showSettings = panel === "settings";
+  const [toast, setToast] = useState<{ id: number; outcome: ToastOutcome } | null>(null);
+  const toasts = useRef(0);
+  // The notes this chat's next message carries. It is read again when the
+  // model or a memory setting of the chat changes, after a send, and after a
+  // note is kept or forgotten from here.
+  const memory = useChatMemory(
+    chatId,
+    `${detail?.chat.model ?? ""}|${detail?.chat.settings.memory ?? ""}|${detail?.chat.settings.memoryExternal ?? ""}`,
+  );
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -122,6 +141,25 @@ export function ChatView({
 
   const { chat, messages } = detail;
 
+  function say(outcome: ToastOutcome | null) {
+    if (outcome) setToast({ id: ++toasts.current, outcome });
+  }
+
+  // Remember this on a message: not in someone else's chat, and not where the
+  // owner has turned Memory off. Where the person has, it says so when pressed.
+  const code = memory.view && !memory.view.readOnly ? memory.view.reasonCode : null;
+  const remember: RememberProps | undefined =
+    chat.readOnly || code === "install_off"
+      ? undefined
+      : {
+          off: code === "person_off" ? "you" : null,
+          onSaved: (note, created) => {
+            say({ kind: "remembered", note, created });
+            void memory.reload();
+          },
+          onManage: onOpenMemory,
+        };
+
   async function saveSettings(next: Settings) {
     const updated = await patch<typeof chat>(`/api/chats/${chat.id}`, { settings: next });
     update((shown) => ({ ...shown, chat: { ...updated, running: shown.chat.running } }));
@@ -190,11 +228,22 @@ export function ChatView({
           ) : (
             <h1
               title={chat.title}
-              className="min-w-0 flex-1 truncate text-xl font-semibold tracking-[-0.01em]"
+              // The title has its own row where the chip and the four buttons
+              // would squeeze it to a few letters: on a phone, and on a tablet
+              // (768 to 1023 px), where the sidebar takes 288 px of the window.
+              className="min-w-0 flex-1 truncate text-xl font-semibold tracking-[-0.01em] max-sm:basis-full md:max-lg:basis-full"
               data-testid="chat-title"
             >
               {chat.title}
             </h1>
+          )}
+          {renaming === null && !confirmDelete && (
+            <MemoryChip
+              view={memory.view}
+              failed={memory.error !== null && memory.view === null}
+              open={panel === "memory"}
+              onToggle={() => setPanel((now) => (now === "memory" ? null : "memory"))}
+            />
           )}
           {renaming === null && !confirmDelete && (
             <button
@@ -208,7 +257,7 @@ export function ChatView({
                   setActionError(error instanceof Error ? error.message : String(error));
                 }
               }}
-              className="icon-btn"
+              className="icon-btn max-sm:ml-auto md:max-lg:ml-auto"
             >
               <Download size={16} />
             </button>
@@ -229,7 +278,7 @@ export function ChatView({
                 title="This chat's settings"
                 aria-label="This chat's settings"
                 aria-expanded={showSettings}
-                onClick={() => setShowSettings((v) => !v)}
+                onClick={() => setPanel((now) => (now === "settings" ? null : "settings"))}
                 className="icon-btn"
               >
                 <SlidersHorizontal size={16} />
@@ -329,7 +378,21 @@ export function ChatView({
         <ChatSettings
           settings={chat.settings}
           onSave={saveSettings}
-          onClose={() => setShowSettings(false)}
+          onClose={() => setPanel(null)}
+        />
+      )}
+      {panel === "memory" && (
+        <MemoryDrawer
+          chatId={chat.id}
+          view={memory.view}
+          error={memory.error}
+          onChat={(next) =>
+            update((shown) => ({ ...shown, chat: { ...next, running: shown.chat.running } }))
+          }
+          onReload={memory.reload}
+          onAdopt={memory.adopt}
+          onManage={onOpenMemory}
+          onClose={() => setPanel(null)}
         />
       )}
       {/* The pill floats over the thread, so showing it no longer resizes the
@@ -374,6 +437,7 @@ export function ChatView({
                   onChanged();
                 }}
                 onLook={chat.readOnly ? look : undefined}
+                memory={remember}
               />
             ))}
           </div>
@@ -391,6 +455,21 @@ export function ChatView({
             Jump to latest
           </button>
         )}
+        {toast && (
+          // Over the thread, above where the person is typing; above the jump
+          // pill when that is showing, so the two never cover each other.
+          <div
+            className={`absolute inset-x-4 z-10 mx-auto max-w-xl ${away ? "bottom-16" : "bottom-4"}`}
+          >
+            <MemoryToast
+              key={toast.id}
+              outcome={toast.outcome}
+              onManage={onOpenMemory}
+              onChanged={() => void memory.reload()}
+              onClose={() => setToast(null)}
+            />
+          </div>
+        )}
       </div>
       {!chat.readOnly && (
         <Composer
@@ -400,7 +479,7 @@ export function ChatView({
           models={models}
           modelsError={modelsError}
           running={running}
-          onSent={(user, answer) => {
+          onSent={(user, answer, notes) => {
             pinned.current = true;
             setAway(false);
             update((shown) => ({
@@ -414,6 +493,10 @@ export function ChatView({
               ],
             }));
             onChanged();
+            // "Remember that ..." has kept a note by now, and the request has
+            // taken the chat's copy of them: the toast and the chip say so.
+            say(outcomeOf(notes));
+            void memory.reload();
           }}
           onChat={(next) =>
             update((shown) => ({ ...shown, chat: { ...next, running: shown.chat.running } }))

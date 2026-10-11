@@ -285,6 +285,13 @@ async def models(request: Request) -> dict[str, Any]:
                 "webSearch": bool(info.get("web_search")),
                 "ready": (info.get("ready_backends") or 0) > 0,
                 "onDemand": bool(info.get("on_demand")),
+                # Where it runs, as the gateway says: `local` only when every
+                # backend serving it is on this install's machines. A model
+                # the gateway does not place is `unknown`, which is not
+                # trusted with a person's notes (memory).
+                "locality": info.get("locality")
+                if info.get("locality") in ("local", "external")
+                else "unknown",
             }
         )
     search = (listing.get("x_eugene_plexus") or {}).get("web_search") or {
@@ -314,6 +321,12 @@ class ChatSettings(BaseModel):
     topP: float | None = Field(default=None, gt=0, le=1)
     maxTokens: int | None = Field(default=None, ge=1, le=1_000_000)
     repetitionMode: Literal["off", "observe", "stop"] | None = None
+    #: Memory in this chat: `off` sends no notes to its model; unset follows the
+    #: person's own setting.
+    memory: Literal["on", "off"] | None = None
+    #: The person chose to send their notes to this chat's model even though it
+    #: runs outside their machines ("Send for this chat").
+    memoryExternal: bool | None = None
 
 
 class ChatUpdate(BaseModel):
@@ -342,7 +355,15 @@ def chat_view(chat: Chat, *, running: bool, read_only: bool = False) -> dict[str
         "search": chat.search,
         "settings": {
             k: chat.settings.get(k)
-            for k in ("instructions", "toolServers", "folderGrants", "repetitionMode", *SAMPLING)
+            for k in (
+                "instructions",
+                "toolServers",
+                "folderGrants",
+                "repetitionMode",
+                "memory",
+                "memoryExternal",
+                *SAMPLING,
+            )
         },
         "createdAt": chat.created_at,
         "updatedAt": chat.updated_at,
@@ -686,9 +707,16 @@ async def _ask(
     history = (await store.messages(chat.id, via=answer.id))[:-1]
     root = _state(request).settings.data_dir
     fresh = await store.chat(chat.id) or chat
+    # The person's notes, as this chat was first sent them (or as they are now,
+    # at its first request that carries any). Never raises; None is none.
+    from . import memory_api
+
+    notes = await memory_api.block_for(request, person, fresh, model)
 
     def build() -> dict[str, Any]:
-        return request_for(fresh, history, records, root=root, model=model, search=search)
+        return request_for(
+            fresh, history, records, root=root, model=model, search=search, memory=notes
+        )
 
     answers = _answers(request)
     if version:
@@ -758,10 +786,19 @@ async def send(request: Request, chat_id: str, body: Send) -> dict[str, Any]:
     if chat.title == NEW_CHAT:
         values["title"] = _title(body.content, [by_id[i] for i in body.attachments])
     await store.update_chat(chat.id, **values)
+    # "Remember that ..." keeps a note before the request is built, so the
+    # first request of a chat already carries it; "forget ..." only finds
+    # candidates. The message goes to the model either way.
+    from . import memory_api
+
+    command = await memory_api.handle_command(request, person, chat, user)
     answer = await _ask(
         request, chat, parent_id=user.id, model=model, search=search, records=records
     )
-    return {"user": message_view(user), "answer": message_view(answer)}
+    sent: dict[str, Any] = {"user": message_view(user), "answer": message_view(answer)}
+    if command is not None:
+        sent["memory"] = command
+    return sent
 
 
 async def _try_again(request: Request, chat: Chat, message_id: str) -> dict[str, Any]:

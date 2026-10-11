@@ -1,7 +1,8 @@
 """A chat, as the request the gateway is sent for its next answer.
 
 The whole conversation travels in each request, as with any OpenAI
-client: the chat's instructions as a `system` message, then every turn.
+client: the chat's instructions as a `system` message (with the person's
+notes after them, when the chat uses memory: `memory.py`), then every turn.
 A user turn with attachments becomes content parts in OpenAI's shapes
 (`common.yaml` `MessageContentPart`): an image as a `data:` URL, a PDF as a
 file part, audio as `input_audio`. An assistant turn is its answer only:
@@ -18,6 +19,7 @@ from typing import Any
 
 from . import files
 from .answers import answer_text
+from .memory import system_text
 from .store import Chat, FileRecord, Message
 from .tools import transcript
 
@@ -65,13 +67,21 @@ def request_for(
     root: Path,
     model: str,
     search: bool,
+    memory: str | None = None,
 ) -> dict[str, Any]:
-    """The body of `POST /v1/chat/completions` for the next answer."""
+    """The body of `POST /v1/chat/completions` for the next answer.
+
+    `memory` is the block of the person's notes (`memory.py`). It goes in the
+    one system message, after the chat's instructions and never in a message
+    of its own: Qwen templates refuse a second system message, and one that
+    changed each turn would start every turn's prompt differently and lose
+    the engine's cache."""
     by_id = {r.id: r for r in records}
     messages: list[dict[str, Any]] = []
     instructions = str(chat.settings.get("instructions") or "").strip()
-    if instructions:
-        messages.append({"role": "system", "content": instructions})
+    system = system_text(instructions, memory)
+    if system:
+        messages.append({"role": "system", "content": system})
     for message in history:
         if message.role == "user":
             messages.append({"role": "user", "content": _user_content(message, by_id, root)})

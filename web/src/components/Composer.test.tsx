@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
-import { ApiError, del, post } from "../lib/api";
+import { ApiError, del, patch, post } from "../lib/api";
 import type { Chat, Me, Message, Models } from "../lib/types";
 import { Composer, type Pending } from "./Composer";
 import { MessageView } from "./MessageView";
@@ -376,5 +376,117 @@ describe("what is said around the field", () => {
     expect(failure).toHaveAttribute("role", "alert");
     expect(failure).toHaveClass("notice", "notice--error");
     expect(failure.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+  });
+});
+
+describe("a new chat, and the model its picker shows", () => {
+  const fresh: Chat = { ...chat, model: null };
+
+  function show(over: { chat?: Chat; models?: Models | null; onChat?: () => void } = {}) {
+    const onChat = over.onChat ?? vi.fn();
+    const props = (models: Models | null, shown: Chat) => (
+      <Composer
+        chat={shown}
+        me={me}
+        models={models}
+        modelsError={null}
+        running={false}
+        onSent={vi.fn()}
+        onChat={onChat}
+      />
+    );
+    const view = render(
+      props(over.models === undefined ? models : over.models, over.chat ?? fresh),
+    );
+    return { ...view, onChat, props };
+  }
+
+  it("tells the chat, once, which model the picker shows, so what asks the server agrees with the screen", async () => {
+    vi.mocked(patch).mockResolvedValue({ ...chat, model: "local" });
+    const { onChat } = show();
+    await waitFor(() => expect(onChat).toHaveBeenCalledWith({ ...chat, model: "local" }));
+    expect(patch).toHaveBeenCalledExactlyOnceWith("/api/chats/one", { model: "local" });
+    expect(screen.getByTestId("model-picker")).toHaveValue("local");
+  });
+
+  it("does not make that the person's own pick: nothing is remembered until they choose", async () => {
+    vi.mocked(patch).mockResolvedValue({ ...chat, model: "local" });
+    const { onChat } = show();
+    await waitFor(() => expect(onChat).toHaveBeenCalled());
+    expect(localStorage.getItem("workbench-model:ada")).toBeNull();
+  });
+
+  it("leaves a chat that has a model alone", () => {
+    show({ chat });
+    expect(patch).not.toHaveBeenCalled();
+  });
+
+  it("waits for the models to be known", async () => {
+    vi.mocked(patch).mockResolvedValue({ ...chat, model: "local" });
+    const { rerender, props } = show({ models: null });
+    expect(patch).not.toHaveBeenCalled();
+    rerender(props(models, fresh));
+    await waitFor(() => expect(patch).toHaveBeenCalledOnce());
+  });
+
+  it("asks once, however often the models are listed again", async () => {
+    vi.mocked(patch).mockResolvedValue({ ...chat, model: "local" });
+    const { rerender, props } = show();
+    await waitFor(() => expect(patch).toHaveBeenCalledOnce());
+    rerender(props({ ...models, models: models.models.map((m) => ({ ...m })) }, fresh));
+    rerender(props({ ...models, models: models.models.map((m) => ({ ...m })) }, fresh));
+    expect(patch).toHaveBeenCalledOnce();
+  });
+
+  it("says nothing when it is refused: the first message carries the model anyway", async () => {
+    vi.mocked(patch).mockRejectedValue(new Error("Workbench answered 502."));
+    const { onChat } = show();
+    await waitFor(() => expect(patch).toHaveBeenCalledOnce());
+    expect(onChat).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+describe("a message that begins with a command", () => {
+  const typed = async (words: string, onSent: () => void) => {
+    render(
+      <Composer
+        chat={chat}
+        me={me}
+        models={models}
+        modelsError={null}
+        running={false}
+        onSent={onSent}
+        onChat={vi.fn()}
+      />,
+    );
+    fireEvent.change(screen.getByTestId("composer"), { target: { value: words } });
+    fireEvent.click(screen.getByTestId("send"));
+    await waitFor(() => expect(onSent).toHaveBeenCalled());
+  };
+
+  it("passes on, with the message, what it did to the person's notes", async () => {
+    const memory = {
+      command: "remember",
+      remembered: { id: "n1", text: "I use metric units" },
+      created: true,
+    };
+    vi.mocked(post).mockResolvedValue({ user: sent, answer: sent, memory });
+    const onSent = vi.fn();
+    await typed("Remember that I use metric units", onSent);
+    expect(post).toHaveBeenCalledExactlyOnceWith("/api/chats/one/messages", {
+      content: "Remember that I use metric units",
+      attachments: [],
+      model: "local",
+      search: false,
+    });
+    expect(onSent).toHaveBeenCalledWith(expect.objectContaining({ id: "u" }), sent, memory);
+  });
+
+  it("passes nothing for a message that was only a message", async () => {
+    vi.mocked(post).mockResolvedValue({ user: sent, answer: sent });
+    const onSent = vi.fn();
+    await typed("Hello", onSent);
+    expect(onSent).toHaveBeenCalledWith(expect.objectContaining({ id: "u" }), sent, undefined);
   });
 });

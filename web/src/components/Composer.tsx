@@ -9,11 +9,11 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { api, del, patch, post } from "../lib/api";
 import { readDraft, saveDraft } from "../lib/conveniences";
-import type { Chat, Me, Message, Model, Models } from "../lib/types";
+import type { Chat, Me, MemoryCommand, Message, Model, Models } from "../lib/types";
 import { modelLabel, SEARCH_HINT, SEARCH_LABEL, SEARCH_PRIVACY, takes } from "../lib/words";
 
 const MODEL_KEY = "workbench-model";
@@ -112,7 +112,9 @@ export function Composer({
   models: Models | null;
   modelsError: string | null;
   running: boolean;
-  onSent: (user: Message, answer: Message) => void;
+  /** `memory`: what the message did to the person's notes, when it began with
+   * "remember" or "forget" (the message is sent either way). */
+  onSent: (user: Message, answer: Message, memory?: MemoryCommand) => void;
   onChat: (chat: Chat) => void;
 }) {
   const [text, setText] = useState(() => readDraft(me.sub, chat.id));
@@ -161,6 +163,18 @@ export function Composer({
   const searchOff = searchProblem(models, chosen);
   const searchOn = searchWanted && !searchOff;
   const cannotTake = attachmentProblem(chosen, pending);
+
+  // A new chat has no model on the server until one is sent or picked, yet the
+  // picker already shows one. Telling the chat now keeps whatever asks the
+  // server which model this chat uses (Memory's chip, which says where the notes
+  // would go) in step with what the person sees. The first send carries the
+  // model anyway, so a refusal here is not worth a message.
+  const told = useRef<string | null>(null);
+  useEffect(() => {
+    if (chat.model || !chosen || told.current === chosen.id) return;
+    told.current = chosen.id;
+    patch<Chat>(`/api/chats/${chat.id}`, { model: chosen.id }).then(onChat, () => undefined);
+  }, [chat.id, chat.model, chosen, onChat]);
 
   async function setModel(id: string) {
     const before = picked;
@@ -238,7 +252,7 @@ export function Composer({
     setSending(true);
     setProblem(null);
     try {
-      const sent = await post<{ user: Message; answer: Message }>(
+      const sent = await post<{ user: Message; answer: Message; memory?: MemoryCommand }>(
         `/api/chats/${chat.id}/messages`,
         {
           content: text,
@@ -248,7 +262,7 @@ export function Composer({
         },
       );
       remember(me.sub, chosen.id);
-      onSent({ ...sent.user, files: pending }, sent.answer);
+      onSent({ ...sent.user, files: pending }, sent.answer, sent.memory);
       changeText("");
       setPending([]);
     } catch (error) {

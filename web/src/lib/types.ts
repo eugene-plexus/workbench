@@ -145,6 +145,12 @@ export interface ChatSettings {
   topP?: number | null;
   maxTokens?: number | null;
   repetitionMode?: "off" | "observe" | "stop" | null;
+  /** Memory in this chat: `off` sends no notes to its model; unset follows
+   * the person's own setting (MR1). */
+  memory?: "on" | "off" | null;
+  /** The person chose "Send for this chat": notes go to this chat's model
+   * though it runs outside their machines. */
+  memoryExternal?: true | null;
 }
 
 export interface FolderGrant {
@@ -416,6 +422,8 @@ export interface Model {
   webSearch: boolean;
   ready: boolean;
   onDemand: boolean;
+  /** Where it runs, as the gateway says: `unknown` is not trusted with notes. */
+  locality?: "local" | "external" | "unknown";
 }
 
 export interface SearchAvailability {
@@ -475,3 +483,157 @@ export interface Person {
   /** How many media results they have (M3). */
   media: number;
 }
+
+// --- Memory (MR1): what src/eugene_plexus_workbench/memory_api.py answers with ---
+
+export type NoteKind = "fact" | "preference" | "instruction" | "project" | "event";
+
+/** How a note got here: written on the Memory page, said in a chat
+ * ("Remember that ..."), or kept from a message's Remember this. */
+export type NoteSource = "typed" | "said" | "button";
+
+export interface MemoryNote {
+  id: string;
+  text: string;
+  kind: NoteKind;
+  pinned: boolean;
+  /** Pinned, or an instruction: used first, in every chat. */
+  always: boolean;
+  source: NoteSource;
+  sourceChatId: string | null;
+  sourceMessageId: string | null;
+  /** Epoch seconds, as everywhere in Workbench's API. */
+  createdAt: number;
+  updatedAt: number;
+  lastUsedAt: number | null;
+  useCount: number;
+}
+
+/** How far notes may travel to a model outside the person's machines. */
+export type ExternalChoice = "never" | "ask" | "always";
+
+/** What a person has set (`null`: not chosen) and what is in effect, with whose
+ * word it is. The page shows `effective`, never a stand-in that looks chosen. */
+export interface MemoryPrefs {
+  enabled: boolean;
+  external: ExternalChoice | null;
+  budgetTokens: number | null;
+  effective: {
+    enabled: boolean;
+    disabledBy: "owner" | "you" | null;
+    external: ExternalChoice;
+    externalSetBy: "owner" | "you" | "default";
+    budgetTokens: number;
+  };
+}
+
+/** `GET /api/memory`: the Memory page. */
+export interface MemoryPage {
+  installEnabled: boolean;
+  ownerReadsChats: boolean;
+  prefs: MemoryPrefs;
+  sections: { always: MemoryNote[]; other: MemoryNote[] };
+  usage: {
+    tokens: number;
+    budget: number;
+    notes: number;
+    maxNotes: number;
+    sent: number;
+    notSent: number;
+  };
+  limits: {
+    maxChars: number;
+    maxNotes: number;
+    kinds: NoteKind[];
+    minWindow: number;
+    budgetCeiling: number;
+    budgetSharePercent: number;
+    budgetFloor: number;
+  };
+}
+
+/** Why a chat's next request carries no notes, in the order a person can act on it. */
+export type MemoryReason =
+  | "install_off"
+  | "person_off"
+  | "chat_off"
+  | "no_model"
+  | "model_unknown"
+  | "window_too_small"
+  | "outside_model"
+  | "no_notes";
+
+export interface SentNote {
+  id: string;
+  text: string;
+  kind: NoteKind;
+  pinned: boolean;
+  always: boolean;
+}
+
+export interface NotSentNote extends MemoryNote {
+  reason: "over_budget" | "added_since";
+  reasonText: string;
+}
+
+/** `GET /api/chats/{id}/memory`, for a chat that is the asker's. */
+export interface ChatMemory {
+  chatId: string;
+  readOnly: false;
+  sending: boolean;
+  reason: string | null;
+  reasonCode: MemoryReason | null;
+  hint: string | null;
+  chatSwitch: "on" | "off";
+  model: {
+    id: string;
+    window: number | null;
+    locality: "local" | "external" | "unknown";
+    runsOn: string | null;
+  } | null;
+  outside: {
+    choice: ExternalChoice;
+    setBy: "owner" | "you" | "default";
+    canSendForThisChat: boolean;
+    sendForThisChat: boolean;
+  } | null;
+  counts: { notes: number; sent: number; notSent: number };
+  frozen: boolean;
+  frozenAt: number | null;
+  /** Notes edited, added or re-pinned since the chat took its copy. */
+  changed: boolean;
+  budget: number | null;
+  tokens: number;
+  /** The exact block the model was given, or null. */
+  text: string | null;
+  sent: SentNote[];
+  notSent: NotSentNote[];
+}
+
+/** The install owner reading someone else's chat: counts, never the notes. */
+export interface ChatMemoryReadOnly {
+  chatId: string;
+  readOnly: true;
+  frozen: boolean;
+  frozenAt: number | null;
+  tokens: number;
+  budget: number | null;
+  counts: { sent: number; notSent: number };
+}
+
+export type ChatMemoryView = ChatMemory | ChatMemoryReadOnly;
+
+/** Why words were not kept: the server's sentence, and what it saw. */
+export interface Refusal {
+  message: string;
+  reason?: "empty" | "hidden" | "secret" | "too_long" | "full" | "off" | "error";
+  /** For a secret: what it has the shape of ("a card number"). */
+  looksLike?: string;
+  limit?: number;
+}
+
+/** What a message that began with "remember" or "forget" did to the notes. */
+export type MemoryCommand =
+  | { command: "remember"; remembered: MemoryNote; created: boolean }
+  | { command: "remember"; refused: Refusal }
+  | { command: "forget"; words: string; candidates: MemoryNote[] };
