@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import { api, post } from "../lib/api";
 import type { Message } from "../lib/types";
@@ -485,6 +485,69 @@ describe("passkeys from here (J14a.3)", () => {
     );
     expect(get).not.toHaveBeenCalled();
   });
+
+  it("asks before removing a passkey: the safe answer has focus, Escape declines, and focus goes back", async () => {
+    webauthn();
+    vi.mocked(api).mockResolvedValue({ sites: [linux], canInvite: true, passkeys: context });
+    vi.mocked(post).mockImplementation(async (path: string) =>
+      path.endsWith("/held")
+        ? { subject: "p-ada", keys: [passkey.id], passkeys: [passkey], items: [] }
+        : {},
+    );
+    render(<JobSites onClose={() => undefined} sub="p-ada" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Review changes waiting on desk" }));
+    const row = await screen.findByTestId(`passkey-${passkey.id}`);
+    fireEvent.click(within(row).getByRole("button", { name: /^Remove passkey/ }));
+    const keep = within(row).getByRole("button", { name: /^Keep it: / });
+    expect(keep).toHaveFocus();
+    expect(vi.mocked(post).mock.calls.some(([p]) => String(p).endsWith("/remove"))).toBe(false);
+    fireEvent.keyDown(keep, { key: "Escape" });
+    expect(within(row).queryByRole("group")).toBeNull();
+    await waitFor(() =>
+      expect(within(row).getByRole("button", { name: /^Remove passkey/ })).toHaveFocus(),
+    );
+  });
+
+  it("is a section of its own with a title, and the code field is described by where to get it", async () => {
+    webauthn();
+    vi.mocked(api).mockResolvedValue({ sites: [linux], canInvite: true, passkeys: context });
+    render(<JobSites onClose={() => undefined} sub="p-ada" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Add a passkey for desk" }));
+    const section = screen.getByRole("region", { name: "Passkeys for desk" });
+    expect(within(section).getByRole("heading", { name: "Passkeys" })).toBeInTheDocument();
+    expect(screen.getByTestId("passkey-code")).toHaveAccessibleDescription(
+      /run Eugene's installer on desk again with --site-pair.*Eugene never sees it\./,
+    );
+  });
+
+  it("shows a held change as a block with its words, and approving is its one primary action", async () => {
+    webauthn();
+    vi.mocked(api).mockResolvedValue({ sites: [linux], canInvite: true, passkeys: context });
+    vi.mocked(post).mockImplementation(async (path: string) =>
+      path.endsWith("/held")
+        ? {
+            subject: "p-ada",
+            keys: [passkey.id],
+            passkeys: [passkey],
+            items: [{ id: "h1", action: "share", words: ["Share Notes with cy"], heldAt: null }],
+          }
+        : {},
+    );
+    render(<JobSites onClose={() => undefined} sub="p-ada" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Review changes waiting on desk" }));
+    const held = await screen.findByTestId("held-h1");
+    expect(held).toHaveTextContent("A change waiting");
+    expect(within(held).getByRole("listitem")).toHaveTextContent("Share Notes with cy");
+    expect(
+      within(held).getByRole("button", { name: "Approve with your passkey: a change on desk" }),
+    ).toHaveClass("btn-primary");
+    expect(within(held).getByRole("button", { name: "Turn down: a change on desk" })).toHaveClass(
+      "btn-quiet",
+      "btn-danger",
+    );
+    // Where the words come from stays as help, in the block.
+    expect(held).toHaveTextContent("These words come from desk.");
+  });
 });
 
 const people = { state: "signed", held: 0, approvePage: null, passkeys: true };
@@ -796,4 +859,514 @@ it("says sharing edits are not saved yet, and the button says Save sharing", asy
   expect(within(sharing).getByRole("button", { name: "Save sharing for Notes" })).toHaveTextContent(
     "Save sharing",
   );
+});
+
+describe("what a machine is doing", () => {
+  it.each([
+    ["an online machine that is ready", { online: true, ready: true }, "Online", "badge--ok"],
+    [
+      "an online machine that is not ready",
+      { online: true, ready: false, reason: "Its file server is starting." },
+      "Online, not ready",
+      "badge--warn",
+    ],
+    ["a machine that is offline", { online: false, ready: false }, "Offline", "badge--warn"],
+  ])("says %s in words, with its tint", async (_name, state, words, tint) => {
+    vi.mocked(api).mockResolvedValue({ sites: [{ ...site, ...state }], canInvite: true });
+    render(<JobSites onClose={() => undefined} />);
+    const badge = await screen.findByText(words);
+    expect(badge).toHaveClass("badge", tint);
+    // Only a machine that is online and ready is green.
+    if (tint !== "badge--ok") expect(badge).not.toHaveClass("badge--ok");
+  });
+
+  it("says when it last heard from the machine, and the machine's own reason it is not ready", async () => {
+    vi.mocked(api).mockResolvedValue({
+      sites: [{ ...site, ready: false, reason: "Its file server is starting." }],
+      canInvite: true,
+    });
+    render(<JobSites onClose={() => undefined} />);
+    expect(
+      await screen.findByText(/^Last contact \d+ s ago · Its file server is starting\.$/),
+    ).toBeInTheDocument();
+  });
+
+  it("titles a linked machine by its name and what it is", async () => {
+    vi.mocked(api).mockResolvedValue({
+      sites: [{ ...site, role: "linked", workspaces: [], links: [] }],
+      canInvite: true,
+    });
+    render(<JobSites onClose={() => undefined} sub="p-jo" />);
+    expect(await screen.findByRole("heading", { name: "desk · linked" })).toBeInTheDocument();
+  });
+});
+
+describe("the page", () => {
+  it("has one title, the page's heading, which App moves focus to when the page opens", () => {
+    vi.mocked(api).mockReturnValue(new Promise(() => undefined));
+    render(<JobSites onClose={() => undefined} />);
+    const title = screen.getByRole("heading", { level: 1, name: "Job sites (your machines)" });
+    expect(title).toHaveAttribute("id", "view-heading");
+    // Focusable by script, and not a stop of the Tab key.
+    expect(title).toHaveAttribute("tabindex", "-1");
+    expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
+  });
+
+  it("says what could not be read, in the server's words, and takes it back when a later read works", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(api)
+        .mockRejectedValueOnce(new Error("Not Found"))
+        .mockResolvedValue({ sites: [], canInvite: true });
+      render(<JobSites onClose={() => undefined} />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      const alert = screen.getByRole("alert");
+      expect(alert).toHaveTextContent("Could not read job sites");
+      expect(alert).toHaveTextContent("Not Found");
+      expect(alert).toHaveTextContent("This page asks again every few seconds.");
+      expect(screen.queryByText("Loading job sites…")).toBeNull();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.getByText("You have no job sites yet.")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows what an action was refused with, and does not call that a failure to read", async () => {
+    vi.mocked(api).mockResolvedValue({ sites: [], canInvite: true });
+    vi.mocked(post).mockRejectedValue(new Error("Only the install owner can add machines."));
+    render(<JobSites onClose={() => undefined} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Make the command" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Only the install owner can add machines.");
+    expect(alert).not.toHaveTextContent("Could not read");
+  });
+
+  it("lays the join steps out as numbered steps, with each command under its own heading, copyable", async () => {
+    vi.mocked(api).mockResolvedValue({ sites: [], canInvite: true });
+    vi.mocked(post).mockResolvedValue({
+      expiresAt: "2026-10-05T12:15:00Z",
+      label: "laptop",
+      commands: { windows: "WINDOWS-COMMAND", posix: "POSIX-COMMAND" },
+    });
+    render(<JobSites onClose={() => undefined} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Make the command" }));
+    const invite = await screen.findByTestId("job-site-invite");
+    const steps = within(invite).getAllByRole("listitem");
+    expect(steps).toHaveLength(3);
+    expect(steps[0]).toHaveTextContent(/^The machine must already have Eugene installed/);
+    expect(steps[1]).toHaveTextContent(/within 15 minutes/);
+    expect(steps[2]).toHaveTextContent(/^It asks for your Eugene password there/);
+    expect(invite.querySelector("ol")).not.toBeNull();
+    expect(
+      within(invite).getByRole("heading", { name: "Windows (PowerShell)" }),
+    ).toBeInTheDocument();
+    expect(within(invite).getByRole("heading", { name: "Linux" })).toBeInTheDocument();
+    expect(
+      within(invite).getByRole("button", { name: "Copy the Windows command" }),
+    ).toBeInTheDocument();
+    expect(
+      within(invite).getByRole("button", { name: "Copy the Linux command" }),
+    ).toBeInTheDocument();
+    // The command is the whole text of its block, so selecting it selects only the command.
+    expect(screen.getByText("POSIX-COMMAND").tagName).toBe("PRE");
+  });
+
+  it("says in a notice, not a sentence of help, why a machine cannot be added from here", async () => {
+    vi.mocked(api).mockResolvedValue({ sites: [], canInvite: false });
+    render(<JobSites onClose={() => undefined} />);
+    expect(await screen.findByText(/does not know an address/)).toHaveClass("notice");
+  });
+});
+
+describe("a machine's key", () => {
+  const withSigning = (extra: object) => ({ ...site, signing: { ...extra } });
+
+  it.each([
+    ["no key yet", { state: "unsigned", held: 0, approvePage }, "notice notice--warn"],
+    [
+      "a key whose rules are not approved",
+      { state: "unconfirmed", held: 0, approvePage },
+      "notice notice--warn",
+    ],
+    ["changes waiting", { state: "signed", held: 2, approvePage }, "notice"],
+  ])("sets %s in the tone it needs", async (_name, signing, tone) => {
+    vi.mocked(api).mockResolvedValue({ sites: [withSigning(signing)], canInvite: true });
+    render(<JobSites onClose={() => undefined} sub="p-ada" />);
+    const words = await screen.findByTestId(`signing-${site.id}`);
+    for (const name of tone.split(" ")) expect(words).toHaveClass(name);
+    if (tone === "notice") expect(words).not.toHaveClass("notice--warn");
+  });
+
+  it("is plain help where there is nothing to do", async () => {
+    vi.mocked(api).mockResolvedValue({
+      sites: [withSigning({ state: "signed", held: 0, approvePage })],
+      canInvite: true,
+    });
+    render(<JobSites onClose={() => undefined} sub="p-ada" />);
+    const words = await screen.findByTestId(`signing-${site.id}`);
+    expect(words).toHaveClass("help");
+    expect(words).not.toHaveClass("notice");
+  });
+
+  it("warns a linked person whose own rules are not approved, and only informs when they wait", async () => {
+    const linked = (state: string, held: number) => ({
+      ...site,
+      role: "linked",
+      workspaces: [],
+      links: [],
+      signing: { state, held, approvePage },
+    });
+    vi.mocked(api).mockResolvedValue({ sites: [linked("unconfirmed", 0)], canInvite: true });
+    const { unmount } = render(<JobSites onClose={() => undefined} sub="p-jo" />);
+    expect(await screen.findByTestId(`signing-${site.id}`)).toHaveClass("notice--warn");
+    unmount();
+    vi.mocked(api).mockResolvedValue({ sites: [linked("signed", 1)], canInvite: true });
+    render(<JobSites onClose={() => undefined} sub="p-jo" />);
+    const waiting = await screen.findByTestId(`signing-${site.id}`);
+    expect(waiting).toHaveClass("notice");
+    expect(waiting).not.toHaveClass("notice--warn");
+  });
+
+  it("titles a held change 'Needs your key', as a notice that is not an alert", async () => {
+    vi.mocked(api).mockResolvedValue({ sites: [site], canInvite: true });
+    vi.mocked(post).mockImplementation(async (path: string) =>
+      path.endsWith("/workspaces/list")
+        ? { workspaces: [] }
+        : { held: true, message: "Waiting for your approval on desk." },
+    );
+    render(<JobSites onClose={() => undefined} />);
+    await screen.findByLabelText("bo changes files");
+    fireEvent.click(screen.getByRole("button", { name: /^Save sharing/ }));
+    const held = await screen.findByTestId("job-site-held");
+    expect(held).toHaveClass("notice");
+    expect(held).toHaveTextContent("Needs your key");
+    expect(held).toHaveTextContent("Waiting for your approval on desk.");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+describe("asking before a machine is changed", () => {
+  const owned = {
+    ...site,
+    workspaces: [],
+    signing: people,
+    commands,
+    links: [{ subject: "p-ada", accountName: "HOST/ada", available: true }],
+  };
+
+  it("asks before taking a machine out: the safe answer has focus, Escape declines, and focus goes back", async () => {
+    vi.mocked(api).mockResolvedValue({
+      sites: [{ ...site, links: [], sharing: true }],
+      canInvite: true,
+    });
+    render(<JobSites onClose={() => undefined} sub="p-ada" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Take this machine out: desk" }));
+    const group = screen.getByRole("group", { name: "Take desk out of Eugene?" });
+    const keep = within(group).getByRole("button", { name: "Keep it: desk" });
+    expect(keep).toHaveFocus();
+    expect(group).toHaveTextContent(/^Take desk out of Eugene\? Its files stay on it/);
+    fireEvent.keyDown(keep, { key: "Escape" });
+    expect(screen.queryByRole("group", { name: "Take desk out of Eugene?" })).toBeNull();
+    expect(post).not.toHaveBeenCalledWith(`/api/job-sites/${site.id}/leave`);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Take this machine out: desk" })).toHaveFocus(),
+    );
+  });
+
+  it("takes the machine out only when the danger answer is taken", async () => {
+    vi.mocked(api).mockResolvedValue({
+      sites: [{ ...site, links: [], sharing: true }],
+      canInvite: true,
+    });
+    vi.mocked(post).mockResolvedValue(undefined);
+    render(<JobSites onClose={() => undefined} sub="p-ada" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Take this machine out: desk" }));
+    fireEvent.click(screen.getByRole("button", { name: "Take it out: desk" }));
+    await waitFor(() => expect(post).toHaveBeenCalledWith(`/api/job-sites/${site.id}/leave`));
+  });
+
+  it("asks before turning commands off: the safe answer has focus, Escape declines, and focus goes back", async () => {
+    vi.mocked(api).mockResolvedValue({ sites: [owned], canInvite: true });
+    render(<JobSites onClose={() => undefined} sub="p-ada" />);
+    const panel = await screen.findByRole("region", { name: "Signed calls on desk" });
+    fireEvent.click(within(panel).getByRole("button", { name: "Turn commands off on desk" }));
+    const group = within(panel).getByRole("group", { name: "Turn commands off on desk?" });
+    const keep = within(group).getByRole("button", { name: "Keep them on desk" });
+    expect(keep).toHaveFocus();
+    fireEvent.keyDown(keep, { key: "Escape" });
+    expect(within(panel).queryByRole("group")).toBeNull();
+    expect(post).not.toHaveBeenCalledWith(`/api/job-sites/${site.id}/commands/withdraw`);
+    await waitFor(() =>
+      expect(
+        within(panel).getByRole("button", { name: "Turn commands off on desk" }),
+      ).toHaveFocus(),
+    );
+  });
+
+  it("keeps the commands on when the person says keep them", async () => {
+    vi.mocked(api).mockResolvedValue({ sites: [owned], canInvite: true });
+    render(<JobSites onClose={() => undefined} sub="p-ada" />);
+    const panel = await screen.findByRole("region", { name: "Signed calls on desk" });
+    fireEvent.click(within(panel).getByRole("button", { name: "Turn commands off on desk" }));
+    fireEvent.click(within(panel).getByRole("button", { name: "Keep them on desk" }));
+    expect(within(panel).queryByRole("group")).toBeNull();
+    expect(
+      within(panel).getByRole("button", { name: "Turn commands off on desk" }),
+    ).toBeInTheDocument();
+    expect(post).not.toHaveBeenCalledWith(`/api/job-sites/${site.id}/commands/withdraw`);
+  });
+});
+
+describe("a workspace", () => {
+  it("warns beside the command rule that a command runs as the person, and says a new workspace waits on their key", async () => {
+    const owned = { ...site, workspaces: [], signing: people, commands };
+    vi.mocked(api).mockResolvedValue({ sites: [owned], canInvite: true });
+    render(<JobSites onClose={() => undefined} />);
+    const form = await screen.findByRole("form", { name: "Add a workspace on desk" });
+    expect(within(form).getByText(/^A command runs as your own account/)).toHaveClass(
+      "notice--warn",
+    );
+    const key = within(form).getByText("Needs your key").closest(".notice");
+    expect(key).toHaveTextContent(
+      "It waits on desk until you approve it with your own key there, or with your passkey here.",
+    );
+    expect(key).not.toHaveClass("notice--warn");
+    expect(within(form).getByRole("button", { name: "Add workspace" })).toHaveClass("btn-primary");
+  });
+
+  it("marks the paths field of a new workspace a pattern was refused for, and holds the button back", async () => {
+    const owned = { ...site, workspaces: [], signing: people, commands };
+    vi.mocked(api).mockResolvedValue({ sites: [owned], canInvite: true });
+    render(<JobSites onClose={() => undefined} />);
+    const form = await screen.findByRole("form", { name: "Add a workspace on desk" });
+    const field = within(form).getByLabelText("Paths to hide, one a line (optional)");
+    fireEvent.change(field, { target: { value: "!keep" } });
+    expect(field).toHaveAttribute("aria-invalid", "true");
+    expect(field).toHaveClass("border-error-line");
+    expect(field).toHaveAccessibleDescription(/!keep cannot be used/);
+    expect(within(form).getByRole("alert")).toHaveTextContent("!keep cannot be used");
+    expect(within(form).getByRole("button", { name: "Add workspace" })).toBeDisabled();
+    fireEvent.change(field, { target: { value: ".env" } });
+    expect(field).not.toHaveAttribute("aria-invalid");
+    expect(within(form).queryByRole("alert")).toBeNull();
+  });
+
+  it("says a read-only workspace is read only, in a badge beside its name", async () => {
+    const readOnly = { ...site.workspaces[0]!, writable: false };
+    vi.mocked(api).mockResolvedValue({
+      sites: [{ ...site, workspaces: [readOnly] }],
+      canInvite: true,
+    });
+    render(<JobSites onClose={() => undefined} />);
+    const box = await screen.findByTestId("workspace-f1");
+    expect(within(box).getByText("Read only")).toHaveClass("badge");
+    expect(within(box).getByRole("heading", { name: "Notes" })).toBeInTheDocument();
+  });
+
+  it("marks the paths field a pattern was refused for, and ties it to the alert", async () => {
+    vi.mocked(api).mockResolvedValue({ sites: [site], canInvite: true });
+    vi.mocked(post).mockImplementation(async (path: string) =>
+      path.endsWith("/workspaces/list")
+        ? {
+            workspaces: [
+              { id: "f1", path: "D:\\notes", deny: [], rules: { read: "allow", change: "ask" } },
+            ],
+          }
+        : {},
+    );
+    render(<JobSites onClose={() => undefined} />);
+    const box = await screen.findByTestId("workspace-f1");
+    const field = within(box).getByLabelText("Paths to hide in Notes");
+    await waitFor(() => expect(field).toBeEnabled());
+    expect(field).not.toHaveAttribute("aria-invalid");
+    fireEvent.change(field, { target: { value: "!keep" } });
+    expect(field).toHaveAttribute("aria-invalid", "true");
+    expect(field).toHaveClass("border-error-line");
+    expect(field).toHaveAccessibleDescription(
+      "!keep cannot be used: a pattern only hides, and is at most 256 characters.",
+    );
+    fireEvent.change(field, { target: { value: ".env" } });
+    expect(field).not.toHaveAttribute("aria-invalid");
+  });
+
+  it("says nothing is shared in words, and sets 'Not saved yet' as a badge", async () => {
+    vi.mocked(api).mockResolvedValue({
+      sites: [{ ...site, workspaces: [{ ...site.workspaces[0]!, people: [] }] }],
+      canInvite: true,
+    });
+    render(<JobSites onClose={() => undefined} />);
+    const sharing = await screen.findByTestId("sharing-f1");
+    expect(within(sharing).getByText("Nobody.")).toBeInTheDocument();
+    fireEvent.change(within(sharing).getByLabelText("Share with (how they sign in)"), {
+      target: { value: "cy" },
+    });
+    fireEvent.click(within(sharing).getByRole("button", { name: "Add to those sharing Notes" }));
+    expect(within(sharing).getByRole("status")).toHaveClass("badge", "badge--warn");
+  });
+});
+
+describe("the machine's audit log", () => {
+  it("tints each verdict in words, keeps the separators in the text, and dates each entry", async () => {
+    vi.mocked(api).mockResolvedValue({ sites: [site], canInvite: true });
+    vi.mocked(post).mockResolvedValue({
+      entries: [
+        {
+          at: "2026-10-05T12:00:00Z",
+          subject: "p-bo",
+          kind: "mcp",
+          tool: "read_text",
+          decision: "refused",
+          reason: "Not on the list.",
+        },
+        {
+          at: "2026-10-05T12:01:00Z",
+          subject: "p-ada",
+          kind: "mcp",
+          tool: "list_directory",
+          decision: "allowed",
+        },
+      ],
+    });
+    render(<JobSites onClose={() => undefined} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Show what desk was asked" }));
+    const list = await screen.findByLabelText("What desk was asked");
+    expect(within(list).getByText("refused")).toHaveClass("text-error");
+    expect(within(list).getByText("allowed")).toHaveClass("text-ok");
+    expect(list).toHaveTextContent(/ · p-bo · read_text · refused · Not on the list\./);
+    expect(list).toHaveTextContent(/ · p-ada · list_directory · allowed$/);
+    expect(list.querySelectorAll("time")).toHaveLength(2);
+    expect(list.querySelector("time")).toHaveAttribute("datetime", "2026-10-05T12:00:00Z");
+  });
+
+  it("says when nothing has been asked, and when the read failed", async () => {
+    vi.mocked(api).mockResolvedValue({ sites: [site], canInvite: true });
+    vi.mocked(post)
+      .mockResolvedValueOnce({ workspaces: [] })
+      .mockResolvedValueOnce({ entries: [] });
+    render(<JobSites onClose={() => undefined} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Show what desk was asked" }));
+    expect(await screen.findByText("Nothing has been asked of it yet.")).toBeInTheDocument();
+    vi.mocked(post).mockRejectedValueOnce(new Error("desk did not answer."));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh what desk was asked" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("desk did not answer.");
+  });
+});
+
+describe("a local server on a machine", () => {
+  const withServer = (extra: object = {}) => ({
+    ...site,
+    ownerInDevMode: false,
+    servers: [
+      {
+        server: {
+          id: "notes-tool",
+          name: "Notes tool",
+          kind: "local",
+          system: true,
+          enabled: true,
+          available: true,
+          reason: null,
+          tools: [
+            { name: "search", title: "Search the notes", readOnly: true, destructive: false },
+          ],
+          ...extra,
+        },
+        people: [{ person: "p-bo", name: "bo", tools: [{ name: "search", standing: false }] }],
+      },
+    ],
+  });
+
+  it("says in a badge that a server can change the machine's settings, apart from its name", async () => {
+    vi.mocked(api).mockResolvedValue({ sites: [withServer()], canInvite: true });
+    render(<JobSites onClose={() => undefined} />);
+    const box = await screen.findByTestId("server-notes-tool");
+    expect(within(box).getByRole("heading", { name: "Notes tool" })).toBeInTheDocument();
+    expect(within(box).getByText("Can change this machine's settings")).toHaveClass("badge--warn");
+  });
+
+  it("puts a tool's name beside its choice, and names the choice for the person and the tool", async () => {
+    vi.mocked(api).mockResolvedValue({ sites: [withServer()], canInvite: true });
+    render(<JobSites onClose={() => undefined} />);
+    const select = await screen.findByLabelText("bo may use search");
+    expect(select).toHaveClass("control");
+    expect(screen.getByText("Search the notes")).toBeInTheDocument();
+  });
+
+  it("warns, rather than writing in help, when a server that is on is not available", async () => {
+    vi.mocked(api).mockResolvedValue({
+      sites: [withServer({ available: false, reason: "The server did not start." })],
+      canInvite: true,
+    });
+    render(<JobSites onClose={() => undefined} />);
+    expect((await screen.findByText("The server did not start.")).closest(".notice")).toHaveClass(
+      "notice--warn",
+    );
+  });
+});
+
+describe("who runs as whom", () => {
+  it("keeps the names and accounts as one run of text, with the way to remove a link beside each", async () => {
+    vi.mocked(api).mockResolvedValue({ sites: [linked], canInvite: true });
+    render(<JobSites onClose={() => undefined} sub="p-ada" />);
+    const box = await screen.findByTestId(`linking-${site.id}`);
+    expect(within(box).getByRole("button", { name: "Remove my link on desk" })).toHaveClass(
+      "btn-quiet",
+      "btn-danger",
+    );
+    const others = within(box).getByRole("list", { name: "Who else has linked on desk" });
+    expect(within(others).getAllByRole("listitem")).toHaveLength(1);
+    expect(others).toHaveTextContent("bo runs as DESK\\bo · bo is not signed in");
+  });
+});
+
+describe("a name a person chose", () => {
+  // A hundred and twenty characters with no space in them: nothing may widen the
+  // page, so every button that carries such a name wraps its words, at any width.
+  const long = "x".repeat(120);
+
+  it("is on buttons that wrap, so it never widens the page", async () => {
+    const named = {
+      ...site,
+      label: `desk${long}`,
+      ownerInDevMode: false,
+      workspaces: [
+        {
+          ...site.workspaces[0]!,
+          people: [{ person: "p-bo", name: `bo${long}`, read: "allow", change: "allow" }],
+        },
+      ],
+      servers: [
+        {
+          server: {
+            id: "notes-tool",
+            name: `Notes${long}`,
+            kind: "local",
+            system: false,
+            enabled: true,
+            available: true,
+            reason: null,
+            tools: [{ name: "search", readOnly: true, destructive: false }],
+          },
+          people: [
+            { person: "p-bo", name: `bo${long}`, tools: [{ name: "search", standing: false }] },
+          ],
+        },
+      ],
+    };
+    vi.mocked(api).mockResolvedValue({ sites: [named], canInvite: true });
+    render(<JobSites onClose={() => undefined} />);
+    const buttons = [
+      await screen.findByRole("button", { name: `Show what desk${long} was asked` }),
+      screen.getByRole("button", { name: `Save who may use Notes${long}` }),
+      screen.getByRole("button", { name: `Remove bo${long}` }),
+      screen.getByRole("button", { name: `Stop sharing with bo${long}` }),
+    ];
+    for (const button of buttons) expect(button).toHaveClass("btn-wrap");
+  });
 });

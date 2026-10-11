@@ -1,4 +1,4 @@
-import { Eye, LogOut, Plus, Search, X } from "lucide-react";
+import { CircleAlert, Eye, LogOut, Plus, Search, X } from "lucide-react";
 import { useState } from "react";
 
 import { api } from "../lib/api";
@@ -44,6 +44,7 @@ export function Sidebar({
 }) {
   const [query, setQuery] = useState("");
   const groups = chatGroups(chats, query);
+  const dev = me.installMode === "dev";
   return (
     <nav
       id="chat-navigation"
@@ -52,59 +53,53 @@ export function Sidebar({
     >
       <div className="flex items-center gap-2 px-4 py-3">
         <Logo />
-        <span className="text-lg font-semibold">Workbench</span>
-        <button
-          onClick={onClose}
-          aria-label="Back to chat"
-          className="ml-auto rounded-plexus p-2 md:hidden"
-        >
+        <span className="text-xl font-semibold tracking-[-0.01em]">Workbench</span>
+        <button onClick={onClose} aria-label="Back to chat" className="icon-btn ml-auto md:hidden">
           <X size={18} />
         </button>
       </div>
-      <div className="px-3">
+      {/* The button, the mode chip, the search box and the chats below all span
+          the same width, and their text starts at the same x. */}
+      <div className="px-2">
         <button
           type="button"
           data-testid="new-chat"
           onClick={onNew}
           disabled={creating}
           aria-keyshortcuts="Control+Alt+N"
-          className="flex w-full items-center justify-center gap-2 rounded-plexus border border-line bg-soft px-3 py-2 hover:bg-hover"
+          className="btn w-full"
         >
-          <Plus size={16} aria-hidden /> {creating ? "Creating…" : "New chat"}
+          <Plus size={16} aria-hidden className="text-accent" />{" "}
+          {creating ? "Creating…" : "New chat"}
         </button>
       </div>
       {me.installMode && (
-        <p className="mx-3 mt-3">
+        <p className="mx-2 mt-3">
           <span
             data-testid="install-mode"
             tabIndex={0}
-            title={me.installMode === "dev" ? DEV_MODE_EXPLAINED : PRODUCTION_MODE_EXPLAINED}
+            title={dev ? DEV_MODE_EXPLAINED : PRODUCTION_MODE_EXPLAINED}
             aria-describedby="install-mode-explained"
-            className={`inline-block rounded-plexus border px-2 py-1 text-sm ${
-              me.installMode === "dev"
-                ? "border-error-line bg-error-bg text-error"
-                : "border-line text-muted"
-            }`}
+            className={`badge ${dev ? "border-error-line bg-error-bg text-error" : ""}`}
           >
-            {me.installMode === "dev" ? DEV_MODE : PRODUCTION_MODE}
+            <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-current" />
+            {dev ? DEV_MODE : PRODUCTION_MODE}
           </span>
-          <span id="install-mode-explained" className="sr-only">
-            {me.installMode === "dev" ? DEV_MODE_EXPLAINED : PRODUCTION_MODE_EXPLAINED}
+          {/* Who can see what is said on the screen in both modes, for the
+              keyboard and the touch screen that have no tooltip. */}
+          <span id="install-mode-explained" className="help mt-1 block">
+            {dev ? DEV_MODE_EXPLAINED : PRODUCTION_MODE_EXPLAINED}
           </span>
         </p>
       )}
       {!me.owner && me.ownerReadsChats && (
-        <p
-          data-testid="owner-reads"
-          className="mx-3 mt-3 rounded-plexus border border-warn-line bg-warn-bg px-3 py-2 text-sm text-warn"
-        >
+        <div data-testid="owner-reads" className="notice notice--warn mx-2 mt-3">
+          <Eye size={16} aria-hidden />
           {OWNER_READS}
-        </p>
+        </div>
       )}
-      <h2 className="px-4 pb-1 pt-4 text-xs font-semibold uppercase tracking-wide text-muted">
-        Chats
-      </h2>
-      <div className="mx-3 mb-2 flex items-center gap-1 rounded-plexus border border-line bg-soft px-2">
+      <h2 className="eyebrow px-4 pb-1 pt-4 text-muted">Chats</h2>
+      <div className="mx-2 mb-2 flex items-center gap-1 rounded-plexus border border-line-strong bg-soft px-2 focus-within:border-accent focus-within:ring-1 focus-within:ring-accent">
         <Search size={14} aria-hidden className="shrink-0 text-muted" />
         <input
           id="chat-search"
@@ -124,18 +119,25 @@ export function Sidebar({
               onOpen(first.id);
             }
           }}
-          className="min-w-0 flex-1 bg-transparent py-2 text-sm"
+          // The box draws its own focus (the wrapper's blue edge and ring); a
+          // hidden outline still shows in Windows high contrast.
+          className="min-w-0 flex-1 bg-transparent py-2 text-sm focus:outline-hidden [&::-webkit-search-cancel-button]:hidden"
         />
         {query && (
-          <button aria-label="Clear chat search" onClick={() => setQuery("")} className="p-1">
+          <button
+            aria-label="Clear chat search"
+            onClick={() => setQuery("")}
+            className="icon-btn -mr-1 shrink-0"
+          >
             <X size={14} />
           </button>
         )}
       </div>
       {error && (
-        <div role="alert" className="px-4 py-2 text-sm text-error">
+        <div role="alert" className="notice notice--error mx-2 mb-2">
+          <CircleAlert size={16} aria-hidden />
           {error}{" "}
-          <button onClick={onRetry} className="underline">
+          <button onClick={onRetry} className="btn btn-quiet -my-1 ml-auto shrink-0">
             Try again
           </button>
         </div>
@@ -152,14 +154,14 @@ export function Sidebar({
           </li>
         )}
         {chats.length > 0 && groups.length === 0 && (
-          <li role="status" className="px-2 py-2 text-sm text-muted">
+          <li role="status" className="px-2 py-2 text-sm text-muted wrap-anywhere">
             No chats match “{query}”.
           </li>
         )}
         {groups.map((group) => (
           <li key={group.label}>
-            <h3 className="px-2 pb-1 pt-3 text-xs text-muted">{group.label}</h3>
-            <ul>
+            <h3 className="px-2 pb-1 pt-3 text-xs font-medium text-muted">{group.label}</h3>
+            <ul className="flex flex-col gap-0.5">
               {group.chats.map((chat) => (
                 <li key={chat.id}>
                   <button
@@ -167,8 +169,15 @@ export function Sidebar({
                     onClick={() => onOpen(chat.id)}
                     aria-current={chat.id === current ? "page" : undefined}
                     title={chat.title}
-                    className={`flex w-full items-center gap-2 truncate rounded-plexus px-2 py-1.5 text-left text-sm hover:bg-hover ${
-                      chat.id === current ? "bg-soft font-medium" : ""
+                    // The open chat has a 3 px blue rail, a tint and a heavier
+                    // weight: three cues, none of them a fill alone, and the
+                    // rail is a border, which Windows high contrast keeps. The
+                    // text does not move: the rail's width comes out of the
+                    // padding.
+                    className={`flex w-full items-center gap-2 rounded-plexus py-1.5 pr-2 text-left text-sm pointer-coarse:py-2.5 ${
+                      chat.id === current
+                        ? "border-l-[3px] border-accent bg-tint pl-[5px] font-medium"
+                        : "pl-2 hover:bg-hover"
                     }`}
                   >
                     {chat.running && (
@@ -176,7 +185,7 @@ export function Sidebar({
                         role="img"
                         aria-label="An answer is being written"
                         data-testid="chat-running"
-                        className="h-2 w-2 shrink-0 rounded-full bg-accent"
+                        className="run-dot h-2 w-2 shrink-0 animate-pulse rounded-full bg-accent"
                         title="An answer is being written"
                       />
                     )}
@@ -190,16 +199,18 @@ export function Sidebar({
       </ul>
       {me.owner && me.ownerReadsChats && <PeoplesChats onOpen={onOpen} onOpenMedia={onOpenMedia} />}
       {me.owner && me.consoleUrl && (
-        <a
-          href={me.consoleUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="border-t border-line px-4 py-3 text-sm text-muted hover:underline"
-        >
-          Open Eugene console ↗
-        </a>
+        <div className="border-t border-line px-4 py-3 text-sm">
+          <a
+            href={me.consoleUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="link inline-flex min-h-7 items-center"
+          >
+            Open Eugene console ↗
+          </a>
+        </div>
       )}
-      <div className="flex items-center justify-between gap-2 border-t border-line px-4 py-3 text-sm">
+      <div className="flex items-center justify-between gap-2 border-t border-line px-4 py-2 text-sm">
         <span className="truncate" data-testid="me">
           {me.name}
           {me.owner && <span className="text-muted"> (owner)</span>}
@@ -207,7 +218,7 @@ export function Sidebar({
         <button
           type="button"
           onClick={onSignOut}
-          className="flex items-center gap-1 rounded-plexus px-2 py-1 text-muted hover:bg-hover"
+          className="btn btn-quiet -mr-2 shrink-0 text-muted hover:text-fg"
         >
           <LogOut size={14} aria-hidden /> Sign out
         </button>
@@ -238,26 +249,27 @@ function PeoplesChats({
 
   return (
     <details
-      className="border-t border-line px-3 py-2 text-sm"
+      className="border-t border-line px-2 py-2 text-sm"
       onToggle={(e) => {
         if ((e.target as HTMLDetailsElement).open && people === null) void load();
       }}
     >
-      <summary className="flex cursor-pointer items-center gap-2 text-muted">
+      <summary className="flex items-center gap-2 rounded-plexus px-2 py-1 text-muted hover:bg-hover hover:text-fg">
         <Eye size={14} aria-hidden /> People&apos;s chats and media (read only)
       </summary>
       {error && (
-        <p role="alert" className="text-error">
+        <p role="alert" className="notice notice--error mt-2">
+          <CircleAlert size={16} aria-hidden />
           {error}
         </p>
       )}
       {people === null && !error && (
-        <p role="status" className="py-1 text-muted">
+        <p role="status" className="px-2 py-1 text-muted">
           Loading people…
         </p>
       )}
       {people?.length === 0 && (
-        <p className="py-1 text-muted">Nobody else has used Workbench yet.</p>
+        <p className="px-2 py-1 text-muted">Nobody else has used Workbench yet.</p>
       )}
       <ul>
         {people?.map((person) => (
@@ -265,7 +277,7 @@ function PeoplesChats({
             <button
               type="button"
               aria-expanded={chats[person.sub] !== undefined}
-              className="w-full truncate py-1 text-left hover:underline"
+              className="w-full truncate rounded-plexus px-2 py-1 text-left hover:bg-hover"
               onClick={async () => {
                 setError(null);
                 try {
@@ -285,19 +297,19 @@ function PeoplesChats({
             {person.media > 0 && (
               <button
                 type="button"
-                className="block w-full truncate py-0.5 pl-3 text-left text-muted hover:underline"
+                className="block w-full truncate rounded-plexus py-0.5 pl-5 pr-2 text-left text-muted hover:bg-hover hover:text-fg"
                 onClick={() => onOpenMedia({ sub: person.sub, name: person.name })}
               >
                 Their images ({person.media})
               </button>
             )}
-            {chats[person.sub]?.length === 0 && <p className="py-0.5 pl-3 text-muted">No chats.</p>}
-            <ul className="pl-3">
+            {chats[person.sub]?.length === 0 && <p className="py-0.5 pl-5 text-muted">No chats.</p>}
+            <ul>
               {chats[person.sub]?.map((chat) => (
                 <li key={chat.id}>
                   <button
                     type="button"
-                    className="w-full truncate py-0.5 text-left text-muted hover:underline"
+                    className="w-full truncate rounded-plexus py-0.5 pl-5 pr-2 text-left text-muted hover:bg-hover hover:text-fg"
                     onClick={() => onOpen(chat.id)}
                   >
                     {chat.title}

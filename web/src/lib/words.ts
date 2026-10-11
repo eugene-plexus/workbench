@@ -76,6 +76,46 @@ export function workingWords(
 }
 
 /**
+ * A working line split into what is said and what ticks: "Thinking · 1 s" is
+ * said once as "Thinking", and the tail (" · 1 s", ": 25%") is what changes
+ * every second, so it is shown and not spoken (a polite region whose text
+ * changes every second is read out every second).
+ */
+export function splitWorking(line: string): { say: string; tail: string } {
+  const at = line.search(/ · |: (?=[0-9])/);
+  return at < 0 ? { say: line, tail: "" } : { say: line.slice(0, at), tail: line.slice(at) };
+}
+
+/**
+ * What a screen reader is told when the state of the newest answer changes:
+ * the phase, and for a stop the cause that was observed. A failure is already
+ * a role="alert" and is not said twice.
+ */
+export function announce(message?: Message): string {
+  if (!message || message.role !== "assistant") return "";
+  switch (message.status) {
+    case "running":
+      return message.content
+        ? "Writing the answer."
+        : message.reasoning
+          ? "Thinking."
+          : "Waiting for the model.";
+    case "done":
+      return message.finish === "length"
+        ? "Answer finished at its length limit."
+        : "Answer finished.";
+    case "stopped":
+      return message.finish === "repetition_detected"
+        ? "Answer stopped because it was repeating."
+        : "Answer stopped.";
+    case "interrupted":
+      return "Answer interrupted: Workbench restarted while it was being written.";
+    default:
+      return "";
+  }
+}
+
+/**
  * A reply split where its last web search fell (workbench#1). A model told
  * to search can write a whole answer first; that text is a draft, shown
  * folded, and the answer is what it wrote after reading the results. A reply
@@ -139,8 +179,10 @@ export function statusWords(message: Message): string | null {
 }
 
 export const SEARCH_LABEL = "Search the web";
-export const SEARCH_HINT =
-  "Search the web before answering. The words searched for go to the internet.";
+/** Where the search words go: said on the screen while the switch is on, and
+ * not only in the switch's tooltip, which a phone never shows. */
+export const SEARCH_PRIVACY = "The words searched for go to the internet.";
+export const SEARCH_HINT = `Search the web before answering. ${SEARCH_PRIVACY}`;
 export const OWNER_READS = "The owner of this Workbench can read your chats and media.";
 export const PRODUCTION_MODE = "Production mode";
 export const DEV_MODE = "Developer mode";

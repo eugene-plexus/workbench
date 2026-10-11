@@ -1,4 +1,4 @@
-import { Check, Copy } from "lucide-react";
+import { Check, CircleAlert, Copy } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 async function copy(text: string): Promise<void> {
@@ -46,8 +46,11 @@ export function CopyButton({
     <span className="relative inline-flex flex-wrap items-center gap-2">
       <button
         type="button"
-        className="flex items-center gap-1 rounded-plexus px-1 py-0.5 hover:text-fg"
-        aria-label={label ? `Copy ${label}` : undefined}
+        className={`act ${state === "copied" ? "text-ok" : ""}`}
+        // The name carries the visible word: "Copy this answer" while it is
+        // ready, and plain "Copied" while it says so (a name that kept saying
+        // "Copy ..." under the word "Copied" would not contain what is shown).
+        aria-label={label && state !== "copied" ? `Copy ${label}` : undefined}
         onClick={async () => {
           window.clearTimeout(timer.current);
           try {
@@ -59,10 +62,16 @@ export function CopyButton({
           }
         }}
       >
-        {state === "copied" ? <Check size={12} aria-hidden /> : <Copy size={12} aria-hidden />}
+        {state === "copied" ? <Check size={14} aria-hidden /> : <Copy size={14} aria-hidden />}
         {state === "copied" ? "Copied" : "Copy"}
       </button>
-      <span role="status" className={state === "failed" ? "text-error" : "sr-only"}>
+      {/* A refusal is said with a glyph and its words, in the error's colour
+          (a colour alone is not a message). */}
+      <span
+        role="status"
+        className={state === "failed" ? "inline-flex items-center gap-1 text-error" : "sr-only"}
+      >
+        {state === "failed" && <CircleAlert size={14} aria-hidden className="shrink-0" />}
         {state === "failed"
           ? "Copy was blocked. Select the text and copy it manually."
           : state === "copied"

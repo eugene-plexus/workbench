@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { CircleAlert, Mic, Square } from "lucide-react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { api, post } from "../lib/api";
 import {
@@ -42,8 +43,8 @@ export function ModelPicker<M extends ServedModel>({
   const groups = useMemo(() => groupModels(models, query), [models, query]);
   const chosen = models.find((m) => m.id === value);
   return (
-    <div className="flex flex-col gap-1">
-      <label htmlFor={id} className="text-sm font-medium">
+    <div className="field">
+      <label htmlFor={id} className="field-label">
         Model
       </label>
       {models.length > 8 && (
@@ -53,7 +54,7 @@ export function ModelPicker<M extends ServedModel>({
           placeholder="Find a model"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          className="rounded-plexus border border-line bg-surface px-2 py-1 text-sm"
+          className="control control--sm"
         />
       )}
       <select
@@ -61,7 +62,8 @@ export function ModelPicker<M extends ServedModel>({
         data-testid={id}
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="rounded-plexus border border-line bg-surface px-2 py-1"
+        aria-describedby={chosen ? `${id}-where` : undefined}
+        className="control"
       >
         <option value="">Choose a model</option>
         {groups.map((group) => (
@@ -76,7 +78,7 @@ export function ModelPicker<M extends ServedModel>({
         ))}
       </select>
       {chosen && (
-        <p className="text-sm text-muted" data-testid="where-it-runs">
+        <p id={`${id}-where`} className="help" data-testid="where-it-runs">
           {whereItRuns(chosen)}
         </p>
       )}
@@ -84,8 +86,12 @@ export function ModelPicker<M extends ServedModel>({
   );
 }
 
-const sendButton =
-  "rounded-plexus bg-accent px-4 py-2 font-medium text-on-accent hover:opacity-90 disabled:opacity-50";
+/** The words a refusal's field goes by on the Speech screen, so the alert can begin with them. */
+const SPEECH_FIELDS: Record<string, string> = {
+  input: "What to say",
+  voice: "Voice",
+  response_format: "Format",
+};
 
 /** The Speech screen's form (workbench-media-screens.md §4): text, a voice
  * from the model's own list (free text where it lists none), a format. */
@@ -100,6 +106,7 @@ export function SpeechForm({
   draft: MediaDraft | null;
   onMade: (item: MediaItem) => void;
 }) {
+  const uid = useId();
   const [model, setModel] = useState(
     () => models.find((m) => m.id === rememberedModel(me.sub, "speech"))?.id ?? "",
   );
@@ -164,13 +171,20 @@ export function SpeechForm({
     }
   }
 
-  const marked = (field: string) =>
-    problem?.field === field ? "border-error-line" : "border-line";
+  // What a refusal named is marked: the danger edge, aria-invalid, and the alert it is described by.
+  const alertId = `${uid}-problem`;
+  const named = (field: string) => problem?.field === field;
+  const edge = (field: string) => (named(field) ? " border-error-line border-2" : "");
+  const invalid = (field: string, ...also: string[]) => ({
+    "aria-invalid": named(field) || undefined,
+    "aria-describedby": [...also, ...(named(field) ? [alertId] : [])].join(" ") || undefined,
+  });
+  const reasonId = `${uid}-why`;
 
   return (
     <form
       aria-label="Speak some text"
-      className="flex flex-col gap-3 rounded-plexus border border-line bg-panel p-4"
+      className="card gap-4"
       onSubmit={(event) => {
         event.preventDefault();
         void send();
@@ -186,8 +200,8 @@ export function SpeechForm({
           if (id) rememberModel(me.sub, "speech", id);
         }}
       />
-      <div className="flex flex-col gap-1">
-        <label htmlFor="speech-input" className="text-sm font-medium">
+      <div className="field">
+        <label htmlFor="speech-input" className="field-label">
           What to say
         </label>
         <textarea
@@ -197,14 +211,19 @@ export function SpeechForm({
           maxLength={4096}
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          className={`rounded-plexus border ${marked("input")} bg-surface px-2 py-1`}
+          className={`control${edge("input")}`}
+          {...invalid("input", `${uid}-count`)}
         />
-        <span className="text-xs text-muted">{input.length} of 4,096 characters</span>
+        <p id={`${uid}-count`} className="help tabular-nums">
+          {input.length} of 4,096 characters
+        </p>
       </div>
       {chosen && (
-        <div className="flex flex-wrap gap-4">
-          <div className="flex flex-col gap-1 text-sm">
-            <label htmlFor="speech-voice">Voice</label>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="field">
+            <label htmlFor="speech-voice" className="field-label">
+              Voice
+            </label>
             {voices ? (
               <>
                 {voices.length > 12 && (
@@ -214,7 +233,7 @@ export function SpeechForm({
                     placeholder="Find a voice"
                     value={voiceQuery}
                     onChange={(e) => setVoiceQuery(e.target.value)}
-                    className="w-48 rounded-plexus border border-line bg-surface px-2 py-1"
+                    className="control control--sm"
                   />
                 )}
                 <select
@@ -222,7 +241,8 @@ export function SpeechForm({
                   data-testid="speech-voice"
                   value={voice}
                   onChange={(e) => setVoice(e.target.value)}
-                  className={`w-48 rounded-plexus border ${marked("voice")} bg-surface px-2 py-1`}
+                  className={`control${edge("voice")}`}
+                  {...invalid("voice")}
                 >
                   <option value="">Choose a voice</option>
                   {shownVoices.map((v) => (
@@ -240,21 +260,26 @@ export function SpeechForm({
                   value={voice}
                   placeholder="A voice name"
                   onChange={(e) => setVoice(e.target.value)}
-                  className={`w-48 rounded-plexus border ${marked("voice")} bg-surface px-2 py-1`}
+                  className={`control${edge("voice")}`}
+                  {...invalid("voice", `${uid}-voice-help`)}
                 />
-                <span className="text-xs text-muted">
+                <p id={`${uid}-voice-help`} className="help">
                   Checked by {chosen.provider ?? "the backend"} when sent
-                </span>
+                </p>
               </>
             )}
           </div>
-          <label className="flex flex-col gap-1 text-sm">
-            Format
+          <div className="field">
+            <label htmlFor="speech-format" className="field-label">
+              Format
+            </label>
             <select
+              id="speech-format"
               data-testid="speech-format"
               value={formats.includes(format) ? format : formats[0]}
               onChange={(e) => setFormat(e.target.value)}
-              className={`rounded-plexus border ${marked("response_format")} bg-surface px-2 py-1`}
+              className={`control${edge("response_format")}`}
+              {...invalid("response_format")}
             >
               {formats.map((f) => (
                 <option key={f} value={f}>
@@ -262,24 +287,40 @@ export function SpeechForm({
                 </option>
               ))}
             </select>
-          </label>
+          </div>
         </div>
       )}
       {problem && (
-        <p role="alert" className="text-error" data-testid="speech-problem">
-          {problem.message}
-        </p>
+        <div
+          id={alertId}
+          role="alert"
+          className="notice notice--error"
+          data-testid="speech-problem"
+        >
+          <CircleAlert size={16} aria-hidden />
+          <div>
+            {problem.field && SPEECH_FIELDS[problem.field] && (
+              <span className="notice-title">{SPEECH_FIELDS[problem.field]}</span>
+            )}
+            {problem.message}
+          </div>
+        </div>
       )}
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
         <button
           type="submit"
           data-testid="make-speech"
           disabled={Boolean(why) || sending}
-          className={sendButton}
+          aria-describedby={why ? reasonId : undefined}
+          className="btn btn-primary"
         >
           {sending ? "Sending…" : "Speak it"}
         </button>
-        {why && <p className="text-sm text-muted">{why}</p>}
+        {why && (
+          <p id={reasonId} className="help">
+            {why}
+          </p>
+        )}
       </div>
     </form>
   );
@@ -297,6 +338,7 @@ export function TranscriptionForm({
   models: TranscriptionModel[];
   onMade: (item: MediaItem) => void;
 }) {
+  const uid = useId();
   const [model, setModel] = useState(
     () => models.find((m) => m.id === rememberedModel(me.sub, "transcription"))?.id ?? "",
   );
@@ -364,6 +406,7 @@ export function TranscriptionForm({
         : clip.file.size > TRANSCRIBE_LIMIT
           ? `That recording is ${bytesWords(clip.file.size)}, and Eugene carries at most ${bytesWords(TRANSCRIBE_LIMIT)} to be transcribed.`
           : null;
+  const reasonId = `${uid}-why`;
 
   async function send() {
     if (!chosen || !clip || why || sending) return;
@@ -389,7 +432,7 @@ export function TranscriptionForm({
   return (
     <form
       aria-label="Turn a recording into text"
-      className="flex flex-col gap-3 rounded-plexus border border-line bg-panel p-4"
+      className="card gap-4"
       onSubmit={(event) => {
         event.preventDefault();
         void send();
@@ -404,9 +447,11 @@ export function TranscriptionForm({
           if (id) rememberModel(me.sub, "transcription", id);
         }}
       />
-      <div className="flex flex-col gap-2">
-        <p className="text-sm font-medium">Recording</p>
-        <div className="flex flex-wrap items-center gap-3 text-sm">
+      <div role="group" aria-labelledby={`${uid}-recording`} className="flex flex-col gap-2">
+        <p id={`${uid}-recording`} className="field-label">
+          Recording
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
           <input
             ref={upload}
             type="file"
@@ -421,7 +466,7 @@ export function TranscriptionForm({
           <button
             ref={chooseButton}
             type="button"
-            className="text-accent"
+            className="btn"
             disabled={Boolean(recording)}
             onClick={() => upload.current?.click()}
           >
@@ -432,31 +477,33 @@ export function TranscriptionForm({
               <button
                 type="button"
                 data-testid="stop-recording"
-                className="text-error"
+                className="btn btn-danger"
                 onClick={() => recording.stop()}
               >
+                <Square size={14} aria-hidden />
                 Stop recording ({elapsed.toFixed(0)} s)
               </button>
             ) : (
               <button
                 type="button"
                 data-testid="record"
-                className="text-accent"
+                className="btn"
                 onClick={() => void record()}
               >
+                <Mic size={14} aria-hidden />
                 Record
               </button>
             )
           ) : (
-            <span className="text-muted" data-testid="record-needs-https">
+            <p className="help" data-testid="record-needs-https">
               {RECORD_NEEDS_HTTPS}
-            </span>
+            </p>
           )}
         </div>
         {clip && (
-          <div className="flex flex-wrap items-center gap-3 text-sm">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
             <p
-              className={clip.file.size > TRANSCRIBE_LIMIT ? "text-error" : undefined}
+              className={`min-w-0 wrap-anywhere ${clip.file.size > TRANSCRIBE_LIMIT ? "text-error" : ""}`}
               data-testid="chosen-recording"
             >
               {clip.file.name}
@@ -465,7 +512,7 @@ export function TranscriptionForm({
             </p>
             <button
               type="button"
-              className="text-muted underline"
+              className="btn btn-quiet"
               onClick={() => {
                 setClip(null);
                 if (upload.current) upload.current.value = "";
@@ -477,45 +524,54 @@ export function TranscriptionForm({
           </div>
         )}
       </div>
-      <div className="flex flex-wrap items-end gap-4">
-        <label className="flex flex-col gap-1 text-sm">
-          Language spoken (optional)
+      <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
+        <div className="field min-w-48 flex-1 sm:max-w-xs">
+          <label htmlFor={`${uid}-language`} className="field-label">
+            Language spoken <small>(optional)</small>
+          </label>
           <input
+            id={`${uid}-language`}
             value={language}
             placeholder="for example en"
             maxLength={16}
             onChange={(e) => setLanguage(e.target.value)}
             disabled={translating}
-            className="w-40 rounded-plexus border border-line bg-surface px-2 py-1"
+            className="control"
           />
-        </label>
+        </div>
         {chosen?.translates && (
-          <label className="flex items-center gap-2 text-sm">
+          <label className="check">
             <input
               type="checkbox"
               data-testid="translate"
               checked={translate}
               onChange={(e) => setTranslate(e.target.checked)}
             />
-            Translate into English
+            <span>Translate into English</span>
           </label>
         )}
       </div>
       {problem && (
-        <p role="alert" className="text-error" data-testid="transcription-problem">
+        <p role="alert" className="notice notice--error" data-testid="transcription-problem">
+          <CircleAlert size={16} aria-hidden />
           {problem}
         </p>
       )}
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
         <button
           type="submit"
           data-testid="make-transcript"
           disabled={Boolean(why) || sending}
-          className={sendButton}
+          aria-describedby={why ? reasonId : undefined}
+          className="btn btn-primary"
         >
           {sending ? "Sending…" : translating ? "Translate it" : "Turn it into text"}
         </button>
-        {why && <p className="text-sm text-muted">{why}</p>}
+        {why && (
+          <p id={reasonId} className="help">
+            {why}
+          </p>
+        )}
       </div>
     </form>
   );

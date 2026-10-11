@@ -50,16 +50,18 @@ try {
   await page.getByTestId("new-chat").click();
   await page.getByRole("button", { name: "This chat's settings" }).click();
   await page.getByRole("checkbox", { name: connection }).check();
-  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await page.getByRole("button", { name: "Save settings", exact: true }).click();
   await page.getByText("Saved. The next answer uses these.").waitFor();
-  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await page.getByRole("button", { name: "Close settings", exact: true }).click();
   await page.getByTestId("model-picker").selectOption(cfg.model);
   await page.getByTestId("composer").fill(prompt);
   await page.getByTestId("send").click();
-  await page.getByRole("button", { name: "Approve call" }).waitFor();
+  // The button says "Approve call" and is named for the tool it approves.
+  const approve = page.getByRole("button", { name: /^Approve \S+ call$/ });
+  await approve.waitFor();
   const chat = page.url();
   await page.reload();
-  await page.getByRole("button", { name: "Approve call" }).click();
+  await approve.click();
   await page.close();
   page = await context.newPage();
   page.on("pageerror", (error) => errors.push(error.message));

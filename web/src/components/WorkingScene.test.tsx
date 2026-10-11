@@ -139,3 +139,26 @@ it("shows the still working pose, with the phrase, when reduced motion is asked 
   act(() => listeners.forEach((fn) => fn()));
   expect(screen.getByTestId("scene-art")).toBeInTheDocument();
 });
+
+it("holds no room for the scene before it shows: a fast answer is never preceded by an empty block", () => {
+  show(running());
+  const line = screen.getByTestId("progress");
+  // The line is the first thing in its row, flush left: no scene, no spacer, no reserved height.
+  const row = line.parentElement!.parentElement!;
+  expect(row.firstElementChild).toBe(line.parentElement);
+  expect(row.children).toHaveLength(1);
+  for (const el of [row, line.parentElement!, line]) {
+    expect(el.className).not.toMatch(/min-h-|pl-\[|ml-\[|h-\[/);
+  }
+  // And when the words start, nothing was ever there to collapse.
+  wait(SCENE_DELAY_MS - 50);
+  expect(row.children).toHaveLength(1);
+});
+
+it("sets the phrase small, italic and quiet, beside the line", () => {
+  show(running());
+  wait(SCENE_DELAY_MS + 10);
+  expect(screen.getByTestId("scene-phrase")).toHaveClass("text-sm", "italic", "text-muted");
+  // The scene and the phrase are decoration: neither is in the live line.
+  expect(screen.getByTestId("progress")).not.toContainElement(screen.getByTestId("scene-phrase"));
+});

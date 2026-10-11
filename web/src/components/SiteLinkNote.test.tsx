@@ -94,6 +94,46 @@ it("shows the link prompt on a machine's tool in Tools", async () => {
   expect(screen.getByText(/open http:\/\/127.0.0.1:8079\/link and sign in/)).toBeInTheDocument();
 });
 
+it("sets how to link in a notice of its own, and the account it runs as apart from it", () => {
+  render(
+    <SiteLinkNote
+      site={SITE}
+      label="desk"
+      linking={{ linked: false, account: "DESK\\owner", linkPage: "http://127.0.0.1:8079/link" }}
+      onChanged={() => undefined}
+    />,
+  );
+  const how = screen.getByText(/^To work as yourself there/);
+  expect(how).toHaveClass("notice");
+  expect(screen.getByText("Runs as DESK\\owner")).not.toHaveClass("notice");
+});
+
+it("offers to take a person's own link away as a quiet danger action, named for the machine", () => {
+  render(
+    <SiteLinkNote
+      site={SITE}
+      label="desk"
+      linking={{ linked: true, account: "DESK\\ada" }}
+      onChanged={() => undefined}
+    />,
+  );
+  const button = screen.getByRole("button", { name: "Remove my link on desk" });
+  expect(button).toHaveClass("btn", "btn-quiet", "btn-danger");
+});
+
+it("wraps the button that carries the machine's name, however long the name a person gave it is", () => {
+  const name = `desk${"x".repeat(120)}`;
+  render(
+    <SiteLinkNote
+      site={SITE}
+      label={name}
+      linking={{ linked: true, account: "DESK\\ada" }}
+      onChanged={() => undefined}
+    />,
+  );
+  expect(screen.getByRole("button", { name: `Remove my link on ${name}` })).toHaveClass("btn-wrap");
+});
+
 it("offers the link page to copy", () => {
   render(
     <SiteLinkNote

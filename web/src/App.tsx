@@ -1,3 +1,4 @@
+import { Boxes, CircleAlert, Info, Keyboard, Laptop, Wrench } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ChatView } from "./components/ChatView";
@@ -18,6 +19,32 @@ import { modeChanged } from "./lib/words";
 export function chatFromPath(path: string): string | null {
   const match = /^\/chats\/([A-Za-z0-9_-]+)\/?$/.exec(path);
   return match ? match[1]! : null;
+}
+
+/** Whether this is an Apple keyboard: the shortcuts are Control and Option
+ * there, and Ctrl and Alt elsewhere. A browser that will not say is not one. */
+function onMac(): boolean {
+  try {
+    return /Mac|iPhone|iPad|iPod/i.test(navigator.platform ?? "");
+  } catch {
+    return false;
+  }
+}
+
+/** The page a person is on, for the top bar, the tab's title and where focus goes. */
+type View = "chat" | "home" | "tools" | "media" | "sites";
+
+const PAGE_TITLES = {
+  tools: "Toolbox · Tools",
+  media: "Bins · Media",
+  sites: "Job sites",
+} as const;
+
+/** Move focus to a heading (or any element), making it a target if it is not. */
+function focusOn(target: HTMLElement | null): void {
+  if (!target) return;
+  if (!target.hasAttribute("tabindex")) target.setAttribute("tabindex", "-1");
+  target.focus();
 }
 
 type Phase =
@@ -46,6 +73,17 @@ export default function App() {
   const [creating, setCreating] = useState(false);
   const newPending = useRef(false);
   const focusTarget = useRef<string | null>(null);
+  const shortcutsButton = useRef<HTMLButtonElement>(null);
+  const view: View = showSites
+    ? "sites"
+    : showTools
+      ? "tools"
+      : media
+        ? "media"
+        : chatId
+          ? "chat"
+          : "home";
+  const lastView = useRef(view);
 
   useEffect(() => {
     if (focusTarget.current) {
@@ -53,6 +91,27 @@ export default function App() {
       focusTarget.current = null;
     }
   });
+
+  // The tab says which page it holds, as it does for a chat (ChatView).
+  useEffect(() => {
+    if (phase.kind !== "ready" || (view !== "tools" && view !== "media" && view !== "sites"))
+      return;
+    document.title = `${PAGE_TITLES[view]} · Workbench`;
+    return () => {
+      document.title = "Workbench";
+    };
+  }, [phase.kind, view]);
+
+  // Opening a page moves focus to its heading, so a screen reader says where it
+  // is and the keyboard starts at the top of it, not back in the sidebar.
+  useEffect(() => {
+    const before = lastView.current;
+    lastView.current = view;
+    if (before === view || phase.kind !== "ready") return;
+    if (view === "tools" || view === "media" || view === "sites") {
+      focusOn(document.getElementById("view-heading") ?? document.querySelector("main h1"));
+    }
+  }, [phase.kind, view]);
 
   const open = useCallback((id: string | null) => {
     const path = id ? `/chats/${id}` : "/";
@@ -184,6 +243,10 @@ export default function App() {
     const shortcuts = (event: KeyboardEvent) => {
       if (event.isComposing || event.repeat || event.getModifierState("AltGraph")) return;
       if (event.key === "Escape") {
+        // Closing the panel from inside it hands focus back to its button.
+        if (document.activeElement?.closest("#keyboard-shortcuts")) {
+          shortcutsButton.current?.focus();
+        }
         setShowShortcuts(false);
         return;
       }
@@ -224,6 +287,21 @@ export default function App() {
 
   return (
     <div className="relative flex h-full">
+      {/* The first stop: past the sidebar to what the page is about. A button
+          and not a link, because a history change closes the pages. */}
+      <button
+        type="button"
+        className="skip-link btn btn-primary"
+        onClick={() =>
+          focusOn(
+            document.getElementById("conversation") ??
+              document.getElementById("view-heading") ??
+              document.querySelector("main h1"),
+          )
+        }
+      >
+        {view === "chat" ? "Skip to the conversation" : "Skip to the page"}
+      </button>
       <div className={`${showChats ? "flex" : "hidden"} w-full shrink-0 md:flex md:w-auto`}>
         <Sidebar
           me={phase.me}
@@ -247,81 +325,105 @@ export default function App() {
         />
       </div>
       <main className={`${showChats ? "hidden md:flex" : "flex"} min-w-0 flex-1 flex-col`}>
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-2">
-          <button
-            onClick={() => setShowChats(true)}
-            className="text-sm text-accent md:hidden"
-            aria-controls="chat-navigation"
+        <div className="relative">
+          {/* Every page is always there, and the one you are on is marked, so
+              nothing moves when you change page. */}
+          <nav
+            aria-label="Workbench"
+            className="flex flex-wrap items-center border-b border-line px-2 py-1 sm:gap-x-1 sm:px-3"
           >
-            Chats
-          </button>
-          {!showTools && (
             <button
+              type="button"
+              onClick={() => setShowChats(true)}
+              aria-controls="chat-navigation"
+              className="nav-tab md:hidden"
+            >
+              Chats
+            </button>
+            <button
+              type="button"
+              aria-current={view === "tools" ? "page" : undefined}
+              className="nav-tab"
               onClick={() => {
+                if (view === "tools") return;
                 setShowSites(false);
                 setShowTools(true);
               }}
-              className="text-sm text-accent"
             >
+              <Wrench size={14} aria-hidden />
               Toolbox · Tools
             </button>
-          )}
-          {(media === null || showTools || showSites) && (
             <button
-              onClick={() => openMedia("images")}
-              className="text-sm text-accent"
+              type="button"
+              aria-current={view === "media" ? "page" : undefined}
+              className="nav-tab"
               data-testid="open-media"
+              onClick={() => {
+                if (view === "media") return;
+                openMedia("images");
+              }}
             >
+              <Boxes size={14} aria-hidden />
               Bins · Media
             </button>
-          )}
-          {!showSites && !phase.me.owner && (
+            {!phase.me.owner && (
+              <button
+                type="button"
+                aria-current={view === "sites" ? "page" : undefined}
+                className="nav-tab"
+                onClick={() => {
+                  if (view === "sites") return;
+                  setShowTools(false);
+                  setShowSites(true);
+                }}
+              >
+                <Laptop size={14} aria-hidden />
+                Job sites <span className="max-sm:sr-only">(your machines)</span>
+              </button>
+            )}
             <button
-              onClick={() => {
-                setShowTools(false);
-                setShowSites(true);
-              }}
-              className="text-sm text-accent"
+              ref={shortcutsButton}
+              type="button"
+              onClick={() => setShowShortcuts((shown) => !shown)}
+              aria-expanded={showShortcuts}
+              aria-controls="keyboard-shortcuts"
+              className="nav-tab nav-keys ml-auto text-muted"
             >
-              Job sites (your machines)
+              <Keyboard size={14} aria-hidden />
+              Keyboard shortcuts
             </button>
+          </nav>
+          {showShortcuts && (
+            // An overlay under the bar, not a push that moves the chat down.
+            <aside
+              id="keyboard-shortcuts"
+              aria-label="Keyboard shortcuts"
+              className="absolute right-4 top-full z-20 max-h-[calc(100dvh-5rem)] w-[min(30rem,calc(100vw-2rem))] overflow-y-auto rounded-plexus border border-line bg-panel p-4 shadow-lg"
+            >
+              <Shortcuts />
+              <button
+                type="button"
+                className="btn btn-quiet -ml-2 mt-3"
+                onClick={() => {
+                  setShowShortcuts(false);
+                  shortcutsButton.current?.focus();
+                }}
+              >
+                Close shortcuts
+              </button>
+            </aside>
           )}
-          <button
-            onClick={() => setShowShortcuts((shown) => !shown)}
-            aria-expanded={showShortcuts}
-            aria-controls="keyboard-shortcuts"
-            className="ml-auto text-sm text-muted"
-          >
-            Keyboard shortcuts
-          </button>
         </div>
-        {showShortcuts && (
-          <aside
-            id="keyboard-shortcuts"
-            className="border-b border-line bg-panel px-4 py-3 text-sm"
-          >
-            <p>
-              Ctrl + Alt + N: New chat · Ctrl + Alt + F: Search chats · Ctrl + Alt + M: Write a
-              message
-            </p>
-            <p className="mt-1 text-muted">
-              On Mac, use Control + Option. Enter sends; Shift + Enter adds a line. In chat search,
-              Enter opens the first match. While editing a message, Ctrl + Enter saves.
-            </p>
-            <button className="mt-2 text-accent" onClick={() => setShowShortcuts(false)}>
-              Close shortcuts
-            </button>
-          </aside>
-        )}
         {phase.me.installModeNotice && phase.me.installMode && phase.me.installModeChangedAt && (
           <aside
             role="status"
             data-testid="install-mode-notice"
-            className="border-b border-warn-line bg-warn-bg px-4 py-3 text-sm text-warn"
+            className="notice notice--warn notice--bar"
           >
+            <Info size={16} aria-hidden />
             {modeChanged(phase.me.installMode, phase.me.installModeChangedAt)}{" "}
             <button
-              className="ml-2 underline"
+              className="btn btn-quiet -my-1 ml-auto shrink-0"
               onClick={async () => {
                 await post("/api/me/mode-seen").catch(() => undefined);
                 setPhase({ kind: "ready", me: { ...phase.me, installModeNotice: false } });
@@ -388,14 +490,90 @@ export default function App() {
       {actionError && (
         <div
           role="alert"
-          className="absolute inset-x-3 bottom-3 z-10 rounded-plexus border border-error-line bg-panel p-3 text-sm text-error"
+          className="notice notice--error notice--float absolute inset-x-3 bottom-3 z-10 shadow-lg"
         >
+          <CircleAlert size={16} aria-hidden />
           {actionError}{" "}
-          <button className="ml-2 underline" onClick={() => setActionError(null)}>
+          <button
+            className="btn btn-quiet -my-1 ml-auto shrink-0"
+            onClick={() => setActionError(null)}
+          >
             Dismiss
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+/** The keys as keys: one box each, with a plus between. */
+function Keys({ keys }: { keys: string[] }) {
+  return (
+    <>
+      {keys.map((key, i) => (
+        <span key={`${i}:${key}`} className="contents">
+          {i > 0 && <span className="text-muted">+</span>}
+          <kbd>{key}</kbd>
+        </span>
+      ))}
+    </>
+  );
+}
+
+/** What the keyboard does, grouped by where it works. */
+function Shortcuts() {
+  const [ctrl, alt] = onMac() ? ["Control", "Option"] : ["Ctrl", "Alt"];
+  const save = onMac() ? "Cmd" : "Ctrl";
+  const groups: { title: string; rows: [string[], string][] }[] = [
+    {
+      title: "Anywhere",
+      rows: [
+        [[ctrl, alt, "N"], "New chat"],
+        [[ctrl, alt, "F"], "Search chats"],
+        [[ctrl, alt, "M"], "Write a message"],
+      ],
+    },
+    {
+      title: "Message box",
+      rows: [
+        [["Enter"], "Send"],
+        [["Shift", "Enter"], "New line"],
+      ],
+    },
+    {
+      title: "Chat search",
+      rows: [
+        [["Enter"], "Open the first match"],
+        [["Esc"], "Clear the search"],
+      ],
+    },
+    {
+      title: "Editing a message",
+      rows: [
+        [[save, "Enter"], "Save"],
+        [["Esc"], "Cancel"],
+      ],
+    },
+  ];
+  return (
+    // One pair of columns for every group (a subgrid), so the keys end and the
+    // words begin at the same x all the way down.
+    <div className="grid grid-cols-[max-content_minmax(0,1fr)] gap-x-5 gap-y-4">
+      {groups.map((group) => (
+        <section key={group.title} className="col-span-2 grid grid-cols-subgrid">
+          <h3 className="eyebrow col-span-2 mb-2 text-muted">{group.title}</h3>
+          <dl className="keys col-span-2 grid-cols-subgrid">
+            {group.rows.map(([keys, what]) => (
+              <div key={what} className="contents">
+                <dt>
+                  <Keys keys={keys} />
+                </dt>
+                <dd>{what}</dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+      ))}
     </div>
   );
 }
@@ -414,30 +592,35 @@ function Empty({
   creating: boolean;
 }) {
   return (
-    <div className="flex flex-1 items-center justify-center p-6">
+    <div className="flex flex-1 items-center justify-center overflow-y-auto p-6">
       <div className="flex max-w-md flex-col items-center gap-4 text-center">
         <Mascot pose={modelsError ? "curious" : "guide"} />
-        <h2 className="text-xl font-semibold">
+        <h1 className="text-balance text-2xl font-semibold tracking-[-0.015em]">
           {hasChats ? "Pick a chat, or start one" : "Start your first chat"}
-        </h2>
+        </h1>
         {modelsError ? (
-          <p role="alert" className="text-error">
+          <p role="alert" className="notice notice--error text-left">
+            <CircleAlert size={16} aria-hidden />
             {modelsError}
           </p>
         ) : noModels ? (
-          <p className="text-muted">
+          <p className="notice text-left">
+            <Info size={16} aria-hidden />
             Eugene is not serving any model you can chat with yet. The owner can start one in
             Eugene&apos;s console.
           </p>
         ) : (
-          <p className="text-muted">Ask anything. Answers keep going even if you close this tab.</p>
+          <p className="text-muted">
+            <span className="text-fg">Ask anything.</span> Answers keep going even if you close this
+            tab.
+          </p>
         )}
         <button
           type="button"
           data-testid="new-chat-empty"
           onClick={onNew}
           disabled={creating}
-          className="rounded-plexus bg-accent px-4 py-2 font-medium text-on-accent hover:opacity-90"
+          className="btn btn-primary min-h-11 px-5 text-base"
         >
           {creating ? "Creating…" : "New chat"}
         </button>

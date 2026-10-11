@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import { api, post } from "../lib/api";
 import type { MediaItem, VideoModel } from "../lib/media";
@@ -192,4 +192,128 @@ it("moves focus to the safe answer when the price appears, and back when decline
   expect(notYet).toHaveFocus();
   fireEvent.click(notYet);
   expect(screen.getByTestId("make-video")).toHaveFocus();
+});
+
+it("asks about the price in a warning, with one primary action, and takes the form's own button away meanwhile", async () => {
+  serve([grok]);
+  show();
+  fireEvent.change(await screen.findByTestId("video-model"), { target: { value: grok.id } });
+  fireEvent.change(screen.getByTestId("video-prompt"), { target: { value: "a red ball" } });
+  fireEvent.click(screen.getByTestId("make-video"));
+  const group = screen.getByRole("group", { name: "Before sending" });
+  expect(group).toHaveClass("notice", "notice--warn");
+  expect(within(group).getByTestId("video-quote")).toHaveTextContent(
+    "1 s at 480p. About $0.05, billed to OpenRouter.",
+  );
+  expect(within(group).getByTestId("confirm-video")).toHaveClass("btn-primary");
+  expect(within(group).getByRole("button", { name: "Not yet" })).not.toHaveClass("btn-primary");
+  expect(screen.queryByTestId("make-video")).toBeNull();
+});
+
+it("says why Make the video cannot be pressed yet, as the button's own description", async () => {
+  serve([grok]);
+  show();
+  const make = await screen.findByTestId("make-video");
+  expect(make).toBeDisabled();
+  expect(make).toHaveAccessibleDescription("Choose a model first.");
+  fireEvent.change(screen.getByTestId("video-model"), { target: { value: grok.id } });
+  expect(make).toHaveAccessibleDescription("Describe the video first.");
+  fireEvent.change(screen.getByTestId("video-prompt"), { target: { value: "a red ball" } });
+  expect(make).toBeEnabled();
+  expect(make).not.toHaveAccessibleDescription();
+});
+
+it("labels the length and size, and the first frame as optional, and offers to bring one in", async () => {
+  serve([grok]);
+  show();
+  fireEvent.change(await screen.findByTestId("video-model"), { target: { value: grok.id } });
+  expect(screen.getByLabelText("Length")).toBe(screen.getByTestId("video-seconds"));
+  expect(screen.getByLabelText("Size")).toBe(screen.getByTestId("video-size"));
+  expect(screen.getByLabelText("First frame (optional)")).toBe(screen.getByTestId("video-frame"));
+  expect(screen.getByRole("button", { name: "Bring in an image" })).toBeInTheDocument();
+});
+
+it("says a length the backend checks is free, and under the box who checks it", async () => {
+  serve([{ ...seedance, durations: null }]);
+  show();
+  fireEvent.change(await screen.findByTestId("video-model"), { target: { value: seedance.id } });
+  const length = screen.getByLabelText("Length");
+  expect(length.tagName).toBe("INPUT");
+  expect(length).toHaveAccessibleDescription("Checked by OpenRouter when sent");
+});
+
+describe("a form that a refusal came back to", () => {
+  // "Edit and send" scrolls the page (its own scroller) back to the form;
+  // jsdom has no Element.scrollTo, so there the call does nothing (Media.test
+  // holds that it is made).
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const refused = (param: string, message: string): MediaItem => ({
+    ...running,
+    id: "v9",
+    status: "failed",
+    job: null,
+    error: { message, param, status: 400 },
+  });
+
+  async function edit(param: string, message: string) {
+    serve([grok], [refused(param, message)]);
+    show();
+    fireEvent.click(await screen.findByRole("button", { name: /^Edit and send/ }));
+    return screen.findByTestId("video-problem");
+  }
+
+  it("begins the alert with the field's own label, and marks the field with the alert as its description", async () => {
+    const alert = await edit("seconds", "seconds: not one of the lengths offered");
+    expect(alert).toHaveAttribute("role", "alert");
+    expect(alert.textContent).toMatch(/^Length/);
+    const seconds = screen.getByTestId("video-seconds");
+    expect(seconds).toHaveAttribute("aria-invalid", "true");
+    expect(seconds).toHaveClass("border-error-line", "border-2");
+    expect(seconds).toHaveAccessibleDescription(/not one of the lengths offered/);
+    expect(screen.getByTestId("video-size")).not.toHaveAttribute("aria-invalid");
+    expect(screen.getByTestId("video-prompt")).not.toHaveAttribute("aria-invalid");
+  });
+
+  it.each([
+    ["prompt", "Describe the video", "video-prompt"],
+    ["size", "Size", "video-size"],
+    ["input_reference", "First frame", "video-frame"],
+  ])("marks %s, and names it %s", async (param, label, testId) => {
+    const alert = await edit(param, `${param}: refused`);
+    expect(alert.textContent).toMatch(new RegExp(`^${label}`));
+    expect(screen.getByTestId(testId)).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByTestId(testId)).toHaveAccessibleDescription(/refused/);
+  });
+
+  it("takes the marks away when the form is sent again", async () => {
+    await edit("prompt", "prompt: refused");
+    vi.mocked(post).mockResolvedValue(running);
+    fireEvent.click(screen.getByTestId("make-video"));
+    fireEvent.click(screen.getByTestId("confirm-video"));
+    await waitFor(() => expect(screen.queryByTestId("video-problem")).toBeNull());
+    expect(screen.getByTestId("video-prompt")).not.toHaveAttribute("aria-invalid");
+  });
+});
+
+describe("a long job", () => {
+  it("says in an alert that a job failed, with what the gateway said, apart from running ones", async () => {
+    const failed: MediaItem = {
+      ...running,
+      id: "v8",
+      status: "failed",
+      job: null,
+      error: { message: "The provider refused this prompt.", param: null, status: 400 },
+    };
+    serve([grok], [running, failed]);
+    show();
+    const statuses = await screen.findAllByTestId("media-status");
+    const alert = statuses.find((s) => s.getAttribute("role") === "alert");
+    expect(alert).toBeDefined();
+    expect(alert).toHaveTextContent("The provider refused this prompt.");
+    expect(alert).toHaveClass("notice--error");
+    expect(statuses.filter((s) => s.getAttribute("role") === "alert")).toHaveLength(1);
+  });
 });

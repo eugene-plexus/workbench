@@ -1,6 +1,6 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
-import { ApiError, del } from "../lib/api";
+import { ApiError, del, post } from "../lib/api";
 import type { Chat, Me, Message, Models } from "../lib/types";
 import { Composer, type Pending } from "./Composer";
 import { MessageView } from "./MessageView";
@@ -142,4 +142,239 @@ it("keeps the placeholder short and the keys in the described-by hint", () => {
   expect(box).toHaveAttribute("placeholder", "Ask anything");
   fireEvent.change(box, { target: { value: "hi" } });
   expect(box).toHaveAccessibleDescription(/Enter sends; Shift\+Enter adds a line/);
+});
+
+describe("opening a chat", () => {
+  const screenIs = (coarse: boolean) => {
+    window.matchMedia = vi.fn((query: string) => ({
+      matches: coarse && query === "(pointer: coarse)",
+      media: query,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+    })) as unknown as typeof window.matchMedia;
+  };
+  afterEach(() => {
+    delete (window as { matchMedia?: unknown }).matchMedia;
+  });
+
+  it("renders and takes focus where the browser has no matchMedia (jsdom, an old browser)", () => {
+    expect(typeof window.matchMedia).not.toBe("function");
+    render(composer());
+    expect(screen.getByTestId("composer")).toHaveFocus();
+  });
+
+  it("takes focus under a mouse", () => {
+    screenIs(false);
+    render(composer());
+    expect(screen.getByTestId("composer")).toHaveFocus();
+  });
+
+  it("does not take focus under a finger, so a phone's keyboard does not rise over the chat", () => {
+    screenIs(true);
+    render(composer());
+    expect(screen.getByTestId("composer")).not.toHaveFocus();
+  });
+});
+
+describe("the field", () => {
+  afterEach(() => {
+    document.documentElement.style.fontSize = "";
+  });
+
+  it("is at the reading size, 4.5 rem or more, and dir follows what is typed", () => {
+    render(composer());
+    const box = screen.getByTestId("composer");
+    expect(box).toHaveClass("control", "text-read", "min-h-[4.5rem]");
+    expect(box).toHaveAttribute("dir", "auto");
+    expect(box).toHaveAttribute("rows", "2");
+  });
+
+  it("is 4.5 of the person's rems tall, not 72 px: a larger text setting makes it larger", () => {
+    render(composer());
+    // jsdom has no root size: 16 px.
+    expect(screen.getByTestId("composer").style.height).toBe("72px");
+    cleanup();
+    document.documentElement.style.fontSize = "20px";
+    render(composer());
+    expect(screen.getByTestId("composer").style.height).toBe("90px");
+  });
+});
+
+describe("the hint and the draft", () => {
+  const hint = () => document.getElementById("composer-hint")!;
+  const keys = "Enter sends; Shift+Enter adds a line. Drop files here or paste an image.";
+
+  it("says the keys, which leave a phone, and nothing of a draft until there is one", () => {
+    render(composer());
+    expect(hint()).toHaveClass("max-sm:sr-only");
+    expect(hint()).toHaveTextContent(keys);
+    expect(hint().textContent).not.toContain("draft");
+    expect(screen.queryByTestId("draft-lost")).toBeNull();
+  });
+
+  it("says a draft is kept, in the same hint", () => {
+    render(composer());
+    fireEvent.change(screen.getByTestId("composer"), { target: { value: "hi" } });
+    expect(hint()).toHaveTextContent("Text draft kept in this tab until you send or sign out.");
+    expect(screen.queryByTestId("draft-lost")).toBeNull();
+  });
+
+  it("says a draft that cannot be kept in a warning that is never hidden, on any screen", () => {
+    const blocked = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("blocked");
+    });
+    try {
+      render(composer());
+      const box = screen.getByTestId("composer");
+      fireEvent.change(box, { target: { value: "hi" } });
+      const warning = screen.getByTestId("draft-lost");
+      expect(warning).toHaveTextContent(
+        "This browser cannot save your draft after you leave this chat.",
+      );
+      expect(warning).toHaveClass("text-warn");
+      expect(warning.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+      // Not the hint, which leaves a phone and goes in a short window.
+      expect(warning.closest("#composer-hint")).toBeNull();
+      expect(warning.className).not.toContain("sr-only");
+      expect(hint().textContent).not.toContain("cannot save");
+      // Still the field's description, with the keys.
+      expect(box).toHaveAccessibleDescription(/Enter sends[\s\S]*cannot save your draft/);
+    } finally {
+      blocked.mockRestore();
+    }
+  });
+});
+
+describe("the search switch", () => {
+  const searching: Models = {
+    models: [{ ...models.models[0]!, webSearch: true }],
+    webSearch: { available: true, reason: null },
+  };
+  const withSearch = (on: boolean) =>
+    render(
+      <Composer
+        chat={{ ...chat, search: on }}
+        me={me}
+        models={searching}
+        modelsError={null}
+        running={false}
+        onSent={vi.fn()}
+        onChat={vi.fn()}
+      />,
+    );
+
+  it("says where the words go, on the screen, while it is on", () => {
+    withSearch(true);
+    const note = screen.getByTestId("search-privacy");
+    expect(note).toHaveTextContent("Search is on. The words searched for go to the internet.");
+    expect(note.className).not.toContain("sr-only");
+    expect(note.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+    expect(screen.getByTestId("search-switch")).toHaveAccessibleDescription(/go to the internet/);
+  });
+
+  it("says nothing of the internet while it is off", () => {
+    withSearch(false);
+    expect(screen.queryByTestId("search-privacy")).toBeNull();
+    expect(screen.getByTestId("search-switch")).not.toHaveAttribute("aria-describedby");
+  });
+
+  it("keeps the sentence in the tooltip too", () => {
+    withSearch(true);
+    expect(screen.getByTestId("search-switch").closest("label")).toHaveAttribute(
+      "title",
+      "Search the web before answering. The words searched for go to the internet.",
+    );
+  });
+
+  it("says why it is off, with a glyph and the reason it was given", () => {
+    render(composer());
+    const off = screen.getByTestId("search-off");
+    expect(off).toHaveTextContent("Search is off: No search account.");
+    expect(off.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+    expect(screen.getByTestId("search-switch")).toBeDisabled();
+  });
+});
+
+describe("the controls", () => {
+  it("are two groups in one wrapping row, so a label never strands from its switch", () => {
+    render(composer());
+    const first = screen.getByRole("button", { name: "Attach" }).parentElement!;
+    const second = screen.getByTestId("search-switch").closest("div")!;
+    expect(first).toContainElement(screen.getByTestId("model-picker"));
+    expect(first).toHaveClass("min-w-0", "flex-[1_1_16rem]");
+    expect(second).toHaveClass("ml-auto");
+    expect(second).toContainElement(screen.getByTestId("send"));
+    expect(second).toContainElement(screen.getByText("Toolbox · Tools:"));
+    expect(first.parentElement).toBe(second.parentElement);
+    expect(first.parentElement).toHaveClass("flex-wrap");
+  });
+
+  it("let the model picker shrink to a phone, and stop at 18 rem on anything wider", () => {
+    render(composer());
+    expect(screen.getByTestId("model-picker")).toHaveClass(
+      "control",
+      "control--sm",
+      "min-w-0",
+      "max-w-full",
+      "sm:max-w-72",
+    );
+  });
+
+  it("make Stop and Send the same kind of button, so the composer is as tall running as idle", () => {
+    const { rerender } = render(composer());
+    expect(screen.getByTestId("send")).toHaveClass("btn", "btn-primary");
+    expect(screen.getByRole("button", { name: "Attach" })).toHaveClass("btn");
+    rerender(
+      <Composer
+        chat={chat}
+        me={me}
+        models={models}
+        modelsError={null}
+        running
+        onSent={vi.fn()}
+        onChat={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("stop")).toHaveClass("btn");
+    expect(screen.getByTestId("stop")).not.toHaveClass("btn-primary");
+  });
+
+  it("name the tools with a glyph that is only a glyph", () => {
+    render(composer());
+    const label = screen.getByText("Toolbox · Tools:");
+    expect(label.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+    expect(label).toHaveAttribute("title", "Tools the model can use");
+  });
+
+  it("take an attached file back with an icon button that keeps its name", () => {
+    render(composer([dot]));
+    expect(screen.getByRole("button", { name: "Remove dot.png" })).toHaveClass("icon-btn");
+    const chip = screen.getByLabelText("Attached").firstElementChild!;
+    // A file name with no break in it wraps inside the chip, never widening the row.
+    expect(chip).toHaveClass("max-w-full", "min-w-0", "wrap-anywhere");
+  });
+});
+
+describe("what is said around the field", () => {
+  it("says a file is being dropped in a status of its own, with its glyph", () => {
+    render(composer());
+    fireEvent.dragEnter(screen.getByTestId("composer-area"), {
+      dataTransfer: { types: ["Files"] },
+    });
+    const drop = screen.getByRole("status");
+    expect(drop).toHaveClass("notice");
+    expect(drop).toHaveTextContent("Drop files to attach them.");
+    expect(drop.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+  });
+
+  it("says why a send failed in an error notice with the words the server gave", async () => {
+    vi.mocked(post).mockRejectedValue(new Error("The model is not loaded."));
+    render(composer());
+    fireEvent.change(screen.getByTestId("composer"), { target: { value: "hi" } });
+    fireEvent.click(screen.getByTestId("send"));
+    const failure = await screen.findByText("The model is not loaded.");
+    expect(failure).toHaveAttribute("role", "alert");
+    expect(failure).toHaveClass("notice", "notice--error");
+    expect(failure.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+  });
 });

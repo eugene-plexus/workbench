@@ -511,6 +511,8 @@ class FakeGateway:
     #: How an answer ends, and the output cap its final chunk says was sent.
     finish: str = "stop"
     output_cap: dict[str, Any] | None = None
+    #: Reasoning each answer opens with, piece by piece (the reading check).
+    reasoning: list[str] = field(default_factory=list)
     #: The image models listed (media screens), as the gateway lists them.
     image_models: list[dict[str, Any]] = field(default_factory=lambda: list(IMAGE_MODELS))
     audio_models: list[dict[str, Any]] = field(default_factory=lambda: list(AUDIO_MODELS))
@@ -839,6 +841,10 @@ class FakeGateway:
                 yield chunk(
                     choices=False, extension={"progress": {"stage": "prompt", "prompt_tokens": 10}}
                 )
+                for piece in self.reasoning:
+                    if self.delay:
+                        await asyncio.sleep(self.delay)
+                    yield chunk({"reasoning_content": piece})
                 if self.mode == "draft" and "web_search_options" in body:
                     # What a local model does under a forced first search
                     # (gateway#4): a whole answer, then the search, then

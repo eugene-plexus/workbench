@@ -1,3 +1,4 @@
+import { CircleAlert, Link2 } from "lucide-react";
 import { useState } from "react";
 
 import { post } from "../lib/api";
@@ -26,11 +27,12 @@ export function SiteLinkNote({
   const { linked, account, linkPage } = linking;
   if (linked === undefined && !account && !linkPage) return null;
   return (
-    <div className="flex flex-col gap-1 text-sm" data-testid={`site-link-${site}`}>
+    <div className="flex flex-col gap-2 text-sm" data-testid={`site-link-${site}`}>
       {account && <p>Runs as {account}</p>}
       {linked === false && linkPage && (
         <>
-          <p>
+          <p className="notice">
+            <Link2 size={16} aria-hidden />
             To work as yourself there, link your own account: on {label}, open {linkPage} and sign
             in. Until then your calls run as the machine&apos;s owner, inside the folders shared
             with you.
@@ -42,7 +44,7 @@ export function SiteLinkNote({
         <button
           type="button"
           disabled={busy}
-          className="self-start text-error"
+          className="btn btn-quiet btn-danger btn-wrap -ms-2 self-start"
           onClick={async () => {
             setBusy(true);
             setProblem(null);
@@ -60,7 +62,8 @@ export function SiteLinkNote({
         </button>
       )}
       {problem && (
-        <p role="alert" className="text-error">
+        <p role="alert" className="notice notice--error">
+          <CircleAlert size={16} aria-hidden />
           {problem}
         </p>
       )}

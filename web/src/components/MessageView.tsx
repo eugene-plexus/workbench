@@ -1,5 +1,16 @@
-import { ChevronLeft, ChevronRight, FileText, Music, Pencil, RotateCcw } from "lucide-react";
-import { useEffect, useState } from "react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  CircleAlert,
+  FileText,
+  Globe,
+  Music,
+  Pencil,
+  RotateCcw,
+  Scissors,
+  TriangleAlert,
+} from "lucide-react";
+import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { fileUrl, post } from "../lib/api";
 import type { AttachedFile, Message, Progress } from "../lib/types";
@@ -13,6 +24,7 @@ import {
   redactedNote,
   reasoningParts,
   SEARCHED_MARK,
+  splitWorking,
   statusWords,
   VERSIONS_WAIT,
 } from "../lib/words";
@@ -56,13 +68,20 @@ export function MessageView({
       onProblem={setProblem}
     />
   );
+  // A version or retry that was refused, with the sentence the server wrote.
+  const refused = problem && (
+    <p role="alert" className="notice notice--error max-w-measure">
+      <CircleAlert size={16} aria-hidden />
+      {problem}
+    </p>
+  );
 
   if (message.redacted) {
     return (
       <div className="flex flex-col gap-1">
         <p
           data-testid="redacted-message"
-          className="rounded-plexus border border-line px-3 py-2 text-sm text-muted"
+          className="max-w-measure rounded-plexus border border-line px-3 py-2 text-sm text-muted wrap-anywhere"
         >
           {redactedNote(message.redacted.site)}
         </p>
@@ -74,7 +93,10 @@ export function MessageView({
 
   if (message.role === "user") {
     return (
-      <div className="flex flex-col items-end gap-1" data-testid="user-message">
+      <div
+        className="msg flex flex-col items-end gap-1 [&:not(:first-child)]:mt-4"
+        data-testid="user-message"
+      >
         {message.files && message.files.length > 0 && (
           <div className="flex flex-wrap justify-end gap-2">
             {message.files.map((file) => (
@@ -84,7 +106,7 @@ export function MessageView({
         )}
         {editing !== null ? (
           <form
-            className="flex w-full max-w-2xl flex-col gap-2"
+            className="flex w-full max-w-measure flex-col gap-2 text-read"
             onSubmit={async (e) => {
               e.preventDefault();
               if (acting) return;
@@ -110,6 +132,7 @@ export function MessageView({
               rows={4}
               disabled={acting}
               autoFocus
+              dir="auto"
               onKeyDown={(e) => {
                 if (e.key === "Escape" && !acting) setEditing(null);
                 if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.nativeEvent.isComposing) {
@@ -117,7 +140,7 @@ export function MessageView({
                   e.currentTarget.form?.requestSubmit();
                 }
               }}
-              className="rounded-plexus border border-line bg-soft p-2"
+              className="control text-read leading-[1.55]"
             />
             <p className="text-xs text-muted" data-testid="edit-note">
               {EDIT_NOTE} {EDIT_KEYS}
@@ -127,14 +150,14 @@ export function MessageView({
                 type="button"
                 disabled={acting}
                 onClick={() => setEditing(null)}
-                className="px-3 py-1"
+                className="btn btn-quiet"
               >
                 Cancel
               </button>
               <button
                 type="submit"
                 disabled={acting || (!editing.trim() && message.attachments.length === 0)}
-                className="rounded-plexus bg-accent px-3 py-1 text-on-accent"
+                className="btn btn-primary"
               >
                 Save and ask again
               </button>
@@ -142,32 +165,39 @@ export function MessageView({
           </form>
         ) : (
           message.content && (
-            <div className="max-w-full whitespace-pre-wrap break-words rounded-plexus bg-soft px-3 py-2 sm:max-w-2xl">
+            // The person's words: a quiet steel-blue tint with a hairline (so
+            // it shows in light, and in forced colours, where a fill is
+            // dropped), at the answer's own reading size and measure.
+            <div
+              dir="auto"
+              className="max-w-[85%] whitespace-pre-wrap rounded-plexus border border-tint-line bg-tint px-4 py-3 text-read leading-[1.55] wrap-anywhere sm:max-w-measure"
+            >
               {message.content}
             </div>
           )
         )}
-        {problem && (
-          <p role="alert" className="text-sm text-error">
-            {problem}
-          </p>
-        )}
-        <div className="flex flex-wrap items-center justify-end gap-3 text-xs text-muted">
-          <MessageTime message={message} />
-          {editing === null && message.content && (
-            <CopyButton text={message.content} label="your message" />
-          )}
+        {refused}
+        {/* Right-aligned under the bubble: what stays (the versions and the
+            time) hugs its edge, and the actions that come and go sit to the
+            left of them, so nothing moves when they appear. */}
+        <div className="-mr-2 flex min-h-7 flex-wrap items-center justify-end gap-1 text-xs text-muted">
+          <span className="msg-actions">
+            {editing === null && message.content && (
+              <CopyButton text={message.content} label="your message" />
+            )}
+            {!readOnly && editing === null && !busy && (
+              <button
+                type="button"
+                aria-label="Edit your message"
+                onClick={() => setEditing(message.content)}
+                className="act"
+              >
+                <Pencil size={14} aria-hidden /> Edit
+              </button>
+            )}
+          </span>
           {arrows}
-          {!readOnly && editing === null && !busy && (
-            <button
-              type="button"
-              aria-label="Edit your message"
-              onClick={() => setEditing(message.content)}
-              className="flex items-center gap-1 text-xs text-muted hover:text-fg"
-            >
-              <Pencil size={12} aria-hidden /> Edit
-            </button>
-          )}
+          <MessageTime message={message} className="pr-2" />
         </div>
       </div>
     );
@@ -183,11 +213,15 @@ export function MessageView({
   const draftHint = hasTools
     ? "The model wrote this before it received the tool results."
     : DRAFT_HINT;
+  const look = statusLook(message);
+  const canCopy = !running && Boolean(answer);
+  // The working line says "Thinking" once to a screen reader; what ticks (the
+  // seconds, the count, the speed) is shown and not spoken.
+  const working = waiting ? splitWorking(workingWords(progress, message, now)) : null;
   return (
-    <article className="flex flex-col gap-2" data-testid="answer" data-status={message.status}>
+    <article className="msg flex flex-col gap-3" data-testid="answer" data-status={message.status}>
       {message.reasoning && (
-        <details className="rounded-plexus border border-line px-3 py-1.5 text-sm text-muted">
-          <summary className="cursor-pointer">Reasoning</summary>
+        <Fold label="Reasoning" boxLabel="Reasoning text" follow={running}>
           {thoughts.map((thought, i) => (
             <div key={i}>
               {i > 0 && (
@@ -195,57 +229,74 @@ export function MessageView({
                   {hasTools ? "Used tools" : SEARCHED_MARK}
                 </p>
               )}
-              <div className="whitespace-pre-wrap pt-1">{thought}</div>
+              <div dir="auto" className="whitespace-pre-wrap py-1 wrap-anywhere">
+                {thought}
+              </div>
             </div>
           ))}
-        </details>
+        </Fold>
       )}
       {draft && (
-        <details
-          className="rounded-plexus border border-line px-3 py-1.5 text-sm text-muted"
-          data-testid="draft"
-        >
-          <summary className="cursor-pointer" title={draftHint}>
-            {draftLabel}
-          </summary>
-          <p className="pt-1 text-xs">{draftHint}</p>
-          <div className="pt-1">
-            <Markdown text={draft} />
-          </div>
-        </details>
+        <Fold label={draftLabel} boxLabel={draftLabel} title={draftHint} testId="draft">
+          <p className="pb-1 text-xs">{draftHint}</p>
+          <Markdown text={draft} quiet />
+        </Fold>
       )}
       <ToolCalls chatId={chatId} message={message} readOnly={readOnly} onChanged={onChanged} />
-      {waiting && (
+      {working && (
         // Eugene works while the model does; waiting on the person's
         // approval is not work, so he steps away then.
         <WorkingScene active={!(progress?.stage === "tool" && progress.phase === "approval")}>
-          <p aria-live="polite" className="text-muted" data-testid="progress">
-            {workingWords(progress, message, now)}
+          <p aria-live="polite" className="text-sm" data-testid="progress">
+            <span className="text-fg">{working.say}</span>
+            {working.tail && (
+              <span aria-hidden="true" className="tabular-nums text-muted">
+                {working.tail}
+              </span>
+            )}
           </p>
         </WorkingScene>
       )}
       {answer && <Markdown text={answer} />}
+      {running && answer && (
+        // Once the first words are on the page the line is not gone: it moves
+        // below them, with the count and the speed, until the answer ends. The
+        // growing answer is not announced, and neither is this.
+        <p data-testid="writing" className="flex items-center gap-2 text-sm text-muted">
+          <span aria-hidden="true" className="working-dots">
+            <span />
+            <span />
+            <span />
+          </span>
+          <span className="tabular-nums">{workingWords(progress, message, now)}</span>
+        </p>
+      )}
       {(message.sources.length > 0 || message.searches > 0) && (
-        <div className="text-sm" data-testid="sources">
-          <h3 className="font-semibold">
+        <div className="mt-1 max-w-measure border-t border-line pt-3 text-sm" data-testid="sources">
+          <h3 className="eyebrow flex items-center gap-2 text-muted">
+            <Globe size={14} aria-hidden className="shrink-0" />
             Sources
-            {message.searches
-              ? ` (${message.searches} search${message.searches === 1 ? "" : "es"})`
-              : ""}
+            {message.searches ? (
+              <span className="font-normal normal-case tracking-normal">
+                {` (${message.searches} search${message.searches === 1 ? "" : "es"})`}
+              </span>
+            ) : null}
           </h3>
           {/* A search ran and the answer linked none of what it found: said,
               so a searched answer never looks like an unsearched one. */}
           {message.sources.length === 0 && (
-            <p className="text-muted">The answer does not link to any page the search found.</p>
+            <p className="mt-2 text-muted">
+              The answer does not link to any page the search found.
+            </p>
           )}
-          <ol className="list-decimal pl-5">
+          <ol className="mt-2 list-decimal space-y-1 pl-5 marker:text-muted wrap-anywhere">
             {message.sources.map((source) => (
               <li key={source.url}>
                 <a
                   href={safe(source.url)}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-accent underline"
+                  className="link"
                 >
                   {source.title}
                 </a>
@@ -267,61 +318,181 @@ export function MessageView({
         <p
           role={message.status === "failed" ? "alert" : undefined}
           data-testid="answer-status"
-          className={
-            message.status === "failed"
-              ? "rounded-plexus border border-error-line bg-error-bg px-3 py-2 text-sm text-error"
-              : "text-sm text-muted"
-          }
+          className={look.className}
         >
+          {look.glyph}
           {status}
         </p>
       )}
-      <div className="flex flex-wrap items-center gap-3 break-all text-xs text-muted">
-        {!running && <MessageTime message={message} />}
-        {!running && answer && <CopyButton text={answer} label="this answer" />}
-        {/* On any answer (V6); while one runs, it is stopped and kept (V2). */}
-        {!readOnly && (
-          <button
-            type="button"
-            data-testid="try-again"
-            aria-label="Try again: write a new version of this answer"
-            disabled={acting}
-            title={
-              running
-                ? "Stops this answer, keeps it as a version, and writes another."
-                : busy
-                  ? "Stops the answer being written, keeps it, and tries this one again."
-                  : undefined
-            }
-            onClick={async () => {
-              if (acting) return;
-              setActing(true);
-              setProblem(null);
-              try {
-                await post(`/api/chats/${chatId}/messages/${message.id}/retry`);
-                onChanged();
-              } catch (error) {
-                setProblem(error instanceof Error ? error.message : String(error));
-              } finally {
-                setActing(false);
-              }
-            }}
-            className="flex items-center gap-1 hover:text-fg"
-          >
-            <RotateCcw size={12} aria-hidden /> Try again
-          </button>
+      <div className="-mt-1 flex min-h-7 flex-wrap items-center gap-1 text-xs text-muted">
+        {!running && <MessageTime message={message} className="pr-2" />}
+        {(canCopy || !readOnly) && (
+          <span className="msg-actions">
+            {canCopy && <CopyButton text={answer} label="this answer" />}
+            {/* On any answer (V6); while one runs, it is stopped and kept (V2). */}
+            {!readOnly && (
+              <button
+                type="button"
+                data-testid="try-again"
+                aria-label="Try again: write a new version of this answer"
+                disabled={acting}
+                title={
+                  running
+                    ? "Stops this answer, keeps it as a version, and writes another."
+                    : busy
+                      ? "Stops the answer being written, keeps it, and tries this one again."
+                      : undefined
+                }
+                onClick={async () => {
+                  if (acting) return;
+                  setActing(true);
+                  setProblem(null);
+                  try {
+                    await post(`/api/chats/${chatId}/messages/${message.id}/retry`);
+                    onChanged();
+                  } catch (error) {
+                    setProblem(error instanceof Error ? error.message : String(error));
+                  } finally {
+                    setActing(false);
+                  }
+                }}
+                className="act"
+              >
+                <RotateCcw size={14} aria-hidden /> Try again
+              </button>
+            )}
+          </span>
         )}
         {arrows}
         {message.model && (!running || (message.versions?.count ?? 1) > 1) && (
-          <span>{message.model}</span>
+          <span className="min-w-0 pl-2 wrap-anywhere">{message.model}</span>
         )}
       </div>
-      {problem && (
-        <p role="alert" className="text-sm text-error">
-          {problem}
-        </p>
-      )}
+      {refused}
     </article>
+  );
+}
+
+/** How a note under an answer looks: a failure is an error box, an answer cut
+ * short (a length limit, a repeat, a restart) is an amber box with the glyph of
+ * what happened, and a stop the person asked for is a plain line. Each has its
+ * words; the box and the glyph are for the eye that scans. */
+function statusLook(message: Message): { className: string; glyph: ReactNode } {
+  if (message.status === "failed") {
+    return {
+      className: "notice notice--error max-w-measure",
+      glyph: <CircleAlert size={16} aria-hidden />,
+    };
+  }
+  if (message.status === "interrupted" || message.finish === "repetition_detected") {
+    return {
+      className: "notice notice--warn max-w-measure",
+      glyph: <TriangleAlert size={16} aria-hidden />,
+    };
+  }
+  if (message.status !== "stopped" && message.finish === "length") {
+    return {
+      className: "notice notice--warn max-w-measure",
+      glyph: <Scissors size={16} aria-hidden />,
+    };
+  }
+  return { className: "text-sm text-muted", glyph: null };
+}
+
+/** Text the model wrote that is not the answer, folded: a quiet row that opens
+ * to the console's dashed box. It is plain text in a box that scrolls. */
+function Fold({
+  label,
+  boxLabel,
+  title,
+  testId,
+  follow = false,
+  children,
+}: {
+  label: string;
+  boxLabel: string;
+  title?: string;
+  testId?: string;
+  /** Follow the bottom while text is arriving (the reasoning of a running answer). */
+  follow?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <details className="group/r max-w-measure text-sm text-muted" data-testid={testId}>
+      <summary
+        title={title}
+        className="disclosure flex w-fit list-none items-center gap-1.5 rounded-plexus pl-1 pr-2 hover:bg-hover hover:text-fg [&::-webkit-details-marker]:hidden"
+      >
+        <ChevronRight
+          size={14}
+          aria-hidden
+          className="transition-transform group-open/r:rotate-90"
+        />
+        {label}
+      </summary>
+      <FoldText label={boxLabel} follow={follow}>
+        {children}
+      </FoldText>
+    </details>
+  );
+}
+
+/**
+ * The scrolling box inside a fold. While text arrives it follows the bottom
+ * until the reader scrolls up (the rule the thread keeps), so thinking can be
+ * watched without scrolling it. It is a keyboard stop only while it overflows:
+ * a box that does not scroll has nothing for the arrow keys to do.
+ */
+function FoldText({
+  label,
+  follow,
+  children,
+}: {
+  label: string;
+  follow: boolean;
+  children: ReactNode;
+}) {
+  const box = useRef<HTMLDivElement>(null);
+  const pinned = useRef(true);
+  const following = useRef(follow);
+  const [scrolls, setScrolls] = useState(false);
+
+  useLayoutEffect(() => {
+    following.current = follow;
+    const el = box.current;
+    if (!el) return;
+    if (follow && pinned.current) el.scrollTop = el.scrollHeight;
+    setScrolls(el.scrollHeight > el.clientHeight + 1);
+    // Whenever the text it holds changes: each piece that arrives is a new one.
+  }, [follow, children]);
+
+  useEffect(() => {
+    const el = box.current;
+    // Opening the fold, or a resize, changes whether it overflows; jsdom has no
+    // ResizeObserver.
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const watch = new ResizeObserver(() => {
+      if (following.current && pinned.current) el.scrollTop = el.scrollHeight;
+      setScrolls(el.scrollHeight > el.clientHeight + 1);
+    });
+    watch.observe(el);
+    return () => watch.disconnect();
+  }, []);
+
+  return (
+    <div
+      ref={box}
+      role="group"
+      aria-label={label}
+      tabIndex={scrolls ? 0 : undefined}
+      onScroll={(e) => {
+        const el = e.currentTarget;
+        pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+      }}
+      className="reasoning-body mt-1"
+    >
+      {children}
+    </div>
   );
 }
 
@@ -377,7 +548,7 @@ function VersionArrows({
       title={held ? VERSIONS_WAIT : label}
       disabled={held || moving || end}
       onClick={() => void go(step)}
-      className="rounded-plexus p-0.5 hover:text-fg disabled:opacity-40"
+      className="act justify-center"
     >
       <Icon size={14} aria-hidden />
     </button>
@@ -412,7 +583,8 @@ function VersionArrows({
 /** The time alone today; with its date on any earlier day, so an old chat
  * does not read as if it were written this morning. */
 export function shortTime(date: Date, now = new Date()): string {
-  const time = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  // 7:12 PM, not 07:12 PM: a leading zero is noise at this size.
+  const time = date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   if (date.toDateString() === now.toDateString()) return time;
   const day = date.toLocaleDateString([], {
     month: "short",
@@ -422,10 +594,14 @@ export function shortTime(date: Date, now = new Date()): string {
   return `${day}, ${time}`;
 }
 
-function MessageTime({ message }: { message: Message }) {
+function MessageTime({ message, className }: { message: Message; className?: string }) {
   const date = new Date(message.createdAt * 1000);
   return (
-    <time dateTime={date.toISOString()} title={date.toLocaleString()}>
+    <time
+      dateTime={date.toISOString()}
+      title={date.toLocaleString()}
+      className={`tabular-nums ${className ?? ""}`}
+    >
       {shortTime(date)}
     </time>
   );

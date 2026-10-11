@@ -1,10 +1,20 @@
-import { Paperclip, Send, Square, X } from "lucide-react";
+import {
+  CircleAlert,
+  Globe,
+  Info,
+  Paperclip,
+  Send,
+  Square,
+  TriangleAlert,
+  Wrench,
+  X,
+} from "lucide-react";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { api, del, patch, post } from "../lib/api";
 import { readDraft, saveDraft } from "../lib/conveniences";
 import type { Chat, Me, Message, Model, Models } from "../lib/types";
-import { modelLabel, SEARCH_HINT, SEARCH_LABEL, takes } from "../lib/words";
+import { modelLabel, SEARCH_HINT, SEARCH_LABEL, SEARCH_PRIVACY, takes } from "../lib/words";
 
 const MODEL_KEY = "workbench-model";
 const ACCEPT =
@@ -30,6 +40,12 @@ function remember(person: string, model: string): void {
   } catch {
     // Remembering the last model is a convenience.
   }
+}
+
+/** A phone or a tablet's touch screen: the first pointer is a finger. jsdom
+ * and old browsers have no matchMedia, and then it is not. */
+function touchFirst(): boolean {
+  return typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
 }
 
 /** The kind of attachment a model must take for this file, or null. */
@@ -116,6 +132,8 @@ export function Composer({
   const [removing, setRemoving] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const dragDepth = useRef(0);
+  // Asked once, when the chat opens: only a mouse takes the focus (below).
+  const [takeFocus] = useState(() => !touchFirst());
 
   function changeText(value: string) {
     setText(value);
@@ -125,8 +143,11 @@ export function Composer({
   useLayoutEffect(() => {
     const field = textarea.current;
     if (!field) return;
+    // From 4.5 to 15 rem, not 72 to 240 px: a larger text setting in the
+    // person's browser makes the box larger with it. jsdom has no root size.
+    const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
     field.style.height = "auto";
-    field.style.height = `${Math.min(240, Math.max(80, field.scrollHeight))}px`;
+    field.style.height = `${Math.min(15 * rem, Math.max(4.5 * rem, field.scrollHeight))}px`;
   }, [text]);
 
   const available = useMemo(() => models?.models ?? [], [models]);
@@ -253,6 +274,11 @@ export function Composer({
       ? "This model is no longer available. Pick another model."
       : cannotTake;
 
+  // What the draft's state says, beside the keys: the keys are for a keyboard
+  // and leave a phone, but a draft that cannot be kept is something the person
+  // must read wherever they are, so it is its own line and never hides.
+  const draftLost = Boolean(text) && !draftSaved;
+
   return (
     <div
       onDragEnter={(e) => {
@@ -276,19 +302,20 @@ export function Composer({
         setDragging(false);
         void attach(e.dataTransfer.files);
       }}
-      className={`border-t bg-panel px-4 py-3 ${dragging ? "border-accent ring-2 ring-inset ring-accent" : "border-line"}`}
+      className={`border-t bg-panel px-4 pb-4 pt-3 ${dragging ? "border-accent ring-2 ring-inset ring-accent" : "border-line"}`}
       data-testid="composer-area"
     >
-      <div className="mx-auto flex max-w-3xl flex-col gap-2">
+      <div className="mx-auto flex max-w-3xl flex-col gap-3">
         {dragging && (
-          <p role="status" className="text-sm text-accent">
+          <p role="status" className="notice">
+            <Paperclip size={16} aria-hidden />
             {uploading || sending
               ? "Wait for the current upload or send to finish."
               : "Drop files to attach them."}
           </p>
         )}
         {uploading && (
-          <p role="status" className="break-words text-sm text-muted">
+          <p role="status" className="text-sm text-muted wrap-anywhere">
             {uploading}
           </p>
         )}
@@ -297,7 +324,7 @@ export function Composer({
             {pending.map((file) => (
               <li
                 key={file.id}
-                className="flex max-w-full items-center gap-1 break-all rounded-plexus border border-line bg-soft px-2 py-0.5 text-sm"
+                className="flex min-w-0 max-w-full items-center gap-1 rounded-plexus border border-line bg-soft py-0.5 pl-2 pr-0.5 text-sm wrap-anywhere"
               >
                 {file.name}
                 <button
@@ -305,52 +332,63 @@ export function Composer({
                   aria-label={`Remove ${file.name}`}
                   disabled={sending || removing !== null}
                   onClick={() => void remove(file)}
+                  className="icon-btn shrink-0"
                 >
-                  <X size={12} />
+                  <X size={14} />
                 </button>
               </li>
             ))}
           </ul>
         )}
-        <textarea
-          id="message-composer"
-          ref={textarea}
-          autoFocus
-          disabled={sending}
-          aria-keyshortcuts="Control+Alt+M"
-          aria-describedby="composer-hint"
-          aria-label="Your message"
-          data-testid="composer"
-          value={text}
-          onChange={(e) => changeText(e.target.value)}
-          onPaste={(e) => {
-            const images = Array.from(e.clipboardData.files).filter((file) =>
-              file.type.startsWith("image/"),
-            );
-            if (images.length && !sending && !uploading) {
-              e.preventDefault();
-              void attach(images);
-            }
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-              e.preventDefault();
-              void send();
-            }
-          }}
-          rows={3}
-          placeholder="Ask anything"
-          className="w-full resize-none overflow-y-auto rounded-plexus border border-line bg-soft p-2"
-        />
-        <p id="composer-hint" className="text-xs text-muted">
-          Enter sends; Shift+Enter adds a line. Drop files here or paste an image.{" "}
-          {text
-            ? draftSaved
-              ? "Text draft kept in this tab until you send or sign out."
-              : "This browser cannot save your draft after you leave this chat."
-            : ""}
-        </p>
-        <div className="flex flex-wrap items-center gap-3 text-sm">
+        <div className="flex flex-col gap-1">
+          <textarea
+            id="message-composer"
+            ref={textarea}
+            // A finger opening a chat must not raise the keyboard over it.
+            autoFocus={takeFocus}
+            disabled={sending}
+            aria-keyshortcuts="Control+Alt+M"
+            aria-describedby={draftLost ? "composer-hint composer-draft-lost" : "composer-hint"}
+            aria-label="Your message"
+            data-testid="composer"
+            dir="auto"
+            value={text}
+            onChange={(e) => changeText(e.target.value)}
+            onPaste={(e) => {
+              const images = Array.from(e.clipboardData.files).filter((file) =>
+                file.type.startsWith("image/"),
+              );
+              if (images.length && !sending && !uploading) {
+                e.preventDefault();
+                void attach(images);
+              }
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                void send();
+              }
+            }}
+            rows={2}
+            placeholder="Ask anything"
+            className="control block min-h-[4.5rem] w-full resize-none overflow-y-auto px-3 py-2.5 text-read leading-[1.55]"
+          />
+          <p id="composer-hint" className="text-xs text-muted max-sm:sr-only">
+            Enter sends; Shift+Enter adds a line. Drop files here or paste an image.{" "}
+            {text && draftSaved ? "Text draft kept in this tab until you send or sign out." : ""}
+          </p>
+          {draftLost && (
+            <p
+              id="composer-draft-lost"
+              data-testid="draft-lost"
+              className="flex items-start gap-1.5 text-xs text-warn"
+            >
+              <TriangleAlert size={14} aria-hidden className="mt-px shrink-0" />
+              This browser cannot save your draft after you leave this chat.
+            </p>
+          )}
+        </div>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm">
           <input
             ref={files}
             type="file"
@@ -360,82 +398,102 @@ export function Composer({
             data-testid="attach-input"
             onChange={(e) => void attach(e.target.files)}
           />
-          <button
-            type="button"
-            onClick={() => files.current?.click()}
-            disabled={uploading !== null || sending}
-            className="flex items-center gap-1 rounded-plexus border border-line px-2 py-1 hover:bg-hover"
-          >
-            <Paperclip size={14} aria-hidden /> Attach
-          </button>
-          <label className="flex items-center gap-1">
-            <span className="text-muted">Model</span>
-            <select
-              data-testid="model-picker"
-              value={chosenId ?? ""}
-              disabled={sending}
-              onChange={(e) => void setModel(e.target.value)}
-              className="min-w-0 max-w-52 rounded-plexus border border-line bg-soft px-1 py-1 sm:max-w-72"
-            >
-              {available.length === 0 && <option value="">No models</option>}
-              {chosenId && !chosen && <option value={chosenId}>{chosenId} (unavailable)</option>}
-              {available.map((model) => (
-                <option key={model.id} value={model.id}>
-                  {modelLabel(model)}
-                  {takes(model).length ? ` · takes ${takes(model).join(", ")}` : ""}
-                </option>
-              ))}
-            </select>
-          </label>
-          <span className="text-muted" title="Tools the model can use">
-            Toolbox · Tools:
-          </span>
-          <label className="flex items-center gap-1" title={searchOff ?? SEARCH_HINT}>
-            <input
-              type="checkbox"
-              role="switch"
-              data-testid="search-switch"
-              checked={searchOn}
-              disabled={searchOff !== null || sending}
-              onChange={(e) => void setSearch(e.target.checked)}
-            />
-            {SEARCH_LABEL}
-          </label>
-          <span className="flex-1" />
-          {running ? (
+          <div className="flex min-w-0 flex-[1_1_16rem] items-center gap-3">
             <button
               type="button"
-              data-testid="stop"
-              onClick={() => void stop()}
-              className="flex items-center gap-1 rounded-plexus border border-line px-3 py-1.5 hover:bg-hover"
+              onClick={() => files.current?.click()}
+              disabled={uploading !== null || sending}
+              className="btn"
             >
-              <Square size={14} aria-hidden /> Stop
+              <Paperclip size={14} aria-hidden /> Attach
             </button>
-          ) : (
-            <button
-              type="button"
-              data-testid="send"
-              disabled={
-                blocked !== null ||
-                sending ||
-                uploading !== null ||
-                removing !== null ||
-                (!text.trim() && pending.length === 0)
-              }
-              onClick={() => void send()}
-              className="flex items-center gap-1 rounded-plexus bg-accent px-3 py-1.5 font-medium text-on-accent disabled:opacity-50"
+            <label className="flex min-w-0 max-w-full flex-1 items-center gap-1">
+              <span className="text-muted">Model</span>
+              <select
+                data-testid="model-picker"
+                value={chosenId ?? ""}
+                disabled={sending}
+                onChange={(e) => void setModel(e.target.value)}
+                className="control control--sm min-w-0 max-w-full sm:max-w-72"
+              >
+                {available.length === 0 && <option value="">No models</option>}
+                {chosenId && !chosen && <option value={chosenId}>{chosenId} (unavailable)</option>}
+                {available.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {modelLabel(model)}
+                    {takes(model).length ? ` · takes ${takes(model).join(", ")}` : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div className="ml-auto flex items-center gap-3">
+            <span
+              className="inline-flex items-center gap-1.5 text-muted"
+              title="Tools the model can use"
             >
-              <Send size={14} aria-hidden /> Send
-            </button>
-          )}
+              <Wrench size={14} aria-hidden />
+              Toolbox · Tools:
+            </span>
+            <label className="check items-center" title={searchOff ?? SEARCH_HINT}>
+              <input
+                type="checkbox"
+                role="switch"
+                data-testid="search-switch"
+                aria-describedby={searchOn ? "search-privacy" : undefined}
+                checked={searchOn}
+                disabled={searchOff !== null || sending}
+                onChange={(e) => void setSearch(e.target.checked)}
+              />
+              {SEARCH_LABEL}
+            </label>
+            {running ? (
+              <button type="button" data-testid="stop" onClick={() => void stop()} className="btn">
+                <Square size={14} aria-hidden /> Stop
+              </button>
+            ) : (
+              <button
+                type="button"
+                data-testid="send"
+                disabled={
+                  blocked !== null ||
+                  sending ||
+                  uploading !== null ||
+                  removing !== null ||
+                  (!text.trim() && pending.length === 0)
+                }
+                onClick={() => void send()}
+                className="btn btn-primary"
+              >
+                <Send size={14} aria-hidden /> Send
+              </button>
+            )}
+          </div>
         </div>
         {searchOff && (
-          <p className="text-xs text-muted" data-testid="search-off">
+          <p
+            className="flex items-start gap-1.5 text-sm text-muted wrap-anywhere"
+            data-testid="search-off"
+          >
+            <Info size={14} aria-hidden className="mt-1 shrink-0" />
             Search is off: {searchOff}
           </p>
         )}
+        {searchOn && (
+          // Where the search words go, on the screen and not only in the
+          // switch's tooltip, which a phone never shows.
+          <p
+            id="search-privacy"
+            data-testid="search-privacy"
+            className="flex items-start gap-1.5 text-xs text-muted"
+          >
+            <Globe size={14} aria-hidden className="mt-px shrink-0" />
+            Search is on. {SEARCH_PRIVACY}
+          </p>
+        )}
         {(blocked || problem || modelsError) && (
-          <p role="alert" className="text-sm text-error">
+          <p role="alert" className="notice notice--error">
+            <CircleAlert size={16} aria-hidden />
             {problem ?? blocked ?? modelsError}
           </p>
         )}

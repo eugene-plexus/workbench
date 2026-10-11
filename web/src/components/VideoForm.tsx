@@ -1,5 +1,5 @@
-import { ImagePlus } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { CircleAlert, CircleDollarSign, ImagePlus } from "lucide-react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 
 import { api, post } from "../lib/api";
 import {
@@ -16,8 +16,13 @@ import { ModelPicker } from "./AudioForms";
 
 const problemOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
-const sendButton =
-  "rounded-plexus bg-accent px-4 py-2 font-medium text-on-accent hover:opacity-90 disabled:opacity-50";
+/** The words a refusal's field goes by on the Video screen, so the alert can begin with them. */
+const VIDEO_FIELDS: Record<string, string> = {
+  prompt: "Describe the video",
+  seconds: "Length",
+  size: "Size",
+  firstFrame: "First frame",
+};
 
 /** A size's width, so of two the same area the wider (landscape) comes first. */
 const wide = (size: string) => Number(size.split("x")[0]) || 0;
@@ -60,6 +65,7 @@ export function VideoForm({
   draft: MediaDraft | null;
   onMade: (item: MediaItem) => void;
 }) {
+  const uid = useId();
   const [form, setForm] = useState<Form>(() => {
     // No model is picked on a first visit, so a paid one is never chosen for anyone (M5).
     const model = models.find((m) => m.id === rememberedModel(me.sub, "video"));
@@ -182,13 +188,20 @@ export function VideoForm({
     }
   }
 
-  const marked = (field: string) =>
-    problem?.field === field ? "border-error-line" : "border-line";
+  // What a refusal named is marked: the danger edge, aria-invalid, and the alert it is described by.
+  const alertId = `${uid}-problem`;
+  const named = (field: string) => problem?.field === field;
+  const edge = (field: string) => (named(field) ? " border-error-line border-2" : "");
+  const invalid = (field: string, ...also: string[]) => ({
+    "aria-invalid": named(field) || undefined,
+    "aria-describedby": [...also, ...(named(field) ? [alertId] : [])].join(" ") || undefined,
+  });
+  const reasonId = `${uid}-why`;
 
   return (
     <form
       aria-label="Make a video"
-      className="flex flex-col gap-3 rounded-plexus border border-line bg-panel p-4"
+      className="card gap-4"
       onSubmit={(event) => {
         event.preventDefault();
         if (!why) setConfirming(true);
@@ -204,8 +217,8 @@ export function VideoForm({
           if (id) rememberModel(me.sub, "video", id);
         }}
       />
-      <div className="flex flex-col gap-1">
-        <label htmlFor="video-prompt" className="text-sm font-medium">
+      <div className="field">
+        <label htmlFor="video-prompt" className="field-label">
           Describe the video
         </label>
         <textarea
@@ -214,19 +227,24 @@ export function VideoForm({
           rows={3}
           value={form.prompt}
           onChange={(e) => set({ prompt: e.target.value })}
-          className={`rounded-plexus border ${marked("prompt")} bg-surface px-2 py-1`}
+          className={`control${edge("prompt")}`}
+          {...invalid("prompt")}
         />
       </div>
       {model && (
-        <div className="flex flex-wrap gap-4">
-          <label className="flex flex-col gap-1 text-sm">
-            Length
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="field">
+            <label htmlFor={`${uid}-seconds`} className="field-label">
+              Length
+            </label>
             {model.durations?.length ? (
               <select
+                id={`${uid}-seconds`}
                 data-testid="video-seconds"
                 value={form.seconds ?? ""}
                 onChange={(e) => set({ seconds: e.target.value ? Number(e.target.value) : null })}
-                className={`rounded-plexus border ${marked("seconds")} bg-surface px-2 py-1`}
+                className={`control${edge("seconds")}`}
+                {...invalid("seconds")}
               >
                 {model.durations.map((d) => (
                   <option key={d} value={d}>
@@ -237,28 +255,34 @@ export function VideoForm({
             ) : (
               <>
                 <input
+                  id={`${uid}-seconds`}
                   type="number"
                   min={1}
                   max={120}
                   placeholder="Model's choice"
                   value={form.seconds ?? ""}
                   onChange={(e) => set({ seconds: e.target.value ? Number(e.target.value) : null })}
-                  className={`w-32 rounded-plexus border ${marked("seconds")} bg-surface px-2 py-1`}
+                  className={`control w-32 ${edge("seconds")}`}
+                  {...invalid("seconds", `${uid}-seconds-help`)}
                 />
-                <span className="text-xs text-muted">
+                <p id={`${uid}-seconds-help`} className="help">
                   Checked by {model.provider ?? "the backend"} when sent
-                </span>
+                </p>
               </>
             )}
-          </label>
+          </div>
           {model.sizes?.length ? (
-            <label className="flex flex-col gap-1 text-sm">
-              Size
+            <div className="field">
+              <label htmlFor={`${uid}-size`} className="field-label">
+                Size
+              </label>
               <select
+                id={`${uid}-size`}
                 data-testid="video-size"
                 value={form.size ?? ""}
                 onChange={(e) => set({ size: e.target.value || null })}
-                className={`rounded-plexus border ${marked("size")} bg-surface px-2 py-1`}
+                className={`control${edge("size")}`}
+                {...invalid("size")}
               >
                 <option value="">Model&apos;s choice</option>
                 {model.sizes.map((s) => (
@@ -267,17 +291,20 @@ export function VideoForm({
                   </option>
                 ))}
               </select>
-            </label>
+            </div>
           ) : (
-            <p className="self-end text-sm text-muted">This model chooses its own size.</p>
+            <p className="help self-end">This model chooses its own size.</p>
           )}
         </div>
       )}
       {model?.firstFrame && (
-        <div className={`flex flex-col gap-2 rounded-plexus border ${marked("firstFrame")} p-2`}>
-          <label className="flex flex-col gap-1 text-sm">
-            <span className="font-medium">First frame (optional)</span>
+        <div className="flex flex-col gap-2">
+          <div className="field">
+            <label htmlFor={`${uid}-frame`} className="field-label">
+              First frame <small>(optional)</small>
+            </label>
             <select
+              id={`${uid}-frame`}
               data-testid="video-frame"
               value={form.frame?.id ?? ""}
               onChange={(e) =>
@@ -287,7 +314,8 @@ export function VideoForm({
                     (form.frame?.id === e.target.value ? form.frame : null),
                 })
               }
-              className="rounded-plexus border border-line bg-surface px-2 py-1"
+              className={`control${edge("firstFrame")}`}
+              {...invalid("firstFrame")}
             >
               <option value="">None: from the words alone</option>
               {form.frame && !images.some((f) => f.id === form.frame?.id) && (
@@ -299,7 +327,7 @@ export function VideoForm({
                 </option>
               ))}
             </select>
-          </label>
+          </div>
           <div>
             <input
               ref={upload}
@@ -314,65 +342,73 @@ export function VideoForm({
             />
             <button
               type="button"
-              className="flex items-center gap-1 text-sm text-accent"
+              className="btn"
               disabled={uploading}
               onClick={() => upload.current?.click()}
             >
-              <ImagePlus size={14} aria-hidden />{" "}
+              <ImagePlus size={14} aria-hidden />
               {uploading ? "Bringing it in…" : "Bring in an image"}
             </button>
           </div>
         </div>
       )}
       {problem && (
-        <p role="alert" className="text-error" data-testid="video-problem">
-          {problem.message}
-        </p>
+        <div id={alertId} role="alert" className="notice notice--error" data-testid="video-problem">
+          <CircleAlert size={16} aria-hidden />
+          <div>
+            {problem.field && VIDEO_FIELDS[problem.field] && (
+              <span className="notice-title">{VIDEO_FIELDS[problem.field]}</span>
+            )}
+            {problem.message}
+          </div>
+        </div>
       )}
       {confirming && model ? (
-        <div
-          role="group"
-          aria-label="Before sending"
-          className="flex flex-col gap-2 rounded-plexus border border-warn-line bg-warn-bg p-3"
-        >
-          <p className="text-sm text-warn" data-testid="video-quote">
-            {quoteWords(model, ask)}
-          </p>
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              data-testid="confirm-video"
-              className={sendButton}
-              disabled={sending}
-              onClick={() => void send()}
-            >
-              {sending ? "Sending…" : "Make it"}
-            </button>
-            <button
-              ref={notYet}
-              type="button"
-              className="underline"
-              onClick={() => {
-                cancelled.current = true;
-                setConfirming(false);
-              }}
-            >
-              Not yet
-            </button>
+        <div role="group" aria-label="Before sending" className="notice notice--warn">
+          <CircleDollarSign size={16} aria-hidden />
+          <div className="flex flex-col gap-3">
+            <p data-testid="video-quote">{quoteWords(model, ask)}</p>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                data-testid="confirm-video"
+                className="btn btn-primary"
+                disabled={sending}
+                onClick={() => void send()}
+              >
+                {sending ? "Sending…" : "Make it"}
+              </button>
+              <button
+                ref={notYet}
+                type="button"
+                className="btn"
+                onClick={() => {
+                  cancelled.current = true;
+                  setConfirming(false);
+                }}
+              >
+                Not yet
+              </button>
+            </div>
           </div>
         </div>
       ) : (
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <button
             ref={makeButton}
             type="submit"
             data-testid="make-video"
             disabled={Boolean(why)}
-            className={sendButton}
+            aria-describedby={why ? reasonId : undefined}
+            className="btn btn-primary"
           >
             Make the video
           </button>
-          {why && <p className="text-sm text-muted">{why}</p>}
+          {why && (
+            <p id={reasonId} className="help">
+              {why}
+            </p>
+          )}
         </div>
       )}
     </form>
