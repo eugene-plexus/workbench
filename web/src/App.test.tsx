@@ -1,6 +1,6 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
-import App from "./App";
+import App, { memoryFromPath } from "./App";
 import { api, post } from "./lib/api";
 import type { Chat, Me, Models } from "./lib/types";
 
@@ -13,11 +13,34 @@ vi.mock("./lib/api", async (importOriginal) => ({
 // The pages are other files' business; what App does is the frame around them:
 // the top bar, the title, where focus goes.
 vi.mock("./components/ChatView", () => ({
-  ChatView: ({ chatId }: { chatId: string }) => (
+  ChatView: ({ chatId, onOpenMemory }: { chatId: string; onOpenMemory: () => void }) => (
     <div>
       <h1>Chat {chatId}</h1>
       <div id="conversation" role="region" aria-label="Conversation" tabIndex={0} />
+      <button onClick={onOpenMemory}>Manage notes from the chat</button>
     </div>
+  ),
+}));
+vi.mock("./components/Memory", () => ({
+  Memory: ({
+    chats,
+    chatsLoaded,
+    onOpenChat,
+    onClose,
+  }: {
+    chats: { id: string; title: string }[];
+    chatsLoaded: boolean;
+    onOpenChat: (id: string) => void;
+    onClose: () => void;
+  }) => (
+    <section>
+      <h1 id="view-heading">The memory page</h1>
+      <p data-testid="memory-chats">
+        {chatsLoaded ? "loaded" : "loading"}: {chats.map((c) => c.title).join(", ")}
+      </p>
+      <button onClick={() => onOpenChat("one")}>Open the note's chat</button>
+      <button onClick={onClose}>Back to chat</button>
+    </section>
   ),
 }));
 vi.mock("./components/Tools", () => ({
@@ -393,5 +416,151 @@ describe("the start page", () => {
     const failure = await screen.findByText(/Workbench answered 502\./);
     expect(failure).toHaveAttribute("role", "alert");
     expect(failure).toHaveClass("notice", "notice--error");
+  });
+});
+
+describe("the Memory page", () => {
+  it("is a page in the top bar, between Media and Job sites, with a glyph that is only a glyph", async () => {
+    await open();
+    const memory = tab("Memory");
+    expect(memory).toHaveClass("nav-tab");
+    expect(memory).toHaveAttribute("data-testid", "open-memory");
+    expect(memory.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+    expect(memory).not.toHaveAttribute("aria-current");
+    const names = within(bar())
+      .getAllByRole("button")
+      .map((b) => b.textContent?.trim());
+    expect(names.indexOf("Memory")).toBe(names.indexOf("Bins · Media") + 1);
+    expect(names.indexOf("Job sites (your machines)")).toBe(names.indexOf("Memory") + 1);
+  });
+
+  it("is there for the owner as well, who has no Job sites", async () => {
+    await open("/", { me: { owner: true } });
+    expect(tab("Memory")).toBeInTheDocument();
+    expect(within(bar()).queryByRole("button", { name: /Job sites/ })).toBeNull();
+  });
+
+  it("opens at /memory, marks the page a person is on, and names the tab", async () => {
+    await open("/chats/one", { chats: [chat] });
+    fireEvent.click(tab("Memory"));
+    expect(window.location.pathname).toBe("/memory");
+    expect(screen.getByRole("heading", { name: "The memory page" })).toBeInTheDocument();
+    expect(tab("Memory")).toHaveAttribute("aria-current", "page");
+    for (const other of ["Toolbox · Tools", "Bins · Media", "Job sites (your machines)"]) {
+      expect(tab(other)).not.toHaveAttribute("aria-current");
+    }
+    expect(document.title).toBe("Memory · Workbench");
+    expect(screen.queryByRole("heading", { name: "Chat one" })).toBeNull();
+  });
+
+  it("moves focus to its heading when a person opens it, and not when the address did", async () => {
+    await open();
+    fireEvent.click(tab("Memory"));
+    const heading = screen.getByRole("heading", { name: "The memory page" });
+    expect(heading).toHaveFocus();
+    expect(heading).toHaveAttribute("tabindex", "-1");
+    cleanup();
+    await open("/memory");
+    const direct = screen.getByRole("heading", { name: "The memory page" });
+    expect(direct).not.toHaveFocus();
+    expect(direct).not.toHaveAttribute("tabindex");
+    expect(tab("Memory")).toHaveAttribute("aria-current", "page");
+  });
+
+  it("is given the chats, so a note can say which one it came from", async () => {
+    await open("/memory", { chats: [chat] });
+    await waitFor(() =>
+      expect(screen.getByTestId("memory-chats")).toHaveTextContent("loaded: Build a birdhouse"),
+    );
+  });
+
+  it("is left alone when its own tab is pressed again", async () => {
+    await open();
+    fireEvent.click(tab("Memory"));
+    const before = window.history.length;
+    fireEvent.click(tab("Memory"));
+    expect(window.history.length).toBe(before);
+    expect(screen.getByRole("heading", { name: "The memory page" })).toBeInTheDocument();
+  });
+
+  it("goes back to the chat it came from, with Back to chat", async () => {
+    await open("/chats/one", { chats: [chat] });
+    fireEvent.click(tab("Memory"));
+    fireEvent.click(back());
+    expect(window.location.pathname).toBe("/chats/one");
+    expect(screen.getByRole("heading", { name: "Chat one" })).toBeInTheDocument();
+    expect(tab("Memory")).not.toHaveAttribute("aria-current");
+    expect(document.title).toBe("Workbench");
+  });
+
+  it("goes back to the start page when there was no chat", async () => {
+    await open();
+    fireEvent.click(tab("Memory"));
+    fireEvent.click(back());
+    expect(window.location.pathname).toBe("/");
+    expect(
+      screen.getByRole("heading", { level: 1, name: "Start your first chat" }),
+    ).toBeInTheDocument();
+  });
+
+  it("opens a note's chat from the page, and the address follows", async () => {
+    await open("/memory", { chats: [chat] });
+    fireEvent.click(screen.getByRole("button", { name: "Open the note's chat" }));
+    expect(window.location.pathname).toBe("/chats/one");
+    expect(screen.getByRole("heading", { name: "Chat one" })).toBeInTheDocument();
+    expect(tab("Memory")).not.toHaveAttribute("aria-current");
+  });
+
+  it("opens from a chat's own Manage notes", async () => {
+    await open("/chats/one", { chats: [chat] });
+    fireEvent.click(screen.getByRole("button", { name: "Manage notes from the chat" }));
+    expect(window.location.pathname).toBe("/memory");
+    expect(screen.getByRole("heading", { name: "The memory page" })).toBeInTheDocument();
+  });
+
+  it("gives way to another page's tab, and is the page again when that page is left", async () => {
+    await open();
+    fireEvent.click(tab("Memory"));
+    fireEvent.click(tab("Toolbox · Tools"));
+    expect(screen.getByRole("heading", { name: "The tools page" })).toBeInTheDocument();
+    expect(tab("Memory")).not.toHaveAttribute("aria-current");
+    fireEvent.click(tab("Bins · Media"));
+    expect(window.location.pathname).toBe("/media/images");
+    expect(screen.getByRole("heading", { name: "The media page" })).toBeInTheDocument();
+    expect(tab("Memory")).not.toHaveAttribute("aria-current");
+    fireEvent.click(tab("Memory"));
+    expect(window.location.pathname).toBe("/memory");
+    expect(screen.queryByRole("heading", { name: "The media page" })).toBeNull();
+  });
+
+  it("follows the browser's back button", async () => {
+    await open("/chats/one", { chats: [chat] });
+    fireEvent.click(tab("Memory"));
+    expect(screen.getByRole("heading", { name: "The memory page" })).toBeInTheDocument();
+    window.history.pushState(null, "", "/chats/one");
+    act(() => void window.dispatchEvent(new PopStateEvent("popstate")));
+    expect(screen.getByRole("heading", { name: "Chat one" })).toBeInTheDocument();
+    window.history.pushState(null, "", "/memory");
+    act(() => void window.dispatchEvent(new PopStateEvent("popstate")));
+    expect(screen.getByRole("heading", { name: "The memory page" })).toBeInTheDocument();
+  });
+
+  it("is a page with a chat's address that is not it: a chat opens, never the page", async () => {
+    await open("/chats/one", { chats: [chat] });
+    expect(screen.queryByRole("heading", { name: "The memory page" })).toBeNull();
+    expect(tab("Memory")).not.toHaveAttribute("aria-current");
+  });
+});
+
+describe("what an address says is the Memory page", () => {
+  it.each([
+    ["/memory", true],
+    ["/memory/", true],
+    ["/memory/extra", false],
+    ["/memories", false],
+    ["/chats/memory", false],
+    ["/", false],
+  ])("%s is %s", (path, is) => {
+    expect(memoryFromPath(path)).toBe(is);
   });
 });

@@ -1591,3 +1591,25 @@ textarea {
   }
   /* ---- end R3 ---- */
 }
+
+/* MR1: memory */
+@layer components {
+  /* ---- MR1: the top bar with a fifth page ---- */
+  /* Memory is a fifth page in the top bar, and on a phone it still keeps to one
+     row (measured in Chrome: the five labels take 394 px at their old padding
+     and 354 px at this one, in the 374 px a 390 px phone leaves and the 359 px
+     a 375 px phone does). The tabs' padding gives way first: a touch target is
+     its height and 44 px, and not its padding. Under 23 rem the type goes to
+     the 13 px floor as well (334 px, in the 344 px a 360 px phone leaves). */
+  @media (max-width: 40rem) {
+    .nav-tab {
+      padding-inline: 0.25rem;
+    }
+  }
+  @media (max-width: 22.99rem) {
+    .nav-tab {
+      font-size: 0.8125rem;
+    }
+  }
+  /* ---- end MR1 ---- */
+}

@@ -30,6 +30,7 @@ import {
 } from "../lib/words";
 import { Markdown } from "./Markdown";
 import { CopyButton } from "./CopyButton";
+import { type RememberProps, useRemember } from "./RememberThis";
 import { ToolCalls } from "./ToolCalls";
 import { WorkingScene } from "./WorkingScene";
 import { useClock } from "../lib/useClock";
@@ -42,6 +43,7 @@ export function MessageView({
   readOnly,
   onChanged,
   onLook,
+  memory,
 }: {
   chatId: string;
   message: Message;
@@ -51,12 +53,27 @@ export function MessageView({
   onChanged: () => void;
   /** The owner's read-only view: show another version without choosing it. */
   onLook?: (id: string) => void;
+  /** Remember this, in the actions row: absent where notes cannot be kept
+   * (the owner's read-only view, a chat whose owner turned Memory off). */
+  memory?: RememberProps;
 }) {
   const [editing, setEditing] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [acting, setActing] = useState(false);
   // Ticks while an answer runs, for how long it has been thinking.
   const now = useClock(message.role === "assistant" && message.status === "running");
+  // What Remember this would keep: the person's words, or the answer (not the
+  // draft written before a search). Not while an answer is still being written
+  // or the person is editing their own words.
+  const remember = useRemember({
+    chatId,
+    message,
+    text: message.role === "user" ? message.content : answerParts(message).answer,
+    memory:
+      readOnly || message.redacted || message.status === "running" || editing !== null
+        ? undefined
+        : memory,
+  });
   const arrows = (
     <VersionArrows
       chatId={chatId}
@@ -195,10 +212,12 @@ export function MessageView({
                 <Pencil size={14} aria-hidden /> Edit
               </button>
             )}
+            {remember.action}
           </span>
           {arrows}
           <MessageTime message={message} className="pr-2" />
         </div>
+        {remember.panel}
       </div>
     );
   }
@@ -361,6 +380,7 @@ export function MessageView({
                 <RotateCcw size={14} aria-hidden /> Try again
               </button>
             )}
+            {remember.action}
           </span>
         )}
         {arrows}
@@ -369,6 +389,7 @@ export function MessageView({
         )}
       </div>
       {refused}
+      {remember.panel}
     </article>
   );
 }

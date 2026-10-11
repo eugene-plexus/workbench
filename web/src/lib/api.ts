@@ -19,6 +19,9 @@ export class ApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    /** The refusal's own fields when the server sent some beside its sentence
+     * (a note refused says `reason`, and for a secret `looksLike`). */
+    readonly detail?: Record<string, unknown>,
   ) {
     super(message);
   }
@@ -46,17 +49,24 @@ export function headers(extra?: Record<string, string>): Record<string, string> 
   return out;
 }
 
-/** The sentence in a refusal: `{detail: {message}}`, or the status. */
-export async function problemOf(response: Response): Promise<string> {
+/** What a refusal says: the sentence, and the `detail` object it came in. */
+async function refusalOf(
+  response: Response,
+): Promise<{ message: string; detail?: Record<string, unknown> }> {
   try {
     const body = await response.json();
     const detail = body?.detail;
-    if (typeof detail?.message === "string") return detail.message;
-    if (typeof detail === "string") return detail;
+    if (typeof detail?.message === "string") return { message: detail.message, detail };
+    if (typeof detail === "string") return { message: detail };
   } catch {
     // Not JSON: fall back to the status.
   }
-  return `Workbench answered ${response.status}.`;
+  return { message: `Workbench answered ${response.status}.` };
+}
+
+/** The sentence in a refusal: `{detail: {message}}`, or the status. */
+export async function problemOf(response: Response): Promise<string> {
+  return (await refusalOf(response)).message;
 }
 
 export async function checked(response: Response): Promise<Response> {
@@ -75,7 +85,8 @@ export async function checked(response: Response): Promise<Response> {
     announce(error);
     throw error;
   }
-  throw new ApiError(await problemOf(response), response.status);
+  const { message, detail } = await refusalOf(response);
+  throw new ApiError(message, response.status, detail);
 }
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -100,6 +111,9 @@ export const post = <T>(path: string, body?: unknown) =>
 export const patch = <T>(path: string, body: unknown) =>
   api<T>(path, { method: "PATCH", body: JSON.stringify(body) });
 
+export const put = <T>(path: string, body: unknown) =>
+  api<T>(path, { method: "PUT", body: JSON.stringify(body) });
+
 export const del = (path: string) => api<void>(path, { method: "DELETE" });
 
 /** A file the server keeps, fetched with the secret and shown from a blob:
@@ -112,4 +126,15 @@ export async function fileUrl(id: string): Promise<string> {
     }),
   );
   return URL.createObjectURL(await response.blob());
+}
+
+/** A file the server makes on request (the memory export), fetched with the
+ * secret, since a plain link cannot carry the header. `name` is the one the
+ * server gave it, when it gave one. */
+export async function fileOf(path: string): Promise<{ blob: Blob; name: string | null }> {
+  const response = await checked(
+    await fetch(path, { credentials: "same-origin", headers: headers() }),
+  );
+  const named = /filename="?([^";]+)"?/i.exec(response.headers.get("Content-Disposition") ?? "");
+  return { blob: await response.blob(), name: named?.[1] ?? null };
 }

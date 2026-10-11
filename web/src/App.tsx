@@ -1,9 +1,10 @@
-import { Boxes, CircleAlert, Info, Keyboard, Laptop, Wrench } from "lucide-react";
+import { Boxes, Brain, CircleAlert, Info, Keyboard, Laptop, Wrench } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ChatView } from "./components/ChatView";
 import { JobSites } from "./components/JobSites";
 import { Mascot } from "./components/Mascot";
+import { Memory } from "./components/Memory";
 import { type Handoff, Media } from "./components/Media";
 import { Sidebar } from "./components/Sidebar";
 import { SignIn } from "./components/SignIn";
@@ -21,6 +22,11 @@ export function chatFromPath(path: string): string | null {
   return match ? match[1]! : null;
 }
 
+/** Whether an address is the Memory page: `/memory`. */
+export function memoryFromPath(path: string): boolean {
+  return /^\/memory\/?$/.test(path);
+}
+
 /** Whether this is an Apple keyboard: the shortcuts are Control and Option
  * there, and Ctrl and Alt elsewhere. A browser that will not say is not one. */
 function onMac(): boolean {
@@ -32,11 +38,12 @@ function onMac(): boolean {
 }
 
 /** The page a person is on, for the top bar, the tab's title and where focus goes. */
-type View = "chat" | "home" | "tools" | "media" | "sites";
+type View = "chat" | "home" | "tools" | "media" | "memory" | "sites";
 
 const PAGE_TITLES = {
   tools: "Toolbox · Tools",
   media: "Bins · Media",
+  memory: "Memory",
   sites: "Job sites",
 } as const;
 
@@ -56,6 +63,7 @@ export default function App() {
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   const [chatId, setChatId] = useState<string | null>(() => chatFromPath(window.location.pathname));
   const [media, setMedia] = useState(() => mediaFromPath(window.location.pathname));
+  const [memoryOpen, setMemoryOpen] = useState(() => memoryFromPath(window.location.pathname));
   // The owner reading someone else's bins (M3); null is one's own.
   const [mediaPerson, setMediaPerson] = useState<{ sub: string; name: string } | null>(null);
   // An image sent to a new chat waits in that chat's composer (M7).
@@ -80,9 +88,11 @@ export default function App() {
       ? "tools"
       : media
         ? "media"
-        : chatId
-          ? "chat"
-          : "home";
+        : memoryOpen
+          ? "memory"
+          : chatId
+            ? "chat"
+            : "home";
   const lastView = useRef(view);
 
   useEffect(() => {
@@ -94,7 +104,10 @@ export default function App() {
 
   // The tab says which page it holds, as it does for a chat (ChatView).
   useEffect(() => {
-    if (phase.kind !== "ready" || (view !== "tools" && view !== "media" && view !== "sites"))
+    if (
+      phase.kind !== "ready" ||
+      (view !== "tools" && view !== "media" && view !== "memory" && view !== "sites")
+    )
       return;
     document.title = `${PAGE_TITLES[view]} · Workbench`;
     return () => {
@@ -108,7 +121,7 @@ export default function App() {
     const before = lastView.current;
     lastView.current = view;
     if (before === view || phase.kind !== "ready") return;
-    if (view === "tools" || view === "media" || view === "sites") {
+    if (view === "tools" || view === "media" || view === "memory" || view === "sites") {
       focusOn(document.getElementById("view-heading") ?? document.querySelector("main h1"));
     }
   }, [phase.kind, view]);
@@ -118,6 +131,7 @@ export default function App() {
     if (window.location.pathname !== path) window.history.pushState(null, "", path);
     setChatId(id);
     setMedia(null);
+    setMemoryOpen(false);
     setMediaPerson(null);
     setShowTools(false);
     setShowSites(false);
@@ -129,6 +143,7 @@ export default function App() {
       const path = mediaPath(door);
       if (window.location.pathname !== path) window.history.pushState(null, "", path);
       setMedia({ door, id: null });
+      setMemoryOpen(false);
       setMediaPerson(person);
       setShowTools(false);
       setShowSites(false);
@@ -137,10 +152,21 @@ export default function App() {
     [],
   );
 
+  const openMemory = useCallback(() => {
+    if (window.location.pathname !== "/memory") window.history.pushState(null, "", "/memory");
+    setMemoryOpen(true);
+    setMedia(null);
+    setMediaPerson(null);
+    setShowTools(false);
+    setShowSites(false);
+    setShowChats(false);
+  }, []);
+
   useEffect(() => {
     const back = () => {
       setChatId(chatFromPath(window.location.pathname));
       setMedia(mediaFromPath(window.location.pathname));
+      setMemoryOpen(memoryFromPath(window.location.pathname));
       setMediaPerson(null);
       setShowTools(false);
       setShowSites(false);
@@ -366,6 +392,19 @@ export default function App() {
               <Boxes size={14} aria-hidden />
               Bins · Media
             </button>
+            <button
+              type="button"
+              aria-current={view === "memory" ? "page" : undefined}
+              className="nav-tab"
+              data-testid="open-memory"
+              onClick={() => {
+                if (view === "memory") return;
+                openMemory();
+              }}
+            >
+              <Brain size={14} aria-hidden />
+              Memory
+            </button>
             {!phase.me.owner && (
               <button
                 type="button"
@@ -463,6 +502,13 @@ export default function App() {
               }
             }}
           />
+        ) : memoryOpen ? (
+          <Memory
+            chats={chats}
+            chatsLoaded={chatsLoaded}
+            onOpenChat={open}
+            onClose={() => open(chatId)}
+          />
         ) : chatId ? (
           <ChatView
             key={chatId}
@@ -476,6 +522,7 @@ export default function App() {
               open(null);
               void refreshChats();
             }}
+            onOpenMemory={openMemory}
           />
         ) : (
           <Empty

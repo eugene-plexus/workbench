@@ -1,7 +1,8 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
-import { del, patch } from "../lib/api";
-import type { Chat, ChatDetail, Me, Message } from "../lib/types";
+import { api, del, patch, post } from "../lib/api";
+import type { Chat, ChatDetail, Me, Message, Models } from "../lib/types";
+import { held, note, owners, sending } from "../test-memory";
 import { ChatView } from "./ChatView";
 
 vi.mock("../lib/api", () => ({
@@ -50,6 +51,7 @@ const element = () => (
     modelsError={null}
     onChanged={vi.fn()}
     onDeleted={vi.fn()}
+    onOpenMemory={vi.fn()}
   />
 );
 
@@ -84,8 +86,10 @@ beforeEach(() => {
       disconnect() {}
     },
   );
+  vi.mocked(api).mockReset();
   vi.mocked(del).mockReset();
   vi.mocked(patch).mockReset();
+  vi.mocked(post).mockReset();
   reload.mockReset();
   loadError = null;
   detail = { chat, messages: [], ownerName: null };
@@ -311,5 +315,357 @@ describe("Jump to latest", () => {
     fireEvent.click(jump);
     expect(screen.queryByRole("button", { name: "Jump to latest" })).toBeNull();
     expect(box.scrollTop).toBe(1000);
+  });
+});
+
+describe("Memory in a chat", () => {
+  const models: Models = {
+    models: [
+      {
+        id: "local",
+        ready: true,
+        onDemand: false,
+        imageInput: false,
+        fileInput: false,
+        audioInput: false,
+        webSearch: false,
+        contextLength: 32768,
+      },
+    ],
+    webSearch: { available: false, reason: null },
+  };
+
+  function shown() {
+    const onOpenMemory = vi.fn();
+    const view = render(
+      <ChatView
+        chatId="one"
+        me={me}
+        models={models}
+        modelsError={null}
+        onChanged={vi.fn()}
+        onDeleted={vi.fn()}
+        onOpenMemory={onOpenMemory}
+      />,
+    );
+    return { ...view, onOpenMemory };
+  }
+
+  const memoryCalls = () =>
+    vi.mocked(api).mock.calls.filter(([path]) => path === "/api/chats/one/memory");
+
+  it("has a chip in the header that says what the next message carries, between the title and the buttons", async () => {
+    vi.mocked(api).mockResolvedValue(sending());
+    shown();
+    const chip = await screen.findByRole("button", { name: "Memory: 1 note sent" });
+    expect(chip).toHaveAttribute("data-testid", "memory-chip");
+    const header = chip.parentElement!;
+    const order = Array.from(header.children);
+    expect(order.indexOf(screen.getByTestId("chat-title"))).toBeLessThan(order.indexOf(chip));
+    expect(order.indexOf(chip)).toBeLessThan(
+      order.indexOf(screen.getByRole("button", { name: "Export chat as Markdown" })),
+    );
+    expect(memoryCalls()).toHaveLength(1);
+  });
+
+  it("says plain Memory until it has read, and that it could not when it could not", async () => {
+    vi.mocked(api).mockRejectedValue(new Error("Workbench answered 502."));
+    shown();
+    expect(await screen.findByRole("button", { name: "Memory: not available" })).toHaveClass(
+      "text-warn",
+    );
+    fireEvent.click(screen.getByTestId("memory-chip"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Workbench answered 502.");
+  });
+
+  it("is a chip even in someone else's chat, where it says how many notes were used and nothing more", async () => {
+    vi.mocked(api).mockResolvedValue(owners());
+    detail = {
+      chat: { ...chat, readOnly: true },
+      messages: [message({ role: "user", content: "Hi" })],
+      ownerName: "Bo",
+    };
+    shown();
+    expect(await screen.findByRole("button", { name: "Memory: 2 notes used" })).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("memory-chip"));
+    expect(screen.getByTestId("memory-status")).toHaveTextContent("not what they said");
+    expect(screen.queryByRole("switch")).toBeNull();
+  });
+
+  it("opens its drawer on a press, reads the notes again, and closes it on a second press", async () => {
+    vi.mocked(api).mockResolvedValue(sending());
+    shown();
+    const chip = await screen.findByTestId("memory-chip");
+    expect(chip).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByTestId("memory-drawer")).toBeNull();
+    fireEvent.click(chip);
+    expect(chip).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByTestId("memory-drawer")).toBeInTheDocument();
+    await waitFor(() => expect(memoryCalls()).toHaveLength(2));
+    fireEvent.click(chip);
+    expect(screen.queryByTestId("memory-drawer")).toBeNull();
+  });
+
+  it("is one panel at a time with the chat's settings, whichever is opened last", async () => {
+    vi.mocked(api).mockResolvedValue(sending());
+    shown();
+    const chip = await screen.findByTestId("memory-chip");
+    const settings = screen.getByRole("button", { name: "This chat's settings" });
+    fireEvent.click(chip);
+    expect(screen.getByTestId("memory-drawer")).toBeInTheDocument();
+    fireEvent.click(settings);
+    expect(screen.queryByTestId("memory-drawer")).toBeNull();
+    expect(screen.getByTestId("chat-settings")).toBeInTheDocument();
+    expect(settings).toHaveAttribute("aria-expanded", "true");
+    expect(chip).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(chip);
+    expect(screen.queryByTestId("chat-settings")).toBeNull();
+    expect(screen.getByTestId("memory-drawer")).toBeInTheDocument();
+    expect(settings).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("opens the Memory page from the drawer's Manage notes", async () => {
+    vi.mocked(api).mockResolvedValue(sending());
+    const { onOpenMemory } = shown();
+    fireEvent.click(await screen.findByTestId("memory-chip"));
+    fireEvent.click(screen.getByRole("button", { name: "Manage notes" }));
+    expect(onOpenMemory).toHaveBeenCalledOnce();
+  });
+
+  it("reads the notes again when the chat's model changes, and when its memory settings do", async () => {
+    vi.mocked(api).mockResolvedValue(sending());
+    const again = () => (
+      <ChatView
+        chatId="one"
+        me={me}
+        models={models}
+        modelsError={null}
+        onChanged={vi.fn()}
+        onDeleted={vi.fn()}
+        onOpenMemory={vi.fn()}
+      />
+    );
+    const { rerender } = render(again());
+    await screen.findByTestId("memory-chip");
+    expect(memoryCalls()).toHaveLength(1);
+    // Nothing changed: nothing is read.
+    rerender(again());
+    expect(memoryCalls()).toHaveLength(1);
+    detail = { chat: { ...chat, model: "gpt-5" }, messages: [], ownerName: null };
+    rerender(again());
+    await waitFor(() => expect(memoryCalls()).toHaveLength(2));
+    detail = {
+      chat: { ...chat, model: "gpt-5", settings: { memory: "off" } },
+      messages: [],
+      ownerName: null,
+    };
+    rerender(again());
+    await waitFor(() => expect(memoryCalls()).toHaveLength(3));
+    detail = {
+      chat: { ...chat, model: "gpt-5", settings: { memory: "off", memoryExternal: true } },
+      messages: [],
+      ownerName: null,
+    };
+    rerender(again());
+    await waitFor(() => expect(memoryCalls()).toHaveLength(4));
+  });
+
+  describe("after a message that begins with a command", () => {
+    const sent = (memory: unknown) => {
+      vi.mocked(post).mockResolvedValue({
+        user: message({ id: "u1", role: "user", content: "x" }),
+        answer: message({ id: "a1", status: "running" }),
+        memory,
+      });
+    };
+
+    async function say(words: string) {
+      fireEvent.change(await screen.findByTestId("composer"), { target: { value: words } });
+      fireEvent.click(screen.getByTestId("send"));
+    }
+
+    it("says what was kept, in a toast over the thread, and the chip is read again", async () => {
+      vi.mocked(api).mockResolvedValue(sending());
+      sent({
+        command: "remember",
+        remembered: note({ text: "I use metric units" }),
+        created: true,
+      });
+      shown();
+      await screen.findByTestId("memory-chip");
+      const before = memoryCalls().length;
+      await say("Remember that I use metric units");
+      const toast = await screen.findByTestId("memory-toast");
+      expect(toast).toHaveTextContent("Remembered: “I use metric units”");
+      // Over the thread, above the composer, not in the flow of the page.
+      expect(toast.parentElement).toHaveClass("absolute", "z-10", "bottom-4");
+      expect(toast.parentElement!.parentElement).toContainElement(screen.getByTestId("messages"));
+      await waitFor(() => expect(memoryCalls().length).toBeGreaterThan(before));
+    });
+
+    it("sits above the jump pill when that is showing", async () => {
+      vi.mocked(api).mockResolvedValue(sending());
+      detail = {
+        chat,
+        messages: [message({ id: "u9", role: "user", content: "I use metric units" })],
+        ownerName: null,
+      };
+      vi.mocked(post).mockResolvedValue({ note: note(), created: true });
+      shown();
+      const box = await screen.findByTestId("messages");
+      let top = 0;
+      Object.defineProperty(box, "scrollHeight", { value: 1000, configurable: true });
+      Object.defineProperty(box, "clientHeight", { value: 400, configurable: true });
+      Object.defineProperty(box, "scrollTop", {
+        get: () => top,
+        set: (value: number) => {
+          top = value;
+        },
+        configurable: true,
+      });
+      top = 600;
+      fireEvent.scroll(box);
+      top = 300;
+      fireEvent.scroll(box);
+      expect(screen.getByRole("button", { name: "Jump to latest" })).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Remember this message" }));
+      const toast = await screen.findByTestId("memory-toast");
+      expect(toast.parentElement).toHaveClass("bottom-16");
+      expect(toast.parentElement).not.toHaveClass("bottom-4");
+    });
+
+    it("says why words were not kept, and that the message was still sent", async () => {
+      vi.mocked(api).mockResolvedValue(sending());
+      sent({
+        command: "remember",
+        refused: {
+          message: "That looks like a password or key, so Workbench will not keep it",
+          reason: "secret",
+          looksLike: "a card number",
+        },
+      });
+      shown();
+      await say("Remember that my card is 4242 4242 4242 4242");
+      const toast = await screen.findByTestId("memory-toast");
+      expect(toast).toHaveAttribute("role", "alert");
+      expect(toast).toHaveTextContent("It looks like a card number. Your message was still sent.");
+    });
+
+    it("lists the notes forget might mean, and deletes only the one picked", async () => {
+      vi.mocked(api).mockResolvedValue(sending());
+      vi.mocked(del).mockResolvedValue(undefined);
+      sent({
+        command: "forget",
+        words: "metric",
+        candidates: [
+          note({ id: "a", text: "I use metric units" }),
+          note({ id: "b", text: "Metric only" }),
+        ],
+      });
+      shown();
+      await say("Forget my metric units");
+      const toast = await screen.findByTestId("memory-toast");
+      expect(toast).toHaveTextContent("Delete one of these notes?");
+      expect(del).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "Delete note: Metric only" }));
+      await waitFor(() => expect(del).toHaveBeenCalledExactlyOnceWith("/api/memory/notes/b"));
+    });
+
+    it("says nothing for a message that was no command, and a new toast replaces an old one", async () => {
+      vi.mocked(api).mockResolvedValue(sending());
+      sent(undefined);
+      shown();
+      await say("Hello");
+      await waitFor(() => expect(post).toHaveBeenCalledOnce());
+      expect(screen.queryByTestId("memory-toast")).toBeNull();
+      sent({ command: "remember", remembered: note({ text: "First" }), created: true });
+      await say("Remember that First");
+      await waitFor(() => expect(screen.getByTestId("memory-toast")).toHaveTextContent("First"));
+      sent({ command: "remember", remembered: note({ id: "n2", text: "Second" }), created: true });
+      await say("Remember that Second");
+      await waitFor(() => expect(screen.getByTestId("memory-toast")).toHaveTextContent("Second"));
+      expect(screen.getAllByTestId("memory-toast")).toHaveLength(1);
+    });
+
+    it("opens the Memory page from the toast's Manage", async () => {
+      vi.mocked(api).mockResolvedValue(sending());
+      sent({ command: "remember", remembered: note(), created: true });
+      const { onOpenMemory } = shown();
+      await say("Remember that I use metric units");
+      fireEvent.click(await screen.findByTestId("memory-toast-manage"));
+      expect(onOpenMemory).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe("Remember this on a message", () => {
+    beforeEach(() => {
+      detail = {
+        chat,
+        messages: [
+          message({ id: "u1", role: "user", content: "I use metric units" }),
+          message({ id: "a1", content: "Metric it is." }),
+        ],
+        ownerName: null,
+      };
+    });
+
+    it("keeps the message's words as a note from a button, and says so in the toast", async () => {
+      vi.mocked(api).mockResolvedValue(sending());
+      vi.mocked(post).mockResolvedValue({
+        note: note({ id: "k", text: "I use metric units", source: "button" }),
+        created: true,
+      });
+      shown();
+      fireEvent.click(await screen.findByRole("button", { name: "Remember this message" }));
+      expect(await screen.findByTestId("memory-toast")).toHaveTextContent(
+        "Remembered: “I use metric units”",
+      );
+      expect(post).toHaveBeenCalledExactlyOnceWith("/api/memory/notes", {
+        text: "I use metric units",
+        source: "button",
+        chatId: "one",
+        messageId: "u1",
+      });
+      // The answer's words can be kept as well.
+      expect(screen.getByRole("button", { name: "Remember this answer" })).toBeInTheDocument();
+    });
+
+    it("is not offered where the owner has turned Memory off", async () => {
+      vi.mocked(api).mockResolvedValue(
+        held("install_off", "The owner of this Workbench has turned Memory off."),
+      );
+      shown();
+      await screen.findByRole("button", { name: "Memory off" });
+      expect(screen.queryByRole("button", { name: /^Remember this/ })).toBeNull();
+    });
+
+    it("says it keeps nothing, and how to turn memory on, where the person has turned it off", async () => {
+      vi.mocked(api).mockResolvedValue(held("person_off", "Memory is off for you."));
+      const { onOpenMemory } = shown();
+      await screen.findByRole("button", { name: "Memory off" });
+      fireEvent.click(screen.getByRole("button", { name: "Remember this message" }));
+      expect(post).not.toHaveBeenCalled();
+      expect(screen.getByTestId("remember-off")).toHaveTextContent(
+        "Memory is off for you, so nothing was kept.",
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Open Memory" }));
+      expect(onOpenMemory).toHaveBeenCalledOnce();
+    });
+
+    it("is not offered in someone else's chat", async () => {
+      vi.mocked(api).mockResolvedValue(owners());
+      detail = { ...detail, chat: { ...chat, readOnly: true }, ownerName: "Bo" };
+      shown();
+      await screen.findByTestId("memory-chip");
+      expect(screen.queryByRole("button", { name: /^Remember this/ })).toBeNull();
+    });
+
+    it("is offered before the notes have been read: the server says no, if it is no", async () => {
+      vi.mocked(api).mockReturnValue(new Promise(() => undefined) as never);
+      shown();
+      expect(
+        await screen.findByRole("button", { name: "Remember this message" }),
+      ).toBeInTheDocument();
+    });
   });
 });
