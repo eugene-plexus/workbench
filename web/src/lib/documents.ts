@@ -345,7 +345,7 @@ export function holdWords(
 /** How much of the model's window the message and the chat come to, in one line. */
 export function requestWords(request: FilesRequest | null): string | null {
   if (!request || request.window == null || request.full) return null;
-  return `With your files, this chat comes to about ${request.used.toLocaleString()} of this model's ${request.window.toLocaleString()} tokens, and ${request.reserve.toLocaleString()} are kept for the answer.`;
+  return `What would be sent now comes to about ${request.used.toLocaleString()} of this model's ${request.window.toLocaleString()} tokens, and ${request.reserve.toLocaleString()} are kept for the answer.`;
 }
 
 /** A sentence that ends: the server's words, or an error's, with a full stop if it has none. */

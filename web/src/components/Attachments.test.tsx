@@ -480,7 +480,7 @@ describe("what is said under the files", () => {
   it("is how much of the window the message comes to", () => {
     show([file()]);
     expect(screen.getByTestId("files-request")).toHaveTextContent(
-      "With your files, this chat comes to about 4,218 of this model's 32,768 tokens, and 1,024 are kept for the answer.",
+      "What would be sent now comes to about 4,218 of this model's 32,768 tokens, and 1,024 are kept for the answer.",
     );
   });
 

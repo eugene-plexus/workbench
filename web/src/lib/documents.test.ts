@@ -368,7 +368,7 @@ describe("why Send waits", () => {
 describe("how much of the window the message comes to", () => {
   it("says what it uses, of what, and what is kept for the answer", () => {
     expect(requestWords({ used: 4218, window: 32768, reserve: 1024, full: null })).toBe(
-      "With your files, this chat comes to about 4,218 of this model's 32,768 tokens, and 1,024 are kept for the answer.",
+      "What would be sent now comes to about 4,218 of this model's 32,768 tokens, and 1,024 are kept for the answer.",
     );
   });
 
