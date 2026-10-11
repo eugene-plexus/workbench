@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import { api, post } from "../lib/api";
 import type { SpeechModel, TranscriptionModel } from "../lib/media";
@@ -210,4 +210,188 @@ it("names the size when a recording is over the limit", async () => {
     ),
   ).toBeInTheDocument();
   expect(screen.getByTestId("make-transcript")).toBeDisabled();
+});
+
+describe("the model picker", () => {
+  it("labels the choice Model, and is described by where the model runs once one is chosen", () => {
+    render(<SpeechForm me={me} models={[kokoro, local]} draft={null} onMade={() => undefined} />);
+    const picker = screen.getByRole("combobox", { name: "Model" });
+    expect(picker).toBe(screen.getByTestId("speech-model"));
+    expect(picker).not.toHaveAccessibleDescription();
+    fireEvent.change(picker, { target: { value: "local-voice" } });
+    expect(picker).toHaveAccessibleDescription("Runs on your own machines.");
+    expect(screen.getByTestId("where-it-runs")).toHaveClass("help");
+  });
+
+  it("offers a box to find a model only when there are many", () => {
+    const many = Array.from({ length: 9 }, (_, i) => ({ ...kokoro, id: `m/${i}` }));
+    render(<SpeechForm me={me} models={many} draft={null} onMade={() => undefined} />);
+    expect(screen.getByRole("searchbox", { name: "Find a model" })).toHaveClass("control--sm");
+  });
+});
+
+describe("what a refusal named on the Speech screen", () => {
+  const draft = (field: string, message: string) => ({
+    request: { model: "local-voice", input: "Hi", voice: "nope", format: "mp3" },
+    field,
+    message,
+  });
+
+  it("begins the alert with the field's own label, marks the voice, and ties it to help and alert", () => {
+    render(
+      <SpeechForm
+        me={me}
+        models={[kokoro, local]}
+        draft={draft("voice", "voice: 'local-voice' has no voice 'nope'.")}
+        onMade={() => undefined}
+      />,
+    );
+    const alert = screen.getByTestId("speech-problem");
+    expect(alert).toHaveAttribute("role", "alert");
+    expect(alert.textContent).toMatch(/^Voice/);
+    const voice = screen.getByTestId("speech-voice");
+    expect(voice).toHaveAttribute("aria-invalid", "true");
+    expect(voice).toHaveClass("border-error-line", "border-2");
+    expect(voice).toHaveAccessibleDescription(
+      /Checked by the backend when sent.*has no voice 'nope'/s,
+    );
+    // Nothing else is marked.
+    expect(screen.getByTestId("speech-input")).not.toHaveAttribute("aria-invalid");
+    expect(screen.getByTestId("speech-format")).not.toHaveAttribute("aria-invalid");
+  });
+
+  it("marks the text, and the character count stays in its description beside the alert", () => {
+    render(
+      <SpeechForm
+        me={me}
+        models={[local]}
+        draft={draft("input", "input: too long")}
+        onMade={() => undefined}
+      />,
+    );
+    const text = screen.getByTestId("speech-input");
+    expect(text).toHaveAttribute("aria-invalid", "true");
+    expect(text).toHaveAccessibleDescription(/2 of 4,096 characters.*input: too long/s);
+    expect(screen.getByTestId("speech-problem").textContent).toMatch(/^What to say/);
+  });
+
+  it("marks the format", () => {
+    render(
+      <SpeechForm
+        me={me}
+        models={[local]}
+        draft={draft("response_format", "response_format: not offered")}
+        onMade={() => undefined}
+      />,
+    );
+    expect(screen.getByTestId("speech-format")).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByTestId("speech-problem").textContent).toMatch(/^Format/);
+  });
+
+  it("names no field for a refusal that named none, and marks nothing", () => {
+    render(
+      <SpeechForm
+        me={me}
+        models={[local]}
+        draft={{
+          request: { model: "local-voice", input: "Hi", voice: "v", format: "mp3" },
+          field: null,
+          message: "The gateway is busy.",
+        }}
+        onMade={() => undefined}
+      />,
+    );
+    expect(screen.getByTestId("speech-problem")).toHaveTextContent("The gateway is busy.");
+    expect(document.querySelector("[aria-invalid]")).toBeNull();
+  });
+
+  it("describes the text by how long it is", () => {
+    render(<SpeechForm me={me} models={[kokoro]} draft={null} onMade={() => undefined} />);
+    const text = screen.getByTestId("speech-input");
+    expect(text).toHaveAccessibleDescription("0 of 4,096 characters");
+    fireEvent.change(text, { target: { value: "Hello." } });
+    expect(text).toHaveAccessibleDescription("6 of 4,096 characters");
+  });
+});
+
+describe("the reason a button is disabled", () => {
+  it("is the Speak it button's description, and goes when there is none", () => {
+    render(<SpeechForm me={me} models={[kokoro]} draft={null} onMade={() => undefined} />);
+    const speak = screen.getByTestId("make-speech");
+    expect(speak).toHaveAccessibleDescription("Choose a model first.");
+    fireEvent.change(screen.getByTestId("speech-model"), {
+      target: { value: "openrouter/kokoro" },
+    });
+    expect(speak).toHaveAccessibleDescription("Write what to say first.");
+    fireEvent.change(screen.getByTestId("speech-input"), { target: { value: "Hello." } });
+    expect(speak).toHaveAccessibleDescription("Choose a voice first.");
+    fireEvent.change(screen.getByTestId("speech-voice"), { target: { value: "af_bella" } });
+    expect(speak).toBeEnabled();
+    expect(speak).not.toHaveAccessibleDescription();
+  });
+
+  it("is the Turn it into text button's description", async () => {
+    render(<TranscriptionForm me={me} models={[turbo]} onMade={() => undefined} />);
+    const turn = screen.getByTestId("make-transcript");
+    expect(turn).toHaveAccessibleDescription("Choose a model first.");
+    fireEvent.change(screen.getByTestId("transcription-model"), {
+      target: { value: "openrouter/whisper-turbo" },
+    });
+    expect(turn).toHaveAccessibleDescription("Record or choose a recording first.");
+    const file = new File([new Uint8Array([1])], "note.wav", { type: "audio/wav" });
+    fireEvent.change(screen.getByTestId("choose-recording"), { target: { files: [file] } });
+    await screen.findByTestId("chosen-recording");
+    expect(turn).toBeEnabled();
+    expect(turn).not.toHaveAccessibleDescription();
+  });
+});
+
+describe("the Transcription screen's recording", () => {
+  it("is one named group of the ways to bring a recording, and what was chosen", async () => {
+    render(<TranscriptionForm me={me} models={[turbo]} onMade={() => undefined} />);
+    const group = screen.getByRole("group", { name: "Recording" });
+    expect(within(group).getByRole("button", { name: "Choose a recording" })).toBeInTheDocument();
+    // This page cannot record (no HTTPS here): it says so, as help, in the group.
+    expect(within(group).getByTestId("record-needs-https")).toHaveClass("help");
+    const file = new File([new Uint8Array([1])], "note.wav", { type: "audio/wav" });
+    fireEvent.change(screen.getByTestId("choose-recording"), { target: { files: [file] } });
+    expect(await within(group).findByTestId("chosen-recording")).toHaveTextContent("note.wav");
+    expect(within(group).getByRole("button", { name: "Remove recording" })).toHaveClass(
+      "btn-quiet",
+    );
+  });
+
+  it("names a recording over the limit in the error tint as well as in words", async () => {
+    render(<TranscriptionForm me={me} models={[turbo]} onMade={() => undefined} />);
+    const file = new File([new Uint8Array(26 * 1024 * 1024)], "long.webm", { type: "audio/webm" });
+    fireEvent.change(screen.getByTestId("choose-recording"), { target: { files: [file] } });
+    expect(await screen.findByTestId("chosen-recording")).toHaveClass("text-error");
+  });
+
+  it("says in an alert what went wrong sending a recording, in the server's words", async () => {
+    vi.mocked(api).mockRejectedValue(new Error("The gateway refused this recording."));
+    render(<TranscriptionForm me={me} models={[turbo]} onMade={() => undefined} />);
+    fireEvent.change(screen.getByTestId("transcription-model"), {
+      target: { value: "openrouter/whisper-turbo" },
+    });
+    const file = new File([new Uint8Array([1])], "note.wav", { type: "audio/wav" });
+    fireEvent.change(screen.getByTestId("choose-recording"), { target: { files: [file] } });
+    await screen.findByTestId("chosen-recording");
+    fireEvent.click(screen.getByTestId("make-transcript"));
+    const alert = await screen.findByTestId("transcription-problem");
+    expect(alert).toHaveAttribute("role", "alert");
+    expect(alert).toHaveClass("notice--error");
+    expect(alert).toHaveTextContent("The gateway refused this recording.");
+  });
+
+  it("labels the language box and the translation choice, and disables the language when translating", async () => {
+    render(<TranscriptionForm me={me} models={[whisper]} onMade={() => undefined} />);
+    fireEvent.change(screen.getByTestId("transcription-model"), {
+      target: { value: "oai/whisper-1" },
+    });
+    const language = screen.getByLabelText("Language spoken (optional)");
+    expect(language).toBeEnabled();
+    fireEvent.click(screen.getByLabelText("Translate into English"));
+    expect(language).toBeDisabled();
+  });
 });

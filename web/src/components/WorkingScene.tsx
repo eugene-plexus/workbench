@@ -25,9 +25,11 @@ function useReducedMotion(): boolean {
  * plain progress line it is given as children. The scene appears only once
  * an active wait outlasts SCENE_DELAY_MS, moves to the next scene every
  * SCENE_TURN_MS, and is hidden from screen readers: the plain line is the
- * state, and it stays mounted whether the scene shows or not. With reduced
- * motion asked for, the still working pose stands in for the loop and the
- * phrase stays.
+ * state, and it stays mounted whether the scene shows or not. No room is held
+ * for the scene before it shows: a fast answer starts at once, flush left, and
+ * is never preceded by an empty block (the line moves right when the scene
+ * comes, as it always has). With reduced motion asked for, the still working
+ * pose stands in for the loop and the phrase stays.
  */
 export function WorkingScene({
   active,
@@ -77,7 +79,7 @@ export function WorkingScene({
         {scene && (
           <span
             aria-hidden="true"
-            className="scene-in italic text-muted"
+            className="scene-in text-sm italic text-muted"
             data-testid="scene-phrase"
           >
             {scene.phrase}

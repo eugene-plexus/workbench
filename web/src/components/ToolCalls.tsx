@@ -1,3 +1,4 @@
+import { CircleAlert, Wrench } from "lucide-react";
 import { useState } from "react";
 
 import { post } from "../lib/api";
@@ -22,11 +23,32 @@ const labels: Record<ToolCall["status"], string> = {
   uncertain: "Result unknown — check the server before trying again",
 };
 
+/** The colour of a call's state: a dot and words carry it, never the colour
+ * alone. Amber is a call that waits on you or whose result is unknown. */
+const tone: Record<ToolCall["status"], string> = {
+  pending: "text-warn",
+  signing: "text-warn",
+  uncertain: "text-warn",
+  running: "text-info",
+  done: "text-ok",
+  failed: "text-error",
+  declined: "text-muted",
+  cancelled: "text-muted",
+};
+
+/** A card's edge, for the calls that ask something of you or went wrong. */
+const edge: Partial<Record<ToolCall["status"], string>> = {
+  pending: "border-warn-line",
+  signing: "border-warn-line",
+  uncertain: "border-warn-line",
+  failed: "border-error-line",
+};
+
 function clock(iso: string): string {
   const when = new Date(iso);
   return Number.isNaN(when.getTime())
     ? iso
-    : when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    : when.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
 /**
@@ -89,15 +111,19 @@ function SignCall({
   };
 
   return (
-    <div className="mt-2 flex flex-col gap-2 rounded-plexus border border-accent p-2">
+    // It asks something of you, so it keeps the blue edge.
+    <div className="mt-2 flex flex-col gap-2 rounded-plexus border border-accent p-3">
       <p className="font-semibold">
         {held.kind === "window"
           ? `Open a ${held.minutes ?? 60}-minute window on ${machine}`
           : `${machine} asks for your signature`}
       </p>
-      <div className="rounded-plexus bg-soft p-2" aria-label={`What ${machine} holds`}>
+      <div role="group" className="rounded-plexus bg-soft p-2" aria-label={`What ${machine} holds`}>
         {held.words.map((line, index) => (
-          <p key={index} className="whitespace-pre-wrap break-all font-mono text-sm">
+          <p
+            key={index}
+            className="whitespace-pre-wrap font-mono text-[0.8125rem] leading-5 wrap-anywhere"
+          >
             {line}
           </p>
         ))}
@@ -106,14 +132,9 @@ function SignCall({
         Nothing has run. {machine} checks your own key itself: Eugene cannot sign for you. A passkey
         prompt does not show what it signs; {machine}'s own page does.
       </p>
-      <div className="flex flex-wrap gap-3">
+      <div className="flex flex-wrap gap-2">
         {held.approvePage && (
-          <a
-            href={held.approvePage}
-            target="_blank"
-            rel="noreferrer"
-            className="rounded-plexus bg-accent px-3 py-1 text-on-accent"
-          >
+          <a href={held.approvePage} target="_blank" rel="noreferrer" className="btn btn-primary">
             Sign on {machine}'s page
           </a>
         )}
@@ -123,7 +144,7 @@ function SignCall({
             aria-label={`Sign ${call.tool} call with my passkey`}
             disabled={disabled || busy}
             onClick={() => void withPasskey()}
-            className="rounded-plexus border border-line px-3 py-1"
+            className="btn"
           >
             Sign with my passkey
           </button>
@@ -133,7 +154,7 @@ function SignCall({
           aria-label={`Do not sign ${call.tool} call`}
           disabled={disabled || busy}
           onClick={() => void onDecide(false)}
-          className="px-3 py-1"
+          className="btn"
         >
           Do not sign
         </button>
@@ -144,7 +165,8 @@ function SignCall({
         </p>
       )}
       {problem && (
-        <p role="alert" className="text-error">
+        <p role="alert" className="notice notice--error">
+          <CircleAlert size={16} aria-hidden />
           {problem}
         </p>
       )}
@@ -184,84 +206,104 @@ export function ToolCalls({
   const calls = message.toolRounds?.flatMap((round) => round.calls) ?? [];
   if (!calls.length) return null;
   return (
-    <section aria-label="Tool calls" className="flex flex-col gap-2">
-      {calls.map((call, index) => (
-        <article
-          key={`${index}:${call.id}`}
-          className="rounded-plexus border border-line p-3 text-sm"
-        >
-          <h3 className="font-semibold">
-            {call.serverName} · {call.tool}
-          </h3>
-          <p role="status" className="text-muted">
-            {call.status === "pending" && call.ask === false
-              ? call.signed
-                ? "Sent to the machine, which checks your signature"
-                : "Allowed by the rules: runs without asking"
-              : labels[call.status]}
-            {call.windowUntil
-              ? ` · your window there is open until ${clock(call.windowUntil)}`
-              : ""}
-          </p>
-          <details open={call.status === "pending" && call.ask !== false}>
-            <summary className="cursor-pointer">Arguments for this call</summary>
-            <div className="pt-1 text-xs text-muted">
-              <CopyButton
-                text={JSON.stringify(call.arguments, null, 2)}
-                label={`${call.tool} call arguments`}
+    <section aria-label="Tool calls" className="flex max-w-measure flex-col gap-2 text-sm">
+      {calls.map((call, index) => {
+        // A pending call the site's rules allow is not waiting on you.
+        const allowed = call.status === "pending" && call.ask === false;
+        const said = allowed
+          ? call.signed
+            ? "Sent to the machine, which checks your signature"
+            : "Allowed by the rules: runs without asking"
+          : labels[call.status];
+        const until = call.windowUntil
+          ? ` · your window there is open until ${clock(call.windowUntil)}`
+          : "";
+        return (
+          <article
+            key={`${index}:${call.id}`}
+            className={`rounded-plexus border p-3 ${(!allowed && edge[call.status]) || "border-line"}`}
+          >
+            <h3 className="flex min-w-0 items-center gap-1.5 font-semibold wrap-anywhere">
+              <Wrench size={14} aria-hidden className="shrink-0 text-muted" />
+              {call.serverName} · {call.tool}
+            </h3>
+            <p
+              role="status"
+              className={`mt-0.5 flex items-center gap-1.5 ${allowed ? "text-muted" : tone[call.status]}`}
+            >
+              <span
+                aria-hidden="true"
+                className={`h-2 w-2 shrink-0 rounded-full bg-current ${
+                  call.status === "running" ? "animate-pulse" : ""
+                }`}
               />
-            </div>
-            <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all py-2">
-              {JSON.stringify(call.arguments, null, 2)}
-            </pre>
-          </details>
-          {call.result && (
-            <details>
-              <summary className="cursor-pointer">Result</summary>
+              {`${said}${until}`}
+            </p>
+            <details open={call.status === "pending" && call.ask !== false}>
+              <summary className="disclosure cursor-pointer text-muted hover:text-fg">
+                Arguments for this call
+              </summary>
               <div className="pt-1 text-xs text-muted">
-                <CopyButton text={call.result} label={`${call.tool} call result`} />
+                <CopyButton
+                  text={JSON.stringify(call.arguments, null, 2)}
+                  label={`${call.tool} call arguments`}
+                />
               </div>
-              <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all py-2">
-                {call.result}
+              <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-plexus border border-line bg-soft p-2 font-mono text-[0.8125rem] leading-5">
+                {JSON.stringify(call.arguments, null, 2)}
               </pre>
             </details>
-          )}
-          {call.status === "signing" && message.status === "running" && !readOnly && (
-            <SignCall
-              call={call}
-              disabled={sent.has(call.id)}
-              onDecide={(signed) => decide(call, signed)}
-            />
-          )}
-          {call.status === "pending" &&
-            call.ask !== false &&
-            message.status === "running" &&
-            !readOnly && (
-              <div className="mt-2 flex gap-3">
-                <button
-                  type="button"
-                  aria-label={`Approve ${call.tool} call`}
-                  disabled={sent.has(call.id)}
-                  onClick={() => void decide(call, true)}
-                  className="rounded-plexus bg-accent px-3 py-1 text-on-accent"
-                >
-                  Approve call
-                </button>
-                <button
-                  type="button"
-                  aria-label={`Decline ${call.tool} call`}
-                  disabled={sent.has(call.id)}
-                  onClick={() => void decide(call, false)}
-                  className="px-3 py-1"
-                >
-                  Decline
-                </button>
-              </div>
+            {call.result && (
+              <details>
+                <summary className="disclosure cursor-pointer text-muted hover:text-fg">
+                  Result
+                </summary>
+                <div className="pt-1 text-xs text-muted">
+                  <CopyButton text={call.result} label={`${call.tool} call result`} />
+                </div>
+                <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-plexus border border-line bg-soft p-2 font-mono text-[0.8125rem] leading-5">
+                  {call.result}
+                </pre>
+              </details>
             )}
-        </article>
-      ))}
+            {call.status === "signing" && message.status === "running" && !readOnly && (
+              <SignCall
+                call={call}
+                disabled={sent.has(call.id)}
+                onDecide={(signed) => decide(call, signed)}
+              />
+            )}
+            {call.status === "pending" &&
+              call.ask !== false &&
+              message.status === "running" &&
+              !readOnly && (
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    aria-label={`Approve ${call.tool} call`}
+                    disabled={sent.has(call.id)}
+                    onClick={() => void decide(call, true)}
+                    className="btn btn-primary"
+                  >
+                    Approve call
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`Decline ${call.tool} call`}
+                    disabled={sent.has(call.id)}
+                    onClick={() => void decide(call, false)}
+                    className="btn"
+                  >
+                    Decline
+                  </button>
+                </div>
+              )}
+          </article>
+        );
+      })}
       {problem && (
-        <p role="alert" className="text-error">
+        <p role="alert" className="notice notice--error">
+          <CircleAlert size={16} aria-hidden />
           {problem}
         </p>
       )}

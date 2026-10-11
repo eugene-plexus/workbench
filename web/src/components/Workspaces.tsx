@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { CircleAlert, KeyRound, TriangleAlert } from "lucide-react";
+import { useEffect, useId, useState } from "react";
 
 import { post } from "../lib/api";
 import type {
@@ -46,6 +47,8 @@ export function patternProblem(patterns: string[]): string | null {
   return bad ? `${bad} cannot be used: a pattern only hides, and is at most 256 characters.` : null;
 }
 
+/** A rule's choice, in a row whose selects line up with the others above and
+ * below it: the words first, the select after, one above the other on a phone. */
 function DecisionSelect({
   label,
   value,
@@ -60,14 +63,14 @@ function DecisionSelect({
   choices?: { value: Decision; label: string }[];
 }) {
   return (
-    <label className="flex items-center gap-2">
-      <span className="min-w-28">{label}</span>
+    <label className="grid grid-cols-1 gap-1 sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-center sm:gap-3">
+      <span>{label}</span>
       <select
         aria-label={label}
         value={only ?? value}
         disabled={only !== undefined}
         onChange={(event) => onChange(event.target.value as Decision)}
-        className="rounded-plexus border border-line bg-soft px-2 py-1"
+        className="control control--sm w-full max-w-xs"
       >
         {choices.map((d) => (
           <option key={d.value} value={d.value}>
@@ -126,17 +129,18 @@ export function Workspaces({
   return (
     <section
       aria-label={`Your workspaces on ${site.label}`}
-      className="flex flex-col gap-2"
+      className="subsection"
       data-testid={`workspaces-${site.id}`}
     >
-      <h3 className="font-semibold">Your workspaces on {site.label}</h3>
-      <p className="text-muted">
+      <h3 className="title-sub">Your workspaces on {site.label}</h3>
+      <p className="help">
         Folders your own account on {site.label} opens. Your rules say what Workbench may do in each
         without asking you; paths you hide are left out of every listing and search.
       </p>
-      {workspaces.length === 0 && <p className="text-muted">None yet.</p>}
+      {workspaces.length === 0 && <p className="empty">None yet.</p>}
       {problem && (
-        <p role="alert" className="text-error">
+        <p role="alert" className="notice notice--error">
+          <CircleAlert size={16} aria-hidden />
           {problem}
         </p>
       )}
@@ -180,6 +184,7 @@ function Workspace({
   commands?: SiteCommands;
   onSaved: () => void;
 }) {
+  const uid = useId();
   // A person's edits until they save; otherwise the rules in effect, read
   // live from the machine. A change that gives more waits for their key
   // (J68), so it is shown only once the machine applies it.
@@ -204,16 +209,16 @@ function Workspace({
   const bad = patternProblem(parsed);
   return (
     <div
-      className="flex flex-col gap-2 rounded-plexus border border-line p-2"
+      className="flex flex-col gap-3 rounded-plexus border border-line p-3"
       data-testid={`workspace-${workspace.id}`}
     >
-      <h4 className="font-semibold">
-        {workspace.name}
-        {workspace.writable ? "" : " · read only"}
-      </h4>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <h4 className="title-sub">{workspace.name}</h4>
+        {!workspace.writable && <span className="badge">Read only</span>}
+      </div>
       {detail && (
-        <p className="flex flex-wrap items-center gap-2 text-muted">
-          <span className="break-all">{detail.path}</span>
+        <p className="flex flex-wrap items-center gap-x-2 text-muted">
+          <span className="break-all font-mono text-[0.8125rem]">{detail.path}</span>
           <CopyButton text={detail.path} label={`the path of ${workspace.name}`} />
         </p>
       )}
@@ -232,28 +237,34 @@ function Workspace({
           commands={commands}
         />
       )}
-      <label className="flex flex-col gap-1">
-        Paths to hide, one a line (like .gitignore: .env, secrets/, *.pem)
+      <div className="field">
+        <label htmlFor={`${uid}-deny`} className="field-label">
+          Paths to hide, one a line <small>(like .gitignore: .env, secrets/, *.pem)</small>
+        </label>
         <textarea
+          id={`${uid}-deny`}
           rows={3}
           value={deny}
           disabled={detail === undefined}
           placeholder={detail ? "" : `Reading them from the machine…`}
           onChange={(event) => setPatterns(event.target.value)}
-          className="rounded-plexus border border-line bg-transparent px-2 py-1 font-mono"
+          className={`control font-mono ${bad ? "border-error-line border-2" : ""}`}
           aria-label={`Paths to hide in ${workspace.name}`}
+          aria-invalid={bad ? true : undefined}
+          aria-describedby={bad ? `${uid}-deny-problem` : undefined}
         />
-      </label>
+      </div>
       {bad && (
-        <p role="alert" className="text-error">
+        <p id={`${uid}-deny-problem`} role="alert" className="notice notice--error">
+          <CircleAlert size={16} aria-hidden />
           {bad}
         </p>
       )}
-      <div className="flex flex-wrap gap-3">
+      <div className="flex flex-wrap items-center gap-2">
         <button
           aria-label={`Save rules for ${workspace.name}`}
           disabled={busy || Boolean(bad) || detail === undefined}
-          className="rounded-plexus border border-line px-3 py-1"
+          className="btn btn-primary"
           onClick={() =>
             void act(() =>
               post(`${path}/rules`, {
@@ -274,7 +285,7 @@ function Workspace({
         <button
           aria-label={`Remove workspace ${workspace.name}`}
           disabled={busy}
-          className="text-error"
+          className="btn btn-quiet btn-danger -me-2 ml-auto"
           onClick={() => void act(() => post(`${path}/remove`))}
         >
           Remove workspace
@@ -317,6 +328,7 @@ function Sharing({
   onSaved: () => void;
 }) {
   type Entry = { name: string; read: Decision; change: Decision };
+  const uid = useId();
   // The owner's edits until they save; otherwise whom it is shared with now,
   // read live from the machine (a share that gives more waits for the key).
   const [edited, setEdited] = useState<Entry[] | null>(null);
@@ -326,12 +338,18 @@ function Sharing({
     setEdited((old) => change(old ?? inEffect));
   const [adding, setAdding] = useState("");
   return (
-    <div className="flex flex-col gap-2" data-testid={`sharing-${workspaceId}`}>
-      <p>Shared with:</p>
-      {people.length === 0 && <p className="text-muted">Nobody.</p>}
+    <div
+      className="flex flex-col gap-3 border-t border-line pt-3"
+      data-testid={`sharing-${workspaceId}`}
+    >
+      <p className="title-sub">Shared with:</p>
+      {people.length === 0 && <p className="text-sm text-muted">Nobody.</p>}
       {people.map((person, index) => (
-        <fieldset key={person.name} className="flex flex-wrap items-center gap-3">
-          <legend>{person.name}</legend>
+        <fieldset
+          key={person.name}
+          className="flex min-w-0 flex-col gap-2 rounded-plexus border border-line p-3"
+        >
+          <legend className="px-1 text-sm font-semibold">{person.name}</legend>
           <DecisionSelect
             label={`${person.name} reads and searches`}
             value={person.read}
@@ -349,7 +367,7 @@ function Sharing({
           />
           <button
             type="button"
-            className="text-error"
+            className="btn btn-quiet btn-danger btn-wrap -ms-2 self-start"
             onClick={() => setPeople((old) => old.filter((_, i) => i !== index))}
           >
             Stop sharing with {person.name}
@@ -357,18 +375,21 @@ function Sharing({
         </fieldset>
       ))}
       <div className="flex flex-wrap items-end gap-2">
-        <label className="flex flex-col gap-1">
-          Share with (how they sign in)
+        <div className="field min-w-48 flex-1">
+          <label htmlFor={`${uid}-add`} className="field-label">
+            Share with (how they sign in)
+          </label>
           <input
+            id={`${uid}-add`}
             value={adding}
             onChange={(event) => setAdding(event.target.value)}
-            className="rounded-plexus border border-line bg-transparent px-2 py-1"
+            className="control"
           />
-        </label>
+        </div>
         <button
           type="button"
           aria-label={`Add to those sharing ${workspaceName}`}
-          className="rounded-plexus border border-line px-3 py-1"
+          className="btn"
           onClick={() => {
             const name = adding.trim();
             if (name && !people.some((p) => p.name.toLowerCase() === name.toLowerCase())) {
@@ -381,14 +402,14 @@ function Sharing({
         </button>
       </div>
       {edited !== null && (
-        <p role="status" className="text-muted">
+        <span role="status" className="badge badge--warn self-start">
           Not saved yet.
-        </p>
+        </span>
       )}
       <button
         aria-label={`Save sharing for ${workspaceName}`}
         disabled={busy}
-        className="self-start rounded-plexus border border-line px-3 py-1"
+        className="btn btn-primary self-start"
         onClick={() =>
           void act(() =>
             post(`${base}/people`, {
@@ -422,7 +443,7 @@ function CommandRule({
   commands: SiteCommands;
 }) {
   return (
-    <div className="flex flex-col gap-1">
+    <div className="flex flex-col gap-2">
       <DecisionSelect
         label="Run commands"
         value={value}
@@ -430,8 +451,9 @@ function CommandRule({
         only={writable ? undefined : "deny"}
         choices={COMMAND_DECISIONS}
       />
-      <p className="text-xs text-muted">
-        A command runs as your own account and can do whatever it can, not only in this folder.
+      <p className="notice notice--warn">
+        <TriangleAlert size={16} aria-hidden />A command runs as your own account and can do
+        whatever it can, not only in this folder.
         {commands.allowed ? "" : ` ${commands.reason ?? "This machine does not run commands now."}`}
       </p>
     </div>
@@ -451,6 +473,7 @@ function AddWorkspace({
   act: Act;
   commands?: SiteCommands;
 }) {
+  const uid = useId();
   const [name, setName] = useState("");
   const [path, setPath] = useState("");
   const [writable, setWritable] = useState(true);
@@ -463,7 +486,7 @@ function AddWorkspace({
   return (
     <form
       aria-label={`Add a workspace on ${label}`}
-      className="flex flex-col gap-2 rounded-plexus border border-dashed border-line p-2"
+      className="card card--add"
       onSubmit={(event) => {
         event.preventDefault();
         void act(async () => {
@@ -485,35 +508,41 @@ function AddWorkspace({
         });
       }}
     >
-      <h4 className="font-semibold">Add a workspace</h4>
-      <div className="flex flex-wrap items-end gap-3">
-        <label className="flex flex-col gap-1">
-          Name
+      <h4 className="title-sub">Add a workspace</h4>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="field">
+          <label htmlFor={`${uid}-name`} className="field-label">
+            Name
+          </label>
           <input
+            id={`${uid}-name`}
             required
             value={name}
             onChange={(event) => setName(event.target.value)}
-            className="rounded-plexus border border-line bg-transparent px-2 py-1"
+            className="control"
           />
-        </label>
-        <label className="flex flex-col gap-1">
-          Path on {label}
+        </div>
+        <div className="field">
+          <label htmlFor={`${uid}-path`} className="field-label">
+            Path on {label}
+          </label>
           <input
+            id={`${uid}-path`}
             required
             value={path}
             onChange={(event) => setPath(event.target.value)}
-            className="rounded-plexus border border-line bg-transparent px-2 py-1"
+            className="control"
           />
-        </label>
-        <label className="flex items-center gap-2">
-          <input
-            type="checkbox"
-            checked={writable}
-            onChange={(event) => setWritable(event.target.checked)}
-          />
-          Files in it may be changed
-        </label>
+        </div>
       </div>
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={writable}
+          onChange={(event) => setWritable(event.target.checked)}
+        />
+        <span>Files in it may be changed</span>
+      </label>
       <DecisionSelect label="Read and search" value={read} onChange={setRead} />
       <DecisionSelect
         label="Change files"
@@ -529,27 +558,35 @@ function AddWorkspace({
           commands={commands}
         />
       )}
-      <label className="flex flex-col gap-1">
-        Paths to hide, one a line (optional)
+      <div className="field">
+        <label htmlFor={`${uid}-deny`} className="field-label">
+          Paths to hide, one a line <small>(optional)</small>
+        </label>
         <textarea
+          id={`${uid}-deny`}
           rows={2}
           value={deny}
           onChange={(event) => setDeny(event.target.value)}
-          className="rounded-plexus border border-line bg-transparent px-2 py-1 font-mono"
+          aria-invalid={bad ? true : undefined}
+          aria-describedby={bad ? `${uid}-deny-problem` : undefined}
+          className={`control font-mono ${bad ? "border-error-line border-2" : ""}`}
         />
-      </label>
+      </div>
       {bad && (
-        <p role="alert" className="text-error">
+        <p id={`${uid}-deny-problem`} role="alert" className="notice notice--error">
+          <CircleAlert size={16} aria-hidden />
           {bad}
         </p>
       )}
-      <p className="text-muted">
-        It waits on {label} until you approve it with your own key there, or with your passkey here.
-      </p>
-      <button
-        disabled={busy || Boolean(bad)}
-        className="self-start rounded-plexus border border-line px-3 py-1"
-      >
+      <div className="notice">
+        <KeyRound size={16} aria-hidden />
+        <div>
+          <span className="notice-title">Needs your key</span>
+          It waits on {label} until you approve it with your own key there, or with your passkey
+          here.
+        </div>
+      </div>
+      <button disabled={busy || Boolean(bad)} className="btn btn-primary self-start">
         Add workspace
       </button>
     </form>

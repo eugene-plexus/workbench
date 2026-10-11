@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { post } from "../lib/api";
-import type { Message } from "../lib/types";
+import type { Message, ToolCall } from "../lib/types";
 import { ToolCalls } from "./ToolCalls";
 
 vi.mock("../lib/api", () => ({ post: vi.fn() }));
@@ -229,4 +229,141 @@ it("copies a call's arguments and its result", () => {
   expect(writeText).toHaveBeenLastCalledWith(JSON.stringify({ from: "a", to: "b" }, null, 2));
   fireEvent.click(screen.getByRole("button", { name: "Copy rename call result" }));
   expect(writeText).toHaveBeenLastCalledWith("renamed");
+});
+
+describe("a call's state is a tone, a dot and words, not a sentence in one grey", () => {
+  const call = message.toolRounds![0]!.calls[0]!;
+  const withStatus = (status: ToolCall["status"], over: Partial<ToolCall> = {}): Message => ({
+    ...message,
+    toolRounds: [
+      { calls: [{ ...call, status, result: status === "done" ? "ok" : null, ...over }] },
+    ],
+  });
+  const show = (m: Message) =>
+    render(<ToolCalls chatId="chat" message={m} readOnly={false} onChanged={() => undefined} />);
+  // The copy buttons inside the call have statuses of their own, for a screen reader.
+  const state = () => screen.getAllByRole("status").find((el) => el.tagName === "P")!;
+  const card = () => screen.getByRole("article");
+
+  it.each([
+    // status, the words it says, the tone of the words, the edge of the card
+    ["pending", "Waiting for approval", "text-warn", "border-warn-line"],
+    ["signing", "Waiting for your signature", "text-warn", "border-warn-line"],
+    ["uncertain", "Result unknown", "text-warn", "border-warn-line"],
+    ["running", "Running", "text-info", "border-line"],
+    ["done", "Finished", "text-ok", "border-line"],
+    ["failed", "Server reported a failure", "text-error", "border-error-line"],
+    ["declined", "Declined", "text-muted", "border-line"],
+    ["cancelled", "Did not run", "text-muted", "border-line"],
+  ] as const)("%s: %s", (status, words, tone, edge) => {
+    show(withStatus(status));
+    expect(state()).toHaveTextContent(words);
+    expect(state()).toHaveClass(tone);
+    expect(card()).toHaveClass(edge);
+    // A dot beside the words, which is only a dot to a screen reader.
+    expect(state().firstElementChild).toHaveAttribute("aria-hidden", "true");
+    expect(state().firstElementChild).toHaveClass("rounded-full", "bg-current");
+  });
+
+  it("pulses the dot while a call runs, and only then", () => {
+    const { unmount } = show(withStatus("running"));
+    expect(state().firstElementChild).toHaveClass("animate-pulse");
+    unmount();
+    show(withStatus("done"));
+    expect(state().firstElementChild).not.toHaveClass("animate-pulse");
+  });
+
+  it("does not call a call the site's rules allow a call waiting on you", () => {
+    show(withStatus("pending", { ask: false }));
+    expect(state()).toHaveTextContent("Allowed by the rules: runs without asking");
+    expect(state()).toHaveClass("text-muted");
+    expect(state()).not.toHaveClass("text-warn");
+    expect(card()).toHaveClass("border-line");
+    expect(card()).not.toHaveClass("border-warn-line");
+  });
+
+  it("keeps its words with its time, as one sentence", () => {
+    const until = new Date(2026, 9, 11, 19, 5).toISOString();
+    show(withStatus("signing", { windowUntil: until }));
+    expect(state().textContent).toMatch(
+      /^Waiting for your signature · your window there is open until 7:05/,
+    );
+  });
+
+  it("names the tool with a glyph that is only a glyph, and keeps to the measure", () => {
+    show(withStatus("done"));
+    const title = screen.getByRole("heading", { name: "Shared files · rename" });
+    expect(title.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+    expect(title).toHaveClass("wrap-anywhere");
+    expect(screen.getByRole("region", { name: "Tool calls" })).toHaveClass(
+      "max-w-measure",
+      "text-sm",
+    );
+  });
+
+  it("folds the arguments and the result under rows that are a real target on a phone", () => {
+    show(withStatus("done"));
+    for (const name of ["Arguments for this call", "Result"]) {
+      expect(screen.getByText(name)).toHaveClass("disclosure", "text-muted");
+    }
+  });
+
+  it("wraps arguments and a result with no break in them, in a bordered box", () => {
+    show(withStatus("done", { arguments: { path: "x".repeat(300) }, result: "y".repeat(300) }));
+    for (const text of [/x{300}/, /y{300}/]) {
+      const box = screen.getByText(text);
+      expect(box.tagName).toBe("PRE");
+      expect(box).toHaveClass("break-all", "whitespace-pre-wrap", "overflow-auto", "border");
+    }
+  });
+});
+
+describe("what a call asks of you is drawn as buttons", () => {
+  it("makes Approve the one primary button and Decline a plain one", () => {
+    render(<ToolCalls chatId="chat" message={message} readOnly={false} onChanged={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "Approve rename call" })).toHaveClass(
+      "btn",
+      "btn-primary",
+    );
+    expect(screen.getByRole("button", { name: "Decline rename call" })).toHaveClass("btn");
+    expect(screen.getByRole("button", { name: "Decline rename call" })).not.toHaveClass(
+      "btn-primary",
+    );
+  });
+
+  it("makes a link to the machine's page the primary action of a held call, and the rest plain", () => {
+    render(<ToolCalls chatId="chat" message={held} readOnly={false} onChanged={vi.fn()} />);
+    expect(screen.getByRole("link", { name: "Sign on desk's page" })).toHaveClass(
+      "btn",
+      "btn-primary",
+    );
+    expect(screen.getByRole("button", { name: "Do not sign run_command call" })).toHaveClass("btn");
+  });
+
+  it("keeps the blue edge on what asks for your signature, and says what the machine holds as a group", () => {
+    render(<ToolCalls chatId="chat" message={held} readOnly={false} onChanged={vi.fn()} />);
+    const words = screen.getByRole("group", { name: "What desk holds" });
+    expect(words).toHaveTextContent("npm test");
+    expect(words.parentElement).toHaveClass("border-accent");
+    expect(words.querySelector("p")).toHaveClass("font-mono", "wrap-anywhere");
+  });
+
+  it("says why a decision failed in an error notice, with the cause it was given", async () => {
+    vi.mocked(post).mockRejectedValue(new Error("This call is no longer waiting for approval."));
+    render(
+      <ToolCalls chatId="chat" message={message} readOnly={false} onChanged={() => undefined} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Approve rename call" }));
+    const failure = await screen.findByRole("alert");
+    expect(failure).toHaveClass("notice", "notice--error");
+    expect(failure.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+  });
+
+  it("keeps the safety sentence once, as quiet help, under every call", () => {
+    render(<ToolCalls chatId="chat" message={message} readOnly={false} onChanged={vi.fn()} />);
+    const note = screen.getByText(
+      "Stopping, editing or retrying a chat does not undo actions a tool has already taken.",
+    );
+    expect(note).toHaveClass("text-xs", "text-muted");
+  });
 });

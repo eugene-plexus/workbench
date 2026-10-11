@@ -1,10 +1,22 @@
-import { ArrowDown, Check, Download, Pencil, SlidersHorizontal, Trash2, X } from "lucide-react";
+import {
+  ArrowDown,
+  Check,
+  CircleAlert,
+  Download,
+  Eye,
+  Pencil,
+  SlidersHorizontal,
+  Trash2,
+  TriangleAlert,
+  X,
+} from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { del, patch } from "../lib/api";
 import { exportChat, saveDraft } from "../lib/conveniences";
 import type { ChatSettings as Settings, Me, Message, Models } from "../lib/types";
 import { useChat } from "../lib/useChat";
+import { announce } from "../lib/words";
 import { ChatSettings } from "./ChatSettings";
 import { Composer } from "./Composer";
 import { Mascot } from "./Mascot";
@@ -46,6 +58,18 @@ export function ChatView({
   const wasRunning = useRef(running);
   const loaded = detail !== null;
 
+  // What a screen reader is told when the newest answer changes phase. What is
+  // on the page when the chat opens is not news, so the first phrase is only
+  // remembered; a change after it is said.
+  const phase = announce(detail?.messages[detail.messages.length - 1]);
+  const [said, setSaid] = useState("");
+  const lastPhase = useRef<string | null>(null);
+  useEffect(() => {
+    if (!loaded) return;
+    if (lastPhase.current !== null && lastPhase.current !== phase) setSaid(phase);
+    lastPhase.current = phase;
+  }, [loaded, phase]);
+
   useEffect(() => {
     const inner = content.current;
     const outer = box.current;
@@ -79,8 +103,11 @@ export function ChatView({
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
         <Mascot pose="curious" size={120} />
-        <p role="alert">{error}</p>
-        <button onClick={() => void reload()} className="text-accent underline">
+        <p role="alert" className="notice notice--error max-w-measure text-left">
+          <CircleAlert size={16} aria-hidden />
+          {error}
+        </p>
+        <button onClick={() => void reload()} className="btn">
           Try loading this chat again
         </button>
       </div>
@@ -118,171 +145,182 @@ export function ChatView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <header className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-2">
-        {renaming !== null ? (
-          <form
-            className="flex min-w-0 flex-1 items-center gap-2"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void rename(renaming);
-            }}
-          >
-            <input
-              autoFocus
-              aria-label="Chat name"
-              value={renaming}
-              maxLength={200}
-              disabled={acting}
-              onKeyDown={(e) => {
-                if (e.key === "Escape" && !acting) setRenaming(null);
+      {/* The header's content sits on the thread's own frame, so the title
+          starts where the messages do and the buttons end where they end. */}
+      <header className="border-b border-line px-4 py-1.5">
+        <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center gap-2">
+          {renaming !== null ? (
+            <form
+              className="flex min-w-0 flex-1 items-center gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void rename(renaming);
               }}
-              onChange={(e) => setRenaming(e.target.value)}
-              className="min-w-0 flex-1 rounded-plexus border border-line bg-soft px-2 py-1"
-            />
-            <button
-              type="submit"
-              disabled={acting || !renaming.trim()}
-              aria-label="Save the name"
-              className="p-1 hover:text-accent"
             >
-              <Check size={16} />
-            </button>
+              <input
+                autoFocus
+                aria-label="Chat name"
+                value={renaming}
+                maxLength={200}
+                disabled={acting}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape" && !acting) setRenaming(null);
+                }}
+                onChange={(e) => setRenaming(e.target.value)}
+                className="control min-w-0 flex-1"
+              />
+              <button
+                type="submit"
+                disabled={acting || !renaming.trim()}
+                aria-label="Save the name"
+                className="icon-btn"
+              >
+                <Check size={16} />
+              </button>
+              <button
+                type="button"
+                aria-label="Keep the old name"
+                disabled={acting}
+                onClick={() => setRenaming(null)}
+                className="icon-btn"
+              >
+                <X size={16} />
+              </button>
+            </form>
+          ) : (
+            <h1
+              title={chat.title}
+              className="min-w-0 flex-1 truncate text-xl font-semibold tracking-[-0.01em]"
+              data-testid="chat-title"
+            >
+              {chat.title}
+            </h1>
+          )}
+          {renaming === null && !confirmDelete && (
             <button
               type="button"
-              aria-label="Keep the old name"
-              disabled={acting}
-              onClick={() => setRenaming(null)}
-              className="p-1"
-            >
-              <X size={16} />
-            </button>
-          </form>
-        ) : (
-          <h1
-            title={chat.title}
-            className="min-w-0 flex-1 truncate text-base font-semibold"
-            data-testid="chat-title"
-          >
-            {chat.title}
-          </h1>
-        )}
-        {renaming === null && !confirmDelete && (
-          <button
-            type="button"
-            title="Export chat as Markdown (attachment contents are not included)"
-            aria-label="Export chat as Markdown"
-            onClick={() => {
-              try {
-                exportChat(detail);
-              } catch (error) {
-                setActionError(error instanceof Error ? error.message : String(error));
-              }
-            }}
-            className="rounded-plexus p-1.5 text-muted hover:bg-hover"
-          >
-            <Download size={16} />
-          </button>
-        )}
-        {!chat.readOnly && renaming === null && !confirmDelete && (
-          <>
-            <button
-              type="button"
-              title="Rename this chat"
-              aria-label="Rename this chat"
-              onClick={() => setRenaming(chat.title)}
-              className="rounded-plexus p-1.5 text-muted hover:bg-hover"
-            >
-              <Pencil size={16} />
-            </button>
-            <button
-              type="button"
-              title="This chat's settings"
-              aria-label="This chat's settings"
-              aria-expanded={showSettings}
-              onClick={() => setShowSettings((v) => !v)}
-              className="rounded-plexus p-1.5 text-muted hover:bg-hover"
-            >
-              <SlidersHorizontal size={16} />
-            </button>
-            <button
-              type="button"
-              title="Delete this chat"
-              aria-label="Delete this chat"
-              onClick={() => setConfirmDelete(true)}
-              className="rounded-plexus p-1.5 text-muted hover:bg-hover"
-            >
-              <Trash2 size={16} />
-            </button>
-          </>
-        )}
-        {confirmDelete && !chat.readOnly && (
-          <div
-            role="group"
-            aria-label="Delete this chat?"
-            className="flex w-full flex-wrap items-center gap-2 text-sm"
-            onKeyDown={(e) => {
-              if (e.key === "Escape" && !acting) setConfirmDelete(false);
-            }}
-          >
-            {`Delete "${chat.title}" and the files attached to it?`}
-            <button
-              type="button"
-              data-testid="confirm-delete"
-              disabled={acting}
-              onClick={async () => {
-                if (acting) return;
-                setActing(true);
-                setActionError(null);
+              title="Export chat as Markdown (attachment contents are not included)"
+              aria-label="Export chat as Markdown"
+              onClick={() => {
                 try {
-                  await del(`/api/chats/${chat.id}`);
-                  saveDraft(me.sub, chat.id, "");
-                  onDeleted();
+                  exportChat(detail);
                 } catch (error) {
                   setActionError(error instanceof Error ? error.message : String(error));
-                } finally {
-                  setActing(false);
                 }
               }}
-              className="rounded-plexus border border-error-line bg-error-bg px-2 py-0.5 text-error"
+              className="icon-btn"
             >
-              Delete chat
+              <Download size={16} />
             </button>
-            {/* Focus starts on the safe answer: Enter on a reflex keeps the chat. */}
-            <button
-              type="button"
-              autoFocus
-              data-testid="keep-chat"
-              onClick={() => setConfirmDelete(false)}
-              disabled={acting}
-              className="px-2 py-0.5"
+          )}
+          {!chat.readOnly && renaming === null && !confirmDelete && (
+            <>
+              <button
+                type="button"
+                title="Rename this chat"
+                aria-label="Rename this chat"
+                onClick={() => setRenaming(chat.title)}
+                className="icon-btn"
+              >
+                <Pencil size={16} />
+              </button>
+              <button
+                type="button"
+                title="This chat's settings"
+                aria-label="This chat's settings"
+                aria-expanded={showSettings}
+                onClick={() => setShowSettings((v) => !v)}
+                className="icon-btn"
+              >
+                <SlidersHorizontal size={16} />
+              </button>
+              <button
+                type="button"
+                title="Delete this chat"
+                aria-label="Delete this chat"
+                onClick={() => setConfirmDelete(true)}
+                className="icon-btn icon-btn--danger"
+              >
+                <Trash2 size={16} />
+              </button>
+            </>
+          )}
+          {confirmDelete && !chat.readOnly && (
+            // The sentence, then the safe answer first and focused, then the
+            // one that cannot be undone. Escape backs out.
+            <div
+              role="group"
+              aria-label="Delete this chat?"
+              className="notice notice--error w-full flex-wrap items-center"
+              onKeyDown={(e) => {
+                if (e.key === "Escape" && !acting) setConfirmDelete(false);
+              }}
             >
-              Keep it
-            </button>
-          </div>
-        )}
+              <TriangleAlert size={16} aria-hidden />
+              {`Delete "${chat.title}" and the files attached to it?`}
+              {/* Focus starts on the safe answer: Enter on a reflex keeps the chat. */}
+              <button
+                type="button"
+                autoFocus
+                data-testid="keep-chat"
+                onClick={() => setConfirmDelete(false)}
+                disabled={acting}
+                className="btn"
+              >
+                Keep it
+              </button>
+              <button
+                type="button"
+                data-testid="confirm-delete"
+                disabled={acting}
+                onClick={async () => {
+                  if (acting) return;
+                  setActing(true);
+                  setActionError(null);
+                  try {
+                    await del(`/api/chats/${chat.id}`);
+                    saveDraft(me.sub, chat.id, "");
+                    onDeleted();
+                  } catch (error) {
+                    setActionError(error instanceof Error ? error.message : String(error));
+                  } finally {
+                    setActing(false);
+                  }
+                }}
+                className="btn btn-danger"
+              >
+                Delete chat
+              </button>
+            </div>
+          )}
+        </div>
       </header>
       {(actionError || error) && (
-        <p
-          role="alert"
-          className="border-b border-error-line bg-error-bg px-4 py-2 text-sm text-error"
-        >
+        <p role="alert" className="notice notice--error notice--bar">
+          <CircleAlert size={16} aria-hidden />
           {actionError ?? error}{" "}
           {actionError ? (
-            <button type="button" onClick={() => setActionError(null)} className="underline">
+            <button
+              type="button"
+              onClick={() => setActionError(null)}
+              className="btn btn-quiet -my-1 ml-auto shrink-0"
+            >
               Dismiss
             </button>
           ) : (
-            <button type="button" onClick={() => void reload()} className="underline">
+            <button
+              type="button"
+              onClick={() => void reload()}
+              className="btn btn-quiet -my-1 ml-auto shrink-0"
+            >
               Reload chat
             </button>
           )}
         </p>
       )}
       {chat.readOnly && (
-        <p
-          data-testid="read-only"
-          className="border-b border-warn-line bg-warn-bg px-4 py-2 text-sm text-warn"
-        >
+        <p data-testid="read-only" className="notice notice--warn notice--bar">
+          <Eye size={16} aria-hidden />
           {detail.ownerName ? `${detail.ownerName}'s chat.` : "Someone else's chat."} You can read
           it, because this Workbench lets its owner read people&apos;s chats. You cannot change it.
         </p>
@@ -294,55 +332,66 @@ export function ChatView({
           onClose={() => setShowSettings(false)}
         />
       )}
-      <div
-        ref={box}
-        onScroll={(e) => {
-          const outer = e.currentTarget;
-          const atBottom = outer.scrollHeight - outer.scrollTop - outer.clientHeight < 80;
-          if (atBottom) pinned.current = true;
-          else if (outer.scrollTop < lastTop.current) pinned.current = false;
-          setAway(!pinned.current);
-          lastTop.current = outer.scrollTop;
-        }}
-        className="min-h-0 flex-1 overflow-y-auto px-4 py-4"
-        data-testid="messages"
-      >
-        <div ref={content} className="mx-auto flex max-w-3xl flex-col gap-5">
-          {messages.length === 0 && (
-            <p className="py-10 text-center text-muted">Ask anything to start.</p>
-          )}
-          {messages.map((message: Message) => (
-            <MessageView
-              key={message.id}
-              chatId={chat.id}
-              message={message}
-              progress={message.status === "running" ? progress : null}
-              busy={running}
-              readOnly={chat.readOnly}
-              onChanged={() => {
-                void reload();
-                onChanged();
-              }}
-              onLook={chat.readOnly ? look : undefined}
-            />
-          ))}
+      {/* The pill floats over the thread, so showing it no longer resizes the
+          pane. */}
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        <div aria-live="polite" aria-atomic="true" className="sr-only" data-testid="announcer">
+          {said}
         </div>
-      </div>
-      {away && (
-        <div className="flex justify-center border-t border-line bg-panel py-1">
+        <div
+          ref={box}
+          onScroll={(e) => {
+            const outer = e.currentTarget;
+            const atBottom = outer.scrollHeight - outer.scrollTop - outer.clientHeight < 80;
+            if (atBottom) pinned.current = true;
+            else if (outer.scrollTop < lastTop.current) pinned.current = false;
+            setAway(!pinned.current);
+            lastTop.current = outer.scrollTop;
+          }}
+          id="conversation"
+          // A named, focusable region, so PageUp and the arrow keys scroll it
+          // from the keyboard.
+          role="region"
+          aria-label="Conversation"
+          tabIndex={0}
+          className="min-h-0 flex-1 overflow-y-auto px-4 pb-8 pt-6 [scrollbar-gutter:stable_both-edges] focus-visible:-outline-offset-2"
+          data-testid="messages"
+        >
+          <div ref={content} className="mx-auto flex max-w-3xl flex-col gap-4">
+            {messages.length === 0 && (
+              <p className="py-10 text-center text-muted">Ask anything to start.</p>
+            )}
+            {messages.map((message: Message) => (
+              <MessageView
+                key={message.id}
+                chatId={chat.id}
+                message={message}
+                progress={message.status === "running" ? progress : null}
+                busy={running}
+                readOnly={chat.readOnly}
+                onChanged={() => {
+                  void reload();
+                  onChanged();
+                }}
+                onLook={chat.readOnly ? look : undefined}
+              />
+            ))}
+          </div>
+        </div>
+        {away && (
           <button
-            className="flex items-center gap-1 rounded-plexus px-3 py-1 text-sm text-accent"
+            className="btn absolute bottom-4 left-1/2 -translate-x-1/2 rounded-full shadow-lg"
             onClick={() => {
               pinned.current = true;
               setAway(false);
               if (box.current) box.current.scrollTop = box.current.scrollHeight;
             }}
           >
-            <ArrowDown size={14} aria-hidden />
+            <ArrowDown size={14} aria-hidden className="text-accent" />
             Jump to latest
           </button>
-        </div>
-      )}
+        )}
+      </div>
       {!chat.readOnly && (
         <Composer
           chat={chat}

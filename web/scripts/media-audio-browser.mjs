@@ -63,7 +63,9 @@ try {
   await page.getByTestId("stop-recording").click();
   await page
     .getByTestId("chosen-recording")
-    .filter({ hasText: /^recording\.webm, 1\.\d s$/ })
+    .filter({
+      hasText: /^recording\.webm, 1\.\d s, \d+(\.\d)? (bytes|KiB|MiB) of 25\.0 MiB allowed$/,
+    })
     .waitFor();
   await page.getByTestId("make-transcript").click();
   await page.locator('[data-testid=media-item][data-status="done"]').nth(1).waitFor();

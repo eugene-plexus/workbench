@@ -51,7 +51,10 @@ try {
     .locator(".answer")
     .filter({ hasText: "Hello from the model." })
     .waitFor();
-  await page.getByTestId("answer").getByRole("button", { name: "Copy", exact: true }).click();
+  await page
+    .getByTestId("answer")
+    .getByRole("button", { name: "Copy this answer", exact: true })
+    .click();
   await page.getByRole("button", { name: "Copied", exact: true }).waitFor();
   assert.ok((await page.locator("time[datetime]").count()) >= 2);
   const messages = page.getByTestId("messages");

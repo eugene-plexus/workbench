@@ -3,7 +3,17 @@ import { parseFrames } from "./events";
 import { SECRET_KEY, takeFragment } from "./session";
 import type { ChatDetail, Message, Model, Models } from "./types";
 import { applyEvent, place, progressAfter } from "./useChat";
-import { EDIT_KEYS, modelLabel, progressWords, statusWords, workingWords } from "./words";
+import {
+  announce,
+  EDIT_KEYS,
+  modelLabel,
+  progressWords,
+  SEARCH_HINT,
+  SEARCH_PRIVACY,
+  splitWorking,
+  statusWords,
+  workingWords,
+} from "./words";
 
 const model = (over: Partial<Model> = {}): Model => ({
   id: "qwen3-14b",
@@ -259,5 +269,86 @@ describe("an attachment goes to a model that takes it (W7)", () => {
   });
   it("is quiet when it does", () => {
     expect(attachmentProblem(model({ imageInput: true }), [png])).toBeNull();
+  });
+});
+
+describe("a working line is said once and shown ticking (splitWorking)", () => {
+  it("splits what is said from what changes every second", () => {
+    expect(splitWorking("Thinking · 1 min 12 s")).toEqual({
+      say: "Thinking",
+      tail: " · 1 min 12 s",
+    });
+    expect(splitWorking("Writing the answer · 1,234 tokens · 83.1 tok/s")).toEqual({
+      say: "Writing the answer",
+      tail: " · 1,234 tokens · 83.1 tok/s",
+    });
+    expect(splitWorking("Reading your message: 25%")).toEqual({
+      say: "Reading your message",
+      tail: ": 25%",
+    });
+  });
+
+  it("leaves a line with nothing that ticks whole", () => {
+    for (const line of [
+      "Waiting for the model…",
+      "Searching the web…",
+      "Review the tool calls to continue.",
+      // A colon that is not followed by a number is part of the sentence.
+      "Using search: the web…",
+    ]) {
+      expect(splitWorking(line)).toEqual({ say: line, tail: "" });
+    }
+  });
+
+  it("joins back to the line it was given, for every line the page makes", () => {
+    const at = 1_000;
+    const lines = [
+      workingWords(null, message({ createdAt: at, reasoning: "x" }), at + 72),
+      workingWords(
+        { stage: "generating", generated_tokens: 7, tokens_per_second: 20 },
+        message({ createdAt: at, content: "Hi" }),
+        at,
+      ),
+      progressWords({ stage: "prompt", prompt_tokens: 100, processed_tokens: 50 }),
+    ];
+    for (const line of lines) {
+      const { say, tail } = splitWorking(line);
+      expect(say + tail).toBe(line);
+    }
+  });
+});
+
+describe("what a screen reader is told when the newest answer changes (announce)", () => {
+  it("says the phase, and for a stop the cause that was observed", () => {
+    expect(announce(message({ status: "running" }))).toBe("Waiting for the model.");
+    expect(announce(message({ status: "running", reasoning: "Hm" }))).toBe("Thinking.");
+    expect(announce(message({ status: "running", reasoning: "Hm", content: "A" }))).toBe(
+      "Writing the answer.",
+    );
+    expect(announce(message({ status: "done" }))).toBe("Answer finished.");
+    expect(announce(message({ status: "done", finish: "length" }))).toBe(
+      "Answer finished at its length limit.",
+    );
+    expect(announce(message({ status: "stopped" }))).toBe("Answer stopped.");
+    expect(announce(message({ status: "stopped", finish: "repetition_detected" }))).toBe(
+      "Answer stopped because it was repeating.",
+    );
+    expect(announce(message({ status: "interrupted" }))).toContain("Workbench restarted");
+  });
+
+  it("says nothing of a failure (its note is already an alert), a person's message or no message", () => {
+    expect(announce(message({ status: "failed", error: "The key was refused" }))).toBe("");
+    expect(announce(message({ role: "user", status: "done" }))).toBe("");
+    expect(announce(undefined)).toBe("");
+  });
+});
+
+describe("the search switch says where the words go", () => {
+  it("is one sentence on the screen and in the tooltip", () => {
+    expect(SEARCH_PRIVACY).toBe("The words searched for go to the internet.");
+    expect(SEARCH_HINT).toContain(SEARCH_PRIVACY);
+    expect(SEARCH_HINT).toBe(
+      "Search the web before answering. The words searched for go to the internet.",
+    );
   });
 });

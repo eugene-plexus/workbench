@@ -1,30 +1,99 @@
+/* The whole stylesheet, in the order workbench-reading.md 13.4 gives: tokens
+   (3), Tailwind's names for them (3), the type scale and base rules (4), an
+   answer's Markdown (6), the patterns every screen shares (8), and the rules
+   that need a media query (9). */
 @import "tailwindcss";
 
-/* Plexus, copied from the console (ui/src/app/globals.css), not shared:
-   components share schemas, never code. Dark is Plexus; light is the
-   console's "modern" palette, which is what the console shows when the
-   system asks for light. The mascot's shirt is the apricot. */
+/* Tailwind reads every source file for class names. The tests and the gates
+   write class names to check them (bg-red-500, font-black); the page does not
+   use them, and they must not become CSS. */
+@source not "./**/*.test.ts";
+@source not "./**/*.test.tsx";
+@source not "./fontGate.ts";
+
+/* Tokens (workbench-reading.md 3). Plexus, copied from the console
+   (ui/src/app/globals.css), not shared: components share schemas, never
+   code. Dark is Plexus; light is the console's "modern" palette. Blue is you,
+   a control, what is current. Apricot (magenta in light) is the answer's own
+   labels and boundaries. Status colours appear only inside a status. */
 :root {
   color-scheme: dark;
+
+  /* ground */
   --background: #141619;
   --foreground: #e6e8ea;
   --panel: #1b1e22;
   --panel-soft: #23272c;
   --panel-hover: #2b3037;
+
+  /* text, brightest first (foreground is the body) */
+  --foreground-strong: #f4f6f7;
+  /* An answer's own text. The body in dark; in light a notch softer than ink,
+     so bold and headings have somewhere to go. */
+  --foreground-read: var(--foreground);
+  --muted: #b3b9bf;
+  --faint: #959aa0;
+
+  /* the answer's labels and boundaries */
+  --heading: #e3c2a8;
+  --accent-right: #cf9a72;
+  /* Warm text, where a mark's colour is not enough: inline code, on its soft
+     fill, and an alert's label. 7:1 on that fill in both schemes (the mark's
+     own colour is 6.1:1 in dark and 4.1:1 in light). */
+  --accent-right-text: #dca67e;
+
+  /* you, controls, what is current */
+  --accent-left: #7fb0cf;
+  --accent-hover: #9cc5df;
+  --accent-active: #6e9cbb;
+  --on-accent-left: #0c1216;
+  --link: #9cc5df;
+  --link-hover: #b4d6ec;
+  --tint: #2b353d;
+  --tint-edge: #506473;
+
+  /* edges */
   --border: #3a4048;
   --border-hover: #5c646e;
-  --accent-left: #7fb0cf;
-  --accent-right: #cf9a72;
-  --on-accent-left: #0c1216;
-  --muted: #b3b9bf;
+  --border-control: #737c86;
+  --rule: #3a4048;
+
+  /* status: a glyph, words and a tint, never colour alone */
   --status-warn-fg: #dcb079;
   --status-warn-bg: rgb(131 96 41 / 0.18);
   --status-warn-border: #836029;
   --status-error-fg: #dd9a93;
   --status-error-bg: rgb(143 70 61 / 0.2);
   --status-error-border: #8f463d;
+  --status-ok-fg: #93c6a6;
+  --status-ok-bg: rgb(58 117 81 / 0.18);
+  --status-ok-border: #3a7551;
+  --status-info-fg: #9cc5df;
+  --status-info-bg: rgb(127 176 207 / 0.12);
+  --status-info-border: #476c84;
+  --danger-edge: #aa766f;
+
+  /* what the browser would otherwise decide */
+  --selection: rgb(127 176 207 / 0.34);
+  --scrollbar-thumb: #68717b;
+  --scrollbar-thumb-hover: #8793a0;
+
+  /* code colours come from the tokens above, so light follows */
+  --hl-keyword: var(--link);
+  --hl-string: var(--status-ok-fg);
+  --hl-number: var(--status-warn-fg);
+  --hl-title: var(--heading);
+  --hl-attr: var(--status-error-fg);
+  --hl-comment: var(--faint);
+  --hl-punct: var(--muted);
+
   --radius: 4px;
-  --font-ui: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  /* A line is capped by a count of characters (75 on average, 80 at most), and
+     a count is a width in em of the text's own size: 33.88 em is 36 rem at the
+     17 px reading size, and 474 px at 14 px. Measured in Chrome, both hold 74
+     on average and 78 at most; 36 rem at 14 px holds 92. */
+  --measure: 33.88em;
+  --font-ui: "IBM Plex Sans Variable", "IBM Plex Sans", system-ui, -apple-system, sans-serif;
   --font-code: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
 }
 
@@ -36,42 +105,192 @@
     --panel: #ffffff;
     --panel-soft: #f3f3f5;
     --panel-hover: #e7e7eb;
+
+    --foreground-strong: #0d0d10;
+    --foreground-read: #202023;
+    --muted: #5a5a63;
+    --faint: #6b6b73;
+
+    --heading: #8f2f5e;
+    --accent-right: #cf3a85;
+    --accent-right-text: #a10260;
+
+    --accent-left: #2a55e6;
+    --accent-hover: #1f42c4;
+    --accent-active: #1a37a8;
+    --on-accent-left: #ffffff;
+    --link: #2a55e6;
+    --link-hover: #1f42c4;
+    --tint: #e8edfc;
+    --tint-edge: #a7b2dc;
+
     --border: #e3e3e8;
     --border-hover: #8a8a93;
-    --accent-left: #2a55e6;
-    --accent-right: #cf3a85;
-    --on-accent-left: #ffffff;
-    --muted: #5a5a63;
+    --border-control: #80808a;
+    --rule: #c4c4cc;
+
     --status-warn-fg: #7c3f08;
     --status-warn-bg: rgb(243 194 90 / 0.18);
     --status-warn-border: #f3c25a;
     --status-error-fg: #971838;
     --status-error-bg: rgb(242 154 169 / 0.18);
     --status-error-border: #f29aa9;
+    --status-ok-fg: #07664d;
+    --status-ok-bg: rgb(122 220 176 / 0.18);
+    --status-ok-border: #7adcb0;
+    --status-info-fg: #1f42c4;
+    --status-info-bg: rgb(42 85 230 / 0.07);
+    --status-info-border: #9aaaf0;
+    --danger-edge: #c24a68;
+
+    --selection: rgb(42 85 230 / 0.22);
+    --scrollbar-thumb: #8a8a93;
+    --scrollbar-thumb-hover: #5a5a63;
   }
 }
 
+/* Tailwind's names for the tokens (3): every alias here is a utility. */
 @theme inline {
   --color-bg: var(--background);
   --color-fg: var(--foreground);
+  --color-strong: var(--foreground-strong);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-heading: var(--heading);
   --color-panel: var(--panel);
   --color-soft: var(--panel-soft);
+  --color-surface: var(--panel-soft);
   --color-hover: var(--panel-hover);
   --color-line: var(--border);
-  --color-line-strong: var(--border-hover);
-  --color-muted: var(--muted);
+  --color-line-strong: var(--border-control);
   --color-accent: var(--accent-left);
-  --color-apricot: var(--accent-right);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-active: var(--accent-active);
   --color-on-accent: var(--on-accent-left);
+  --color-link: var(--link);
+  --color-link-hover: var(--link-hover);
+  --color-tint: var(--tint);
+  --color-tint-line: var(--tint-edge);
+  --color-apricot: var(--accent-right);
   --color-warn: var(--status-warn-fg);
   --color-warn-bg: var(--status-warn-bg);
   --color-warn-line: var(--status-warn-border);
   --color-error: var(--status-error-fg);
   --color-error-bg: var(--status-error-bg);
   --color-error-line: var(--status-error-border);
+  --color-ok: var(--status-ok-fg);
+  --color-ok-bg: var(--status-ok-bg);
+  --color-ok-line: var(--status-ok-border);
+  --color-info: var(--status-info-fg);
+  --color-info-bg: var(--status-info-bg);
+  --color-info-line: var(--status-info-border);
+  --container-measure: var(--measure);
   --font-sans: var(--font-ui);
   --font-mono: var(--font-code);
   --radius-plexus: var(--radius);
+}
+
+/* The type scale by role (4). Tailwind's own text-xs and text-xl are retuned
+   rather than renamed, so the 188 existing size classes keep their meaning. */
+@theme {
+  --text-xs: 0.8125rem;
+  --text-xs--line-height: calc(18 / 13);
+  --text-read: 1.0625rem;
+  --text-read--line-height: 1.65;
+  --text-xl: 1.25rem;
+  --text-xl--line-height: 1.3;
+}
+
+/* Scale, base rules, and what the browser would otherwise decide (4). */
+@utility eyebrow {
+  font-size: 0.75rem;
+  line-height: calc(16 / 12);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+@layer base {
+  /* Preflight sets every heading to the body's size and weight; outside an
+     answer a heading now has one meaning per level, and a utility
+     (text-xl, eyebrow, font-medium) still wins. */
+  h1,
+  h2,
+  h3,
+  h4 {
+    color: var(--foreground-strong);
+  }
+  h1 {
+    font-size: 1.25rem;
+    line-height: 1.3;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  h2 {
+    font-size: 1rem;
+    line-height: 1.5;
+    font-weight: 600;
+  }
+  h3,
+  h4 {
+    font-size: 0.875rem;
+    line-height: calc(20 / 14);
+    font-weight: 600;
+  }
+  kbd {
+    display: inline-block;
+    min-width: 1.5rem;
+    padding: 0.125rem 0.375rem;
+    border: 1px solid var(--border-hover);
+    border-bottom-width: 2px;
+    border-radius: var(--radius);
+    background: var(--panel-soft);
+    color: var(--foreground);
+    font: 0.8125rem/1.25 var(--font-code);
+    text-align: center;
+  }
+  ::placeholder {
+    color: var(--faint);
+    opacity: 1;
+  }
+  /* In the base layer so a component can tune it; fields hug it (.control). */
+  :focus-visible {
+    outline: 2px solid var(--accent-left);
+    outline-offset: 2px;
+  }
+  button:not(:disabled),
+  summary,
+  select,
+  [role="tab"],
+  label:has(> input[type="checkbox"]),
+  label:has(> input[type="radio"]) {
+    cursor: pointer;
+  }
+  button:disabled,
+  input:disabled,
+  select:disabled,
+  textarea:disabled {
+    cursor: not-allowed;
+  }
+  /* A button not yet converted to .btn keeps the old look; .btn:disabled wins. */
+  button:disabled {
+    opacity: 0.5;
+  }
+}
+
+html {
+  /* Every face a page uses is loaded, so none is faked. */
+  font-synthesis: none;
+  /* Light text on a dark ground looks heavier than it is; macOS honours this. */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  accent-color: var(--accent-left);
+}
+@media (prefers-color-scheme: light) {
+  html {
+    -webkit-font-smoothing: auto;
+    -moz-osx-font-smoothing: auto;
+  }
 }
 
 html,
@@ -79,96 +298,1090 @@ body,
 #root {
   height: 100%;
 }
-
 #root {
   height: 100dvh;
 }
-
-button:disabled {
-  cursor: default;
-  opacity: 0.5;
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-ui);
+  /* A long unbroken string in reasoning, a source title or an error must not
+     widen the page; a value that must break anywhere says so itself (.facts dd). */
+  overflow-wrap: break-word;
 }
 .clipboard-field {
   position: fixed;
   left: -10000px;
   top: 0;
 }
-.answer pre {
+
+input,
+textarea {
+  caret-color: var(--accent-left);
+}
+::selection {
+  background: var(--selection);
+  color: var(--foreground-strong);
+}
+
+/* Chrome ignores ::-webkit-scrollbar once scrollbar-color is set, so the
+   standard properties are for the browsers that lack it. Measured: this gives
+   Chrome a 10 px thumb with no arrows, Firefox a thin native bar. */
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) transparent;
+  }
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 8px;
+  background-color: var(--scrollbar-thumb);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--scrollbar-thumb-hover);
+  background-clip: padding-box;
+}
+
+/* An answer's Markdown (6). Unlayered, so it still wins over utilities on the
+   elements inside an answer. */
+.answer {
+  font-size: var(--text-read);
+  line-height: var(--text-read--line-height);
+  color: var(--foreground-read);
+  /* Not `anywhere`: that lets a table's columns shrink to a sliver. */
+  overflow-wrap: break-word;
+}
+/* A draft that a search or a tool call wrote first sits in a 14 px muted box. */
+.answer.answer-quiet {
+  font-size: inherit;
+  line-height: 1.6;
+  color: inherit;
+}
+
+/* Prose keeps to the measure, in em of its own size; code and tables use the
+   whole column. */
+.answer > :is(p, ul, ol, blockquote, hr, h4) {
+  max-width: var(--measure);
+}
+
+/* One owner per gap: a block owns the space above it. */
+.answer > * + * {
+  margin-top: 0.9em;
+}
+.answer > :first-child {
   margin-top: 0;
 }
-.answer table {
-  display: block;
-  max-width: 100%;
-  overflow-x: auto;
+.answer > :last-child {
+  margin-bottom: 0;
 }
 
-body {
-  margin: 0;
-  background: var(--background);
-  color: var(--foreground);
-  font-family: var(--font-ui);
+/* Streaming rewraps the last lines on every chunk, so `pretty` waits. */
+.answer :is(p, li, blockquote) {
+  text-wrap: pretty;
+}
+[data-status="running"] .answer :is(p, li, blockquote) {
+  text-wrap: wrap;
 }
 
-:focus-visible {
-  outline: 2px solid var(--accent-left);
-  outline-offset: 2px;
+/* Headings */
+.answer :is(h1, h2, h3, h4, h5, h6) {
+  color: var(--foreground-strong);
+  font-weight: 600;
+  text-wrap: balance;
+}
+.answer :is(h1, h2, h3) {
+  color: var(--heading);
+}
+.answer h1 {
+  font-size: 1.5em;
+  line-height: 1.2;
+  letter-spacing: -0.018em;
+  margin: 1.6em 0 0.5em;
+}
+.answer h2 {
+  font-size: 1.25em;
+  line-height: 1.25;
+  letter-spacing: -0.012em;
+  margin: 1.6em 0 0.45em;
+}
+.answer h3 {
+  font-size: 1.1em;
+  line-height: 1.3;
+  letter-spacing: -0.006em;
+  margin: 1.5em 0 0.4em;
+}
+.answer h4 {
+  font-size: 1em;
+  line-height: 1.4;
+  margin: 1.4em 0 0.3em;
+}
+.answer :is(h5, h6) {
+  color: var(--muted);
+  font-size: 0.8125em;
+  line-height: 1.4;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin: 1.6em 0 0.35em;
+}
+.answer h6 {
+  font-weight: 500;
+}
+/* A heading's em is its own size, so its cap is the measure divided by its
+   scale: the same width as the prose around it. */
+.answer > h1 {
+  max-width: calc(var(--measure) / 1.5);
+}
+.answer > h2 {
+  max-width: calc(var(--measure) / 1.25);
+}
+.answer > h3 {
+  max-width: calc(var(--measure) / 1.1);
+}
+.answer > :is(h5, h6) {
+  max-width: calc(var(--measure) / 0.8125);
+}
+/* The hairline under h1 and h2, and the segment that closes it. */
+.answer :is(h1, h2) {
+  position: relative;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--rule);
+}
+.answer :is(h1, h2)::after {
+  content: "";
+  position: absolute;
+  inset-inline-start: 0;
+  bottom: -1px;
+  width: 2.5rem;
+  height: 2px;
+  background: var(--accent-right);
+}
+/* The heading's own bottom margin is the gap; the next block adds none. */
+.answer :is(h1, h2, h3, h4, h5, h6) + * {
+  margin-top: 0;
 }
 
-/* An answer's Markdown. */
-.answer {
-  line-height: 1.6;
-  overflow-wrap: anywhere;
+/* Emphasis */
+.answer :is(strong, b) {
+  color: var(--foreground-strong);
+  font-weight: 600;
 }
-.answer p,
-.answer ul,
-.answer ol,
-.answer pre,
-.answer table,
-.answer blockquote {
-  margin: 0.6em 0;
+.answer strong.lead-in {
+  color: var(--heading);
+}
+/* Plex Mono is loaded at 400 only: code inside a bolder run stays at it. */
+.answer :is(strong, b, h1, h2, h3, h4, h5, h6, th) code {
+  font-weight: 400;
+}
+.answer del {
+  color: var(--muted);
+  text-decoration-thickness: 1px;
+}
+
+/* Links */
+.answer a {
+  color: var(--link);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.2em;
+  text-decoration-color: color-mix(in srgb, currentColor 55%, transparent);
+}
+@media (hover: hover) {
+  .answer a:hover {
+    color: var(--link-hover);
+    text-decoration-thickness: 2px;
+    text-decoration-color: currentColor;
+  }
+}
+
+/* Lists */
+.answer :is(ul, ol) {
+  padding-inline-start: 1.5em;
+}
+.answer ol {
+  padding-inline-start: 1.75em;
 }
 .answer ul {
   list-style: disc;
-  padding-left: 1.4em;
+}
+.answer ul ul {
+  list-style: circle;
+}
+.answer ul ul ul {
+  list-style: square;
 }
 .answer ol {
   list-style: decimal;
-  padding-left: 1.4em;
 }
-.answer a {
-  color: var(--accent-left);
-  text-decoration: underline;
+.answer ol ol {
+  list-style: lower-alpha;
 }
+/* Markers: a first-level bullet is a small warm mark, a nested one is quiet,
+   and a numeral is bold in the heading's colour. */
+.answer li::marker {
+  color: var(--muted);
+}
+.answer > ul > li::marker {
+  color: var(--accent-right);
+}
+.answer ol > li::marker {
+  color: var(--heading);
+  font-weight: 600;
+}
+.answer li + li {
+  margin-top: 0.3em;
+}
+.answer li > * + * {
+  margin-top: 0.5em;
+}
+.answer li > :is(ul, ol) {
+  margin-top: 0.3em;
+}
+.answer li > p:last-child {
+  margin-bottom: 0.6em;
+}
+.answer li:last-child > p:last-child {
+  margin-bottom: 0;
+}
+.answer .contains-task-list {
+  list-style: none;
+  padding-inline-start: 0;
+}
+.answer .task-box {
+  display: inline-block;
+  box-sizing: border-box;
+  width: 0.95em;
+  height: 0.95em;
+  margin-inline-end: 0.5em;
+  vertical-align: -0.12em;
+  border: 2px solid var(--border-control);
+  border-radius: 3px;
+}
+.answer .task-box[data-checked="true"] {
+  border-color: var(--accent-left);
+  background: var(--accent-left);
+}
+.answer .task-box[data-checked="true"]::after {
+  content: "";
+  display: block;
+  width: 0.26em;
+  height: 0.5em;
+  margin: 0.03em auto 0;
+  border: solid var(--on-accent-left);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+/* Quote */
+.answer blockquote {
+  padding: 0.15em 0;
+  padding-inline-start: 1em;
+  border-inline-start: 3px solid var(--accent-right);
+}
+.answer blockquote > * + * {
+  margin-top: 0.6em;
+}
+
+/* Rule */
+.answer hr {
+  height: 0;
+  margin: 1.75em 0;
+  border: 0;
+  border-top: 1px solid var(--rule);
+}
+
+/* Code: inline, then the block (header with the language and Copy, then the code) */
 .answer code {
   font-family: var(--font-code);
-  font-size: 0.92em;
 }
 .answer :not(pre) > code {
-  background: var(--panel-soft);
-  padding: 0.1em 0.3em;
+  padding: 0.08em 0.35em;
+  border: 1px solid var(--rule);
   border-radius: var(--radius);
+  background: var(--panel-soft);
+  color: var(--accent-right-text);
+  font-size: 0.88em;
+}
+/* A warm mark never marks something you can click: code in a link keeps the
+   link's colour. */
+.answer a code {
+  color: inherit;
+}
+.answer .code-block {
+  overflow: hidden;
+  border: 1px solid var(--rule);
+  border-radius: calc(var(--radius) + 2px);
+  background: var(--panel-soft);
+}
+.answer .code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-height: 2rem;
+  padding: 0 0.5rem 0 0.875rem;
+  border-bottom: 1px solid var(--rule);
+  background: var(--panel-hover);
+  color: var(--muted);
+  font-size: 0.8125rem;
+  line-height: 1.25rem;
+}
+.answer .code-lang {
+  font-family: var(--font-code);
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+}
+/* The block clips its corners, so the Copy button's ring stays inside it. */
+.answer .code-head :focus-visible {
+  outline-offset: -2px;
+}
+.answer pre {
+  margin: 0;
+  padding: 0.75rem 1rem;
+  overflow-x: auto;
+  font-size: 0.875rem;
+  line-height: 1.55;
+}
+.answer pre:focus-visible {
+  outline-offset: -2px;
+}
+
+/* Tables: whole words, rules not a grid, a header that anchors, left unless asked. */
+.answer .table-wrap {
+  width: fit-content;
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--rule);
+  border-radius: calc(var(--radius) + 2px);
 }
 .answer table {
   border-collapse: collapse;
+  font-size: 0.9em;
+  line-height: 1.45;
 }
-.answer th,
-.answer td {
-  border: 1px solid var(--border);
-  padding: 0.3em 0.6em;
+.answer :is(th, td) {
+  padding: 0.5em 0.8em;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+  overflow-wrap: normal;
 }
-.answer blockquote {
-  border-left: 3px solid var(--border-hover);
-  padding-left: 0.8em;
-  color: var(--muted);
+/* A column the Markdown aligned (`---:`, `:-:`) reaches the page as an inline
+   style="text-align: ..." (react-markdown 10 turns the align attribute into
+   one), which beats this rule; this is only for the header that was not. */
+.answer th {
+  text-align: start;
 }
-.answer h1,
-.answer h2,
-.answer h3 {
+.answer thead th {
+  border-bottom: 2px solid var(--accent-right);
+  background: var(--panel-hover);
+  color: var(--foreground-strong);
   font-weight: 600;
-  margin: 0.8em 0 0.4em;
+}
+.answer tbody tr:last-child td {
+  border-bottom: 0;
 }
 
-/* Eugene at the bench fades in once a wait outlasts its delay (§6.1). */
+/* A quiet draft (6.3): the chrome's size, nothing in it set under 13 px, and
+   its marks as quiet as its words. */
+.answer.answer-quiet :not(pre) > code {
+  color: inherit;
+  font-size: max(0.8125rem, 0.88em);
+}
+.answer.answer-quiet table {
+  font-size: max(0.8125rem, 0.9em);
+}
+.answer.answer-quiet :is(h5, h6) {
+  font-size: max(0.8125rem, 0.8125em);
+}
+.answer.answer-quiet > ul > li::marker {
+  color: var(--muted);
+}
+
+/* Syntax colour (6.4): only classes, so dark and light follow with no script,
+   and only colour. Plex Mono is loaded upright at 400 and font-synthesis is
+   off, so an italic comment or a bold token would be a face the page does not
+   have: a comment is told apart by its colour alone. */
+.answer .hljs-comment,
+.answer .hljs-quote {
+  color: var(--hl-comment);
+}
+.answer .hljs-keyword,
+.answer .hljs-selector-tag,
+.answer .hljs-doctag,
+.answer .hljs-name,
+.answer .hljs-tag {
+  color: var(--hl-keyword);
+}
+.answer .hljs-string,
+.answer .hljs-regexp,
+.answer .hljs-template-variable {
+  color: var(--hl-string);
+}
+.answer .hljs-number,
+.answer .hljs-literal,
+.answer .hljs-symbol,
+.answer .hljs-bullet {
+  color: var(--hl-number);
+}
+.answer .hljs-title,
+.answer .hljs-type,
+.answer .hljs-built_in,
+.answer .hljs-section,
+.answer .hljs-selector-class,
+.answer .hljs-selector-id {
+  color: var(--hl-title);
+}
+.answer .hljs-attr,
+.answer .hljs-attribute,
+.answer .hljs-property {
+  color: var(--hl-attr);
+}
+.answer .hljs-punctuation,
+.answer .hljs-operator,
+.answer .hljs-meta {
+  color: var(--hl-punct);
+}
+.answer .hljs-addition {
+  background: var(--status-ok-bg);
+  color: var(--status-ok-fg);
+}
+.answer .hljs-deletion {
+  background: var(--status-error-bg);
+  color: var(--status-error-fg);
+}
+
+/* GitHub alerts (6.4): the marker is consumed, the label is drawn from the
+   attribute. */
+.answer blockquote.alert {
+  --alert: var(--status-info-fg);
+  border-inline-start-color: var(--alert);
+  background: color-mix(in srgb, var(--alert) 9%, transparent);
+  padding-inline-end: 1em;
+}
+.answer blockquote.alert-tip {
+  --alert: var(--status-ok-fg);
+}
+.answer blockquote.alert-important {
+  /* The bar and the tint are a mark, and the mark's own colour; the label is
+     text, and takes the warm text colour, which has the contrast text needs. */
+  --alert: var(--accent-right);
+  --alert-text: var(--accent-right-text);
+}
+.answer blockquote.alert-warning {
+  --alert: var(--status-warn-fg);
+}
+.answer blockquote.alert-caution {
+  --alert: var(--status-error-fg);
+}
+.answer blockquote.alert::before {
+  content: attr(data-alert);
+  display: block;
+  margin-top: 0.35em;
+  color: var(--alert-text, var(--alert));
+  font-size: 0.75em;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* Shared patterns (8): one recipe each for buttons, fields, notices, badges,
+   page frames, headings and cards. All in one layer, so any utility
+   (border-error-line, text-xs, w-24) still wins. */
+@layer components {
+  /* Buttons: four kinds. One primary per visible form. */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.375rem;
+    min-height: 2.25rem;
+    padding: 0.375rem 0.875rem;
+    border: 1px solid var(--border-control);
+    border-radius: var(--radius);
+    background: var(--panel-soft);
+    color: var(--foreground);
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    font-weight: 600;
+    white-space: nowrap;
+    max-width: 100%;
+    text-decoration: none;
+    transition:
+      background-color 0.12s,
+      border-color 0.12s;
+  }
+  /* A phone cannot hold a long name on one line (a server or a site a person
+     named): a button wraps there, and breaks a name that has no spaces. */
+  @media (max-width: 39.99rem) {
+    .btn {
+      white-space: normal;
+      overflow-wrap: anywhere;
+      text-align: center;
+    }
+  }
+  .btn:disabled,
+  .btn[aria-disabled="true"] {
+    border-color: var(--border);
+    background: transparent;
+    color: var(--faint);
+    opacity: 1;
+  }
+  .btn-primary {
+    border-color: var(--accent-left);
+    background: var(--accent-left);
+    color: var(--on-accent-left);
+  }
+  .btn-primary:disabled {
+    border-color: var(--border);
+    background: var(--panel-soft);
+    color: var(--faint);
+  }
+  .btn-primary:not(:disabled):active {
+    border-color: var(--accent-active);
+    background: var(--accent-active);
+  }
+  .btn-danger {
+    border-color: var(--danger-edge);
+    background: var(--status-error-bg);
+    color: var(--status-error-fg);
+  }
+  .btn-quiet {
+    min-height: 2rem;
+    padding: 0.25rem 0.5rem;
+    border-color: transparent;
+    background: transparent;
+    color: var(--link);
+    font-weight: 500;
+  }
+  .btn-quiet.btn-danger {
+    border-color: transparent;
+    background: transparent;
+    color: var(--status-error-fg);
+  }
+  @media (hover: hover) {
+    .btn:not(:disabled):hover {
+      border-color: var(--accent-left);
+      background: var(--panel-hover);
+    }
+    .btn-primary:not(:disabled):hover {
+      border-color: var(--accent-hover);
+      background: var(--accent-hover);
+    }
+    .btn-danger:not(:disabled):hover {
+      border-color: var(--status-error-fg);
+      background: var(--status-error-bg);
+    }
+    .btn-quiet:not(:disabled):hover {
+      border-color: transparent;
+      background: var(--panel-hover);
+    }
+    .btn-quiet.btn-danger:not(:disabled):hover {
+      background: var(--status-error-bg);
+    }
+  }
+
+  /* Icon buttons (header), and the quiet actions under a message. */
+  .icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 2rem;
+    min-height: 2rem;
+    border-radius: var(--radius);
+    color: var(--muted);
+  }
+  .icon-btn[aria-expanded="true"] {
+    background: var(--panel-hover);
+    color: var(--link);
+  }
+  .act {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    min-height: 1.75rem;
+    padding: 0.25rem 0.5rem;
+    border-radius: var(--radius);
+  }
+  @media (hover: hover) {
+    .icon-btn:hover,
+    .act:not(:disabled):hover {
+      background: var(--panel-hover);
+      color: var(--foreground);
+    }
+    .icon-btn--danger:hover {
+      background: var(--status-error-bg);
+      color: var(--status-error-fg);
+    }
+  }
+  /* Reveal on hover, on focus, and always for the newest message and on touch. */
+  .msg-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    opacity: 0;
+    transition: opacity 0.12s;
+  }
+  .msg:hover .msg-actions,
+  .msg:focus-within .msg-actions,
+  .msg:last-child .msg-actions {
+    opacity: 1;
+  }
+  @media (hover: none), (pointer: coarse) {
+    .msg-actions {
+      opacity: 1;
+    }
+  }
+
+  /* Fields. The edge is at least 3:1 against the fill (3.5:1 in both schemes);
+     focus turns it blue and the ring hugs it. */
+  .control {
+    min-width: 0;
+    min-height: 2.25rem;
+    padding: 0.375rem 0.625rem;
+    border: 1px solid var(--border-control);
+    border-radius: var(--radius);
+    background: var(--panel-soft);
+    color: var(--foreground);
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+  }
+  textarea.control {
+    min-height: 5rem;
+    padding-block: 0.5rem;
+    line-height: 1.5;
+  }
+  .control--sm {
+    min-height: 2rem;
+    padding-block: 0.25rem;
+  }
+  .control:focus-visible {
+    border-color: var(--accent-left);
+    outline-offset: 0;
+  }
+  /* An invalid field's edge is after the layers (below). */
+  .control:disabled {
+    border-color: var(--border);
+    color: var(--faint);
+  }
+  .field {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 0.375rem;
+  }
+  .field-label {
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    font-weight: 500;
+  }
+  .field-label small {
+    color: var(--muted);
+    font-weight: 400;
+  }
+  .help {
+    max-width: 34em;
+    color: var(--muted);
+    font-size: 0.875rem;
+    line-height: 1.375rem;
+    text-wrap: pretty;
+  }
+  .help strong {
+    color: var(--foreground);
+    font-weight: 600;
+  }
+  .check {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.625rem;
+    min-height: 2rem;
+    padding-block: 0.25rem;
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    /* A folder, a server or an error with no space in it (a hash, a path) must
+       wrap in a row that is a flex container, or it widens the page. */
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .check > input {
+    flex: none;
+    width: 1rem;
+    height: 1rem;
+    margin-top: 0.125rem;
+  }
+  .check > :not(input) {
+    min-width: 0;
+  }
+
+  /* Notices: a rail, a tint, a glyph, a title, words. */
+  .notice {
+    --n-fg: var(--status-info-fg);
+    --n-bg: var(--status-info-bg);
+    --n-line: var(--status-info-border);
+    display: flex;
+    align-items: flex-start;
+    gap: 0.625rem;
+    padding: 0.625rem 0.875rem;
+    border: 1px solid var(--n-line);
+    border-left: 3px solid var(--n-fg);
+    border-radius: var(--radius);
+    background: var(--n-bg);
+    color: var(--foreground);
+    font-size: 0.875rem;
+    line-height: 1.375rem;
+    /* An error carries what it was told (a hash, a path, a token): it wraps
+       where it must, and never widens the page. */
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .notice > svg {
+    flex: none;
+    margin-top: 0.1875rem;
+    color: var(--n-fg);
+  }
+  .notice > :not(svg) {
+    min-width: 0;
+  }
+  .notice-title {
+    display: block;
+    color: var(--n-fg);
+    font-weight: 600;
+  }
+  .notice--warn {
+    --n-fg: var(--status-warn-fg);
+    --n-bg: var(--status-warn-bg);
+    --n-line: var(--status-warn-border);
+  }
+  .notice--error {
+    --n-fg: var(--status-error-fg);
+    --n-bg: var(--status-error-bg);
+    --n-line: var(--status-error-border);
+  }
+  .notice--ok {
+    --n-fg: var(--status-ok-fg);
+    --n-bg: var(--status-ok-bg);
+    --n-line: var(--status-ok-border);
+  }
+  .notice--bar {
+    padding-inline: 1rem;
+    border-width: 0 0 1px;
+    border-radius: 0;
+  }
+  .notice--float {
+    background-color: var(--panel);
+    background-image: linear-gradient(var(--n-bg), var(--n-bg));
+  }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    min-height: 1.5rem;
+    padding: 0 0.625rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--muted);
+    font-size: 0.75rem;
+    line-height: 1rem;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .badge--ok {
+    border-color: var(--status-ok-border);
+    background: var(--status-ok-bg);
+    color: var(--status-ok-fg);
+  }
+  .badge--warn {
+    border-color: var(--status-warn-border);
+    background: var(--status-warn-bg);
+    color: var(--status-warn-fg);
+  }
+
+  /* Pages: one frame, one set of heading levels, one card. */
+  .page {
+    min-height: 0;
+    flex: 1 1 0%;
+    overflow-y: auto;
+    padding: 1.5rem 1rem 3rem;
+  }
+  .page-col {
+    display: flex;
+    flex-direction: column;
+    gap: 2rem;
+    width: 100%;
+    max-width: 48rem;
+    margin-inline: auto;
+  }
+  .page-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+  .title-page {
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    font-size: 1.25rem;
+    line-height: 1.3;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    /* A title may carry a name a person chose: it wraps rather than widen the page. */
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .title-page > svg {
+    flex: none;
+    color: var(--accent-left);
+  }
+  .title-section {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--border);
+    font-size: 1rem;
+    line-height: 1.5;
+    font-weight: 600;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .title-section::after {
+    content: "";
+    position: absolute;
+    inset-inline-start: 0;
+    bottom: -1px;
+    width: 2.5rem;
+    height: 2px;
+    background: var(--accent-right);
+  }
+  .title-card {
+    font-size: 1rem;
+    line-height: 1.5;
+    font-weight: 600;
+  }
+  .title-sub {
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    font-weight: 600;
+  }
+  .section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+  .subsection {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+  }
+  .card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding: 1rem;
+    border: 1px solid var(--border);
+    border-radius: calc(var(--radius) + 2px);
+    background: var(--panel);
+  }
+  .card--add {
+    border-style: dashed;
+    background: transparent;
+  }
+  .empty {
+    padding: 0.75rem 1rem;
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+    color: var(--muted);
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+  }
+  .facts {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 0.25rem 1rem;
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+  }
+  .facts dt {
+    color: var(--muted);
+  }
+  .facts dd {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .keys {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    align-items: center;
+    gap: 0.5rem 1.25rem;
+    font-size: 0.875rem;
+  }
+  .keys dt {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.25rem;
+  }
+  .link {
+    color: var(--link);
+    text-decoration: underline;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 0.18em;
+  }
+  @media (hover: hover) {
+    .link:hover {
+      color: var(--link-hover);
+      text-decoration-thickness: 2px;
+    }
+  }
+
+  /* Tabs (Media), nav tabs (top bar). The current one has a real 2 px
+     underline; the others have none, so nothing wobbles and forced colors
+     does not paint a transparent border. */
+  .tabs {
+    display: flex;
+    gap: 0.25rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .tab {
+    min-height: 2.5rem;
+    margin-bottom: -1px;
+    padding: 0.5rem 0.75rem calc(0.5rem + 2px);
+    color: var(--muted);
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+  }
+  .tab[aria-selected="true"] {
+    padding-bottom: 0.5rem;
+    border-bottom: 2px solid var(--accent-left);
+    color: var(--foreground);
+    font-weight: 500;
+  }
+  .nav-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    min-height: 1.75rem;
+    padding: 0.25rem 0.625rem calc(0.25rem + 2px);
+    border-radius: var(--radius);
+    color: var(--foreground);
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+  }
+  .nav-tab > svg {
+    color: var(--muted);
+  }
+  .nav-tab[aria-current="page"] {
+    padding-bottom: 0.25rem;
+    border-bottom: 2px solid var(--accent-left);
+    background: var(--panel-soft);
+    font-weight: 600;
+  }
+  .nav-tab[aria-current="page"] > svg {
+    color: var(--accent-left);
+  }
+  @media (hover: hover) {
+    .tab:not([aria-selected="true"]):hover,
+    .nav-tab:hover {
+      background: var(--panel-hover);
+      color: var(--foreground);
+    }
+  }
+  /* A phone keeps the top bar to one row: no icons, tighter padding. */
+  @media (max-width: 40rem) {
+    .nav-tab {
+      padding-inline: 0.5rem;
+    }
+    .nav-tab > svg {
+      display: none;
+    }
+  }
+
+  /* The chat's settings: the fields scroll, Save and Close do not. */
+  .sheet {
+    display: flex;
+    flex-direction: column;
+    max-height: clamp(8rem, 40dvh, 28rem);
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+  .sheet-body {
+    min-height: 0;
+    flex: 1 1 auto;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 1rem;
+  }
+  .sheet-foot {
+    flex: none;
+    padding: 0.75rem 1rem;
+    border-top: 1px solid var(--border);
+  }
+
+  /* Reasoning and the draft: the console's dashed box for derived text. */
+  .reasoning-body {
+    max-height: 20rem;
+    overflow-y: auto;
+    padding: 0.5rem 0.75rem;
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+    line-height: 1.6;
+  }
+
+  /* A working answer. */
+  .working-dots {
+    display: inline-flex;
+    gap: 3px;
+  }
+  .working-dots > span {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: currentColor;
+    opacity: 0.35;
+    animation: working-pulse 1.2s ease-in-out infinite;
+  }
+  .working-dots > span:nth-child(2) {
+    animation-delay: 0.2s;
+  }
+  .working-dots > span:nth-child(3) {
+    animation-delay: 0.4s;
+  }
+  @keyframes working-pulse {
+    0%,
+    80%,
+    100% {
+      opacity: 0.35;
+    }
+    40% {
+      opacity: 1;
+    }
+  }
+}
+
+/* An invalid field's edge is a control edge (4.0:1 in dark and 4.2:1 in light
+   against the field's fill), not a status box's quiet one. A marked field
+   still carries border-error-line (its tests assert it), which is 2.2:1 on
+   dark and 1.9:1 on light, and a utility beats a component: so this one sits
+   outside the layers, where it wins. */
+:is(input, select, textarea)[aria-invalid="true"] {
+  border-color: var(--danger-edge);
+}
+
+/* Preferences, and the bits that need a query (9). */
 .scene-in {
   animation: scene-in 240ms ease-out;
 }
@@ -178,9 +1391,203 @@ body {
   }
 }
 
+/* Windows High Contrast: fills are dropped, so every meaning rides on a
+   border, an outline or text. The running dot is the one thing that was only a
+   background. */
+@media (forced-colors: active) {
+  .run-dot {
+    forced-color-adjust: none;
+    background-color: Highlight;
+  }
+}
+
+/* Increase contrast (macOS, iOS, Windows contrast themes): every text tier to
+   7:1 on the page, a panel, a soft fill and a hover fill, and every edge to 5:1
+   on the page, a panel and a soft fill (tokens.test.ts holds each of these). */
+@media (prefers-contrast: more) and (prefers-color-scheme: dark) {
+  :root {
+    --foreground: #ffffff;
+    --foreground-strong: #ffffff;
+    --muted: #d0d4d8;
+    --faint: #c4c9ce;
+    --heading: #f0d5c0;
+    --accent-right: #e0ab82;
+    --accent-right-text: #e7b288;
+    /* The primary button's states keep their direction: lighter when hovered,
+       darker when pressed. */
+    --accent-left: #a9d0e8;
+    --accent-hover: #bcdcf0;
+    --accent-active: #8bb8d4;
+    --link: #b4d6ec;
+    --link-hover: #cfe5f3;
+    --border: #939ba5;
+    --border-hover: #aab2bb;
+    --border-control: #aab2bb;
+    --rule: #939ba5;
+    --status-warn-fg: #ecc08a;
+    --status-error-fg: #f0b4ad;
+    --status-ok-fg: #a9d7b9;
+  }
+}
+@media (prefers-contrast: more) and (prefers-color-scheme: light) {
+  :root {
+    --foreground: #000000;
+    --foreground-strong: #000000;
+    --foreground-read: #000000;
+    --muted: #44444c;
+    --faint: #4a4a52;
+    --heading: #6f2a4d;
+    --accent-right: #a3326b;
+    /* Text, not a mark: 7:1 on every surface (the mark's colour is 5.9:1 on a
+       soft fill). */
+    --accent-right-text: #842758;
+    /* The primary button's states keep their direction: darker when hovered
+       and again when pressed. */
+    --accent-left: #1a3eb7;
+    --accent-hover: #1638a8;
+    --accent-active: #112d8c;
+    --link: #1a3eb7;
+    --link-hover: #1a3eb7;
+    --status-info-fg: #1b3bbd;
+    --border: #62626c;
+    --border-hover: #4a4a52;
+    --border-control: #4a4a52;
+    --rule: #62626c;
+    --status-warn-fg: #6a3406;
+    --status-error-fg: #7d1230;
+    --status-ok-fg: #05523d;
+  }
+}
+@media (prefers-contrast: more) {
+  :focus-visible {
+    outline-width: 3px;
+  }
+}
+
+/* Touch: 44 px targets, and no field under 16 px (iOS Safari zooms the page
+   into one). The composer is already 17 px (.text-read). */
+@media (pointer: coarse) {
+  .btn,
+  .control:not(textarea),
+  .tab,
+  .check {
+    min-height: 2.75rem;
+  }
+  .btn-quiet,
+  .act,
+  .icon-btn,
+  .nav-tab {
+    min-height: 2.75rem;
+    min-width: 2.75rem;
+  }
+  input:not([type="checkbox"], [type="radio"], [type="file"]):not(.text-read),
+  select:not(.text-read),
+  textarea:not(.text-read) {
+    font-size: max(1rem, 16px);
+  }
+}
+@media (hover: none) {
+  .needs-keyboard {
+    display: none;
+  }
+}
+
+/* A short window (a landscape phone, 200% zoom): keep a third of it for the
+   conversation and Send on screen. */
+@media (max-height: 32rem) {
+  #composer-hint {
+    display: none;
+  }
+  [data-testid="composer-area"] {
+    padding-block: 0.5rem;
+  }
+  #message-composer {
+    height: 3rem !important; /* beats the inline height the composer sets from its text */
+    min-height: 0;
+  }
+  .sheet {
+    max-height: clamp(6rem, 30dvh, 28rem);
+  }
+}
+@media (max-width: 47.99rem) {
+  .sheet {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    max-height: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   * {
     animation: none !important;
     transition: none !important;
   }
+}
+
+/* Slices R2 and R3 add their rules only inside their own block. */
+@layer components {
+  /* ---- R2: the chat's surroundings ---- */
+  /* The first stop on the page: a button that waits above the window until
+     it is focused, then drops in over the top bar. */
+  .skip-link {
+    position: absolute;
+    inset-block-start: 0.5rem;
+    inset-inline-start: 0.5rem;
+    z-index: 40;
+    transform: translateY(calc(-100% - 1rem));
+  }
+  .skip-link:focus-visible {
+    transform: none;
+  }
+  /* The keyboard shortcuts are for a keyboard. A phone has none and a tight
+     top bar; a tablet with a keyboard (it reports hover: none too) keeps the
+     button, which no media query can tell from one without. */
+  @media (hover: none) and (max-width: 47.99rem) {
+    .nav-keys {
+      display: none;
+    }
+  }
+  /* A row that opens and closes (reasoning, a call's arguments and result): 28 px
+     under a mouse and 44 px under a finger, like the buttons around it. */
+  .disclosure {
+    padding-block: 0.25rem;
+  }
+  @media (pointer: coarse) {
+    .disclosure {
+      padding-block: 0.8125rem;
+    }
+  }
+  /* ---- end R2 ---- */
+}
+
+@layer components {
+  /* ---- R3: the other screens ---- */
+  /* A card or sub-section title may carry a name a person chose (a server, a
+     machine, a folder): it wraps rather than widen a row on a phone. */
+  .title-card,
+  .title-sub {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  /* A button whose label holds such a name ("Save who may use X") wraps at
+     any width, not only below the sm breakpoint. */
+  .btn-wrap {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    text-align: center;
+  }
+  /* A field group (a fieldset, a box of chips) a refusal named: the group has
+     no aria-invalid to hang the danger edge on, so a ring inside its border
+     carries the 3:1 the border-error-line utility does not (2.2:1 dark). */
+  .group-invalid {
+    box-shadow: inset 0 0 0 1px var(--danger-edge);
+  }
+  /* The chat's settings are a form that needs more than 40% of a tall window:
+     Save and Close are in the sheet's own footer, so the fields scroll, not the
+     buttons. A short window keeps its own, smaller cap (above, unlayered). */
+  .sheet {
+    max-height: clamp(8rem, 55dvh, 40rem);
+  }
+  /* ---- end R3 ---- */
 }

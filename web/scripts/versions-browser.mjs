@@ -50,7 +50,8 @@ try {
   await page.getByTestId("user-message").getByRole("button", { name: "Edit" }).click();
   assert.equal(
     await page.getByTestId("edit-note").textContent(),
-    "Your earlier version and what followed it are kept. Use the arrows to go back.",
+    "Your earlier version and what followed it are kept. Use the arrows to go back. " +
+      "Ctrl+Enter (Cmd+Enter on a Mac) saves; Escape cancels.",
   );
   // The edit box has its own name, apart from the composer's (workbench#2).
   await page

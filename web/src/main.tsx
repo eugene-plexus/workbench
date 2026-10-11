@@ -1,5 +1,5 @@
-import "@fontsource/ibm-plex-sans/400.css";
-import "@fontsource/ibm-plex-sans/600.css";
+import "@fontsource-variable/ibm-plex-sans/wght.css";
+import "@fontsource-variable/ibm-plex-sans/wght-italic.css";
 import "@fontsource/ibm-plex-mono/400.css";
 import "./styles.css";
 
