@@ -87,3 +87,56 @@ it("reads the memory files it is about", () => {
     expect(() => readFileSync(join(import.meta.dirname, file), "utf8"), file).not.toThrow();
   }
 });
+
+/**
+ * Documents (MR2) say "files", "pages" and "tokens". How they are read underneath
+ * (chunks, embeddings, a vector store, retrieval, RAG) is not on the way a person
+ * reads it, so none of those words is in the files that write what a person reads
+ * about documents, comments included.
+ */
+const DOCUMENT_FILES = [
+  "components/Attachments.tsx",
+  "components/DocumentText.tsx",
+  "lib/documents.ts",
+  "lib/useChatFiles.ts",
+];
+const NOT_ON_THE_DOCUMENT_PATH = /\b(RAG|vectors?|embeddings?|retrieval|retrieve[ds]?|chunks?)\b/i;
+
+it("keeps how documents are read underneath off every screen about them", () => {
+  const found: string[] = [];
+  for (const file of DOCUMENT_FILES) {
+    const text = readFileSync(join(import.meta.dirname, file), "utf8");
+    const word = NOT_ON_THE_DOCUMENT_PATH.exec(text);
+    if (word) found.push(`${file}: ${word[0]}`);
+  }
+  expect(found).toEqual([]);
+});
+
+it("can fail: it names each of those words, and lets the plain ones through", () => {
+  for (const sample of [
+    "RAG",
+    "a text chunk",
+    "Chunks",
+    "an embedding",
+    "vector search",
+    "retrieval",
+  ]) {
+    expect(NOT_ON_THE_DOCUMENT_PATH.test(sample), sample).toBe(true);
+  }
+  for (const sample of [
+    "Documents",
+    "files",
+    "pages",
+    "tokens",
+    "window",
+    "Show what Workbench read",
+  ]) {
+    expect(NOT_ON_THE_DOCUMENT_PATH.test(sample), sample).toBe(false);
+  }
+});
+
+it("reads the document files it is about", () => {
+  for (const file of DOCUMENT_FILES) {
+    expect(() => readFileSync(join(import.meta.dirname, file), "utf8"), file).not.toThrow();
+  }
+});

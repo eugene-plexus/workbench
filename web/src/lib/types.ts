@@ -2,15 +2,45 @@
 
 export type MessageStatus = "done" | "running" | "stopped" | "interrupted" | "failed";
 
-export interface Source {
+/** What a web search found and the answer linked. */
+export interface WebSource {
+  kind: "web";
   url: string;
   title: string;
 }
 
+/** A document that was sent to the model with the message (MR2). It lists what
+ * was SENT, never what the model used: `partial` is the first part only, `native`
+ * the file itself (a model that reads PDFs), `replayed` a file attached earlier
+ * in the chat and sent again. The server counts pages and lines from 1. */
+export interface DocumentSource {
+  kind: "document";
+  doc_id: string;
+  name: string;
+  type: string | null;
+  native: boolean;
+  partial: boolean;
+  tokens: number | null;
+  replayed: boolean;
+  page_start: number | null;
+  page_end: number | null;
+  pages_total: number | null;
+  line_start: number | null;
+  line_end: number | null;
+  lines_total: number | null;
+  /** How much of the text went, 0 to 1; only on a partial read. */
+  fraction?: number;
+}
+
+export type Source = WebSource | DocumentSource;
+
+/** A file a message carried, as chat detail lists it. `reading` is how Workbench
+ * read it, for a document; null for an image or audio. */
 export interface AttachedFile {
   id: string;
   name: string;
   mediaType: string;
+  reading?: Reading | null;
 }
 
 export interface Message {
@@ -437,10 +467,13 @@ export interface Models {
 }
 
 export interface Progress {
-  stage: "prompt" | "working" | "tool" | "generating";
+  stage: "prompt" | "working" | "tool" | "generating" | "documents";
   tool?: string;
-  /** On `tool`: whether the call started, finished or waits for approval. */
-  phase?: "started" | "finished" | "approval";
+  /** On `tool`: whether the call started, finished or waits for approval. On
+   * `documents`: `reading`, while the answer waits for its files to be read. */
+  phase?: "started" | "finished" | "approval" | "reading";
+  /** On `documents`: how many files are being read. */
+  files?: number;
   prompt_tokens?: number;
   cached_tokens?: number;
   processed_tokens?: number;
@@ -637,3 +670,127 @@ export type MemoryCommand =
   | { command: "remember"; remembered: MemoryNote; created: boolean }
   | { command: "remember"; refused: Refusal }
   | { command: "forget"; words: string; candidates: MemoryNote[] };
+
+// --- Documents (MR2): what src/eugene_plexus_workbench/documents_api.py answers with ---
+
+export type ReadingState = "reading" | "ready" | "skipped" | "failed";
+export type ReadingKind = "pdf" | "docx" | "markdown" | "csv" | "html" | "code" | "text";
+
+/** How much of a document to read: all of it, or its first part, up to a number
+ * of tokens. The choice is kept with the file. */
+export type ReadingChoice = { mode: "whole" } | { mode: "first"; tokens: number };
+
+/** How reading a file went (`context.reading_view`). The numbers are the ones
+ * Workbench counted; `message` is the sentence to show for a file it skipped or
+ * could not read. */
+export interface Reading {
+  state: ReadingState;
+  kind: ReadingKind | null;
+  /** PDF, Word, Markdown, CSV, HTML, code or text. */
+  label: string | null;
+  language: string | null;
+  pages: number | null;
+  lines: number | null;
+  tokens: number | null;
+  chars: number | null;
+  headings: number | null;
+  notes: string[];
+  truncated: boolean;
+  code: string | null;
+  message: string | null;
+  chosen: ReadingChoice | null;
+  startedAt: number | null;
+  finishedAt: number | null;
+}
+
+/** Which part of a file goes, as the server counts it. */
+export interface Coverage {
+  whole: boolean;
+  tokens: number;
+  /** `pages 1 to 9 of 30`, `lines 1 to 567 of 900`, `3 pages`, `all of it`. */
+  where: string;
+  pages: [number, number] | null;
+  totalPages: number | null;
+  partialPage: boolean;
+  lines: [number, number] | null;
+  totalLines: number | null;
+  fraction: number;
+  heading: string | null;
+}
+
+/** What a person may choose for a file that is not read whole by default. */
+export type Offer =
+  | { action: "readAll"; tokens: number; where: string }
+  | { action: "readFirst"; tokens: number; where: string; cut?: Coverage };
+
+export type DecisionKind =
+  "pending" | "whole" | "partial" | "native" | "choose" | "too_long" | "no_room" | "unreadable";
+
+/** What a request to a model would do with one file (`context.Decision.view`).
+ * `send` is whether it can go as things stand. */
+export interface FileDecision {
+  kind: DecisionKind;
+  send: boolean;
+  message: string;
+  tokens: number | null;
+  blockTokens: number;
+  native: boolean;
+  replayed: boolean;
+  chosen: ReadingChoice | null;
+  /** A choice that was kept and no longer fits this model, so it is not used. */
+  choiceNoLongerFits: boolean;
+  offers: Offer[];
+  coverage: Coverage | null;
+  notes: string[];
+  window: number | null;
+  wholeLimit: number;
+  readAllLimit: number | null;
+  overhead?: number;
+  room: {
+    history: number;
+    memory: number;
+    documents: number;
+    reserve: number;
+    remaining: number | null;
+  };
+}
+
+/** One of a chat's files while the message is being written. Everything but the
+ * first three is absent from a file the page was handed without asking (an
+ * image sent from the media area), and `reading` and `decision` are null for an
+ * image or audio. */
+export interface ChatFile {
+  id: string;
+  name: string;
+  mediaType: string;
+  size?: number;
+  createdAt?: number;
+  kind?: "document" | "image" | "audio";
+  /** Already sent with a message, so no longer this message's to carry. */
+  sent?: boolean;
+  reading?: Reading | null;
+  decision?: FileDecision | null;
+}
+
+export interface FilesModel {
+  id: string | null;
+  /** Whether Eugene said how large the model's window is. */
+  known: boolean;
+  window: number | null;
+  fileInput: boolean;
+}
+
+export interface FilesRequest {
+  used: number;
+  window: number | null;
+  reserve: number;
+  /** Why the request as a whole cannot go, when every file fits alone. */
+  full: string | null;
+}
+
+/** `GET /api/chats/{id}/files?model=`: the decisions for the model the person picked. */
+export interface ChatFiles {
+  model: FilesModel;
+  files: ChatFile[];
+  request: FilesRequest | null;
+}

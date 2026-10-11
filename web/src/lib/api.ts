@@ -128,6 +128,19 @@ export async function fileUrl(id: string): Promise<string> {
   return URL.createObjectURL(await response.blob());
 }
 
+/** What Workbench read from a document, as text (`GET /api/files/{id}/text`),
+ * fetched with the secret since a plain link cannot carry the header. A PDF's
+ * pages are marked `[page N]`. */
+export async function fileText(id: string): Promise<string> {
+  const response = await checked(
+    await fetch(`/api/files/${encodeURIComponent(id)}/text`, {
+      credentials: "same-origin",
+      headers: headers(),
+    }),
+  );
+  return response.text();
+}
+
 /** A file the server makes on request (the memory export), fetched with the
  * secret, since a plain link cannot carry the header. `name` is the one the
  * server gave it, when it gave one. */

@@ -1,4 +1,4 @@
-import { ApiError, api, fileOf, problemOf, put } from "./api";
+import { ApiError, api, fileOf, fileText, problemOf, put, SignedOut } from "./api";
 import { SECRET_HEADER, SECRET_KEY } from "./session";
 
 function answer(status: number, body: unknown, headers: Record<string, string> = {}) {
@@ -129,5 +129,53 @@ describe("a file the server makes on request", () => {
       vi.fn(async () => answer(500, { detail: { message: "The disk is read only." } })),
     );
     await expect(fileOf("/api/x")).rejects.toThrow("The disk is read only.");
+  });
+});
+
+describe("the text Workbench read from a document", () => {
+  const read = "[page 1]\nAnnual report.\n\n[page 3]\nThe code word is TAMARIND-6042.";
+
+  it("is asked for by the file's id, with the request secret, and comes back as the text it is", async () => {
+    window.localStorage.setItem(SECRET_KEY, "s3cret");
+    const fetched = vi.fn<typeof fetch>(async () =>
+      answer(200, read, { "Content-Type": "text/plain; charset=utf-8" }),
+    );
+    vi.stubGlobal("fetch", fetched);
+    try {
+      expect(await fileText("a/b c")).toBe(read);
+      const [path, init] = fetched.mock.calls[0]!;
+      expect(path).toBe("/api/files/a%2Fb%20c/text");
+      expect(init?.credentials).toBe("same-origin");
+      expect((init?.headers as Record<string, string>)[SECRET_HEADER]).toBe("s3cret");
+    } finally {
+      window.localStorage.removeItem(SECRET_KEY);
+    }
+  });
+
+  it("says why it was refused, in the server's own words, for a file that is not there or not read", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        answer(404, { detail: { message: "The text read from this file is no longer on disk." } }),
+      ),
+    );
+    await expect(fileText("f")).rejects.toThrow(
+      "The text read from this file is no longer on disk.",
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => answer(409, { detail: { message: "This file is still being read." } })),
+    );
+    const failure = await failed(fileText("f"));
+    expect(failure).toBeInstanceOf(ApiError);
+    expect(failure.status).toBe(409);
+  });
+
+  it("is a sign-out when the person is not signed in", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => answer(401, { detail: { message: "Sign in.", reason: "expired" } })),
+    );
+    await expect(fileText("f")).rejects.toBeInstanceOf(SignedOut);
   });
 });

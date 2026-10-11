@@ -110,6 +110,7 @@ ignore = []
 "scripts/check-memory-sabotage.py" = ["E501"]
 "scripts/check-memory-page-sabotage.py" = ["E501"]
 "scripts/check-documents-sabotage.py" = ["E501"]
+"scripts/check-documents-page-sabotage.py" = ["E501"]
 
 # -----------------------------------------------------------------------------
 # Mypy

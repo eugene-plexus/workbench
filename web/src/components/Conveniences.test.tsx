@@ -135,8 +135,9 @@ it("pastes images through the same attachment endpoint while ordinary text keeps
     clipboardData: { files: [new File(["png"], "paste.png", { type: "image/png" })] },
   });
   await screen.findByRole("button", { name: "Remove paste.png" });
+  // Asked for the model the picker shows, so a document's first decision is for it.
   expect(api).toHaveBeenCalledWith(
-    "/api/chats/one/files",
+    "/api/chats/one/files?model=local",
     expect.objectContaining({ method: "POST", body: expect.any(FormData) }),
   );
   expect(fireEvent.paste(screen.getByTestId("composer"), { clipboardData: { files: [] } })).toBe(
@@ -204,7 +205,7 @@ it("exports a snapshot with source, file names and unfinished status without fet
         content: "Partial answer",
         reasoning: "Thinking",
         status: "running",
-        sources: [{ title: "Reference", url: "https://example.org" }],
+        sources: [{ kind: "web", title: "Reference", url: "https://example.org" }],
       },
     ],
   });

@@ -1,4 +1,5 @@
 import { attachmentProblem, searchProblem } from "../components/Composer";
+import { reading as documentReading } from "../test-documents";
 import { parseFrames } from "./events";
 import { SECRET_KEY, takeFragment } from "./session";
 import type { ChatDetail, Message, Model, Models } from "./types";
@@ -240,6 +241,34 @@ describe("what an answer being written is doing (2026-10-10)", () => {
   });
 });
 
+describe("what an answer says while its files are read (MR2)", () => {
+  const reading = { stage: "documents", phase: "reading", files: 2 } as const;
+
+  it("says the files are being read, not that the model is awaited", () => {
+    expect(progressWords(reading)).toBe("Reading your files…");
+    expect(progressWords({ stage: "documents", phase: "reading", files: 1 })).toBe(
+      "Reading your files…",
+    );
+    expect(progressWords(null)).toBe("Waiting for the model…");
+  });
+
+  it("is the working line before anything is written, and the model's own count is said as it always was", () => {
+    const at = 1_000;
+    const writing = (over: Partial<Message> = {}) => message({ createdAt: at, ...over });
+    expect(workingWords(reading, writing(), at + 12)).toBe("Reading your files…");
+    expect(
+      workingWords({ stage: "generating", generated_tokens: 5 }, writing({ content: "Hi" }), at),
+    ).toBe("Writing the answer · 5 tokens");
+  });
+
+  it("is a progress event like any other, and the model's first words end it", () => {
+    const event = { type: "progress" as const, id: "a", progress: reading };
+    expect(progressAfter(event, null)).toEqual(reading);
+    const delta = { type: "delta" as const, id: "a", content: "The" };
+    expect(progressAfter(delta, reading)).toBeNull();
+  });
+});
+
 describe("the search switch says why it is off (W6)", () => {
   const listing = (available: boolean, reason: string | null = null): Models => ({
     models: [model()],
@@ -270,6 +299,25 @@ describe("an attachment goes to a model that takes it (W7)", () => {
   it("is quiet when it does", () => {
     expect(attachmentProblem(model({ imageInput: true }), [png])).toBeNull();
   });
+
+  // MR2: Workbench reads a PDF and sends its text, which any model takes.
+  const pdf = { id: "p", name: "a.pdf", mediaType: "application/pdf" };
+  const read = { ...pdf, kind: "document" as const, reading: documentReading() };
+  it("does not ask a model to take a PDF that Workbench read, and sends as text", () => {
+    expect(attachmentProblem(model(), [read])).toBeNull();
+    expect(attachmentProblem(model({ imageInput: true }), [png, read])).toBeNull();
+  });
+  it("still asks it of a PDF that Workbench did not read, which goes as the file", () => {
+    expect(attachmentProblem(model(), [pdf])).toMatch(/does not take PDFs/);
+    expect(attachmentProblem(model({ fileInput: true }), [pdf])).toBeNull();
+    const unread = { ...pdf, kind: "document" as const, reading: null };
+    expect(attachmentProblem(model(), [unread])).toMatch(/does not take PDFs/);
+  });
+  it("still asks it of an image beside a PDF that was read", () => {
+    expect(attachmentProblem(model(), [png, read])).toBe(
+      "qwen3-14b does not take images. Pick a model that does, or remove the file.",
+    );
+  });
 });
 
 describe("a working line is said once and shown ticking (splitWorking)", () => {
@@ -292,6 +340,7 @@ describe("a working line is said once and shown ticking (splitWorking)", () => {
     for (const line of [
       "Waiting for the model…",
       "Searching the web…",
+      "Reading your files…",
       "Review the tool calls to continue.",
       // A colon that is not followed by a number is part of the sentence.
       "Using search: the web…",
@@ -310,6 +359,7 @@ describe("a working line is said once and shown ticking (splitWorking)", () => {
         at,
       ),
       progressWords({ stage: "prompt", prompt_tokens: 100, processed_tokens: 50 }),
+      progressWords({ stage: "documents", phase: "reading", files: 3 }),
     ];
     for (const line of lines) {
       const { say, tail } = splitWorking(line);
