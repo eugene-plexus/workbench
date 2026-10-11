@@ -14,12 +14,16 @@ import { useEffect, useRef, useState } from "react";
 
 import { del, patch } from "../lib/api";
 import { exportChat, saveDraft } from "../lib/conveniences";
+import { failureWords } from "../lib/memory";
+import { hideHint, hintCount, hintHidden } from "../lib/savedDocuments";
 import type { ChatSettings as Settings, Me, Message, Models } from "../lib/types";
 import { useChat } from "../lib/useChat";
+import { useChatDocuments } from "../lib/useChatDocuments";
 import { useChatMemory } from "../lib/useChatMemory";
 import { announce } from "../lib/words";
 import { ChatSettings } from "./ChatSettings";
 import { Composer } from "./Composer";
+import { DocumentsChip, DocumentsDrawer, DocumentsHint } from "./DocumentsChip";
 import { Mascot } from "./Mascot";
 import { MemoryChip, MemoryDrawer } from "./MemoryChip";
 import { MemoryToast, outcomeOf, type ToastOutcome } from "./MemoryToast";
@@ -35,6 +39,7 @@ export function ChatView({
   onChanged,
   onDeleted,
   onOpenMemory,
+  onOpenDocuments,
 }: {
   chatId: string;
   /** Files already in this chat, waiting in its composer: an image sent from the media area (M7). */
@@ -46,11 +51,13 @@ export function ChatView({
   onDeleted: () => void;
   /** Open the Memory page (from the drawer, and from a toast's Manage). */
   onOpenMemory: () => void;
+  /** Open the Documents screen (from the drawer, and from an answer's search that went wrong). */
+  onOpenDocuments: () => void;
 }) {
   const { detail, update, progress, error, reload, look } = useChat(chatId);
-  // The settings and the memory drawer are both panels above the chat, and
-  // only one is open at a time (on a phone each covers the whole window).
-  const [panel, setPanel] = useState<"settings" | "memory" | null>(null);
+  // The settings, the memory drawer and the documents drawer are all panels above
+  // the chat, and only one is open at a time (on a phone each covers the whole window).
+  const [panel, setPanel] = useState<"settings" | "memory" | "documents" | null>(null);
   const showSettings = panel === "settings";
   const [toast, setToast] = useState<{ id: number; outcome: ToastOutcome } | null>(null);
   const toasts = useRef(0);
@@ -61,6 +68,16 @@ export function ChatView({
     chatId,
     `${detail?.chat.model ?? ""}|${detail?.chat.settings.memory ?? ""}|${detail?.chat.settings.memoryExternal ?? ""}`,
   );
+  // What this chat does with the person's documents: read when the chat opens, when its
+  // model or a documents setting changes, after a send, and while documents are read.
+  const documents = useChatDocuments(
+    chatId,
+    `${detail?.chat.model ?? ""}|${detail?.chat.settings.documents ?? ""}|${detail?.chat.settings.documentsOnly ?? ""}|${detail?.chat.settings.documentsExternal ?? ""}`,
+  );
+  // The hint in the composer: hidden for good by this person, or while it turns Documents on.
+  const [hintGone, setHintGone] = useState(() => hintHidden(me.sub));
+  const [turningOn, setTurningOn] = useState(false);
+  const [hintProblem, setHintProblem] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -165,6 +182,21 @@ export function ChatView({
     update((shown) => ({ ...shown, chat: { ...updated, running: shown.chat.running } }));
   }
 
+  async function turnOnDocuments() {
+    setTurningOn(true);
+    setHintProblem(null);
+    try {
+      await saveSettings({ documents: "on" });
+      await documents.reload();
+    } catch (failure) {
+      setHintProblem(failureWords(failure));
+    } finally {
+      setTurningOn(false);
+    }
+  }
+
+  const aboutDocuments = hintGone ? null : hintCount(documents.view);
+
   async function rename(title: string) {
     if (!title.trim() || acting) return;
     setActing(true);
@@ -228,14 +260,22 @@ export function ChatView({
           ) : (
             <h1
               title={chat.title}
-              // The title has its own row where the chip and the four buttons
-              // would squeeze it to a few letters: on a phone, and on a tablet
-              // (768 to 1023 px), where the sidebar takes 288 px of the window.
-              className="min-w-0 flex-1 truncate text-xl font-semibold tracking-[-0.01em] max-sm:basis-full md:max-lg:basis-full"
+              // The title has its own row where the two chips and the four buttons
+              // would squeeze it to a few letters: below 1024 px, on a phone and on a
+              // tablet, where the sidebar also takes 288 px of the window.
+              className="min-w-0 flex-1 truncate text-xl font-semibold tracking-[-0.01em] max-lg:basis-full"
               data-testid="chat-title"
             >
               {chat.title}
             </h1>
+          )}
+          {renaming === null && !confirmDelete && (
+            <DocumentsChip
+              view={documents.view}
+              failed={documents.error !== null}
+              open={panel === "documents"}
+              onToggle={() => setPanel((now) => (now === "documents" ? null : "documents"))}
+            />
           )}
           {renaming === null && !confirmDelete && (
             <MemoryChip
@@ -257,7 +297,7 @@ export function ChatView({
                   setActionError(error instanceof Error ? error.message : String(error));
                 }
               }}
-              className="icon-btn max-sm:ml-auto md:max-lg:ml-auto"
+              className="icon-btn max-lg:ml-auto"
             >
               <Download size={16} />
             </button>
@@ -381,6 +421,19 @@ export function ChatView({
           onClose={() => setPanel(null)}
         />
       )}
+      {panel === "documents" && (
+        <DocumentsDrawer
+          chatId={chat.id}
+          view={documents.view}
+          error={documents.error}
+          onChat={(next) =>
+            update((shown) => ({ ...shown, chat: { ...next, running: shown.chat.running } }))
+          }
+          onReload={documents.reload}
+          onManage={onOpenDocuments}
+          onClose={() => setPanel(null)}
+        />
+      )}
       {panel === "memory" && (
         <MemoryDrawer
           chatId={chat.id}
@@ -438,6 +491,7 @@ export function ChatView({
                 }}
                 onLook={chat.readOnly ? look : undefined}
                 memory={remember}
+                documents={chat.readOnly ? undefined : { onManage: onOpenDocuments }}
               />
             ))}
           </div>
@@ -479,6 +533,20 @@ export function ChatView({
           models={models}
           modelsError={modelsError}
           running={running}
+          documentsHint={
+            aboutDocuments === null ? undefined : (
+              <DocumentsHint
+                documents={aboutDocuments}
+                busy={turningOn}
+                problem={hintProblem}
+                onTurnOn={() => void turnOnDocuments()}
+                onHide={() => {
+                  hideHint(me.sub);
+                  setHintGone(true);
+                }}
+              />
+            )
+          }
           onSent={(user, answer, notes) => {
             pinned.current = true;
             setAway(false);
@@ -497,6 +565,7 @@ export function ChatView({
             // taken the chat's copy of them: the toast and the chip say so.
             say(outcomeOf(notes));
             void memory.reload();
+            void documents.reload();
           }}
           onChat={(next) =>
             update((shown) => ({ ...shown, chat: { ...next, running: shown.chat.running } }))

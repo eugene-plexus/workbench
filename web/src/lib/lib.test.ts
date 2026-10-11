@@ -269,6 +269,41 @@ describe("what an answer says while its files are read (MR2)", () => {
   });
 });
 
+describe("what an answer says while the person's documents are searched (MR4)", () => {
+  const searching = { stage: "documents", phase: "searching" } as const;
+
+  it("says Searching your documents, which is not the model's wait and not the reading of files", () => {
+    expect(progressWords(searching)).toBe("Searching your documents…");
+    expect(progressWords(searching)).not.toBe(
+      progressWords({ stage: "documents", phase: "reading", files: 1 }),
+    );
+    expect(progressWords(searching)).not.toMatch(/model/);
+  });
+
+  it("is the working line before anything is written, and the model's own count is said as it always was", () => {
+    const at = 1_000;
+    const writing = (over: Partial<Message> = {}) => message({ createdAt: at, ...over });
+    expect(workingWords(searching, writing(), at + 30)).toBe("Searching your documents…");
+    expect(
+      workingWords({ stage: "generating", generated_tokens: 5 }, writing({ content: "Hi" }), at),
+    ).toBe("Writing the answer · 5 tokens");
+  });
+
+  it("is a progress event like any other, and the model's first words end it", () => {
+    const event = { type: "progress" as const, id: "a", progress: searching };
+    expect(progressAfter(event, null)).toEqual(searching);
+    const delta = { type: "delta" as const, id: "a", content: "The" };
+    expect(progressAfter(delta, searching)).toBeNull();
+  });
+
+  it("is told to a screen reader once, as a line with nothing that ticks", () => {
+    expect(splitWorking(progressWords(searching))).toEqual({
+      say: "Searching your documents…",
+      tail: "",
+    });
+  });
+});
+
 describe("the search switch says why it is off (W6)", () => {
   const listing = (available: boolean, reason: string | null = null): Models => ({
     models: [model()],
@@ -341,6 +376,7 @@ describe("a working line is said once and shown ticking (splitWorking)", () => {
       "Waiting for the model…",
       "Searching the web…",
       "Reading your files…",
+      "Searching your documents…",
       "Review the tool calls to continue.",
       // A colon that is not followed by a number is part of the sentence.
       "Using search: the web…",
@@ -360,6 +396,7 @@ describe("a working line is said once and shown ticking (splitWorking)", () => {
       ),
       progressWords({ stage: "prompt", prompt_tokens: 100, processed_tokens: 50 }),
       progressWords({ stage: "documents", phase: "reading", files: 3 }),
+      progressWords({ stage: "documents", phase: "searching" }),
     ];
     for (const line of lines) {
       const { say, tail } = splitWorking(line);

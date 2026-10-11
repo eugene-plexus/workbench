@@ -73,3 +73,14 @@ export function lacking(controls: HTMLElement[], scope: HTMLElement): string[] {
 /** Everything wrong with every control on what is drawn: nothing, when it is right. */
 export const wrong = (view: { container: HTMLElement }) =>
   lacking(controlsIn(view.container), view.container);
+
+/** What a screen drawn in some state must be: at least `atLeast` controls on it (a
+ * gate that finds none has checked nothing), and every one of them with a name and a
+ * test id. A control that is added later with neither fails here, by name. */
+export function everyControlIsNamed(view: { container: HTMLElement }, atLeast = 1): void {
+  const found = controlsIn(view.container);
+  expect(found.length, "controls on the screen").toBeGreaterThanOrEqual(atLeast);
+  const problems = lacking(found, view.container);
+  // The message names each control, so a failure says which one.
+  expect(problems, problems.join("; ")).toEqual([]);
+}

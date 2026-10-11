@@ -106,12 +106,17 @@ def record(reading: dict[str, Any] | None = READING) -> FileRecord:
     )
 
 
+#: How the document made of a file chosen to be searched is getting on (`_search_view`).
+SEARCH = {"docId": "d1", "status": "ready", "message": None, "passages": 12}
+
+
 def decided(
     reading: dict[str, Any],
     window: int | None = 32768,
     *,
     choice: context.Choice | None = None,
     file_input: bool = False,
+    search: dict[str, Any] | None = None,
 ) -> context.Decision:
     item = context.Attached(
         id="f1",
@@ -122,6 +127,7 @@ def decided(
         reading=reading,
         choice=choice,
         nonce="abcd1234",
+        search=search,
     )
     plan = context.plan(
         [item],
@@ -140,24 +146,44 @@ def test_a_reading_has_the_fields_the_page_reads() -> None:
 
 
 def test_a_decision_has_the_fields_the_page_reads() -> None:
-    # Whole, to choose (with its offers), a part, and one that is not read yet.
+    # Whole, to choose (with its offers), a part, one that is not read yet, and one
+    # chosen to be searched instead (ready, and while its document is made).
     whole = {**READING, "pages": 3, "tokens": 77, "partTokens": [25, 26, 26]}
+    choice = context.Choice("search")
     views = [
         decided(whole).view(),
         decided(READING).view(),
         decided({**READING, "state": "reading", "tokens": None}).view(),
         decided({"state": "skipped", "kind": "pdf", "message": "Skipped."}).view(),
+        decided(READING, choice=choice, search=SEARCH).view(),
+        decided(READING, choice=choice, search={**SEARCH, "status": "queued"}).view(),
     ]
-    assert {v["kind"] for v in views} == {"whole", "choose", "pending", "unreadable"}
+    assert {v["kind"] for v in views} == {"whole", "choose", "pending", "unreadable", "search"}
     page = interface("FileDecision")
+    # `overhead` is only there once a file has been read, and `search` only on a file
+    # chosen to be searched: both are optional on the page.
+    optional = {"overhead", "search"}
     for view in views:
-        # `overhead` is only there once a file has been read (it is optional on the page).
         assert set(view) <= page, set(view) - page
-        assert page - {"overhead"} <= set(view), page - {"overhead"} - set(view)
+        assert page - optional <= set(view), page - optional - set(view)
+    assert [v["search"] for v in views if "search" in v] == [
+        SEARCH,
+        {**SEARCH, "status": "queued"},
+    ], "only a file chosen to be searched says how its document is getting on"
+    assert all(set(v["search"]) == interface("FileSearch") for v in views if "search" in v)
     chosen = next(v for v in views if v["kind"] == "choose")
-    assert [o["action"] for o in chosen["offers"]] == ["readAll", "readFirst"]
+    # What a file may be offered: all of it, the first part, and, always, to search it instead.
+    assert [o["action"] for o in chosen["offers"]] == ["readAll", "readFirst", "search"]
     assert set(chosen["offers"][1]) == {"action", "tokens", "where", "cut"}
     assert set(chosen["offers"][0]) == {"action", "tokens", "where"}
+    assert set(chosen["offers"][2]) == {"action"}
+    declared = re.search(
+        r"export type Offer =(.*?);\n", (LIB / "types.ts").read_text("utf-8"), re.DOTALL
+    )
+    assert declared, "types.ts has no type Offer"
+    assert set(re.findall(r'action: "(\w+)"', declared.group(1))) == {
+        o["action"] for o in chosen["offers"]
+    }, "an offer the server makes that the page has no words for, or the other way round"
     assert set(chosen["offers"][1]["cut"]) == interface("Coverage")
     assert set(chosen["room"]) == {"history", "memory", "documents", "reserve", "remaining"}
 
@@ -176,6 +202,7 @@ def test_every_kind_of_decision_is_one_the_page_has_words_for() -> None:
         decided(READING, 2048).kind,
         decided(READING, choice=context.Choice("first", 3000)).kind,
         decided(READING, file_input=True).kind,
+        decided(READING, choice=context.Choice("search"), search=SEARCH).kind,
     }
     assert reached == kinds, sorted(reached ^ kinds)
 
@@ -186,6 +213,15 @@ def test_a_file_in_the_list_has_the_fields_the_page_reads() -> None:
     unread = documents_api._item(record(None), sent=True, decision=None)
     assert set(unread) == interface("ChatFile")
     assert unread["reading"] is None and unread["decision"] is None
+    # A file chosen to be searched also says how its own document is getting on.
+    assert item["search"] is None
+    chosen = documents_api._item(
+        record(),
+        sent=False,
+        decision=decided(READING, choice=context.Choice("search"), search=SEARCH),
+        search=SEARCH,
+    )
+    assert set(chosen) == interface("ChatFile") and chosen["search"] == SEARCH
 
 
 def test_a_source_has_the_fields_the_page_reads() -> None:

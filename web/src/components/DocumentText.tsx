@@ -6,25 +6,30 @@
  * plain link cannot carry it) and dropped when it is closed.
  *
  * It gives the button for a row of actions and the box that opens below the row,
- * as Remember this does.
+ * as Remember this does. For a saved document (`saved`) it is "Show indexed text":
+ * the text the search looks in, which its passages were cut from.
  */
 
 import { CircleAlert, FileSearch } from "lucide-react";
 import { type ReactNode, useId, useRef, useState } from "react";
 
-import { fileText } from "../lib/api";
+import { documentText, fileText } from "../lib/api";
 import { ScrollText } from "./ScrollText";
 
 export function useDocumentText({
   id,
   name,
   describedBy,
+  saved = false,
 }: {
   id: string;
   name: string;
   /** The id of what names the file, so a row of buttons that say the same
    * thing can be told apart by a screen reader. */
   describedBy?: string;
+  /** A document the person keeps (read from `/api/documents`), not a file attached
+   * to a chat. */
+  saved?: boolean;
 }): { action: ReactNode; panel: ReactNode } {
   const uid = useId();
   const [open, setOpen] = useState(false);
@@ -33,6 +38,7 @@ export function useDocumentText({
   const [loading, setLoading] = useState(false);
   // An answer that arrives after the box was closed (or opened again) is not shown.
   const latest = useRef(0);
+  const test = saved ? "saved-document" : "document";
 
   async function toggle() {
     const mine = ++latest.current;
@@ -47,7 +53,7 @@ export function useDocumentText({
     setLoading(true);
     setProblem(null);
     try {
-      const read = await fileText(id);
+      const read = await (saved ? documentText(id) : fileText(id));
       if (mine === latest.current) setText(read);
     } catch (failure) {
       if (mine === latest.current) {
@@ -61,15 +67,22 @@ export function useDocumentText({
   const action = (
     <button
       type="button"
-      data-testid="document-text-toggle"
+      data-testid={`${test}-text-toggle`}
       aria-expanded={open}
       aria-controls={`${uid}-text`}
       aria-describedby={describedBy}
+      title={saved ? "The text Workbench searches, with a PDF's pages marked" : undefined}
       onClick={() => void toggle()}
       className="act"
     >
       <FileSearch size={14} aria-hidden />{" "}
-      {open ? "Hide what Workbench read" : "Show what Workbench read"}
+      {saved
+        ? open
+          ? "Hide indexed text"
+          : "Show indexed text"
+        : open
+          ? "Hide what Workbench read"
+          : "Show what Workbench read"}
     </button>
   );
 
@@ -83,7 +96,7 @@ export function useDocumentText({
         </p>
       )}
       {problem && (
-        <p role="alert" data-testid="document-text-error" className="notice notice--error">
+        <p role="alert" data-testid={`${test}-text-error`} className="notice notice--error">
           <CircleAlert size={16} aria-hidden />
           {problem}
         </p>
@@ -91,12 +104,15 @@ export function useDocumentText({
       {text !== null && (
         <>
           <p className="help mt-1">
-            All the text Workbench read from {name}. A model is given the part you chose, or all of
-            it.
+            {saved
+              ? `All the text Workbench indexed from ${name}. A search looks in this text, and the passages sent to a model are cut from it.`
+              : `All the text Workbench read from ${name}. A model is given the part you chose, or all of it.`}
           </p>
           <ScrollText
-            label={`Text Workbench read from ${name}`}
-            testId="document-text"
+            label={
+              saved ? `Text Workbench indexed from ${name}` : `Text Workbench read from ${name}`
+            }
+            testId={`${test}-text`}
             text={text}
           />
         </>

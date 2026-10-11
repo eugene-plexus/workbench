@@ -128,17 +128,67 @@ export async function fileUrl(id: string): Promise<string> {
   return URL.createObjectURL(await response.blob());
 }
 
-/** What Workbench read from a document, as text (`GET /api/files/{id}/text`),
- * fetched with the secret since a plain link cannot carry the header. A PDF's
- * pages are marked `[page N]`. */
-export async function fileText(id: string): Promise<string> {
+/** Text the server keeps, fetched with the secret since a plain link cannot carry
+ * the header. */
+async function textOf(path: string): Promise<string> {
   const response = await checked(
-    await fetch(`/api/files/${encodeURIComponent(id)}/text`, {
-      credentials: "same-origin",
-      headers: headers(),
-    }),
+    await fetch(path, { credentials: "same-origin", headers: headers() }),
   );
   return response.text();
+}
+
+/** What Workbench read from a document, as text (`GET /api/files/{id}/text`). A
+ * PDF's pages are marked `[page N]`. */
+export const fileText = (id: string): Promise<string> =>
+  textOf(`/api/files/${encodeURIComponent(id)}/text`);
+
+/** What Workbench read from a saved document, as text (`GET /api/documents/{id}/text`):
+ * all of it, the pages of a PDF marked `[page N]`, as its passages were cut from it. */
+export const documentText = (id: string): Promise<string> =>
+  textOf(`/api/documents/${encodeURIComponent(id)}/text`);
+
+/** What an upload reports as it goes: how much of the file has gone, 0 to 1. */
+export interface UploadOptions {
+  onProgress?: (fraction: number) => void;
+  signal?: AbortSignal;
+}
+
+/** A form sent as it is made, with the secret, and the answer read as JSON. `fetch`
+ * cannot say how much of a body has gone, so this is the one call that is not one:
+ * a refusal and a sign-out are read exactly as every other call's are. */
+export function upload<T>(path: string, form: FormData, options: UploadOptions = {}): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    // Told to stop before it began: nothing is made, nothing is sent.
+    if (options.signal?.aborted) {
+      reject(new DOMException("The upload was stopped.", "AbortError"));
+      return;
+    }
+    const request = new XMLHttpRequest();
+    request.open("POST", path);
+    for (const [name, value] of Object.entries(headers())) request.setRequestHeader(name, value);
+    request.upload.onprogress = (event) => {
+      if (event.lengthComputable && event.total > 0)
+        options.onProgress?.(event.loaded / event.total);
+    };
+    request.onload = () => {
+      const empty = request.status === 204 || request.status === 205;
+      const answered = new Response(empty ? null : request.responseText, {
+        status: request.status,
+      });
+      checked(answered).then(
+        async (ok) => {
+          options.onProgress?.(1);
+          resolve(empty ? (undefined as T) : ((await ok.json()) as T));
+        },
+        (failure: unknown) => reject(failure),
+      );
+    };
+    request.onerror = () =>
+      reject(new Error("The connection to Workbench was lost while the file was being added."));
+    request.onabort = () => reject(new DOMException("The upload was stopped.", "AbortError"));
+    options.signal?.addEventListener("abort", () => request.abort(), { once: true });
+    request.send(form);
+  });
 }
 
 /** A file the server makes on request (the memory export), fetched with the

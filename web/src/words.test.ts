@@ -99,6 +99,17 @@ const DOCUMENT_FILES = [
   "components/DocumentText.tsx",
   "lib/documents.ts",
   "lib/useChatFiles.ts",
+  // The Documents screen, a chat's Documents and the passages under an answer (MR4).
+  "components/AddDocuments.tsx",
+  "components/DocumentRow.tsx",
+  "components/Documents.tsx",
+  "components/DocumentsChip.tsx",
+  "components/Marked.tsx",
+  "components/SourcePassages.tsx",
+  "components/TestQuestion.tsx",
+  "lib/savedDocuments.ts",
+  "lib/useChatDocuments.ts",
+  "lib/useSavedDocuments.ts",
 ];
 const NOT_ON_THE_DOCUMENT_PATH = /\b(RAG|vectors?|embeddings?|retrieval|retrieve[ds]?|chunks?)\b/i;
 

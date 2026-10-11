@@ -52,6 +52,7 @@ const element = () => (
     onChanged={vi.fn()}
     onDeleted={vi.fn()}
     onOpenMemory={vi.fn()}
+    onOpenDocuments={vi.fn()}
   />
 );
 
@@ -346,6 +347,7 @@ describe("Memory in a chat", () => {
         onChanged={vi.fn()}
         onDeleted={vi.fn()}
         onOpenMemory={onOpenMemory}
+        onOpenDocuments={vi.fn()}
       />,
     );
     return { ...view, onOpenMemory };
@@ -443,6 +445,7 @@ describe("Memory in a chat", () => {
         onChanged={vi.fn()}
         onDeleted={vi.fn()}
         onOpenMemory={vi.fn()}
+        onOpenDocuments={vi.fn()}
       />
     );
     const { rerender } = render(again());

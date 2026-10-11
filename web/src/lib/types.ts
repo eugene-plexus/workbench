@@ -32,7 +32,47 @@ export interface DocumentSource {
   fraction?: number;
 }
 
-export type Source = WebSource | DocumentSource;
+/** A passage of a person's saved documents that was found for their question and
+ * sent to the model with the message (MR4). It lists what was SENT, never what the
+ * model used: `cited` is only whether the answer's own text has this passage's
+ * number in it, like [2], and is absent until the answer is done. `snippet` is at
+ * most 240 characters, around the words that were searched for. */
+export interface PassageSource {
+  kind: "document";
+  passage: true;
+  doc_id: string;
+  name: string;
+  type: string | null;
+  scope: "library" | "chat";
+  /** 1, 2, 3 ...: the number the model was asked to cite. */
+  rank: number;
+  via: "words" | "meaning" | "both";
+  page_start: number | null;
+  page_end: number | null;
+  line_start: number | null;
+  line_end: number | null;
+  heading: string | null;
+  snippet: string;
+  chunk_ids: number[];
+  tokens: number;
+  terms: string[];
+  phrases: string[];
+  cited?: boolean;
+}
+
+/** A passage as the install's owner sees it in a chat they may read: that one was
+ * sent, and nothing of which (saved documents are never the owner's to read). */
+export interface HiddenPassage {
+  kind: "document";
+  passage: true;
+  name: "a document";
+  scope: "library" | "chat" | null;
+  rank: number | null;
+  via: "words" | "meaning" | "both" | null;
+  redacted: true;
+}
+
+export type Source = WebSource | DocumentSource | PassageSource | HiddenPassage;
 
 /** A file a message carried, as chat detail lists it. `reading` is how Workbench
  * read it, for a document; null for an image or audio. */
@@ -77,6 +117,9 @@ export interface Message {
   /** The output cap the gateway sent for this answer and where it came
    * from; null when it sent none or did not say (2026-10-10). */
   outputCap?: OutputCap | null;
+  /** What searching the person's saved documents came to for this answer, or
+   * null when nothing was searched (MR4). */
+  retrieval?: SearchRecord | null;
 }
 
 export interface OutputCap {
@@ -181,6 +224,14 @@ export interface ChatSettings {
   /** The person chose "Send for this chat": notes go to this chat's model
    * though it runs outside their machines. */
   memoryExternal?: true | null;
+  /** Documents in this chat: `on` searches the person's saved documents for each
+   * question; unset is off (MR4). */
+  documents?: "on" | "off" | null;
+  /** Answer only from the person's documents: when nothing matches, Workbench
+   * says so itself and does not ask the model. */
+  documentsOnly?: boolean | null;
+  /** The person chose "Send for this chat" for passages of their documents. */
+  documentsExternal?: true | null;
 }
 
 export interface FolderGrant {
@@ -470,8 +521,9 @@ export interface Progress {
   stage: "prompt" | "working" | "tool" | "generating" | "documents";
   tool?: string;
   /** On `tool`: whether the call started, finished or waits for approval. On
-   * `documents`: `reading`, while the answer waits for its files to be read. */
-  phase?: "started" | "finished" | "approval" | "reading";
+   * `documents`: `reading`, while the answer waits for its files to be read, or
+   * `searching`, while the person's saved documents are searched. */
+  phase?: "started" | "finished" | "approval" | "reading" | "searching";
   /** On `documents`: how many files are being read. */
   files?: number;
   prompt_tokens?: number;
@@ -494,6 +546,7 @@ export type ChatEvent =
       reasoningAt?: number;
       sources?: Source[];
       searchSuggestions?: string[];
+      retrieval?: SearchRecord | null;
     }
   | {
       type: "progress";
@@ -677,8 +730,11 @@ export type ReadingState = "reading" | "ready" | "skipped" | "failed";
 export type ReadingKind = "pdf" | "docx" | "markdown" | "csv" | "html" | "code" | "text";
 
 /** How much of a document to read: all of it, or its first part, up to a number
- * of tokens. The choice is kept with the file. */
-export type ReadingChoice = { mode: "whole" } | { mode: "first"; tokens: number };
+ * of tokens, or none of it: "Search it instead" keeps the file as a document of
+ * this chat, and each question is sent the passages that match it (MR4). The
+ * choice is kept with the file. */
+export type ReadingChoice =
+  { mode: "whole" } | { mode: "first"; tokens: number } | { mode: "search" };
 
 /** How reading a file went (`context.reading_view`). The numbers are the ones
  * Workbench counted; `message` is the sentence to show for a file it skipped or
@@ -718,13 +774,32 @@ export interface Coverage {
   heading: string | null;
 }
 
-/** What a person may choose for a file that is not read whole by default. */
+/** What a person may choose for a file that is not read whole by default. A
+ * file may always be searched instead (the offer that ends the list). */
 export type Offer =
   | { action: "readAll"; tokens: number; where: string }
-  | { action: "readFirst"; tokens: number; where: string; cut?: Coverage };
+  | { action: "readFirst"; tokens: number; where: string; cut?: Coverage }
+  | { action: "search" };
 
 export type DecisionKind =
-  "pending" | "whole" | "partial" | "native" | "choose" | "too_long" | "no_room" | "unreadable";
+  | "pending"
+  | "whole"
+  | "partial"
+  | "native"
+  | "search"
+  | "choose"
+  | "too_long"
+  | "no_room"
+  | "unreadable";
+
+/** How the document made of a file the person chose to search instead is getting
+ * on (`documents_api._search_view`). */
+export interface FileSearch {
+  docId: string | null;
+  status: SavedState;
+  message: string | null;
+  passages: number;
+}
 
 /** What a request to a model would do with one file (`context.Decision.view`).
  * `send` is whether it can go as things stand. */
@@ -746,6 +821,9 @@ export interface FileDecision {
   wholeLimit: number;
   readAllLimit: number | null;
   overhead?: number;
+  /** Only on a file the person chose to search instead: how its own document is
+   * getting on, or null before it has one. */
+  search?: FileSearch | null;
   room: {
     history: number;
     memory: number;
@@ -770,6 +848,9 @@ export interface ChatFile {
   sent?: boolean;
   reading?: Reading | null;
   decision?: FileDecision | null;
+  /** For a file the person chose to search instead: how its own document is
+   * getting on; null for any other. */
+  search?: FileSearch | null;
 }
 
 export interface FilesModel {
@@ -793,4 +874,251 @@ export interface ChatFiles {
   model: FilesModel;
   files: ChatFile[];
   request: FilesRequest | null;
+}
+
+// --- Saved documents (MR4): what src/eugene_plexus_workbench/saved_api.py answers with ---
+
+/** Where a saved document stands. `embedding` is held for search by meaning. */
+export type SavedState =
+  "queued" | "reading" | "searchable" | "embedding" | "ready" | "skipped" | "failed";
+
+/** One of a person's saved documents (`saved_api.document_view`). `message` is the
+ * sentence for a document that was skipped or could not be read, as it came. */
+export interface SavedDocument {
+  id: string;
+  name: string;
+  mediaType: string;
+  kind: string;
+  label: string | null;
+  language: string | null;
+  scope: "library" | "chat";
+  size: number;
+  pages: number | null;
+  lines: number | null;
+  tokens: number | null;
+  state: SavedState;
+  searchable: boolean;
+  message: string | null;
+  code: string | null;
+  passages: number;
+  embedded: number;
+  notes: string[];
+  /** Epoch seconds, as everywhere in Workbench's API. */
+  addedAt: number | null;
+  readAt: number | null;
+  indexedAt: number | null;
+}
+
+/** A document just added: whether it was already there byte for byte, and the ones
+ * a file of the same name replaced. */
+export interface AddedDocument extends SavedDocument {
+  unchanged: boolean;
+  replaced: string[];
+}
+
+/** A file that was not added, and why, in the server's words. */
+export interface AddRefusal {
+  name: string;
+  status: number;
+  message: string;
+}
+
+export interface AddedFiles {
+  documents: AddedDocument[];
+  refused: AddRefusal[];
+}
+
+/** How documents are searched right now (`saved_api.search_facts`): `headline` is
+ * the sentence to show, and it says words only for as long as that is so. */
+export interface SearchFacts {
+  mode: string;
+  words: boolean;
+  meaning: boolean;
+  headline: string;
+}
+
+/** What a person has set (`null`: not chosen) and what is in effect, with whose
+ * word it is. The page shows `effective`, never a stand-in that looks chosen. */
+export interface DocumentsPrefs {
+  newChats: boolean;
+  external: ExternalChoice | null;
+  effective: {
+    enabled: boolean;
+    disabledBy: "owner" | null;
+    newChats: boolean;
+    external: ExternalChoice;
+    externalSetBy: "owner" | "you" | "default";
+  };
+}
+
+export interface DocumentCounts {
+  documents: number;
+  passages: number;
+  waiting: number;
+}
+
+/** `GET /api/documents`: the Documents screen. */
+export interface DocumentsPage {
+  documents: SavedDocument[];
+  totals: {
+    documents: number;
+    passages: number;
+    bytes: number;
+    byState: Record<string, number>;
+    passagesKept: number;
+  };
+  limits: {
+    maxFileBytes: number;
+    maxFileMB: number;
+    maxPassages: number;
+    readsKinds: string[];
+    reads: string;
+    readTimeoutSeconds: number;
+  };
+  search: SearchFacts;
+  prefs: DocumentsPrefs;
+  installEnabled: boolean;
+  ownerReadsChats: boolean;
+}
+
+/** Why the documents cannot be read, said by the server: a 503 with the words, a
+ * code, and whether the search can be made again from the person's own files. */
+export interface DocumentsBlocked {
+  message: string;
+  code: string | null;
+  canRebuild: boolean;
+}
+
+/** `POST /api/documents/rebuild`: how many documents were made again, and how many
+ * files no document could be made of. */
+export interface Rebuilt {
+  documents: number;
+  left: number;
+}
+
+/** One passage `POST /api/documents/test` found, with why it matched. */
+export interface TestedPassage {
+  rank: number;
+  docId: string;
+  name: string;
+  scope: "library" | "chat";
+  pageStart: number | null;
+  pageEnd: number | null;
+  lineStart: number | null;
+  lineEnd: number | null;
+  heading: string | null;
+  snippet: string;
+  text: string;
+  tokens: number;
+  chunkIds: number[];
+  via: "words" | "meaning" | "both";
+  why: { via: string; terms: string[]; phrases: string[]; inHeading: string[] };
+}
+
+/** `POST /api/documents/test`: the passages that would be sent for a question, with
+ * no model asked. */
+export interface TestedQuestion {
+  status: "found" | "nothing_matched" | "no_words" | "no_documents";
+  query: { text: string; terms: string[]; phrases: string[] };
+  mode: string;
+  passages: TestedPassage[];
+  found: number;
+  didNotFit: number;
+  budget: {
+    window: number | null;
+    used: number;
+    reserve: number;
+    limit: number;
+    room: number | null;
+    allowed: number;
+    block: number;
+    perPassage: number;
+  };
+  searched: DocumentCounts;
+}
+
+/** Why a chat's next request sends no passages of the person's documents, in the
+ * order a person can act on it. */
+export type DocumentsReason =
+  "install_off" | "no_model" | "model_unknown" | "window_too_small" | "outside_model" | "chat_off";
+
+/** `GET /api/chats/{id}/documents`, for a chat that is the asker's. */
+export interface ChatDocuments {
+  chatId: string;
+  readOnly: false;
+  switch: "on" | "off";
+  documentsOnly: boolean;
+  /** Whether the next request searches anything: the person's documents, this
+   * chat's own searched files, or both. */
+  sending: boolean;
+  searching: { library: boolean; chat: boolean };
+  reason: string | null;
+  reasonCode: DocumentsReason | null;
+  hint: string | null;
+  model: {
+    id: string;
+    window: number | null;
+    locality: "local" | "external" | "unknown";
+    runsOn: string | null;
+  } | null;
+  outside: {
+    choice: ExternalChoice;
+    setBy: "owner" | "you" | "default";
+    canSendForThisChat: boolean;
+    sendForThisChat: boolean;
+  } | null;
+  counts: { library: DocumentCounts; chat: DocumentCounts };
+  chatDocuments: SavedDocument[];
+  budget: { limit: number; window: number | null };
+  search: SearchFacts;
+}
+
+/** The install's owner reading someone else's chat: whether Documents was on, and
+ * nothing of the person's documents. */
+export interface ChatDocumentsReadOnly {
+  chatId: string;
+  readOnly: true;
+  switch: "on" | "off";
+  documentsOnly: boolean;
+}
+
+export type ChatDocumentsView = ChatDocuments | ChatDocumentsReadOnly;
+
+/** What searching saved documents came to for one answer: `used` (passages were
+ * sent), `nothing_matched` (a normal result), `skipped` (not searched, and `code`
+ * says why), `failed` (it could not run, and `message` says what was seen) or
+ * `no_documents` (a chat that answers only from documents had none). */
+export type SearchStatus = "used" | "nothing_matched" | "skipped" | "failed" | "no_documents";
+
+/** `Message.retrieval`, as `saved_api.retrieval_view` makes it. */
+export interface SearchRecord {
+  status: SearchStatus;
+  code: string | null;
+  message: string | null;
+  query: string | null;
+  terms: string[];
+  phrases: string[];
+  mode: string;
+  scope: { library: boolean; chat: boolean };
+  documentsOnly: boolean;
+  askedAnyway: boolean;
+  answeredBy: "workbench" | null;
+  passages: number;
+  documents: number;
+  found: number;
+  didNotFit: number;
+  tokens: number;
+  budget: {
+    window: number | null;
+    used: number;
+    reserve: number;
+    limit: number;
+    room: number | null;
+    allowed: number;
+  } | null;
+  searched: DocumentCounts | null;
+  notes: { code: string; message: string; hint?: string }[];
+  /** The numbers the answer's own text cites, once it is done. */
+  cited: number[];
+  ms: number | null;
 }

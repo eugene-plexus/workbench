@@ -12,6 +12,7 @@ import type {
   ChatFiles,
   DocumentSource,
   FileDecision,
+  FileSearch,
   FilesModel,
   Offer,
   Reading,
@@ -124,8 +125,14 @@ const LOG_READING = reading({
   chars: 27900,
 });
 
-export const READ_ALL: Offer = { action: "readAll", tokens: 9300, where: "lines 1 to 900 of 900" };
-export const READ_FIRST: Offer = {
+export const READ_ALL: Extract<Offer, { action: "readAll" }> = {
+  action: "readAll",
+  tokens: 9300,
+  where: "lines 1 to 900 of 900",
+};
+/** The offer that ends every list of offers since MR4: a file may be searched instead. */
+export const SEARCH_INSTEAD: Extract<Offer, { action: "search" }> = { action: "search" };
+export const READ_FIRST: Extract<Offer, { action: "readFirst" }> = {
   action: "readFirst",
   tokens: 5859,
   where: "lines 1 to 567 of 900",
@@ -158,7 +165,7 @@ export function choose(over: Partial<ChatFile> = {}): ChatFile {
         "About 9,300 tokens. That is more than Workbench reads at once by default (6,000). Choose how much to read, or remove the file.",
       tokens: 9300,
       blockTokens: 0,
-      offers: [READ_ALL, READ_FIRST],
+      offers: [READ_ALL, READ_FIRST, SEARCH_INSTEAD],
       coverage: null,
       overhead: 136,
     }),
@@ -256,6 +263,7 @@ export function tooLong(over: Partial<ChatFile> = {}): ChatFile {
             heading: null,
           },
         },
+        SEARCH_INSTEAD,
       ],
       coverage: null,
       window: 4096,
@@ -415,6 +423,55 @@ export function partSource(over: Partial<DocumentSource> = {}): DocumentSource {
     line_end: 290,
     lines_total: 900,
     fraction: 0.3222,
+    ...over,
+  });
+}
+
+/** How the document made of a file chosen to be searched is getting on. */
+export function fileSearch(over: Partial<FileSearch> = {}): FileSearch {
+  return { docId: "d1", status: "ready", message: null, passages: 12, ...over };
+}
+
+/** The text of 9,300 tokens after the person chose "Search it instead": it is not
+ * read into the message, and its own document is ready to be searched. */
+export function searched(over: Partial<ChatFile> = {}): ChatFile {
+  const found = fileSearch();
+  return choose({
+    reading: { ...LOG_READING, chosen: { mode: "search" } },
+    search: found,
+    decision: decision({
+      kind: "search",
+      send: true,
+      message: "Will be searched for each question, not read whole.",
+      tokens: 9300,
+      blockTokens: 0,
+      chosen: { mode: "search" },
+      offers: [],
+      coverage: null,
+      overhead: 136,
+      search: found,
+    }),
+    ...over,
+  });
+}
+
+/** The same, while its document is still being made. */
+export function preparing(over: Partial<ChatFile> = {}): ChatFile {
+  const found = fileSearch({ status: "queued", passages: 0 });
+  return searched({
+    search: found,
+    decision: decision({
+      kind: "pending",
+      send: false,
+      message: "Getting this file ready to search…",
+      tokens: 9300,
+      blockTokens: 0,
+      chosen: { mode: "search" },
+      offers: [],
+      coverage: null,
+      overhead: 136,
+      search: found,
+    }),
     ...over,
   });
 }

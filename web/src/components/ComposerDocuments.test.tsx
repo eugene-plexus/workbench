@@ -278,7 +278,7 @@ describe("a document that needs a choice", () => {
     expect(chip()).toHaveAttribute("data-state", "choose");
     expect(send()).toBeDisabled();
     expect(screen.getByTestId("send-held")).toHaveTextContent(
-      "Choose how much of log.txt to read, or remove it.",
+      "Choose how much of log.txt to read, search it instead, or remove it.",
     );
     fireEvent.change(screen.getByTestId("composer"), { target: { value: "Summarize it." } });
     expect(send()).toBeDisabled();
@@ -397,7 +397,7 @@ describe("a different model", () => {
     expect(chip()).toHaveAttribute("data-state", "too_long");
     expect(screen.getByTestId("document-status")).toHaveTextContent("window is 4,096 tokens");
     expect(screen.getByTestId("send-held")).toHaveTextContent(
-      "Choose how much of report.pdf to read, or remove it.",
+      "Choose how much of report.pdf to read, search it instead, or remove it.",
     );
   });
 

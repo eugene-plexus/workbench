@@ -259,7 +259,7 @@ try {
   // --- choose how much to read -------------------------------------------------------
   assert.match(
     await page.getByTestId("send-held").textContent(),
-    /Choose how much of long-12-pages\.pdf to read, or remove it\./,
+    /Choose how much of long-12-pages\.pdf to read, search it instead, or remove it\./,
   );
   const offerAll = refused.getByTestId("document-offer-all");
   const offerFirst = refused.getByTestId("document-offer-first");
@@ -336,7 +336,7 @@ try {
   assert.equal(await tooLong.getByTestId("document-offer-all").count(), 0, "it does not fit whole");
   assert.match(
     await page.getByTestId("send-held").textContent(),
-    /Choose how much of long-30-pages\.pdf to read, or remove it\./,
+    /Choose how much of long-30-pages\.pdf to read, search it instead, or remove it\./,
   );
   await page.getByTestId("model-picker").selectOption(cfg.small);
   const crowded = chip(page, "long-30-pages.pdf", "no_room");

@@ -1,7 +1,8 @@
-import { Boxes, Brain, CircleAlert, Info, Keyboard, Laptop, Wrench } from "lucide-react";
+import { Boxes, Brain, CircleAlert, Files, Info, Keyboard, Laptop, Wrench } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ChatView } from "./components/ChatView";
+import { Documents } from "./components/Documents";
 import { JobSites } from "./components/JobSites";
 import { Mascot } from "./components/Mascot";
 import { Memory } from "./components/Memory";
@@ -9,7 +10,7 @@ import { type Handoff, Media } from "./components/Media";
 import { Sidebar } from "./components/Sidebar";
 import { SignIn } from "./components/SignIn";
 import { Tools } from "./components/Tools";
-import { api, onSignedOut, post, SignedOut } from "./lib/api";
+import { api, onSignedOut, patch, post, SignedOut } from "./lib/api";
 import { type Door, mediaFromPath, mediaPath } from "./lib/media";
 import { saveDraft } from "./lib/conveniences";
 import { forget, takeFragment } from "./lib/session";
@@ -27,6 +28,11 @@ export function memoryFromPath(path: string): boolean {
   return /^\/memory\/?$/.test(path);
 }
 
+/** Whether an address is the Documents screen: `/documents`. */
+export function documentsFromPath(path: string): boolean {
+  return /^\/documents\/?$/.test(path);
+}
+
 /** Whether this is an Apple keyboard: the shortcuts are Control and Option
  * there, and Ctrl and Alt elsewhere. A browser that will not say is not one. */
 function onMac(): boolean {
@@ -38,11 +44,12 @@ function onMac(): boolean {
 }
 
 /** The page a person is on, for the top bar, the tab's title and where focus goes. */
-type View = "chat" | "home" | "tools" | "media" | "memory" | "sites";
+type View = "chat" | "home" | "tools" | "media" | "documents" | "memory" | "sites";
 
 const PAGE_TITLES = {
   tools: "Toolbox · Tools",
   media: "Bins · Media",
+  documents: "Documents",
   memory: "Memory",
   sites: "Job sites",
 } as const;
@@ -64,6 +71,9 @@ export default function App() {
   const [chatId, setChatId] = useState<string | null>(() => chatFromPath(window.location.pathname));
   const [media, setMedia] = useState(() => mediaFromPath(window.location.pathname));
   const [memoryOpen, setMemoryOpen] = useState(() => memoryFromPath(window.location.pathname));
+  const [documentsOpen, setDocumentsOpen] = useState(() =>
+    documentsFromPath(window.location.pathname),
+  );
   // The owner reading someone else's bins (M3); null is one's own.
   const [mediaPerson, setMediaPerson] = useState<{ sub: string; name: string } | null>(null);
   // An image sent to a new chat waits in that chat's composer (M7).
@@ -88,11 +98,13 @@ export default function App() {
       ? "tools"
       : media
         ? "media"
-        : memoryOpen
-          ? "memory"
-          : chatId
-            ? "chat"
-            : "home";
+        : documentsOpen
+          ? "documents"
+          : memoryOpen
+            ? "memory"
+            : chatId
+              ? "chat"
+              : "home";
   const lastView = useRef(view);
 
   useEffect(() => {
@@ -106,7 +118,11 @@ export default function App() {
   useEffect(() => {
     if (
       phase.kind !== "ready" ||
-      (view !== "tools" && view !== "media" && view !== "memory" && view !== "sites")
+      (view !== "tools" &&
+        view !== "media" &&
+        view !== "documents" &&
+        view !== "memory" &&
+        view !== "sites")
     )
       return;
     document.title = `${PAGE_TITLES[view]} · Workbench`;
@@ -115,13 +131,28 @@ export default function App() {
     };
   }, [phase.kind, view]);
 
+  // Six pages do not fit a phone's one row: the bar scrolls sideways there, and the
+  // page a person is on is brought into view, whether they opened it or the address did.
+  useEffect(() => {
+    if (phase.kind !== "ready") return;
+    document
+      .querySelector<HTMLElement>('nav[aria-label="Workbench"] [aria-current="page"]')
+      ?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  }, [phase.kind, view]);
+
   // Opening a page moves focus to its heading, so a screen reader says where it
   // is and the keyboard starts at the top of it, not back in the sidebar.
   useEffect(() => {
     const before = lastView.current;
     lastView.current = view;
     if (before === view || phase.kind !== "ready") return;
-    if (view === "tools" || view === "media" || view === "memory" || view === "sites") {
+    if (
+      view === "tools" ||
+      view === "media" ||
+      view === "documents" ||
+      view === "memory" ||
+      view === "sites"
+    ) {
       focusOn(document.getElementById("view-heading") ?? document.querySelector("main h1"));
     }
   }, [phase.kind, view]);
@@ -132,6 +163,7 @@ export default function App() {
     setChatId(id);
     setMedia(null);
     setMemoryOpen(false);
+    setDocumentsOpen(false);
     setMediaPerson(null);
     setShowTools(false);
     setShowSites(false);
@@ -144,6 +176,7 @@ export default function App() {
       if (window.location.pathname !== path) window.history.pushState(null, "", path);
       setMedia({ door, id: null });
       setMemoryOpen(false);
+      setDocumentsOpen(false);
       setMediaPerson(person);
       setShowTools(false);
       setShowSites(false);
@@ -155,6 +188,20 @@ export default function App() {
   const openMemory = useCallback(() => {
     if (window.location.pathname !== "/memory") window.history.pushState(null, "", "/memory");
     setMemoryOpen(true);
+    setDocumentsOpen(false);
+    setMedia(null);
+    setMediaPerson(null);
+    setShowTools(false);
+    setShowSites(false);
+    setShowChats(false);
+  }, []);
+
+  const openDocuments = useCallback(() => {
+    if (window.location.pathname !== "/documents") {
+      window.history.pushState(null, "", "/documents");
+    }
+    setDocumentsOpen(true);
+    setMemoryOpen(false);
     setMedia(null);
     setMediaPerson(null);
     setShowTools(false);
@@ -167,6 +214,7 @@ export default function App() {
       setChatId(chatFromPath(window.location.pathname));
       setMedia(mediaFromPath(window.location.pathname));
       setMemoryOpen(memoryFromPath(window.location.pathname));
+      setDocumentsOpen(documentsFromPath(window.location.pathname));
       setMediaPerson(null);
       setShowTools(false);
       setShowSites(false);
@@ -264,6 +312,30 @@ export default function App() {
     }
   }, [open]);
 
+  /** A new chat with Documents on, for asking about the person's own documents. */
+  const askAboutDocuments = useCallback(async () => {
+    if (newPending.current) return;
+    newPending.current = true;
+    setActionError(null);
+    try {
+      const made = await post<Chat>("/api/chats", {});
+      let chat = made;
+      try {
+        chat = await patch<Chat>(`/api/chats/${made.id}`, { settings: { documents: "on" } });
+      } catch (error) {
+        setActionError(
+          `The chat was made, but Documents could not be turned on in it: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      setChats((current) => [chat, ...current]);
+      open(chat.id);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      newPending.current = false;
+    }
+  }, [open]);
+
   useEffect(() => {
     if (phase.kind !== "ready") return;
     const shortcuts = (event: KeyboardEvent) => {
@@ -353,10 +425,12 @@ export default function App() {
       <main className={`${showChats ? "hidden md:flex" : "flex"} min-w-0 flex-1 flex-col`}>
         <div className="relative">
           {/* Every page is always there, and the one you are on is marked, so
-              nothing moves when you change page. */}
+              nothing moves when you change page. On a phone the row scrolls
+              sideways; `relative` makes it the box that holds a tab's visually
+              hidden words, so they scroll with it and never widen the page. */}
           <nav
             aria-label="Workbench"
-            className="flex flex-wrap items-center border-b border-line px-2 py-1 sm:gap-x-1 sm:px-3"
+            className="relative flex flex-wrap items-center border-b border-line px-2 py-1 max-sm:flex-nowrap max-sm:overflow-x-auto max-sm:[&>*]:shrink-0 sm:gap-x-1 sm:px-3"
           >
             <button
               type="button"
@@ -391,6 +465,19 @@ export default function App() {
             >
               <Boxes size={14} aria-hidden />
               Bins · Media
+            </button>
+            <button
+              type="button"
+              aria-current={view === "documents" ? "page" : undefined}
+              className="nav-tab"
+              data-testid="open-documents"
+              onClick={() => {
+                if (view === "documents") return;
+                openDocuments();
+              }}
+            >
+              <Files size={14} aria-hidden />
+              Documents
             </button>
             <button
               type="button"
@@ -502,6 +589,8 @@ export default function App() {
               }
             }}
           />
+        ) : documentsOpen ? (
+          <Documents onClose={() => open(chatId)} onAsk={() => void askAboutDocuments()} />
         ) : memoryOpen ? (
           <Memory
             chats={chats}
@@ -523,6 +612,7 @@ export default function App() {
               void refreshChats();
             }}
             onOpenMemory={openMemory}
+            onOpenDocuments={openDocuments}
           />
         ) : (
           <Empty

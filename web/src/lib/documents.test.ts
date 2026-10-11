@@ -11,27 +11,37 @@ import {
   noRoom,
   partial,
   partSource,
+  preparing,
   READ_ALL,
   READ_FIRST,
   reading,
   scan,
+  SEARCH_INSTEAD,
+  searched,
   source,
   tooLong,
 } from "../test-documents";
+import { passage } from "../test-saved";
 import {
   ACCEPT,
   announceWords,
   asAttached,
   canGo,
+  choiceWords,
   chipState,
   chipWords,
+  DOCUMENT_ACCEPT,
   endSentence,
   holdWords,
   isDocument,
+  isDocumentSource,
+  isPassageSource,
   isReading,
+  isWebSource,
   KNOWN_EXTENSIONS,
   metaWords,
   offerChoice,
+  offerKey,
   offerWords,
   PLAIN_EXTENSIONS,
   readingMeta,
@@ -331,8 +341,12 @@ describe("why Send waits", () => {
   });
 
   it("is that a file needs a choice, whether it fits whole or not", () => {
-    expect(hold([choose()])).toBe("Choose how much of log.txt to read, or remove it.");
-    expect(hold([tooLong()])).toBe("Choose how much of long.pdf to read, or remove it.");
+    expect(hold([choose()])).toBe(
+      "Choose how much of log.txt to read, search it instead, or remove it.",
+    );
+    expect(hold([tooLong()])).toBe(
+      "Choose how much of long.pdf to read, search it instead, or remove it.",
+    );
   });
 
   it("is that a file cannot be read, or has no room", () => {
@@ -348,7 +362,7 @@ describe("why Send waits", () => {
       "Waiting for Workbench to read report.pdf. (2 more files need attention too.)",
     );
     expect(hold([scan(), choose()])).toBe(
-      "Choose how much of log.txt to read, or remove it. (1 more file needs attention too.)",
+      "Choose how much of log.txt to read, search it instead, or remove it. (1 more file needs attention too.)",
     );
     expect(hold([noRoom(), damaged()])).toContain("broken.pdf cannot be read");
   });
@@ -489,5 +503,154 @@ describe("what an answer lists of the files that were sent", () => {
     expect(sourceLine(source({ native: true, replayed: true }))).toBe(
       "report.pdf, sent as a file (attached earlier)",
     );
+  });
+});
+
+describe("what the Documents screen's file picker is asked to show", () => {
+  it("is documents only: PDF, Word, text and code, and no images or sound", () => {
+    const wanted = DOCUMENT_ACCEPT.split(",");
+    for (const kept of ["application/pdf", ".docx", "text/*", ".md", ".csv", ".py", ".txt"]) {
+      expect(wanted, kept).toContain(kept);
+    }
+    for (const left of ["image/png", "image/jpeg", "audio/wav", "audio/mpeg"]) {
+      expect(wanted, left).not.toContain(left);
+    }
+    expect(new Set(wanted).size).toBe(wanted.length);
+    // Everything it asks for beside the types is a name the server reads.
+    for (const extension of wanted.filter((w) => w.startsWith("."))) {
+      expect([...KNOWN_EXTENSIONS, ...PLAIN_EXTENSIONS, ".docx"], extension).toContain(extension);
+    }
+  });
+});
+
+describe("searching a file instead of reading it", () => {
+  it("is an offer with a button of its own: Search it instead, which keeps the choice to search", () => {
+    expect(offerWords(SEARCH_INSTEAD)).toBe("Search it instead");
+    expect(offerChoice(SEARCH_INSTEAD)).toEqual({ mode: "search" });
+    expect(offerKey(SEARCH_INSTEAD)).toBe("search");
+    expect(offerKey(READ_ALL)).toBe("all");
+    expect(offerKey(READ_FIRST)).toBe("first");
+  });
+
+  it("is the last of what a long file is offered, whether it fits or not", () => {
+    for (const long of [choose(), tooLong()]) {
+      const offers = long.decision!.offers;
+      expect(offers[offers.length - 1]).toEqual({ action: "search" });
+    }
+  });
+
+  it("is a choice a person can be told they made", () => {
+    expect(choiceWords({ mode: "search" })).toBe("search it instead");
+    expect(choiceWords({ mode: "whole" })).toBe("read it all");
+    expect(choiceWords({ mode: "first", tokens: 3000 })).toBe("the first 3,000 tokens");
+  });
+
+  it("is its own look of a file's card, ready to be searched", () => {
+    expect(chipState(searched())).toBe("search");
+    const words = chipWords(searched(), MODEL);
+    expect(words.state).toBe("search");
+    expect(words.tone).toBe("ok");
+    expect(words.title).toBeNull();
+    expect(words.sentence).toBe(
+      "Will be searched for each question, not read whole. 12 passages to search.",
+    );
+    expect(words.choice).toBe("Your choice: search it instead. It is kept for this chat only.");
+  });
+
+  it("says how many passages it has once it has some, from the file or from its decision, and nothing before", () => {
+    const one = searched({ search: { docId: "d", status: "ready", message: null, passages: 1 } });
+    expect(chipWords(one, MODEL).sentence).toBe(
+      "Will be searched for each question, not read whole. 1 passage to search.",
+    );
+    const bare = searched({ search: undefined });
+    expect(chipWords(bare, MODEL).sentence).toBe(
+      "Will be searched for each question, not read whole. 12 passages to search.",
+    );
+    const none = searched({
+      search: { docId: "d", status: "searchable", message: null, passages: 0 },
+      decision: { ...searched().decision!, search: null },
+    });
+    expect(chipWords(none, MODEL).sentence).toBe(
+      "Will be searched for each question, not read whole.",
+    );
+  });
+
+  it("says what it will do in its own words when the server gave none, and in the server's when it did", () => {
+    const quiet = searched({ decision: { ...searched().decision!, message: "" } });
+    expect(chipWords(quiet, MODEL).sentence).toBe(
+      "Will be searched for each question, not read whole. 12 passages to search.",
+    );
+    const said = searched({ decision: { ...searched().decision!, message: "Searching log.txt." } });
+    expect(chipWords(said, MODEL).sentence).toBe("Searching log.txt. 12 passages to search.");
+  });
+
+  it("can go, and Send does not wait for it", () => {
+    expect(canGo(searched())).toBe(true);
+    expect(holdWords([searched()], null, false, "local-model")).toBeNull();
+  });
+
+  it("is being read while its own document is made, in the server's words, and Send waits", () => {
+    const making = preparing();
+    expect(isReading(making)).toBe(true);
+    expect(chipState(making)).toBe("reading");
+    expect(chipWords(making, MODEL).sentence).toBe("Getting this file ready to search…");
+    expect(canGo(making)).toBe(false);
+    expect(holdWords([making], null, false, "local-model")).toBe(
+      "Waiting for Workbench to read log.txt.",
+    );
+  });
+
+  it("is a file that could not be searched, with the server's sentence, when its document was skipped or failed", () => {
+    const message = "Skipped: this file has no text.";
+    const failed = searched({
+      decision: { ...searched().decision!, kind: "unreadable", send: false, message },
+    });
+    expect(chipState(failed)).toBe("failed");
+    expect(chipWords(failed, MODEL).sentence).toBe(message);
+    expect(holdWords([failed], null, false, "local-model")).toBe(
+      "log.txt cannot be read. Remove it to send your message.",
+    );
+  });
+
+  it("is told to a screen reader with the file's name once it can be searched", () => {
+    expect(announceWords(searched(), MODEL)).toBe(
+      "log.txt: Will be searched for each question, not read whole. 12 passages to search.",
+    );
+  });
+});
+
+describe("a source under an answer is a web page, a file or a passage", () => {
+  const web = { kind: "web" as const, url: "https://example.org/a", title: "A page" };
+
+  it("tells each from the others, so a passage is never listed as a file or a page", () => {
+    expect(isWebSource(web)).toBe(true);
+    expect(isDocumentSource(web)).toBe(false);
+    expect(isPassageSource(web)).toBe(false);
+    expect(isDocumentSource(source())).toBe(true);
+    expect(isPassageSource(source())).toBe(false);
+    expect(isWebSource(source())).toBe(false);
+    expect(isPassageSource(passage())).toBe(true);
+    expect(isDocumentSource(passage())).toBe(false);
+    expect(isWebSource(passage())).toBe(false);
+  });
+
+  it("calls a passage the owner may not read a passage too, and never a file", () => {
+    const hiddenPassage = {
+      kind: "document" as const,
+      passage: true as const,
+      name: "a document" as const,
+      scope: "library" as const,
+      rank: 1,
+      via: "words" as const,
+      redacted: true as const,
+    };
+    expect(isPassageSource(hiddenPassage)).toBe(true);
+    expect(isDocumentSource(hiddenPassage)).toBe(false);
+  });
+
+  it("is not a passage when it only says it is not one", () => {
+    // A file source has no `passage` mark; one that says false is still a file.
+    expect(isPassageSource({ ...source(), passage: false } as never)).toBe(false);
+    expect(isDocumentSource({ ...source(), passage: false } as never)).toBe(true);
   });
 });

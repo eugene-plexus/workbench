@@ -28,6 +28,7 @@ import {
   isDocument,
   metaWords,
   offerChoice,
+  offerKey,
   offerWords,
   requestWords,
   WINDOW_UNKNOWN,
@@ -165,7 +166,12 @@ function DocumentChip({
   const decision = file.decision ?? null;
   const offers =
     words.state === "choose" || words.state === "too_long" ? (decision?.offers ?? []) : [];
-  const kept = (words.state === "whole" || words.state === "partial") && decision?.chosen != null;
+  // A choice that is kept can be taken back: how much to read, or to search it instead
+  // (also while its document is made, and when it could not be).
+  const searching = decision?.chosen?.mode === "search";
+  const kept =
+    searching ||
+    ((words.state === "whole" || words.state === "partial") && decision?.chosen != null);
   const text = useDocumentText({
     id: file.id,
     name: file.name,
@@ -244,7 +250,7 @@ function DocumentChip({
                   <button
                     key={offer.action}
                     type="button"
-                    data-testid={`document-offer-${offer.action === "readAll" ? "all" : "first"}`}
+                    data-testid={`document-offer-${offerKey(offer)}`}
                     disabled={disabled}
                     onClick={() => void choose(offerChoice(offer))}
                     className="btn btn-wrap"

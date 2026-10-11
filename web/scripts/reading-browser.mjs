@@ -424,10 +424,26 @@ try {
       judgeFaint(scheme, "the composer with files", await page.evaluate(probe));
       await takeFilesBack(page);
 
+      // Saved documents (MR4): a chat that was sent passages of them, with the passage
+      // that was cited opened under its answer, and the drawer that says what is searched.
+      await chat(page, cfg.chats.library);
+      await toTop(page);
+      await page.getByTestId("passage-toggle").first().click();
+      await settle(page);
+      await page.screenshot(shot(`library-chat-${scheme}-desk`));
+      judgeFaint(scheme, "a chat with passages under its answer", await page.evaluate(probe));
+      await page.getByTestId("documents-chip").click();
+      await page.getByTestId("documents-counts").waitFor();
+      await settle(page);
+      await page.screenshot(shot(`library-drawer-${scheme}-desk`));
+      judgeFaint(scheme, "the Documents drawer", await page.evaluate(probe));
+      await page.getByTestId("documents-close").click();
+
       // The other screens a person reads: the top bar's pages and the keys.
       for (const [name, file] of [
         [/Tools/, "tools"],
         [/Media/, "media"],
+        [/^Documents$/, "library"],
         [/^Memory$/, "memory"],
         [/Job sites/, "jobsites"],
         [/Keyboard shortcuts/, "shortcuts"],
@@ -443,6 +459,15 @@ try {
         if (file === "memory") {
           await page.getByTestId("memory-note").first().waitFor();
           judgeFaint(scheme, "the Memory page", await page.evaluate(probe));
+        }
+        if (file === "library") {
+          // The screen with its documents, and a question tried so its passages are read too.
+          await page.locator("[data-testid=saved-document][data-state=ready]").first().waitFor();
+          await page.getByTestId("documents-test-question").fill(cfg.library.question);
+          await page.getByTestId("documents-test-ask").click();
+          await page.getByTestId("documents-test-hit").first().waitFor();
+          await settle(page);
+          judgeFaint(scheme, "the Documents screen", await page.evaluate(probe));
         }
         await page.keyboard.press("Escape");
       }
@@ -495,6 +520,44 @@ try {
         `${filesWide}px too wide`,
       );
       await takeFilesBack(page);
+      // Saved documents on a phone: a chat with passages under its answer, its drawer,
+      // and the screen itself, each nothing wider than the screen.
+      await chat(page, cfg.chats.library);
+      await toTop(page);
+      await page.getByTestId("passage-toggle").first().click();
+      await settle(page);
+      await page.screenshot(shot(`library-chat-${scheme}-phone`));
+      const passagesWide = (await page.evaluate(structure)).overflow;
+      check(
+        `${scheme} phone: a chat with passages under its answer is nothing wider than the screen`,
+        passagesWide <= 1,
+        `${passagesWide}px too wide`,
+      );
+      await page.getByTestId("documents-chip").click();
+      await page.getByTestId("documents-counts").waitFor();
+      await settle(page);
+      await page.screenshot(shot(`library-drawer-${scheme}-phone`));
+      const drawerWide = await page.evaluate(
+        () => document.documentElement.scrollWidth - window.innerWidth,
+      );
+      check(
+        `${scheme} phone: the Documents drawer is nothing wider than the screen`,
+        drawerWide <= 1,
+        `${drawerWide}px too wide`,
+      );
+      await page.getByTestId("documents-close").click();
+      await page.goto(`${cfg.url}/documents`);
+      await page.locator("[data-testid=saved-document][data-state=ready]").first().waitFor();
+      await settle(page);
+      await page.screenshot(shot(`library-${scheme}-phone`));
+      const libraryWide = await page.evaluate(
+        () => document.documentElement.scrollWidth - window.innerWidth,
+      );
+      check(
+        `${scheme} phone: the Documents screen is nothing wider than the screen`,
+        libraryWide <= 1,
+        `${libraryWide}px too wide`,
+      );
       // The Memory page, on a phone: nothing wider than the screen.
       await page.goto(`${cfg.url}/memory`);
       await page.getByTestId("memory-note").first().waitFor();
@@ -508,9 +571,14 @@ try {
         memoryWide <= 1,
         `${memoryWide}px too wide`,
       );
-      // The top bar keeps to one row with five pages in it (a member's: the owner has no Job sites).
-      for (const width of [390, 375, 360]) {
+      // The top bar keeps to one row with six pages in it (a member's: the owner has no
+      // Job sites): it scrolls sideways there, and the page a person is on is in view.
+      for (const width of [390, 375, 360, 320]) {
+        // Each width is a phone of its own: the page is opened on it, as it is on a phone.
         await page.setViewportSize({ width, height: 844 });
+        await page.goto(`${cfg.url}/memory`);
+        await page.getByTestId("memory-note").first().waitFor();
+        await settle(page);
         const rows = await page.evaluate(() => {
           const tabs = [...document.querySelectorAll("nav[aria-label=Workbench] .nav-tab")].filter(
             (tab) => getComputedStyle(tab).display !== "none",
@@ -518,6 +586,22 @@ try {
           return new Set(tabs.map((tab) => Math.round(tab.getBoundingClientRect().top))).size;
         });
         check(`${scheme} phone ${width}: the top bar keeps to one row`, rows === 1, `${rows} rows`);
+        // The page a person is on is not left out of sight (it is Memory here).
+        const hidden = await page.evaluate(() => {
+          const bar = document.querySelector("nav[aria-label=Workbench]");
+          const here = bar?.querySelector("[aria-current=page]");
+          if (!bar || !here) return "no page is marked";
+          const edge = bar.getBoundingClientRect();
+          const box = here.getBoundingClientRect();
+          return box.left >= edge.left - 1 && box.right <= edge.right + 1
+            ? null
+            : `${Math.round(box.left)} to ${Math.round(box.right)} in a bar of ${Math.round(edge.left)} to ${Math.round(edge.right)}`;
+        });
+        check(
+          `${scheme} phone ${width}: the page a person is on is in view`,
+          hidden === null,
+          `${hidden}`,
+        );
       }
       await page.setViewportSize(PHONE);
       await context.close();
