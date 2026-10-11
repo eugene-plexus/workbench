@@ -4,16 +4,24 @@ The whole conversation travels in each request, as with any OpenAI
 client: the chat's instructions as a `system` message (with the person's
 notes after them, when the chat uses memory: `memory.py`), then every turn.
 A user turn with attachments becomes content parts in OpenAI's shapes
-(`common.yaml` `MessageContentPart`): an image as a `data:` URL, a PDF as a
-file part, audio as `input_audio`. An assistant turn is its answer only:
+(`common.yaml` `MessageContentPart`): an image as a `data:` URL, a PDF a model
+reads as a file part, audio as `input_audio`. An assistant turn is its answer only:
 text it wrote before its last web search is a draft and is not sent back
 (workbench#1). An answer that failed before it said anything is left out,
 because the model never said it.
+
+**A document is text in its message** (MR2, `context.py`): a PDF, Word, Markdown,
+text, CSV, HTML or code file the person attached is put in the user message it
+was attached to, as a delimited block before the person's own words, and is
+replayed there every turn, byte for byte, so the engine's prompt cache holds.
+The stored message is only the person's words.
 """
 
 from __future__ import annotations
 
 import base64
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +33,16 @@ from .tools import transcript
 
 #: What a chat's settings may hold, and the gateway's name for each.
 SAMPLING = {"temperature": "temperature", "topP": "top_p", "maxTokens": "max_tokens"}
+
+
+@dataclass(frozen=True)
+class SentDocument:
+    """How one attached document goes in a request (`context.Plan`): its text as
+    a delimited block, or, for a model that reads PDFs, the file itself."""
+
+    id: str
+    text: str | None
+    native: bool = False
 
 
 def _part(record: FileRecord, data: bytes) -> dict[str, Any]:
@@ -44,19 +62,48 @@ def _part(record: FileRecord, data: bytes) -> dict[str, Any]:
     }
 
 
+#: What stands for a part that is not text when only its size in tokens is wanted.
+_STUB = {"type": "image_url", "image_url": {"url": ""}}
+
+
 def _user_content(
-    message: Message, records: dict[str, FileRecord], root: Path
+    message: Message,
+    records: dict[str, FileRecord],
+    root: Path,
+    documents: Mapping[str, SentDocument] | None,
+    lean: bool,
 ) -> str | list[dict[str, Any]]:
     attached = [records[i] for i in message.attachments if i in records]
     if not attached:
         return message.content
-    parts: list[dict[str, Any]] = []
-    if message.content:
-        parts.append({"type": "text", "text": message.content})
+    blocks: list[str] = []
+    media: list[dict[str, Any]] = []
     for record in attached:
-        data = files.path_of(root, record.owner, record.id).read_bytes()
-        parts.append(_part(record, data))
-    return parts
+        if record.media_type in files.DOCUMENT_TYPES:
+            if lean:
+                continue
+            sent = (documents or {}).get(record.id)
+            if sent is None:
+                # Every document of a request is decided before it is built
+                # (`context.plan`); one that was not must not be left out unsaid.
+                raise LookupError(f"the document {record.id} was not planned for this request")
+            if sent.native:
+                data = files.path_of(root, record.owner, record.id).read_bytes()
+                media.append(_part(record, data))
+            elif sent.text:
+                blocks.append(sent.text)
+            continue
+        if lean:
+            media.append(dict(_STUB))
+        else:
+            data = files.path_of(root, record.owner, record.id).read_bytes()
+            media.append(_part(record, data))
+    words = [*blocks, message.content] if message.content else blocks
+    text = "\n\n".join(words)
+    if not media:
+        return text
+    parts: list[dict[str, Any]] = [{"type": "text", "text": text}] if text else []
+    return parts + media
 
 
 def request_for(
@@ -68,6 +115,8 @@ def request_for(
     model: str,
     search: bool,
     memory: str | None = None,
+    documents: Mapping[str, SentDocument] | None = None,
+    lean: bool = False,
 ) -> dict[str, Any]:
     """The body of `POST /v1/chat/completions` for the next answer.
 
@@ -75,7 +124,12 @@ def request_for(
     one system message, after the chat's instructions and never in a message
     of its own: Qwen templates refuse a second system message, and one that
     changed each turn would start every turn's prompt differently and lose
-    the engine's cache."""
+    the engine's cache.
+
+    `documents` says how each attached document goes (by file id): its block of
+    text, or the PDF itself. With `lean`, no file is read and no document is
+    included: a part that is not text is a stub, and the request is only good for
+    counting its tokens (`context.count_messages`)."""
     by_id = {r.id: r for r in records}
     messages: list[dict[str, Any]] = []
     instructions = str(chat.settings.get("instructions") or "").strip()
@@ -84,7 +138,12 @@ def request_for(
         messages.append({"role": "system", "content": system})
     for message in history:
         if message.role == "user":
-            messages.append({"role": "user", "content": _user_content(message, by_id, root)})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": _user_content(message, by_id, root, documents, lean),
+                }
+            )
         elif message.role == "assistant":
             messages.extend(transcript(message.tool_rounds))
             answer = (

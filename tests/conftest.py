@@ -270,11 +270,15 @@ def chat_model(
     locality: str | None,
     window: int | None = 32768,
     owned_by: str | None = None,
+    file_input: bool = False,
 ) -> dict[str, Any]:
     """A chat model as the gateway lists it: where it runs and how much it
     holds. `locality=None` leaves the key out; an outside model names its
-    provider, as a cloud account's driver does."""
+    provider, as a cloud account's driver does; `file_input` says it takes a
+    PDF as a file."""
     info: dict[str, Any] = {"surfaces": ["chat"], "ready_backends": 1}
+    if file_input:
+        info["file_input"] = True
     if window is not None:
         info["context_length"] = window
     if locality is not None:
@@ -532,6 +536,8 @@ class FakeGateway:
     #: gateway would.
     locality: str | None = "local"
     context_length: int | None = 32768
+    #: Whether the chat model takes a PDF as a file (the gateway's `file_input`).
+    file_input: bool = False
     #: Other chat models listed, whole, as `chat_model` builds them.
     more_chat_models: list[dict[str, Any]] = field(default_factory=list)
     #: End each answer with ` #N`, N its request's number, to tell versions apart.
@@ -604,6 +610,7 @@ class FakeGateway:
                                 else {}
                             ),
                             "image_input": True,
+                            **({"file_input": True} if self.file_input else {}),
                             "web_search": True,
                             "ready_backends": 1,
                             **({"locality": self.locality} if self.locality is not None else {}),
@@ -978,6 +985,17 @@ class Browser:
 
     def new_chat(self) -> str:
         return str(self.post("/api/chats", json={"model": MODEL}).json()["id"])
+
+    def wait_read(self, chat_id: str, file_id: str, seconds: float = 30) -> dict[str, Any]:
+        """The chat's file once Workbench has finished reading it (any end)."""
+        deadline = time.perf_counter() + seconds
+        while time.perf_counter() < deadline:
+            listed = self.get(f"/api/chats/{chat_id}/files").json()["files"]
+            found = next(f for f in listed if f["id"] == file_id)
+            if found["reading"] is None or found["reading"]["state"] != "reading":
+                return dict(found)
+            time.sleep(0.05)
+        raise AssertionError("the file was not read in time")
 
     def wait_answer(self, chat_id: str, seconds: float = 15) -> dict[str, Any]:
         deadline = time.perf_counter() + seconds

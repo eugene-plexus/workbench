@@ -9,11 +9,22 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI
 
-from . import api, config, folders_api, job_sites_api, media_api, memory_api, tools_api, web
+from . import (
+    api,
+    config,
+    documents_api,
+    folders_api,
+    job_sites_api,
+    media_api,
+    memory_api,
+    tools_api,
+    web,
+)
 from ._build import commit
 from ._http import ssl_context
 from .answers import Answers
 from .hub import Hub
+from .knowledge.reader import Reader
 from .media import MediaJobs
 from .node_folders import NodeFolders
 from .sessions import Sessions
@@ -58,6 +69,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         tools.node_folders = NodeFolders(store, provider, http)
         answers = Answers(store, hub, tools)
         media = MediaJobs(store, hub, settings.data_dir)
+        reader = Reader(store, settings.data_dir)
+        # A file whose reading a stop cut short is read again, not left
+        # saying "Reading" for ever.
+        reading = await reader.resume()
+        if reading:
+            log.info("reading %d file(s) again after the restart", reading)
         # M11: a video job the gateway accepted is polled again, whatever
         # stopped Workbench, because the provider kept working on it.
         resumed = await media.resume()
@@ -69,6 +86,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.hub = hub
         app.state.answers = answers
         app.state.media = media
+        app.state.reader = reader
         app.state.sessions = Sessions(store, provider)
         for problem in (provider.why_not(), hub.why_not()):
             if problem:
@@ -84,6 +102,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             yield
         finally:
             await answers.aclose()
+            await reader.aclose()
             await media.aclose()
             await hub.aclose()
             await http.aclose()
@@ -100,6 +119,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(api.router)
     app.include_router(media_api.router)
     app.include_router(memory_api.router)
+    app.include_router(documents_api.router)
     app.include_router(tools_api.router)
     app.include_router(folders_api.router)
     app.include_router(job_sites_api.router)
