@@ -1,8 +1,9 @@
 """Eugene's gateway, as Workbench reaches it: an ordinary OpenAI client.
 
 **The same doors as everyone else** (`workbench.md` call 6). `GET
-/v1/models`, `POST /v1/chat/completions` and, for search by meaning (MR5),
-`POST /v1/embeddings`, with the app's client key as the bearer. The key is
+/v1/models`, `POST /v1/chat/completions`, for search by meaning (MR5)
+`POST /v1/embeddings` and, for sorting what a search found (MR6b),
+`POST /v1/rerank`, with the app's client key as the bearer. The key is
 minted by the registry at install and read from the file it names; nothing
 else the hub has is reachable from here.
 
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import email.utils
 import json
+import math
 import time
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
@@ -89,6 +91,28 @@ class Embedded:
     #: How long the request took, from sending it to having the whole answer.
     seconds: float
     request_id: str | None = None
+
+
+@dataclass(frozen=True)
+class Reranked:
+    """What the gateway answered to one rerank request (MR6b): how well each passage answers
+    the question, which is all Workbench asks of a result sorter."""
+
+    #: `scores[i]` is for the `i`-th passage that was sent, 0 to 1 (the gateway puts every
+    #: sorter on that scale). They are put in order here, never compared with another sorter's.
+    scores: list[float]
+    #: What the sorter says it read, when it says.
+    tokens: int | None
+    #: How long the request took, from sending it to having the whole answer.
+    seconds: float
+    model: str | None = None
+    request_id: str | None = None
+
+    @property
+    def order(self) -> list[int]:
+        """The positions of the passages, best first. A tie keeps the order the passages were
+        sent in, so the order does not depend on the order the answer happened to list them in."""
+        return sorted(range(len(self.scores)), key=lambda i: (-self.scores[i], i))
 
 
 def _gateway_words(response: httpx.Response) -> str:
@@ -177,6 +201,57 @@ def _embedded(response: httpx.Response, count: int, seconds: float) -> Embedded:
         vectors=ordered,
         tokens=tokens if isinstance(tokens, int) and not isinstance(tokens, bool) else None,
         seconds=seconds,
+        request_id=response.headers.get("x-request-id"),
+    )
+
+
+def _reranked(response: httpx.Response, count: int, seconds: float) -> Reranked:
+    """The gateway's answer to a rerank request, checked: a score for each of the `count`
+    passages sent, each once, each a finite number. A reply that is not that is said as what
+    it is (`kind` is `unusable`), and the passages are left in the order they were found in."""
+
+    def bad(why: str) -> HubError:
+        return HubError(
+            f"The gateway's answer to the sort request was not usable: {why}.", kind="unusable"
+        )
+
+    try:
+        answer = response.json()
+    except ValueError as exc:
+        raise bad(f"it was not JSON ({response.headers.get('content-type') or 'no type'})") from exc
+    if not isinstance(answer, dict):
+        raise bad("it was not an object")
+    results = answer.get("results")
+    if not isinstance(results, list) or len(results) != count:
+        raise bad(
+            f"it held {len(results) if isinstance(results, list) else 'no'} scores for "
+            f"{count} passages"
+        )
+    scores = [0.0] * count
+    seen: set[int] = set()
+    for item in results:
+        index = item.get("index") if isinstance(item, dict) else None
+        score = item.get("relevance_score") if isinstance(item, dict) else None
+        if (
+            not isinstance(index, int)
+            or isinstance(index, bool)
+            or not 0 <= index < count
+            or index in seen
+            or not isinstance(score, int | float)
+            or isinstance(score, bool)
+            or not math.isfinite(score)
+        ):
+            raise bad("a score was missing, repeated or not a number")
+        seen.add(index)
+        scores[index] = float(score)
+    usage = answer.get("usage")
+    tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+    model = answer.get("model")
+    return Reranked(
+        scores=scores,
+        tokens=tokens if isinstance(tokens, int) and not isinstance(tokens, bool) else None,
+        seconds=seconds,
+        model=model if isinstance(model, str) and model else None,
         request_id=response.headers.get("x-request-id"),
     )
 
@@ -313,6 +388,44 @@ class Hub:
                 _retry_after(response),
             )
         return _embedded(response, len(inputs), time.perf_counter() - started)
+
+    async def rerank(
+        self, model: str, query: str, documents: Sequence[str], *, seconds: float = 20.0
+    ) -> Reranked:
+        """One sort (MR6b): how well each of `documents` answers `query`, by `model`, which
+        is a result sorter the gateway lists with the `rerank` surface. Jina's body, with
+        nothing in it the gateway does not honour: no `top_n` (every passage is scored; the
+        caller puts them in order), and no `return_documents` (the caller has the text). A
+        passage longer than the sorter reads is the gateway's 400, not cut. The request is
+        given up on after `seconds`. Raises `HubError`, with `retry_after` when the gateway
+        asked us to wait."""
+        headers = self._headers()
+        body = {"model": model, "query": query, "documents": list(documents)}
+        started = time.perf_counter()
+        try:
+            response = await self._http.post(
+                f"{self.gateway_url}/v1/rerank",
+                json=body,
+                headers=headers,
+                timeout=httpx.Timeout(min(10.0, seconds), read=seconds),
+            )
+        except httpx.TimeoutException as exc:
+            raise HubError(
+                f"Eugene's gateway did not answer the sort request within {seconds:g} "
+                f"seconds ({type(exc).__name__}).",
+                status=504,
+                kind="timeout",
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise self._unreachable(exc) from exc
+        if response.status_code != 200:
+            raise refusal(
+                response.status_code,
+                _gateway_words(response),
+                _gateway_param(response),
+                _retry_after(response),
+            )
+        return _reranked(response, len(documents), time.perf_counter() - started)
 
     async def images(
         self, body: dict[str, Any], *, edit: bool

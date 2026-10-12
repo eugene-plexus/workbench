@@ -65,12 +65,20 @@ def union(name: str) -> set[str]:
 
 
 def literals(name: str, field: str) -> set[str]:
-    """The strings of an inline union that a field of interface `name` is: `mode: "a" | "b c";`."""
+    """The strings of an inline union that a field of interface `name` is: `mode: "a" | "b c";`.
+    The union may end with `null` or with the name of another type (`mode: "a" | Sorted;`), which
+    is not a string and is not one of these."""
     found = re.search(
-        rf"^  {field}\??: ((?:\"[\w ]+\"(?:\s*\|\s*)?)+)(?:null)?;", body(name), re.MULTILINE
+        rf"^  {field}\??: ((?:\"[\w ]+\"(?:\s*\|\s*)?)+)(?:\w+)?;", body(name), re.MULTILINE
     )
     assert found, f"{name}.{field} is not a union of strings"
     return set(re.findall(r'"([\w ]+)"', found.group(1)))
+
+
+def base_mode(mode: str) -> str:
+    """How a search was done, without the sorter that put what it found in order (MR6b):
+    `meaning and words, sorted by X` is `meaning and words`."""
+    return mode.split(", sorted by ", 1)[0]
 
 
 def server_text(name: str) -> str:
@@ -196,7 +204,7 @@ def test_a_question_that_was_tried_has_the_fields_the_page_reads_whatever_it_fou
         assert set(found["budget"]) == shape("TestedQuestion", "budget")
         assert set(found["searched"]) == interface("DocumentCounts")
         assert set(found["meaning"]) == interface("MeaningRun"), wanted
-        assert found["mode"] in literals("TestedQuestion", "mode"), wanted
+        assert base_mode(found["mode"]) in literals("TestedQuestion", "mode"), wanted
     assert ran["unavailable"].json()["mode"] == "none" and ran["found"].json()["mode"] == "words"
     assert literals("TestedQuestion", "status") == set(ran)
     hit = ran["found"].json()["passages"][0]

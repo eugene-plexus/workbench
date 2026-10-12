@@ -506,7 +506,11 @@ def test_the_listing_has_every_field_the_documents_screen_reads(
     head = found["search"]
     assert set(head) == {
         "mode", "words", "meaning", "headline", "code", "detail", "actions", "model", "adding", "rebuild",
+        "sort",
     }  # fmt: skip
+    assert head["sort"]["code"] == "none_set_up" and head["sort"]["sorting"] is False, (
+        "this gateway lists no result sorter: MR6b's own tests give it one"
+    )
     assert set(head["model"]) == {
         "setting", "automatic", "resolved", "label", "locality", "runsOn", "allowExternal",
         "outside", "builtWith", "dimension", "prefixes", "floor",

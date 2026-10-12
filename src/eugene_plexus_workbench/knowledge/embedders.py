@@ -202,6 +202,12 @@ def passage_input(identity: Identity, heading: str | None, text: str) -> str:
     return f"{identity.document_prefix}{head}{text}"
 
 
+#: A passage that is not for a search model: no model's prefix, only the headings and the words.
+#: What a result sorter is sent (MR6b, `search.sheet_of`), made by `passage_input` as a search
+#: model's text is, so that the two read a passage the same way.
+PLAIN = Identity(model="", dim=1)
+
+
 def question_input(identity: Identity, question: str) -> str:
     """What a question is embedded as: the model's query prefix, then the question."""
     return f"{identity.query_prefix}{question[:MAX_QUESTION_CHARS]}"
@@ -224,7 +230,9 @@ def unknown_prefixes(identity: Identity) -> str | None:
 
 @dataclass(frozen=True)
 class SearchModel:
-    """A model the gateway lists with the embeddings surface."""
+    """A model the gateway lists with a surface Workbench uses for finding passages: the
+    embeddings surface for a search model, and the rerank surface for a result sorter
+    (`sorting.py`, which says its models in the same terms)."""
 
     id: str
     #: `local`, `external` or `unknown`: whether it runs on this install's own machines.
@@ -242,6 +250,13 @@ class SearchModel:
 def search_models(listing: Mapping[str, Any]) -> tuple[list[SearchModel], set[str]]:
     """The search models in the gateway's list of models, in its order, and every id the
     list holds (a model that is not a search model is told from one that is not there)."""
+    return models_with(listing, SURFACE)
+
+
+def models_with(listing: Mapping[str, Any], surface: str) -> tuple[list[SearchModel], set[str]]:
+    """The models in the gateway's list of models that have this surface, in its order, and
+    every id the list holds. Where a model runs and whether it is running are read the same
+    way for every surface (the gateway says them in `x_eugene_plexus`)."""
     found: list[SearchModel] = []
     every: set[str] = set()
     for model in listing.get("data") or []:
@@ -249,7 +264,7 @@ def search_models(listing: Mapping[str, Any]) -> tuple[list[SearchModel], set[st
             continue
         every.add(model["id"])
         info = model.get("x_eugene_plexus") or {}
-        if SURFACE not in (info.get("surfaces") or []):
+        if surface not in (info.get("surfaces") or []):
             continue
         drivers = info.get("drivers") or []
         owner = str(model.get("owned_by") or "")

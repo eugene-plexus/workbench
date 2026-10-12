@@ -334,8 +334,9 @@ const ordinal = (n: number): string => {
   return `${n}${ending}`;
 };
 
-/** Where each way put a passage in its own list: `Words put it 3rd, meaning put it 1st
- * (closeness 0.62).` Never one number made of two scales. */
+/** Where each way put a passage in its own list, and where the result sorter put it among the
+ * best of both: `Words put it 3rd, meaning put it 1st (closeness 0.62), the sorter put it 2nd.`
+ * Never one number made of two scales. */
 export function placesWords(places: Places, similarity: number | null): string | null {
   const said: string[] = [];
   if (places.words != null) said.push(`words put it ${ordinal(places.words)}`);
@@ -344,20 +345,36 @@ export function placesWords(places: Places, similarity: number | null): string |
       `meaning put it ${ordinal(places.meaning)}${similarity != null ? ` (closeness ${similarity.toFixed(2)})` : ""}`,
     );
   }
+  if (places.sorter != null) said.push(`the sorter put it ${ordinal(places.sorter)}`);
   return said.length > 0 ? `${capital(said.join(", "))}.` : null;
+}
+
+/** What the server puts after a mode when a result sorter put the passages in order. */
+const SORTED_BY = ", sorted by ";
+
+/** A mode as the server says it, told apart: how documents were searched (`meaning and words`),
+ * and the sorter that put what was found in order, when there was one (`Qwen3-Reranker`). A
+ * way of searching is never named with a comma, so the first `, sorted by ` is the sorter's. */
+export function splitMode(mode: string): { how: string; sorter: string | null } {
+  const at = mode.indexOf(SORTED_BY);
+  if (at < 0) return { how: mode, sorter: null };
+  return { how: mode.slice(0, at), sorter: mode.slice(at + SORTED_BY.length) };
 }
 
 /** How a question was searched. Said as what was done, and what was asked for. */
 export function searchedByWords(mode: string, chose: boolean): string | null {
-  const how =
-    mode === "meaning and words"
-      ? "Searched by meaning and words."
-      : mode === "words"
-        ? "Searched by words only."
-        : mode === "meaning"
-          ? "Searched by meaning only."
+  const { how, sorter } = splitMode(mode);
+  const said =
+    how === "meaning and words"
+      ? "Searched by meaning and words"
+      : how === "words"
+        ? "Searched by words only"
+        : how === "meaning"
+          ? "Searched by meaning only"
           : null;
-  return how && chose ? `${how} You chose this.` : how;
+  if (!said) return null;
+  const sentence = `${said}${sorter ? `, sorted by ${sorter}` : ""}.`;
+  return chose ? `${sentence} You chose this.` : sentence;
 }
 
 /** What it says when meaning did not run for a tried question, in the server's words: the
@@ -392,14 +409,16 @@ export function closenessWords(run: MeaningRun): string | null {
 /** How the passages sent with an answer were found, and by which search model: `Found by
  * meaning and words, with the search model X.` Nothing for a way it does not know. */
 export function foundByWords(mode: string, run: MeaningRun | null): string | null {
-  const how =
-    mode === "words"
+  const { how: ways, sorter } = splitMode(mode);
+  const found =
+    ways === "words"
       ? "Found by words only"
-      : mode === "meaning and words"
+      : ways === "meaning and words"
         ? "Found by meaning and words"
-        : mode === "meaning"
+        : ways === "meaning"
           ? "Found by meaning only"
           : null;
-  if (!how) return null;
+  if (!found) return null;
+  const how = `${found}${sorter ? `, sorted by ${sorter}` : ""}`;
   return run?.used && run.model ? `${how}, with the search model ${run.model}.` : `${how}.`;
 }

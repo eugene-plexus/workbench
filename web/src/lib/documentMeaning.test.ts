@@ -53,6 +53,7 @@ import {
   searchedByWords,
   SEARCH_TONE,
   searchTone,
+  splitMode,
   unavailableWords,
   viaTag,
   viaWords,
@@ -493,6 +494,18 @@ describe("how a passage was found", () => {
     expect(placesWords({}, null)).toBeNull();
   });
 
+  it("says where the result sorter put it beside where each way did, never a score", () => {
+    expect(placesWords({ words: 3, meaning: 1, sorter: 2 }, 0.62)).toBe(
+      "Words put it 3rd, meaning put it 1st (closeness 0.62), the sorter put it 2nd.",
+    );
+    expect(placesWords({ words: 7, sorter: 1 }, null)).toBe(
+      "Words put it 7th, the sorter put it 1st.",
+    );
+    expect(placesWords({ sorter: 12 }, null)).toBe("The sorter put it 12th.");
+    // A passage the sorter was not given has no place by it.
+    expect(placesWords({ words: 14 }, null)).toBe("Words put it 14th.");
+  });
+
   it("says a place the way a person does", () => {
     const said = (n: number) => placesWords({ words: n }, null);
     expect([1, 2, 3, 4, 11, 12, 13, 21, 22, 23, 101, 111].map(said)).toEqual([
@@ -525,6 +538,36 @@ describe("how a question was searched", () => {
   it("says nothing of a search that was none", () => {
     expect(searchedByWords("none", false)).toBeNull();
     expect(searchedByWords("whatever else", true)).toBeNull();
+  });
+
+  it.each([
+    [
+      "meaning and words, sorted by Qwen3-Reranker",
+      "Searched by meaning and words, sorted by Qwen3-Reranker.",
+    ],
+    ["words, sorted by a-sorter", "Searched by words only, sorted by a-sorter."],
+    ["meaning, sorted by a, b", "Searched by meaning only, sorted by a, b."],
+  ])("says what sorted what was found: %s", (mode, said) => {
+    expect(searchedByWords(mode, false)).toBe(said);
+    expect(searchedByWords(mode, true)).toBe(`${said} You chose this.`);
+  });
+
+  it("does not say a sorter of a search that none of its ways could run", () => {
+    expect(searchedByWords("none, sorted by x", false)).toBeNull();
+  });
+
+  it("tells how a mode searched from the sorter that put what it found in order", () => {
+    expect(splitMode("meaning and words")).toEqual({ how: "meaning and words", sorter: null });
+    expect(splitMode("words, sorted by Qwen3-Reranker-0.6B")).toEqual({
+      how: "words",
+      sorter: "Qwen3-Reranker-0.6B",
+    });
+    // The first one is the delimiter: a sorter's own name may hold a comma.
+    expect(splitMode("meaning and words, sorted by one, sorted by two")).toEqual({
+      how: "meaning and words",
+      sorter: "one, sorted by two",
+    });
+    expect(splitMode("none")).toEqual({ how: "none", sorter: null });
   });
 
   it("says why meaning did not run, in the server's words, unless it was never in play", () => {
@@ -579,6 +622,19 @@ describe("under an answer", () => {
     // Meaning that did not run names no search model.
     expect(foundByWords("words", meaningRun({ model: "m" }))).toBe("Found by words only.");
     expect(foundByWords("none", null)).toBeNull();
+  });
+
+  it("says the sorter that put them in order, beside the search model when meaning ran", () => {
+    expect(foundByWords("meaning and words, sorted by Qwen3-Reranker", null)).toBe(
+      "Found by meaning and words, sorted by Qwen3-Reranker.",
+    );
+    expect(foundByWords("meaning and words, sorted by Qwen3-Reranker", ranByMeaning())).toBe(
+      "Found by meaning and words, sorted by Qwen3-Reranker, with the search model Qwen3-Embedding-0.6B-Q8_0.",
+    );
+    expect(foundByWords("words, sorted by s", meaningRun({ model: "m" }))).toBe(
+      "Found by words only, sorted by s.",
+    );
+    expect(foundByWords("none, sorted by s", null)).toBeNull();
   });
 
   it("knows a note about meaning by its code", () => {
