@@ -24,6 +24,13 @@ otherwise kept in them), and the log is folded into the file and emptied.
 `searchable`, `embedding` and `ready`. So what a state says is what is true of it
 (a state is never claimed ahead of the work), and nothing stale outlives an edit.
 
+**Meaning** (MR5): a passage's vector is `chunks.vec` (NULL while it is owed, an empty
+BLOB where the search model refused the passage), and which search model made the vectors
+is `meta.embedder` (`embedders.Identity`), written in the same transaction as the first
+vectors and checked in every one after, so two search models' numbers are never in one
+index. `Index.writes` counts the transactions, which is what says a cached matrix of the
+vectors is stale (`vectors.MatrixCache`).
+
 One connection per index, used by one thread at a time (a lock), on a few
 threads shared by every index and apart from the chats' store. Every method here
 is `async` and returns data, never a cursor. The schema is versioned with
@@ -45,16 +52,16 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from .. import files
-from . import chunk
+from . import chunk, vectors
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 INDEX_FILE = "index.sqlite3"
 #: Where a person's saved documents are: the scope of one is `library`, or
 #: `chat:<id>` for one searched only in the chat it was attached to.
@@ -178,8 +185,15 @@ _SCHEMA: list[str] = [
     "VALUES (new.id, new.text, COALESCE(new.heading_path, '')); END",
 ]
 
-#: What brings an index at version N-1 to N (`_SCHEMA` is version 1 whole).
-_MIGRATIONS: dict[int, list[str]] = {}
+#: What brings an index at version N-1 to N (`_SCHEMA` is version 1 whole). Version 2
+#: (MR5) keeps, for a document, the passages the search model refused (a JSON list), so
+#: the Documents screen can say which, in words, without reading every passage.
+_MIGRATIONS: dict[int, list[str]] = {
+    2: ["ALTER TABLE documents ADD COLUMN refused TEXT"],
+}
+
+#: The `meta` key that holds the search model an index was built with.
+EMBEDDER = "embedder"
 
 
 def chunker_meta() -> dict[str, Any]:
@@ -224,6 +238,8 @@ class Document:
     read_at: float | None = None
     indexed_at: float | None = None
     source_mtime: str | None = None
+    #: Passages the search model refused (too long for it): each `{ord, page, chars, why}`.
+    refused: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def searchable(self) -> bool:
@@ -278,7 +294,9 @@ class Hit:
     name: str
     scope: str
     kind: str
-    #: BM25 as SQLite gives it: lower is better, and it means nothing beside another scale.
+    #: What the way of searching scored it, on its own scale, which means nothing beside
+    #: another's: BM25 as SQLite gives it (lower is better) for words, and for meaning
+    #: the similarity of its vector to the question's (cosine, higher is better).
     score: float
 
 
@@ -288,6 +306,55 @@ class Totals:
     passages: int
     bytes: int
     by_state: Mapping[str, int]
+    #: Passages that have their meaning (or were refused it), and passages still owed it.
+    embedded: int = 0
+    owed: int = 0
+
+
+@dataclass(frozen=True)
+class Pending:
+    """A passage that is owed its meaning, with what it is embedded from."""
+
+    chunk_id: int
+    doc_id: str
+    ord: int
+    heading_path: str | None
+    page_start: int | None
+    text: str
+    name: str
+    scope: str
+
+
+@dataclass(frozen=True)
+class Stored:
+    """What storing a batch of vectors came to."""
+
+    #: Passages that now have their vector, and passages marked refused.
+    written: int = 0
+    refused: int = 0
+    #: Passages that were not there any more (their document was removed or read again).
+    gone: int = 0
+    #: Documents that are `ready` now: nothing is owed them.
+    completed: tuple[str, ...] = ()
+    #: Set when nothing was stored because the index was built with another search model:
+    #: `(model, dim)` it was built with.
+    changed: tuple[str, int] | None = None
+    #: Set when nothing was stored because the vectors were cleared (Rebuild) after the
+    #: batch was begun: its numbers are from the search model that was just let go.
+    stale: bool = False
+
+
+@dataclass(frozen=True)
+class MeaningCounts:
+    """How much of what can be found by words can also be found by meaning."""
+
+    passages: int
+    #: Passages that have a vector, or were refused one.
+    embedded: int
+    #: Passages of documents that are waiting for their meaning.
+    owed: int
+    #: Passages of documents that are `ready` without it (no search model was in play).
+    words_only: int
 
 
 def _document(row: sqlite3.Row) -> Document:
@@ -295,6 +362,10 @@ def _document(row: sqlite3.Row) -> Document:
         notes = json.loads(row["notes"] or "[]")
     except ValueError:
         notes = []
+    try:
+        refused = json.loads(row["refused"] or "[]")
+    except ValueError:
+        refused = []
     return Document(
         id=row["id"],
         scope=row["scope"],
@@ -320,6 +391,7 @@ def _document(row: sqlite3.Row) -> Document:
         read_at=row["read_at"],
         indexed_at=row["indexed_at"],
         source_mtime=row["source_mtime"],
+        refused=[r for r in refused if isinstance(r, dict)] if isinstance(refused, list) else [],
     )
 
 
@@ -379,6 +451,12 @@ class Index:
         self._executor = executor
         self._lock = threading.Lock()
         self._db: sqlite3.Connection | None = None
+        #: How many transactions have changed this index since it was opened. A cached
+        #: matrix of the vectors is good only while this is what it was when it was read.
+        self.writes = 0
+        #: How many times the vectors have been cleared (Rebuild). A batch of vectors made
+        #: before one is never stored after it (`store_vectors`).
+        self.epoch = 0
 
     # --- where things are ----------------------------------------------
 
@@ -458,7 +536,11 @@ class Index:
 
     def quarantine(self) -> None:
         """Take the index file out of the way, with its log, so a new one is made in its
-        place. Close it first (`close`); nothing is read from it again."""
+        place. Close it first (`close`); nothing is read from it again. A batch of vectors
+        begun before this is never stored after it: its passage numbers are the old file's,
+        and the new one counts from 1 again."""
+        self.epoch += 1
+        self.writes += 1
         for suffix in ("", "-wal", "-shm"):
             path = self.path.with_name(self.path.name + suffix)
             for attempt in range(6):
@@ -571,13 +653,13 @@ class Index:
 
         await asyncio.get_running_loop().run_in_executor(self._executor, shut)
 
-    @staticmethod
-    def _transaction[T](db: sqlite3.Connection, body: Callable[[], T]) -> T:
+    def _transaction[T](self, db: sqlite3.Connection, body: Callable[[], T]) -> T:
         """`body` as one transaction: all of it, or none."""
         db.execute("BEGIN IMMEDIATE")
         try:
             result = body()
             db.execute("COMMIT")
+            self.writes += 1
             return result
         except BaseException:
             with contextlib.suppress(sqlite3.Error):
@@ -608,17 +690,21 @@ class Index:
     async def totals(self, scope: str = LIBRARY) -> Totals:
         def go(db: sqlite3.Connection) -> Totals:
             by_state = dict.fromkeys(STATES, 0)
-            documents = passages = size = 0
+            documents = passages = size = embedded = owed = 0
             for row in db.execute(
                 "SELECT status, COUNT(*) AS n, COALESCE(SUM(chunks), 0) AS c, "
-                "COALESCE(SUM(bytes), 0) AS b FROM documents WHERE scope = ? GROUP BY status",
+                "COALESCE(SUM(bytes), 0) AS b, COALESCE(SUM(embedded), 0) AS e "
+                "FROM documents WHERE scope = ? GROUP BY status",
                 (scope,),
             ):
                 by_state[row["status"]] = row["n"]
                 documents += row["n"]
                 passages += row["c"]
                 size += row["b"]
-            return Totals(documents, passages, size, by_state)
+                embedded += row["e"]
+                if row["status"] in (SEARCHABLE, EMBEDDING):
+                    owed += row["c"] - row["e"]
+            return Totals(documents, passages, size, by_state, embedded, owed)
 
         return await self._run(go)
 
@@ -757,7 +843,7 @@ class Index:
                 db.execute(
                     "UPDATE documents SET status = 'queued', attempt = attempt + 1, "
                     "reason = NULL, code = NULL, detail = NULL, chunks = 0, embedded = 0, "
-                    "indexed_at = NULL WHERE id = ?",
+                    "refused = NULL, indexed_at = NULL WHERE id = ?",
                     (doc_id,),
                 )
                 row = db.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
@@ -873,7 +959,8 @@ class Index:
                 db.execute(
                     "UPDATE documents SET status = 'searchable', reason = NULL, code = NULL, "
                     "detail = NULL, kind = ?, language = ?, pages = ?, lines = ?, tokens_est = ?, "
-                    "chunks = ?, embedded = 0, notes = ?, indexed_at = ? WHERE id = ?",
+                    "chunks = ?, embedded = 0, refused = NULL, notes = ?, indexed_at = ? "
+                    "WHERE id = ?",
                     (
                         summary["kind"],
                         summary.get("language"),
@@ -953,6 +1040,298 @@ class Index:
                 "ORDER BY added_at, rowid"
             )
             return [_document(r) for r in rows]
+
+        return await self._run(go)
+
+    # --- meaning (MR5) ----------------------------------------------------
+
+    async def embedder(self) -> str | None:
+        """The search model the vectors were made by, as `embedders.Identity` JSON, or
+        None while there are none: `meta.embedder`."""
+        return await self.meta(EMBEDDER)
+
+    async def pending_meaning(self, limit: int) -> tuple[list[Pending], int]:
+        """The next `limit` passages owed their meaning, in the order they are served:
+        a chat's own files before the ones in My documents, then the document that has
+        waited longest, in reading order; and the `epoch` the index is at, read with them,
+        for `store_vectors`. Documents are chosen first (a small table), then their
+        passages, so this never reads the passages of every document."""
+
+        def go(db: sqlite3.Connection) -> tuple[list[Pending], int]:
+            owed: list[Pending] = []
+            docs = db.execute(
+                "SELECT id, name, scope FROM documents WHERE status IN ('searchable', 'embedding') "
+                "AND chunks > embedded ORDER BY (scope = 'library'), added_at, rowid"
+            ).fetchall()
+            for doc in docs:
+                rows = db.execute(
+                    "SELECT id, ord, heading_path, page_start, text FROM chunks "
+                    "WHERE doc_id = ? AND vec IS NULL ORDER BY ord LIMIT ?",
+                    (doc["id"], limit - len(owed)),
+                )
+                owed.extend(
+                    Pending(
+                        r["id"],
+                        doc["id"],
+                        r["ord"],
+                        r["heading_path"],
+                        r["page_start"],
+                        r["text"],
+                        doc["name"],
+                        doc["scope"],
+                    )
+                    for r in rows
+                )
+                if len(owed) >= limit:
+                    break
+            return owed, self.epoch
+
+        return await self._run(go)
+
+    async def store_vectors(
+        self,
+        identity: str,
+        model: str,
+        dim: int,
+        vectors_: Sequence[tuple[int, str, bytes]],
+        refused: Sequence[tuple[int, str, dict[str, Any]]] = (),
+        epoch: int | None = None,
+    ) -> Stored:
+        """Keep a batch of vectors, `(passage id, document id, stored vector)`, and the
+        passages the search model refused, `(passage id, document id, what)`, **in one
+        transaction** with the identity of the search model that made them: the first batch
+        writes it, and every one after is checked against it, and **nothing is stored** (and
+        `changed` says what the index was built with) when it is not this model at this size.
+        A passage that is not there any more is left out. A document with nothing owed
+        any more is `ready`. `epoch` is `Index.epoch` as it was when the batch was begun:
+        if the vectors were cleared since, nothing is stored (`stale`)."""
+
+        def go(db: sqlite3.Connection) -> Stored:
+            def body() -> Stored:
+                if epoch is not None and epoch != self.epoch:
+                    return Stored(stale=True)
+                row = db.execute("SELECT value FROM meta WHERE key = ?", (EMBEDDER,)).fetchone()
+                if row is None:
+                    db.execute("INSERT INTO meta (key, value) VALUES (?, ?)", (EMBEDDER, identity))
+                else:
+                    try:
+                        built = json.loads(row[0])
+                        built_model, built_dim = str(built["model"]), int(built["dim"])
+                    except (ValueError, KeyError, TypeError) as exc:
+                        raise IndexDamaged(
+                            f"the search model this index was built with is unreadable ({exc})"
+                        ) from exc
+                    if built_model != model or built_dim != dim:
+                        return Stored(changed=(built_model, built_dim))
+                written = skipped = gone = 0
+                touched: set[str] = set()
+                for chunk_id, doc_id, blob in vectors_:
+                    changed = db.execute(
+                        "UPDATE chunks SET vec = ? WHERE id = ? AND vec IS NULL", (blob, chunk_id)
+                    ).rowcount
+                    written += changed
+                    gone += 1 - changed
+                    if changed:
+                        touched.add(doc_id)
+                refusals: dict[str, list[dict[str, Any]]] = {}
+                for chunk_id, doc_id, what in refused:
+                    changed = db.execute(
+                        "UPDATE chunks SET vec = X'' WHERE id = ? AND vec IS NULL", (chunk_id,)
+                    ).rowcount
+                    skipped += changed
+                    gone += 1 - changed
+                    if changed:
+                        touched.add(doc_id)
+                        refusals.setdefault(doc_id, []).append(what)
+                completed: list[str] = []
+                for doc_id in touched:
+                    doc = db.execute(
+                        "SELECT chunks, status, refused FROM documents WHERE id = ?", (doc_id,)
+                    ).fetchone()
+                    if doc is None:
+                        continue
+                    have = int(
+                        db.execute(
+                            "SELECT COUNT(*) FROM chunks WHERE doc_id = ? AND vec IS NOT NULL",
+                            (doc_id,),
+                        ).fetchone()[0]
+                    )
+                    status = doc["status"]
+                    if status in (SEARCHABLE, EMBEDDING):
+                        status = READY if have >= doc["chunks"] else EMBEDDING
+                    kept = json.loads(doc["refused"] or "[]") if doc_id in refusals else None
+                    db.execute(
+                        "UPDATE documents SET embedded = ?, status = ?, "
+                        "refused = CASE WHEN ? THEN ? ELSE refused END WHERE id = ?",
+                        (
+                            have,
+                            status,
+                            kept is not None,
+                            json.dumps([*(kept or []), *refusals.get(doc_id, [])]),
+                            doc_id,
+                        ),
+                    )
+                    if status == READY and doc["status"] != READY:
+                        completed.append(doc_id)
+                return Stored(written, skipped, gone, tuple(sorted(completed)))
+
+            return self._transaction(db, body)
+
+        return await self._run(go)
+
+    async def clear_vectors(self) -> int:
+        """Rebuild the meaning: every vector goes, and the record of which search model made
+        them, **in one transaction**, so no vector of the old model is ever beside one of a
+        new one; a document that was `ready` or adding its meaning is `searchable` again,
+        owed all of it. Words are not touched. How many passages are owed now."""
+
+        def go(db: sqlite3.Connection) -> int:
+            def body() -> int:
+                db.execute("UPDATE chunks SET vec = NULL WHERE vec IS NOT NULL")
+                db.execute("DELETE FROM meta WHERE key = ?", (EMBEDDER,))
+                db.execute(
+                    "UPDATE documents SET embedded = 0, refused = NULL, "
+                    "status = CASE WHEN status IN ('ready', 'embedding') AND chunks > 0 "
+                    "THEN 'searchable' ELSE status END "
+                    "WHERE status IN ('searchable', 'embedding', 'ready')"
+                )
+                return int(
+                    db.execute(
+                        "SELECT COALESCE(SUM(chunks), 0) FROM documents WHERE status = 'searchable'"
+                    ).fetchone()[0]
+                )
+
+            owed = self._transaction(db, body)
+            self.epoch += 1
+            return owed
+
+        return await self._run(go)
+
+    async def reopen_unembedded(self) -> int:
+        """Documents that are `ready` with passages that have no meaning (no search model
+        was in play when they were read) are `searchable` again, owed it. How many."""
+
+        def go(db: sqlite3.Connection) -> int:
+            # Nothing to do is no write: a write makes every cached matrix stale.
+            if (
+                db.execute(
+                    "SELECT 1 FROM documents WHERE status = 'ready' AND chunks > embedded LIMIT 1"
+                ).fetchone()
+                is None
+            ):
+                return 0
+
+            def body() -> int:
+                return db.execute(
+                    "UPDATE documents SET status = 'searchable' "
+                    "WHERE status = 'ready' AND chunks > embedded"
+                ).rowcount
+
+            return self._transaction(db, body)
+
+        return await self._run(go)
+
+    async def recount_embedded(self) -> int:
+        """Boot: each document's count of passages that have their meaning, made again from
+        the passages themselves (what is derived heals). How many were wrong."""
+
+        def go(db: sqlite3.Connection) -> int:
+            wrong = (
+                "SELECT 1 FROM documents WHERE status IN ('searchable', 'embedding', 'ready') "
+                "AND embedded != (SELECT COUNT(*) FROM chunks WHERE chunks.doc_id = documents.id "
+                "AND chunks.vec IS NOT NULL) LIMIT 1"
+            )
+            if db.execute(wrong).fetchone() is None:
+                return 0
+
+            def body() -> int:
+                return db.execute(
+                    "UPDATE documents SET embedded = (SELECT COUNT(*) FROM chunks "
+                    "WHERE chunks.doc_id = documents.id AND chunks.vec IS NOT NULL) "
+                    "WHERE status IN ('searchable', 'embedding', 'ready') AND embedded != "
+                    "(SELECT COUNT(*) FROM chunks WHERE chunks.doc_id = documents.id "
+                    "AND chunks.vec IS NOT NULL)"
+                ).rowcount
+
+            return self._transaction(db, body)
+
+        return await self._run(go)
+
+    async def meaning_counts(self, scope: str | None = None) -> MeaningCounts:
+        """How much can be found by meaning too: in one scope (My documents), or in all."""
+
+        def go(db: sqlite3.Connection) -> MeaningCounts:
+            where, params = ("", ()) if scope is None else (" AND scope = ?", (scope,))
+            row = db.execute(
+                "SELECT COALESCE(SUM(chunks), 0) AS passages, COALESCE(SUM(embedded), 0) AS e, "
+                "COALESCE(SUM(CASE WHEN status IN ('searchable', 'embedding') "
+                "THEN chunks - embedded ELSE 0 END), 0) AS owed, "
+                "COALESCE(SUM(CASE WHEN status = 'ready' AND chunks > embedded "
+                "THEN chunks - embedded ELSE 0 END), 0) AS words_only "
+                f"FROM documents WHERE status IN ('searchable', 'embedding', 'ready'){where}",
+                params,
+            ).fetchone()
+            return MeaningCounts(row["passages"], row["e"], row["owed"], row["words_only"])
+
+        return await self._run(go)
+
+    async def owed_by_document(self) -> list[tuple[str, int]]:
+        """Documents waiting for their meaning, in the order they are served, with how many
+        passages each is owed: what an estimate of the time left is made from."""
+
+        def go(db: sqlite3.Connection) -> list[tuple[str, int]]:
+            rows = db.execute(
+                "SELECT id, chunks - embedded AS owed FROM documents "
+                "WHERE status IN ('searchable', 'embedding') AND chunks > embedded "
+                "ORDER BY (scope = 'library'), added_at, rowid"
+            )
+            return [(r["id"], r["owed"]) for r in rows]
+
+        return await self._run(go)
+
+    async def load_vectors(
+        self, dim: int, clock: Callable[[], float] = time.perf_counter
+    ) -> vectors.Matrix:
+        """Every vector of a document that can be found, as one matrix (`vectors.assemble`),
+        stamped with the writes this index has had, so a later write makes it stale. Raises
+        `vectors.BadVector` for a stored vector that is not `dim` numbers."""
+        found = (
+            "FROM chunks AS c JOIN documents AS d ON d.id = c.doc_id WHERE c.vec IS NOT NULL "
+            "AND length(c.vec) > 0 AND d.status IN ('searchable', 'embedding', 'ready')"
+        )
+
+        def go(db: sqlite3.Connection) -> vectors.Matrix:
+            count = int(db.execute(f"SELECT COUNT(*) {found}").fetchone()[0])
+            # No ORDER BY: it would sort every passage with its 4 KB vector in it, and the scan
+            # does not need an order (it breaks ties by passage id itself).
+            rows = ((r[0], r[1], r[2]) for r in db.execute(f"SELECT c.id, c.vec, d.scope {found}"))
+            return vectors.assemble(dim, count, rows, self.writes, clock)
+
+        return await self._run(go)
+
+    async def hits_by_ids(
+        self, ids: Sequence[int], scores: Mapping[int, float], scopes: Sequence[str]
+    ) -> list[Hit]:
+        """These passages, as hits with the similarity each was found with, in the order
+        of `ids`, among the documents of these scopes that can be found. A passage that is
+        gone (removed since the matrix was read) is left out."""
+        if not ids or not scopes:
+            return []
+
+        def go(db: sqlite3.Connection) -> list[Hit]:
+            marks = ", ".join("?" for _ in ids)
+            scope_marks = ", ".join("?" for _ in scopes)
+            rows = db.execute(
+                "SELECT c.id AS chunk_id, c.doc_id, c.ord, c.text, c.heading_path, c.page_start, "
+                "c.page_end, c.line_start, c.line_end, c.char_start, c.char_end, c.tokens_est, "
+                "d.name, d.scope, d.kind, 0.0 AS score "
+                "FROM chunks AS c JOIN documents AS d ON d.id = c.doc_id "
+                f"WHERE c.id IN ({marks}) AND d.scope IN ({scope_marks}) "
+                "AND d.status IN ('searchable', 'embedding', 'ready')",
+                (*ids, *scopes),
+            )
+            by_id = {r["chunk_id"]: _hit(r) for r in rows}
+            return [replace(by_id[i], score=scores[i]) for i in ids if i in by_id]
 
         return await self._run(go)
 

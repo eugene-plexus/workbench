@@ -64,6 +64,15 @@ def union(name: str) -> set[str]:
     return set(re.findall(r'"(\w+)"', found.group(1)))
 
 
+def literals(name: str, field: str) -> set[str]:
+    """The strings of an inline union that a field of interface `name` is: `mode: "a" | "b c";`."""
+    found = re.search(
+        rf"^  {field}\??: ((?:\"[\w ]+\"(?:\s*\|\s*)?)+)(?:null)?;", body(name), re.MULTILINE
+    )
+    assert found, f"{name}.{field} is not a union of strings"
+    return set(re.findall(r'"([\w ]+)"', found.group(1)))
+
+
 def server_text(name: str) -> str:
     return (Path(saved_api.__file__).parent / name).read_text(encoding="utf-8")
 
@@ -126,8 +135,13 @@ def test_the_screens_data_has_the_fields_the_page_reads_down_to_each_number(worl
     assert set(found["search"]) == interface("SearchFacts")
     assert set(found["prefs"]) == interface("DocumentsPrefs")
     assert set(found["prefs"]["effective"]) == shape("DocumentsPrefs", "effective")
-    # What the page says of the search is the server's own headline, for words only.
-    assert found["search"]["headline"] == "Searching by words only."
+    # What the page says of the search is the server's own headline, for words only. This world's
+    # gateway lists one model that only embeds and says nothing of where it runs, so Workbench
+    # cannot place it, will not send a person's text to it, and says no search model is running.
+    assert found["search"]["headline"] == "Searching by words only. No search model is running."
+    assert found["search"]["code"] == "outside_only" and found["search"]["code"] in union(
+        "SearchCode"
+    )
     assert found["search"]["words"] is True and found["search"]["meaning"] is False
     assert set(found["totals"]["byState"]) == set(index_module.STATES)
 
@@ -167,6 +181,11 @@ def test_a_question_that_was_tried_has_the_fields_the_page_reads_whatever_it_fou
         "nothing_matched": ada.post("/api/documents/test", json={"question": "zebra giraffe"}),
         "no_words": ada.post("/api/documents/test", json={"question": "?!"}),
         "no_documents": bo.post("/api/documents/test", json={"question": "code word"}),
+        # Asked to search by meaning alone, with no search model to do it: none of the ways asked
+        # for could run, which is said, and is never "nothing matched".
+        "unavailable": ada.post(
+            "/api/documents/test", json={"question": "code word lighthouse", "ways": ["meaning"]}
+        ),
     }
     for wanted, response in ran.items():
         assert response.status_code == 200, response.text
@@ -176,8 +195,10 @@ def test_a_question_that_was_tried_has_the_fields_the_page_reads_whatever_it_fou
         assert set(found["query"]) == shape("TestedQuestion", "query")
         assert set(found["budget"]) == shape("TestedQuestion", "budget")
         assert set(found["searched"]) == interface("DocumentCounts")
-    statuses = re.search(r"status: ((?:\"\w+\"(?: \| )?\s*)+);", body("TestedQuestion"), re.DOTALL)
-    assert statuses and set(re.findall(r'"(\w+)"', statuses.group(1))) == set(ran)
+        assert set(found["meaning"]) == interface("MeaningRun"), wanted
+        assert found["mode"] in literals("TestedQuestion", "mode"), wanted
+    assert ran["unavailable"].json()["mode"] == "none" and ran["found"].json()["mode"] == "words"
+    assert literals("TestedQuestion", "status") == set(ran)
     hit = ran["found"].json()["passages"][0]
     assert set(hit) == interface("TestedPassage")
     assert set(hit["why"]) == shape("TestedPassage", "why")

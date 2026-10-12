@@ -1,9 +1,10 @@
 """Eugene's gateway, as Workbench reaches it: an ordinary OpenAI client.
 
 **The same doors as everyone else** (`workbench.md` call 6). `GET
-/v1/models` and `POST /v1/chat/completions`, with the app's client key as
-the bearer. The key is minted by the registry at install and read from
-the file it names; nothing else the hub has is reachable from here.
+/v1/models`, `POST /v1/chat/completions` and, for search by meaning (MR5),
+`POST /v1/embeddings`, with the app's client key as the bearer. The key is
+minted by the registry at install and read from the file it names; nothing
+else the hub has is reachable from here.
 
 **A refusal is said in plain words** (W11): the key turned off, the key at
 its limit, the gateway unreachable -- each names what happened and what to
@@ -13,8 +14,12 @@ of them can see Eugene's console.
 
 from __future__ import annotations
 
+import email.utils
 import json
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -22,12 +27,22 @@ import httpx
 
 from ._http import ssl_context
 
+#: The longest a gateway's `Retry-After` is believed: a person waits minutes, not days.
+RETRY_AFTER_MAX = 3600.0
+
 
 class HubError(Exception):
     """The gateway could not give an answer, in words a person reads."""
 
     def __init__(
-        self, message: str, *, status: int = 502, kind: str = "hub", param: str | None = None
+        self,
+        message: str,
+        *,
+        status: int = 502,
+        kind: str = "hub",
+        param: str | None = None,
+        retry_after: float | None = None,
+        words: str | None = None,
     ) -> None:
         super().__init__(message)
         self.message = message
@@ -35,6 +50,45 @@ class HubError(Exception):
         self.kind = kind
         #: The request field the gateway named, so a form can mark it (§2.5).
         self.param = param
+        #: Seconds the gateway asked us to wait (`Retry-After`), when it said.
+        self.retry_after = retry_after
+        #: What the gateway itself said, when it refused (`message` is ours, around it).
+        self.words = words
+
+
+def _retry_after(response: httpx.Response) -> float | None:
+    """The seconds a refusal's `Retry-After` asks for: a number, or an HTTP date."""
+    raw = response.headers.get("retry-after")
+    if not raw:
+        return None
+    try:
+        seconds = float(raw)
+    except ValueError:
+        try:
+            when = email.utils.parsedate_to_datetime(raw)
+        except (TypeError, ValueError):
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        seconds = (when - datetime.now(UTC)).total_seconds()
+    if seconds != seconds:  # NaN
+        return None
+    return max(0.0, min(seconds, RETRY_AFTER_MAX))
+
+
+@dataclass(frozen=True)
+class Embedded:
+    """What the gateway answered to one embeddings request."""
+
+    #: The model the gateway says answered: the one its vectors belong to, which is not
+    #: always the name that was asked for (an alias answers with its first target's).
+    model: str
+    #: One vector for each input, in the order the inputs were sent.
+    vectors: list[list[float]]
+    tokens: int | None
+    #: How long the request took, from sending it to having the whole answer.
+    seconds: float
+    request_id: str | None = None
 
 
 def _gateway_words(response: httpx.Response) -> str:
@@ -75,7 +129,61 @@ def _video_resource(response: httpx.Response, what: str) -> dict[str, Any]:
     return answer
 
 
-def refusal(status: int, words: str, param: str | None = None) -> HubError:
+def _embedded(response: httpx.Response, count: int, seconds: float) -> Embedded:
+    """The gateway's answer to an embeddings request, checked: one vector for each input
+    in the order they were sent, all of one length, and a model named. A reply that is
+    not that is said as what it is, and never stored."""
+
+    def bad(why: str) -> HubError:
+        return HubError(
+            f"The gateway's answer to the search request was not usable: {why}.", kind="gateway"
+        )
+
+    try:
+        answer = response.json()
+    except ValueError as exc:
+        raise bad(f"it was not JSON ({response.headers.get('content-type') or 'no type'})") from exc
+    if not isinstance(answer, dict):
+        raise bad("it was not an object")
+    model = answer.get("model")
+    if not isinstance(model, str) or not model:
+        raise bad("it named no model")
+    data = answer.get("data")
+    if not isinstance(data, list) or len(data) != count:
+        raise bad(f"it held {len(data) if isinstance(data, list) else 'no'} vectors for {count}")
+    ordered: list[list[float]] = [[] for _ in range(count)]
+    seen: set[int] = set()
+    for item in data:
+        index = item.get("index") if isinstance(item, dict) else None
+        vector = item.get("embedding") if isinstance(item, dict) else None
+        if (
+            not isinstance(index, int)
+            or isinstance(index, bool)
+            or not 0 <= index < count
+            or index in seen
+            or not isinstance(vector, list)
+            or not vector
+        ):
+            raise bad("a vector was missing, repeated or not a list of numbers")
+        seen.add(index)
+        ordered[index] = vector
+    width = len(ordered[0])
+    if any(len(v) != width for v in ordered):
+        raise bad("its vectors were not all the same length")
+    usage = answer.get("usage")
+    tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+    return Embedded(
+        model=model,
+        vectors=ordered,
+        tokens=tokens if isinstance(tokens, int) and not isinstance(tokens, bool) else None,
+        seconds=seconds,
+        request_id=response.headers.get("x-request-id"),
+    )
+
+
+def refusal(
+    status: int, words: str, param: str | None = None, retry_after: float | None = None
+) -> HubError:
     """The gateway's refusal, said for a person who cannot see the console."""
     if status in (401, 403):
         return HubError(
@@ -84,6 +192,7 @@ def refusal(status: int, words: str, param: str | None = None) -> HubError:
             "uninstall and install Workbench again to make a new one.",
             status=status,
             kind="key",
+            words=words,
         )
     if status == 429:
         return HubError(
@@ -91,8 +200,12 @@ def refusal(status: int, words: str, param: str | None = None) -> HubError:
             "shares that key; the owner can raise its limits on the key in Eugene's console.",
             status=429,
             kind="limit",
+            retry_after=retry_after,
+            words=words,
         )
-    return HubError(words, status=status, kind="gateway", param=param)
+    return HubError(
+        words, status=status, kind="gateway", param=param, retry_after=retry_after, words=words
+    )
 
 
 class Hub:
@@ -164,6 +277,42 @@ class Hub:
             raise refusal(response.status_code, _gateway_words(response))
         body: dict[str, Any] = response.json()
         return body
+
+    async def embeddings(
+        self, model: str, inputs: Sequence[str], *, seconds: float = 120.0
+    ) -> Embedded:
+        """One embeddings request (MR5): a vector for each input, from `model`, and the
+        model the gateway says answered. Floats, not base64, and nothing else in the body:
+        the gateway ignores `dimensions` and `user`, and says so. An alias embeds with its
+        first target only, and a stopped model is not woken (503): both are the gateway's.
+        Raises `HubError`, with `retry_after` when the gateway asked us to wait."""
+        headers = self._headers()
+        body = {"model": model, "input": list(inputs), "encoding_format": "float"}
+        started = time.perf_counter()
+        try:
+            response = await self._http.post(
+                f"{self.gateway_url}/v1/embeddings",
+                json=body,
+                headers=headers,
+                timeout=httpx.Timeout(10.0, read=seconds),
+            )
+        except httpx.TimeoutException as exc:
+            raise HubError(
+                f"Eugene's gateway did not answer the search request within {seconds:.0f} "
+                f"seconds ({type(exc).__name__}).",
+                status=504,
+                kind="timeout",
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise self._unreachable(exc) from exc
+        if response.status_code != 200:
+            raise refusal(
+                response.status_code,
+                _gateway_words(response),
+                _gateway_param(response),
+                _retry_after(response),
+            )
+        return _embedded(response, len(inputs), time.perf_counter() - started)
 
     async def images(
         self, body: dict[str, Any], *, edit: bool

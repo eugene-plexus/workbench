@@ -5,8 +5,10 @@
  * in plain words, and always removable: a removed document is gone for real. A box
  * tries a question, and shows the passages that would be sent, without asking a model.
  *
- * Search here is by words only, and the screen says so truthfully, in the server's own
- * headline, and promises nothing more. Every setting shows the value in effect and
+ * How it is searched is said from a live look, in the server's own headline: by meaning
+ * and words, or by words only and why, with what the person can do (Rebuild search, or get
+ * a search model from Eugene's console), and each document says how much of its meaning is
+ * added. The screen promises nothing more. Every setting shows the value in effect and
  * whose word it is. Where the owner of this Workbench has turned documents off, the
  * screen says so and offers nothing that would keep a document; what a person already
  * has stays theirs to read and remove. A search that is damaged says so in the
@@ -21,39 +23,53 @@ import {
   Files,
   Info,
   MessageSquarePlus,
-  Search,
 } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 
 import { del, fileOf, post, put } from "../lib/api";
+import {
+  emptyWords,
+  introWords,
+  meaningRebuiltWords,
+  meaningTotalsWords,
+} from "../lib/documentMeaning";
 import { failureWords, saveFile } from "../lib/memory";
 import {
   capsWords,
   EXTERNAL_CHOICES,
   externalLabel,
-  INTRO,
   newChatsWords,
   OWNER_OFF,
   OWNER_OFF_EFFECT,
   rebuiltWords,
   setByWords,
   totalsWords,
-  WORDS_ONLY_HELP,
 } from "../lib/savedDocuments";
-import type { DocumentsPage, ExternalChoice, Rebuilt } from "../lib/types";
+import type { DocumentsPage, ExternalChoice, Me, MeaningRebuilt, Rebuilt } from "../lib/types";
 import { useKeepFocus } from "../lib/useKeepFocus";
 import { useSavedDocuments } from "../lib/useSavedDocuments";
 import { AddDocuments } from "./AddDocuments";
 import { DocumentRow } from "./DocumentRow";
+import { DocumentsSearch } from "./DocumentsSearch";
 import { TestQuestion } from "./TestQuestion";
 
 type Working = <T>(work: () => Promise<T>) => Promise<T>;
 
-export function Documents({ onClose, onAsk }: { onClose: () => void; onAsk: () => void }) {
+export function Documents({
+  onClose,
+  onAsk,
+  me,
+}: {
+  onClose: () => void;
+  onAsk: () => void;
+  /** Who is reading, and where Eugene's console is: a search model is the owner's to get. */
+  me?: Pick<Me, "owner" | "consoleUrl"> | null;
+}) {
   const uid = useId();
   const { data, blocked, problem: loadProblem, reload } = useSavedDocuments();
   const [problem, setProblem] = useState<string | null>(null);
   const [rebuilt, setRebuilt] = useState<Rebuilt | null>(null);
+  const [meaningRebuilt, setMeaningRebuilt] = useState<MeaningRebuilt | null>(null);
   // The words about what happened to one document, by its id.
   const [rowProblems, setRowProblems] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
@@ -69,6 +85,12 @@ export function Documents({ onClose, onAsk }: { onClose: () => void; onAsk: () =
     document.getElementById(focusId)?.focus();
     setFocusId(null);
   }, [focusId, data]);
+
+  // What was said of adding meaning again is true while there is meaning to add: once none is
+  // owed it goes, and does not come back for the next document that is added.
+  useEffect(() => {
+    if (data && data.totals.owed === 0) setMeaningRebuilt(null);
+  }, [data]);
 
   /** Work that changes the documents or the settings: the screen is busy while it
    * runs, and reads again after it, whether it worked or not. */
@@ -159,6 +181,19 @@ export function Documents({ onClose, onAsk }: { onClose: () => void; onAsk: () =
     setRebuilt(null);
     try {
       setRebuilt(await working(() => post<Rebuilt>("/api/documents/rebuild")));
+    } catch (failure) {
+      setProblem(failureWords(failure));
+    }
+  }
+
+  /** Add meaning again with the search model that is running. Words are never touched. */
+  async function rebuildMeaning() {
+    setProblem(null);
+    setMeaningRebuilt(null);
+    try {
+      setMeaningRebuilt(
+        await working(() => post<MeaningRebuilt>("/api/documents/meaning/rebuild")),
+      );
     } catch (failure) {
       setProblem(failureWords(failure));
     }
@@ -292,15 +327,14 @@ export function Documents({ onClose, onAsk }: { onClose: () => void; onAsk: () =
           <>
             <div className="flex flex-col gap-3">
               <p data-testid="documents-intro" className="help">
-                {INTRO}
+                {introWords(data.search)}
               </p>
-              <p data-testid="documents-search" className="notice">
-                <Search size={16} aria-hidden />
-                <span>
-                  <span className="notice-title">{data.search.headline}</span>
-                  {!data.search.meaning && WORDS_ONLY_HELP}
-                </span>
-              </p>
+              <DocumentsSearch
+                facts={data.search}
+                me={me}
+                busy={busy}
+                onRebuild={() => void rebuildMeaning()}
+              />
             </div>
             {data.ownerReadsChats && (
               <p data-testid="documents-owner-reads" className="notice notice--warn">
@@ -316,6 +350,15 @@ export function Documents({ onClose, onAsk }: { onClose: () => void; onAsk: () =
           <p role="status" data-testid="documents-rebuilt" className="notice notice--ok">
             <CircleCheck size={16} aria-hidden />
             {rebuiltWords(rebuilt)}
+          </p>
+        )}
+        {meaningRebuilt && (
+          <p role="status" data-testid="documents-meaning-rebuilt" className="notice notice--ok">
+            <CircleCheck size={16} aria-hidden />
+            {meaningRebuiltWords({
+              passages: meaningRebuilt.passages,
+              model: meaningRebuilt.search.model?.resolved ?? null,
+            })}
           </p>
         )}
         {!off && (
@@ -336,10 +379,7 @@ export function Documents({ onClose, onAsk }: { onClose: () => void; onAsk: () =
             {data.documents.length === 0 ? (
               <div data-testid="documents-empty" className="card">
                 <h3 className="title-card">No documents yet</h3>
-                <p className="help">
-                  Add files above. Workbench reads each one, so a chat with Documents on can find
-                  the passages that have the words of your question.
-                </p>
+                <p className="help">{emptyWords(data.search)}</p>
               </div>
             ) : (
               <>
@@ -362,7 +402,7 @@ export function Documents({ onClose, onAsk }: { onClose: () => void; onAsk: () =
             )}
           </section>
         )}
-        {!off && data.documents.length > 0 && <TestQuestion />}
+        {!off && data.documents.length > 0 && <TestQuestion search={data.search} />}
       </div>
     </section>
   );
@@ -370,11 +410,17 @@ export function Documents({ onClose, onAsk }: { onClose: () => void; onAsk: () =
 
 /** The totals, and the caps, stated. */
 function Foot({ data }: { data: DocumentsPage }) {
+  const meaning = meaningTotalsWords(data);
   return (
     <div className="flex flex-col gap-1">
       <p data-testid="documents-totals" className="text-sm">
         {totalsWords(data.totals)}
       </p>
+      {meaning && (
+        <p data-testid="documents-meaning-totals" className="text-sm">
+          {meaning}
+        </p>
+      )}
       <ul data-testid="documents-caps" className="flex flex-col gap-0.5 text-xs text-muted">
         {capsWords(data).map((line) => (
           <li key={line}>{line}</li>

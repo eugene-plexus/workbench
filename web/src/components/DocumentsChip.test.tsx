@@ -2,7 +2,21 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 
 import { patch } from "../lib/api";
 import type { Chat, ChatDocumentsView } from "../lib/types";
-import { chatDocuments, held, off, owners, saved, scanned, queued } from "../test-saved";
+import {
+  adding,
+  addingView,
+  byMeaning,
+  chatDocuments,
+  CODES,
+  held,
+  off,
+  owners,
+  queued,
+  saved,
+  scanned,
+  searchFor,
+  wordsOnly,
+} from "../test-saved";
 import { DocumentsChip, DocumentsDrawer, DocumentsHint } from "./DocumentsChip";
 
 vi.mock("../lib/api", () => ({ api: vi.fn(), del: vi.fn(), patch: vi.fn(), post: vi.fn() }));
@@ -692,5 +706,96 @@ describe("the hint in the composer", () => {
   it("says why it could not, as an alert, beside the hint", () => {
     hint({ problem: "This chat is gone." });
     expect(screen.getByRole("alert")).toHaveTextContent("This chat is gone.");
+  });
+});
+
+// --- search by meaning (MR5) ---
+
+describe("how the documents are searched, in the drawer", () => {
+  const mode = () => screen.getByTestId("documents-search-mode");
+
+  it("says meaning and words, in the server's own headline, with nothing more", () => {
+    drawer(chatDocuments({ search: byMeaning() }));
+    expect(mode()).toHaveTextContent("Searching by meaning and words.");
+    expect(mode()).toHaveAttribute("data-mode", "meaning and words");
+    expect(mode()).toHaveAttribute("data-code", "ok");
+    expect(within(mode()).getAllByText(/./)).toHaveLength(1);
+  });
+
+  it("says words only, with why, for a chat whose documents are searched by words", () => {
+    drawer(chatDocuments({ search: wordsOnly() }));
+    expect(mode()).toHaveTextContent("Searching by words only.");
+    expect(mode()).toHaveAttribute("data-mode", "words");
+  });
+
+  it.each(CODES)("%s: says the server's headline and its detail, and where Rebuild is", (code) => {
+    const facts = searchFor(code);
+    drawer(chatDocuments({ search: facts }));
+    expect(mode()).toHaveAttribute("data-code", code);
+    expect(mode()).toHaveTextContent(facts.headline);
+    if (facts.detail !== null) {
+      const detail = (facts.detail as string).replace(/^Searching by words only: /, "");
+      expect(mode()).toHaveTextContent(detail.slice(1));
+    }
+    expect(mode().textContent?.includes("Rebuild search is on the Documents screen.")).toBe(
+      facts.actions.includes("rebuild"),
+    );
+    // Mending it is on the Documents screen, which the foot leads to.
+    expect(screen.getByTestId("documents-manage")).toBeInTheDocument();
+  });
+
+  it("says how adding meaning is going, while it is", () => {
+    drawer(
+      chatDocuments({
+        search: byMeaning({
+          adding: addingView({
+            state: "working",
+            message: "Adding meaning: 2 of 5 passages, about 14 minutes left.",
+          }),
+        }),
+      }),
+    );
+    expect(screen.getByTestId("documents-search-adding")).toHaveTextContent(
+      "Adding meaning: 2 of 5 passages, about 14 minutes left.",
+    );
+  });
+
+  it("does not say a search model that is not there twice", () => {
+    drawer(
+      chatDocuments({
+        search: searchFor("not_running", {
+          adding: addingView({
+            state: "waiting",
+            message: "Meaning is waiting: the model is not running.",
+          }),
+        }),
+      }),
+    );
+    expect(screen.queryByTestId("documents-search-adding")).toBeNull();
+  });
+
+  it("is said for a chat that sends nothing too, since it says how the documents are searched", () => {
+    drawer(off({ search: byMeaning() }));
+    expect(mode()).toHaveTextContent("Searching by meaning and words.");
+  });
+
+  it("is not said where the owner has turned documents off, or for someone else's chat", () => {
+    const view = drawer(held("install_off", "The owner turned them off."));
+    expect(screen.queryByTestId("documents-search-mode")).toBeNull();
+    view.unmount();
+    drawer(owners());
+    expect(screen.queryByTestId("documents-search-mode")).toBeNull();
+  });
+
+  it("says how a file of this chat is getting on in meaning, as a row in the list does", () => {
+    drawer(
+      chatDocuments({
+        search: byMeaning(),
+        chatDocuments: [adding({ id: "a", name: "long.pdf", scope: "chat" })],
+      }),
+    );
+    expect(screen.getByTestId("documents-chat-files")).toHaveTextContent(
+      "Ready for words. Adding meaning: 2 of 5 passages, about 14 minutes left.",
+    );
   });
 });

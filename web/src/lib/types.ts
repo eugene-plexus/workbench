@@ -46,7 +46,7 @@ export interface PassageSource {
   scope: "library" | "chat";
   /** 1, 2, 3 ...: the number the model was asked to cite. */
   rank: number;
-  via: "words" | "meaning" | "both";
+  via: Via;
   page_start: number | null;
   page_end: number | null;
   line_start: number | null;
@@ -68,7 +68,7 @@ export interface HiddenPassage {
   name: "a document";
   scope: "library" | "chat" | null;
   rank: number | null;
-  via: "words" | "meaning" | "both" | null;
+  via: Via | null;
   redacted: true;
 }
 
@@ -882,8 +882,28 @@ export interface ChatFiles {
 export type SavedState =
   "queued" | "reading" | "searchable" | "embedding" | "ready" | "skipped" | "failed";
 
+/** How much of one document's meaning is added, and what is true of it now
+ * (`Meaning.document_view`, MR5): `ready` (every passage has its meaning, or was
+ * refused it), `words_only` (read while no search model was running), `adding`,
+ * `waiting` (the search model is not there, or is not the one this search was built
+ * with) or `limited` (the key is at its limit). `message` is the server's sentence
+ * for the three that are in the middle of something, as it came; `refused` counts
+ * the passages the search model would not take, and `notes` say each one's why. */
+export type MeaningState = "ready" | "words_only" | "adding" | "waiting" | "limited";
+
+export interface DocumentMeaning {
+  embedded: number;
+  total: number;
+  etaSeconds: number | null;
+  refused: number;
+  notes: string[];
+  state: MeaningState;
+  message: string | null;
+}
+
 /** One of a person's saved documents (`saved_api.document_view`). `message` is the
- * sentence for a document that was skipped or could not be read, as it came. */
+ * sentence for a document that was skipped or could not be read, as it came. `meaning`
+ * is null until the document is read, and for one that could not be. */
 export interface SavedDocument {
   id: string;
   name: string;
@@ -907,6 +927,7 @@ export interface SavedDocument {
   addedAt: number | null;
   readAt: number | null;
   indexedAt: number | null;
+  meaning: DocumentMeaning | null;
 }
 
 /** A document just added: whether it was already there byte for byte, and the ones
@@ -928,13 +949,96 @@ export interface AddedFiles {
   refused: AddRefusal[];
 }
 
-/** How documents are searched right now (`saved_api.search_facts`): `headline` is
- * the sentence to show, and it says words only for as long as that is so. */
+/** Why documents are searched as they are (`Status.code`, MR5): `ok` is meaning and
+ * words; every other one is why meaning is not in use. `no_gateway` is a Workbench with
+ * no gateway to ask about a search model at all. */
+export type SearchCode =
+  | "ok"
+  | "none_set_up"
+  | "not_running"
+  | "not_listed"
+  | "not_search_model"
+  | "outside"
+  | "outside_only"
+  | "unreachable"
+  | "key"
+  | "limited"
+  | "slow"
+  | "refused"
+  | "error"
+  | "changed"
+  | "dimension"
+  | "damaged"
+  | "no_gateway";
+
+/** What a person can do about it: make the search again (`rebuild`), or get a search
+ * model, which is Eugene's console's to do (`get_search_model`). */
+export type SearchAction = "rebuild" | "get_search_model";
+
+/** How meaning is searched when the search is by meaning at all: whether the
+ * prefixes the model wants on a question and a passage are known. */
+export interface SearchPrefixes {
+  known: boolean | null;
+  family: string | null;
+  query: string | null;
+  document: string | null;
+  /** The sentence that says they are not known, or null. */
+  note: string | null;
+}
+
+/** The search model in use and what the search was built with (`Meaning.status`). `label`
+ * is the sentence to show, "In use: X (automatic)"; `locality` and `runsOn` say where it
+ * runs, and `allowExternal` whether the owner lets text go to a model outside the machines. */
+export interface SearchModelView {
+  setting: string;
+  automatic: boolean;
+  resolved: string | null;
+  label: string | null;
+  locality: "local" | "external" | "unknown" | null;
+  runsOn: string | null;
+  allowExternal: boolean;
+  outside: string[];
+  builtWith: string | null;
+  dimension: number | null;
+  prefixes: SearchPrefixes;
+  floor: number | null;
+}
+
+/** How adding meaning is going for the person's documents: `working`, `waiting` (the
+ * search model is not there), `limited` (the key is at its limit) or `idle`. */
+export interface AddingView {
+  state: "idle" | "working" | "waiting" | "limited";
+  message: string | null;
+  passages: number;
+  embedded: number;
+  owed: number;
+  wordsOnly: number;
+  etaSeconds: number | null;
+  ratePerSecond: number | null;
+}
+
+/** What Rebuild would do: add meaning again to this many passages with this search model,
+ * and how long that takes when it is known. */
+export interface RebuildView {
+  passages: number;
+  seconds: number | null;
+  model: string | null;
+}
+
+/** How documents are searched right now (`saved_api.search_facts`, from a live look):
+ * `headline` is the sentence to show, `detail` says why in the code's own words, and
+ * `actions` what the person can do about it. */
 export interface SearchFacts {
-  mode: string;
+  mode: "words" | "meaning and words";
   words: boolean;
   meaning: boolean;
   headline: string;
+  code: SearchCode;
+  detail: string | null;
+  actions: SearchAction[];
+  model: SearchModelView | null;
+  adding: AddingView | null;
+  rebuild: RebuildView | null;
 }
 
 /** What a person has set (`null`: not chosen) and what is in effect, with whose
@@ -966,6 +1070,9 @@ export interface DocumentsPage {
     bytes: number;
     byState: Record<string, number>;
     passagesKept: number;
+    /** Passages that have their meaning (or were refused it), and passages still owed it. */
+    embedded: number;
+    owed: number;
   };
   limits: {
     maxFileBytes: number;
@@ -996,7 +1103,26 @@ export interface Rebuilt {
   left: number;
 }
 
-/** One passage `POST /api/documents/test` found, with why it matched. */
+/** `POST /api/documents/meaning/rebuild`: how many passages are owed their meaning now,
+ * and the header as it is after. Words are never touched. */
+export interface MeaningRebuilt {
+  passages: number;
+  search: SearchFacts;
+}
+
+/** How a passage was found: by its words, by what it says, or by both. */
+export type Via = "words" | "meaning" | "both";
+
+/** Where each way of searching put a passage, 1 being its best. Never a score: a way's
+ * scores are of a scale that means nothing beside another's. */
+export interface Places {
+  words?: number;
+  meaning?: number;
+}
+
+/** One passage `POST /api/documents/test` found, with why it matched. `similarity` is how
+ * near the question it was by meaning, on that way's own scale (null when meaning did not
+ * find it). */
 export interface TestedPassage {
   rank: number;
   docId: string;
@@ -1011,16 +1137,43 @@ export interface TestedPassage {
   text: string;
   tokens: number;
   chunkIds: number[];
-  via: "words" | "meaning" | "both";
-  why: { via: string; terms: string[]; phrases: string[]; inHeading: string[] };
+  via: Via;
+  why: {
+    via: Via;
+    terms: string[];
+    phrases: string[];
+    inHeading: string[];
+    ranks: Places;
+    similarity: number | null;
+  };
 }
 
+/** What a search by meaning came to, for a person to be told (`saved_api.meaning_block`):
+ * whether it ran, with which search model; if not, why, in words (`quiet` when it was never
+ * in play and is not worth saying beside every answer); its best closeness, the floor
+ * under which that is not an answer by itself, and whether its passages were set aside. */
+export interface MeaningRun {
+  used: boolean;
+  code: string;
+  message: string | null;
+  quiet: boolean;
+  model: string | null;
+  best: number | null;
+  floor: number | null;
+  belowFloor: boolean;
+}
+
+/** The ways of searching a question can ask to be tried by (`ways`). */
+export type Way = "words" | "meaning";
+
 /** `POST /api/documents/test`: the passages that would be sent for a question, with
- * no model asked. */
+ * no model asked. `unavailable` is only for a run that named its ways, and none of them
+ * could run; `meaning` says why. `mode` is how it searched. */
 export interface TestedQuestion {
-  status: "found" | "nothing_matched" | "no_words" | "no_documents";
+  status: "found" | "nothing_matched" | "no_words" | "no_documents" | "unavailable";
   query: { text: string; terms: string[]; phrases: string[] };
-  mode: string;
+  mode: "words" | "meaning" | "meaning and words" | "none";
+  meaning: MeaningRun;
   passages: TestedPassage[];
   found: number;
   didNotFit: number;
@@ -1098,7 +1251,7 @@ export interface SearchRecord {
   query: string | null;
   terms: string[];
   phrases: string[];
-  mode: string;
+  mode: "words" | "meaning" | "meaning and words" | "none";
   scope: { library: boolean; chat: boolean };
   documentsOnly: boolean;
   askedAnyway: boolean;
@@ -1121,4 +1274,7 @@ export interface SearchRecord {
   /** The numbers the answer's own text cites, once it is done. */
   cited: number[];
   ms: number | null;
+  /** Whether search by meaning ran for this answer, with which search model, and if not,
+   * why; null for a search that was not run (MR5). */
+  meaning: MeaningRun | null;
 }

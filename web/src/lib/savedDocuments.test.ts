@@ -1,9 +1,15 @@
 import {
+  adding,
+  addingView,
   broken,
+  byMeaning,
   chatDocuments,
   held,
   hidden,
+  limited,
   markdown,
+  meaningOf,
+  meaningRun,
   nothing,
   off,
   owners,
@@ -11,13 +17,18 @@ import {
   passage,
   prefs,
   queued,
+  ranByMeaning,
   reading,
   record,
   saved,
   scanned,
   second,
   tested,
+  waiting,
+  withMeaning,
   word,
+  wordsOnly,
+  wordsOnlyDoc,
 } from "../test-saved";
 import {
   addedWords,
@@ -35,6 +46,8 @@ import {
   hintFor,
   hintHidden,
   hintWords,
+  IDLE_POLL_MS,
+  isBeingRead,
   isHidden,
   isPending,
   leftOutWords,
@@ -61,6 +74,8 @@ import {
   type Upload,
   uploadSummary,
   uploadWords,
+  watching,
+  WAITING_POLL_MS,
 } from "./savedDocuments";
 
 describe("where a document stands", () => {
@@ -802,5 +817,155 @@ describe("under an answer", () => {
     expect(isHidden(passage())).toBe(false);
     // One that says it is not hidden is readable, whatever else it says.
     expect(isHidden({ ...passage(), redacted: false } as never)).toBe(false);
+  });
+});
+
+// --- search by meaning (MR5) ---
+
+describe("where a document stands, once its meaning is being added", () => {
+  it("is ready for words, with the server's own sentence for how its meaning is going", () => {
+    expect(stateWords(adding())).toEqual({
+      state: "embedding",
+      tone: "ok",
+      label: "Ready for words. Adding meaning: 2 of 5 passages, about 14 minutes left.",
+    });
+  });
+
+  it("is a wait, with a clock and the server's words, when the search model is not there or the key is at its limit", () => {
+    const stopped = stateWords(waiting());
+    expect(stopped.state).toBe("searchable");
+    expect(stopped.tone).toBe("quiet");
+    expect(stopped.label).toMatch(/^Ready for words\. Meaning is waiting: the search model/);
+    const slow = stateWords(limited());
+    expect(slow.tone).toBe("quiet");
+    expect(slow.label).toMatch(
+      /^Ready for words\. Adding meaning to your documents is slow right now/,
+    );
+  });
+
+  it("is plain ready for words while the server has said nothing of its meaning", () => {
+    expect(stateWords(saved({ state: "searchable" })).label).toBe("Ready for words");
+    expect(
+      stateWords(
+        saved({ state: "embedding", meaning: meaningOf({ state: "adding", message: null }) }),
+      ).label,
+    ).toBe("Ready for words");
+  });
+
+  it("is ready when every passage has its meaning, and says why a document read without any has none", () => {
+    expect(stateWords(withMeaning())).toEqual({ state: "ready", tone: "ok", label: "Ready" });
+    expect(stateWords(wordsOnlyDoc())).toEqual({
+      state: "ready",
+      tone: "ok",
+      label: "Ready for words only: no search model was running when it was read.",
+    });
+  });
+
+  it("says how many passages were refused, in a document that is ready", () => {
+    const some = saved({ meaning: meaningOf({ embedded: 5, total: 5, refused: 1 }) });
+    expect(stateWords(some).label).toBe(
+      "Ready. Meaning was added to 4 of 5 passages; 1 passage is found by words only.",
+    );
+  });
+
+  it("does not touch a document that was skipped or could not be read", () => {
+    expect(stateWords(scanned({ meaning: meaningOf({ state: "words_only" }) })).label).toMatch(
+      /^Skipped:/,
+    );
+    expect(stateWords(broken({ meaning: meaningOf({ state: "words_only" }) })).label).toMatch(
+      /^Failed:/,
+    );
+  });
+});
+
+describe("what the screen is waiting on", () => {
+  const states = (list: ReturnType<typeof saved>[], search = wordsOnly()) =>
+    watching(page(list, { search }));
+
+  it("is documents being read: soon, and each second", () => {
+    expect(states([queued()])).toBe("busy");
+    expect(states([reading(), saved()])).toBe("busy");
+    expect(isBeingRead(queued())).toBe(true);
+    expect(isBeingRead(reading())).toBe(true);
+    for (const done of [saved(), adding(), waiting(), scanned(), broken()]) {
+      expect(isBeingRead(done), done.name).toBe(false);
+    }
+  });
+
+  it("is meaning being added: each second, like reading", () => {
+    expect(states([adding()], byMeaning())).toBe("busy");
+    // A document that can be found by words and has no word on its meaning yet is being added to.
+    expect(states([saved({ state: "searchable" })], byMeaning())).toBe("busy");
+    expect(
+      states(
+        [saved()],
+        byMeaning({ adding: addingView({ state: "working", message: "Adding meaning." }) }),
+      ),
+    ).toBe("busy");
+  });
+
+  it("is meaning that waits, which is asked about every few seconds: for a search model, or the key's limit", () => {
+    expect(states([waiting()], byMeaning({ code: "not_running" }))).toBe("waiting");
+    expect(states([limited()], byMeaning())).toBe("waiting");
+    expect(
+      states(
+        [saved()],
+        byMeaning({ adding: addingView({ state: "waiting", message: "Waiting." }) }),
+      ),
+    ).toBe("waiting");
+    expect(
+      states([saved()], byMeaning({ adding: addingView({ state: "limited", message: "Slow." }) })),
+    ).toBe("waiting");
+  });
+
+  it("is quick for a document read before any search model ran, when one is running now: it is taken up", () => {
+    expect(states([wordsOnlyDoc()], byMeaning())).toBe("busy");
+    // With none running it waits for the half-minute look, and is not asked after each second.
+    expect(states([wordsOnlyDoc()], wordsOnly())).toBe("idle");
+  });
+
+  it("is nothing, but the half-minute look, when everything is read and has its meaning", () => {
+    expect(states([saved(), withMeaning(), scanned(), broken()], byMeaning())).toBe("idle");
+    expect(states([], byMeaning())).toBe("idle");
+    expect(states([saved()], wordsOnly({ adding: null }))).toBe("idle");
+  });
+
+  it("is reading before it is anything else", () => {
+    expect(states([queued(), waiting()], byMeaning({ code: "not_running" }))).toBe("busy");
+  });
+
+  it("asks how often the design says: each half minute when there is nothing to watch, every five seconds when waiting", () => {
+    expect(IDLE_POLL_MS).toBe(30_000);
+    expect(WAITING_POLL_MS).toBe(5_000);
+  });
+});
+
+describe("a tried question that none of its ways could answer", () => {
+  it("says nothing was searched, and why, in the server's words, and never that nothing matched", () => {
+    const none = tested({
+      status: "unavailable",
+      mode: "none",
+      passages: [],
+      meaning: meaningRun({
+        code: "none_set_up",
+        message: "Searching by words only: no search model is set up.",
+        quiet: true,
+      }),
+    });
+    expect(testedWords(none)).toBe(
+      "Nothing was searched: search by meaning could not run. No search model is set up.",
+    );
+    expect(testedWords(none)).not.toMatch(/matched/);
+  });
+});
+
+describe("how the passages under an answer were found, with the model", () => {
+  it("says the search model when meaning ran, and not when it did not", () => {
+    expect(modeWords("meaning and words", ranByMeaning())).toBe(
+      "Found by meaning and words, with the search model Qwen3-Embedding-0.6B-Q8_0.",
+    );
+    expect(modeWords("meaning and words")).toBe("Found by meaning and words.");
+    expect(modeWords("meaning")).toBe("Found by meaning only.");
+    expect(modeWords("words", meaningRun())).toBe("Found by words only.");
   });
 });

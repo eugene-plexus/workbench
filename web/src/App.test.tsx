@@ -32,9 +32,20 @@ vi.mock("./components/ChatView", () => ({
   ),
 }));
 vi.mock("./components/Documents", () => ({
-  Documents: ({ onClose, onAsk }: { onClose: () => void; onAsk: () => void }) => (
+  Documents: ({
+    onClose,
+    onAsk,
+    me,
+  }: {
+    onClose: () => void;
+    onAsk: () => void;
+    me?: { owner: boolean; consoleUrl?: string | null } | null;
+  }) => (
     <section>
       <h1 id="view-heading">The documents page</h1>
+      <p data-testid="documents-reader">
+        {me ? `${me.owner ? "owner" : "person"} ${me.consoleUrl ?? "no console"}` : "nobody"}
+      </p>
       <button onClick={onAsk}>Ask about the documents</button>
       <button onClick={onClose}>Back to chat</button>
     </section>
@@ -603,6 +614,15 @@ describe("the Documents page", () => {
   it("is there for the owner as well, who has no Job sites", async () => {
     await open("/", { me: { owner: true } });
     expect(tab("Documents")).toBeInTheDocument();
+  });
+
+  it("is told who is reading, and where Eugene's console is: a search model is the owner's to get there", async () => {
+    await open("/documents", { me: { owner: true, consoleUrl: "http://nas:8279/" } });
+    expect(screen.getByTestId("documents-reader")).toHaveTextContent("owner http://nas:8279/");
+    cleanup();
+    // Someone who is not the owner has no console: they are told who is, and are given no address.
+    await open("/documents");
+    expect(screen.getByTestId("documents-reader")).toHaveTextContent("person no console");
   });
 
   it("opens at /documents, marks the page a person is on, and names the tab", async () => {

@@ -82,10 +82,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         async def passage_limit() -> int:
             return (await config.document_settings(store)).max_passages
 
+        async def document_settings() -> config.DocumentSettings:
+            return await config.document_settings(store)
+
         # The people's saved documents (MR4): put right what the last stop left (a
         # chat's own documents whose chat is gone, files no row claims, a document cut
-        # off while it was read), and begin reading what is waiting.
-        saved = SavedDocuments(settings.data_dir, reader, passage_limit)
+        # off while it was read), and begin reading what is waiting. With the gateway to
+        # ask, also search by meaning (MR5): the passages that still have no vector are
+        # owed, and are embedded in the background.
+        saved = SavedDocuments(
+            settings.data_dir, reader, passage_limit, gateway=hub, settings=document_settings
+        )
         reconciled = await saved.start(store.chat_owners)
         if any(
             (

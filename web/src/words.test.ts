@@ -110,6 +110,10 @@ const DOCUMENT_FILES = [
   "lib/savedDocuments.ts",
   "lib/useChatDocuments.ts",
   "lib/useSavedDocuments.ts",
+  // Search by meaning (MR5): "search model", "meaning and words", "words only", never what it is
+  // made of underneath.
+  "components/DocumentsSearch.tsx",
+  "lib/documentMeaning.ts",
 ];
 const NOT_ON_THE_DOCUMENT_PATH = /\b(RAG|vectors?|embeddings?|retrieval|retrieve[ds]?|chunks?)\b/i;
 

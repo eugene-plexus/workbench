@@ -22,6 +22,7 @@ from eugene_plexus_workbench.knowledge import extract
 from eugene_plexus_workbench.knowledge import reader as readers
 from eugene_plexus_workbench.knowledge.index import (
     LIBRARY,
+    Document,
     Index,
     Indexes,
     NewDocument,
@@ -504,6 +505,41 @@ async def test_waiting_ends_when_the_documents_are_read_and_not_before_its_time(
     assert await fake.ingest.wait(ADA, ["doc00001"], 20) == set()
     assert await fake.ingest.wait(ADA, ["no-such-doc"], 1) == set()
     assert await fake.ingest.wait(BO, ["doc00001"], 1) == set(), "nobody else's"
+
+
+async def test_waiting_does_not_end_while_the_worker_is_still_finishing_a_document(
+    tmp_path: Path,
+) -> None:
+    """A document can be found by its words a moment before the worker is done with it
+    (before it is `ready`, or left owed its meaning). A caller that waited for it to be
+    read and then looked for `ready` raced that moment, and lost it under load."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def owed(index: Index, doc: Document) -> bool:
+        entered.set()
+        await release.wait()
+        return False
+
+    root = tmp_path / "data"
+    indexes = Indexes(root)
+    reader = FakeReader()
+    ingest = Ingest(indexes, reader, big_cap, owed=owed)  # type: ignore[arg-type]
+    ingest.start()
+    rig = Rig(indexes, reader, ingest, root)
+    try:
+        await rig.add("doc00001", "Words.")
+        await asyncio.wait_for(entered.wait(), 20)
+        assert await rig.status("doc00001") == "searchable"
+        waiter = asyncio.create_task(ingest.wait(ADA, ["doc00001"], 20))
+        await asyncio.sleep(0.6)  # more than two of its looks
+        assert not waiter.done(), "it can be found, but the worker has not finished with it"
+        release.set()
+        assert await asyncio.wait_for(waiter, 20) == set()
+        assert await rig.status("doc00001") == "ready"
+    finally:
+        await ingest.aclose()
+        await indexes.aclose()
 
 
 async def test_an_index_that_cannot_be_used_does_not_stop_the_others(fake: Rig) -> None:

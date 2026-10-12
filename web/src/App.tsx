@@ -590,7 +590,11 @@ export default function App() {
             }}
           />
         ) : documentsOpen ? (
-          <Documents onClose={() => open(chatId)} onAsk={() => void askAboutDocuments()} />
+          <Documents
+            me={phase.me}
+            onClose={() => open(chatId)}
+            onAsk={() => void askAboutDocuments()}
+          />
         ) : memoryOpen ? (
           <Memory
             chats={chats}

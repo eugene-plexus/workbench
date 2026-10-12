@@ -47,6 +47,11 @@ dependencies = [
     "pypdfium2>=5,<6",
     "pypdf>=6,<7",
     "python-docx>=1.2,<2",
+    # Search by meaning (MR5, `knowledge/vectors.py`): a person's vectors are one numpy
+    # matrix and a search is one product of it (8.6 ms for 100,000 passages). One wheel for
+    # CPython 3.12 on Windows (x64, ARM64), macOS (Intel, Apple silicon) and Linux (glibc and
+    # musl, x86-64 and arm64), so no installer needs a compiler or an extension to load.
+    "numpy>=2.0,<3",
 ]
 
 [project.optional-dependencies]
@@ -114,6 +119,9 @@ ignore = []
 "scripts/check-documents-page-sabotage.py" = ["E501"]
 "scripts/check-library-sabotage.py" = ["E501"]
 "scripts/check-library-page-sabotage.py" = ["E501"]
+"scripts/check-meaning-sabotage.py" = ["E501"]
+"scripts/check-meaning-page-sabotage.py" = ["E501"]
+"scripts/mr5-meaning-acceptance.py" = ["E501"]
 
 # -----------------------------------------------------------------------------
 # Mypy

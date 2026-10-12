@@ -16,29 +16,45 @@ import { DocumentsChip, DocumentsDrawer, DocumentsHint } from "./components/Docu
 import { MessageView } from "./components/MessageView";
 import { TestQuestion } from "./components/TestQuestion";
 import { ApiError, api, documentText, post, upload } from "./lib/api";
-import type { ChatDocumentsView, ChatFile, Message, SavedDocument } from "./lib/types";
+import type { ChatDocumentsView, ChatFile, Me, Message, SavedDocument } from "./lib/types";
 import { choose, file, fresh, MODEL, preparing, searched, tooLong } from "./test-documents";
-import { controlsIn, everyControlIsNamed, lacking } from "./test-controls";
+import { controlsIn, everyControlIsNamed, lacking, wrong } from "./test-controls";
 import {
+  adding,
+  addingView,
   broken,
+  byMeaning,
   chatDocuments,
+  CODES,
   held,
   hidden,
+  limited,
   markdown,
+  meaningOf,
+  meaningRun,
+  noSearchModel,
   nothing,
   off,
   owners,
   page,
   passage,
+  paused,
   prefs,
   queued,
+  ranByMeaning,
   reading,
   record,
   saved,
   scanned,
+  searchFor,
   second,
   tested,
+  waiting,
+  why,
+  withMeaning,
   word,
+  wordsOnlyDoc,
+  hit,
 } from "./test-saved";
 
 vi.mock("./lib/api", async (importOriginal) => ({
@@ -76,12 +92,19 @@ const settle = () =>
 
 // --- the Documents screen ---
 
-async function screenOf(docs: SavedDocument[], over: Parameters<typeof page>[1] = {}) {
+async function screenOf(
+  docs: SavedDocument[],
+  over: Parameters<typeof page>[1] = {},
+  me?: Pick<Me, "owner" | "consoleUrl">,
+) {
   vi.mocked(api).mockResolvedValue(page(docs, over) as never);
-  const view = render(<Documents onClose={vi.fn()} onAsk={vi.fn()} />);
+  const view = render(<Documents onClose={vi.fn()} onAsk={vi.fn()} me={me} />);
   await settle();
   return view;
 }
+
+const OWNER = { owner: true, consoleUrl: "http://nas:8279/" };
+const PERSON = { owner: false, consoleUrl: null };
 
 describe("the Documents screen", () => {
   it("empty: the way back, the settings, and Add files", async () => {
@@ -561,6 +584,258 @@ describe("a file's card, with Search it instead", () => {
   });
 });
 
+// --- search by meaning (MR5) ---
+
+describe("the Documents screen, with search by meaning", () => {
+  const working = addingView({
+    state: "working",
+    message: "Adding meaning: 2 of 5 passages, about 14 minutes left.",
+    embedded: 2,
+    owed: 3,
+  });
+
+  it("with a search model in use, and a document in each state of its meaning", async () => {
+    const view = await screenOf(
+      [
+        adding({ id: "a", name: "adding.pdf" }),
+        waiting({ id: "w", name: "waiting.pdf" }),
+        limited({ id: "l", name: "limited.pdf" }),
+        wordsOnlyDoc({ id: "o", name: "words.pdf" }),
+        withMeaning({ id: "r", name: "ready.pdf" }),
+        saved({
+          id: "f",
+          name: "refused.pdf",
+          meaning: meaningOf({ embedded: 5, total: 5, refused: 1, notes: ["It refused one."] }),
+        }),
+      ],
+      { search: byMeaning({ adding: working }) },
+      OWNER,
+    );
+    expect(screen.getByTestId("documents-meaning-totals")).toBeInTheDocument();
+    everyControlIsNamed(view, 30);
+  });
+
+  it.each(CODES)("for the code %s, to the owner and to a person who is not", async (code) => {
+    const owner = await screenOf([withMeaning()], { search: searchFor(code) }, OWNER);
+    everyControlIsNamed(owner, 5);
+    owner.unmount();
+    const person = await screenOf([withMeaning()], { search: searchFor(code) }, PERSON);
+    everyControlIsNamed(person, 5);
+  });
+
+  it("with no search model set up, the link to Eugene's console is named and has an id", async () => {
+    const view = await screenOf([wordsOnlyDoc()], { search: noSearchModel() }, OWNER);
+    expect(screen.getByTestId("documents-get-search-model")).toHaveAccessibleName(
+      "Get a search model",
+    );
+    everyControlIsNamed(view, 5);
+  });
+
+  it("with a search model that is not running, the link to Backends is named and has an id", async () => {
+    const view = await screenOf([withMeaning()], { search: searchFor("not_running") }, OWNER);
+    expect(screen.getByTestId("documents-open-backends")).toHaveAccessibleName("Open Backends");
+    everyControlIsNamed(view, 5);
+  });
+
+  it("with a search that is paused, Rebuild search is named and described", async () => {
+    const view = await screenOf([withMeaning()], { search: paused() }, OWNER);
+    const button = screen.getByTestId("documents-meaning-rebuild");
+    expect(button).toHaveAccessibleName("Rebuild search");
+    expect(button).toHaveAccessibleDescription(/adds meaning again to 3,000 passages/);
+    everyControlIsNamed(view, 5);
+  });
+
+  it("with Rebuild search just pressed, and its words", async () => {
+    vi.mocked(post).mockResolvedValue({ passages: 5, search: byMeaning() });
+    const view = await screenOf([withMeaning()], { search: paused() }, OWNER);
+    fireEvent.click(screen.getByTestId("documents-meaning-rebuild"));
+    await settle();
+    everyControlIsNamed(view, 5);
+  });
+
+  it("with a search model that runs outside the machines", async () => {
+    const view = await screenOf(
+      [withMeaning()],
+      {
+        search: byMeaning({
+          model: {
+            ...byMeaning().model!,
+            locality: "external",
+            runsOn: "OpenAI",
+            allowExternal: true,
+          },
+        }),
+      },
+      OWNER,
+    );
+    everyControlIsNamed(view, 5);
+  });
+});
+
+describe("Test a question, with search by meaning", () => {
+  const triesWith = async (result: ReturnType<typeof tested>, open = false) => {
+    vi.mocked(post).mockReset();
+    vi.mocked(post).mockResolvedValue(result);
+    const view = render(<TestQuestion search={byMeaning()} />);
+    if (open) fireEvent.click(screen.getByTestId("documents-test-ways-toggle"));
+    fireEvent.change(screen.getByTestId("documents-test-question"), {
+      target: { value: "boats" },
+    });
+    fireEvent.click(screen.getByTestId("documents-test-ask"));
+    await settle();
+    return view;
+  };
+
+  it("with one way at a time offered, closed and open: a summary and three radios, each named", () => {
+    const view = render(<TestQuestion search={byMeaning()} />);
+    everyControlIsNamed(view, 3);
+    fireEvent.click(screen.getByTestId("documents-test-ways-toggle"));
+    expect(screen.getAllByRole("radio")).toHaveLength(3);
+    everyControlIsNamed(view, 6);
+  });
+
+  it("with passages found by words, by meaning and by both", async () => {
+    const view = await triesWith(
+      tested({
+        mode: "meaning and words",
+        meaning: ranByMeaning(),
+        passages: [
+          hit(),
+          hit({
+            rank: 2,
+            via: "meaning",
+            why: why({ via: "meaning", ranks: { meaning: 1 }, similarity: 0.6 }),
+          }),
+          hit({
+            rank: 3,
+            via: "both",
+            why: why({ via: "both", terms: ["code"], ranks: { words: 2, meaning: 2 } }),
+          }),
+        ],
+      }),
+      true,
+    );
+    expect(screen.getAllByTestId("documents-test-via")).toHaveLength(3);
+    everyControlIsNamed(view, 9);
+  });
+
+  it("with a search none of whose ways could run", async () => {
+    const view = await triesWith(
+      tested({
+        status: "unavailable",
+        mode: "none",
+        passages: [],
+        meaning: meaningRun({ message: "Searching by words only: no search model is set up." }),
+      }),
+      true,
+    );
+    expect(screen.getByTestId("documents-test-result")).toHaveAttribute(
+      "data-status",
+      "unavailable",
+    );
+    everyControlIsNamed(view, 5);
+  });
+
+  it("where no search model has been set up, with no second way to try", () => {
+    const view = render(<TestQuestion search={noSearchModel()} />);
+    expect(screen.queryByTestId("documents-test-ways")).toBeNull();
+    everyControlIsNamed(view, 2);
+  });
+});
+
+describe("the Documents drawer, with search by meaning", () => {
+  it.each(CODES)("with the search at code %s", (code) => {
+    const view = render(
+      <DocumentsDrawer
+        chatId="c1"
+        view={chatDocuments({ search: searchFor(code) })}
+        error={null}
+        onChat={vi.fn()}
+        onReload={vi.fn().mockResolvedValue(undefined)}
+        onManage={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("documents-search-mode")).toBeInTheDocument();
+    everyControlIsNamed(view, 3);
+  });
+
+  it("with meaning being added, and a file of this chat having its meaning added", () => {
+    const view = render(
+      <DocumentsDrawer
+        chatId="c1"
+        view={chatDocuments({
+          search: byMeaning({
+            adding: addingView({ state: "working", message: "Adding meaning." }),
+          }),
+          chatDocuments: [adding({ scope: "chat" })],
+        })}
+        error={null}
+        onChat={vi.fn()}
+        onReload={vi.fn().mockResolvedValue(undefined)}
+        onManage={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+    everyControlIsNamed(view, 3);
+  });
+});
+
+describe("under an answer, with search by meaning", () => {
+  const answer = (over: Partial<Message> = {}): Message => ({
+    id: "a",
+    seq: 2,
+    role: "assistant",
+    content: "The harbour master keeps the registry [1].",
+    reasoning: "",
+    attachments: [],
+    status: "done",
+    error: null,
+    sources: [],
+    searches: 0,
+    search: false,
+    model: "m",
+    finish: "stop",
+    createdAt: 0,
+    finishedAt: 1,
+    ...over,
+  });
+
+  it("each passage a row that opens, whichever way it was found, and each named with how", () => {
+    const view = render(
+      <MessageView
+        chatId="c"
+        message={answer({
+          sources: [
+            passage(),
+            passage({ rank: 2, via: "meaning", terms: [], phrases: [], cited: false }),
+            passage({ rank: 3, via: "both", cited: false }),
+          ],
+          retrieval: record({
+            mode: "meaning and words",
+            meaning: ranByMeaning(),
+            passages: 3,
+            notes: [{ code: "meaning_not_running", message: "Searching by words only: x." }],
+          }),
+        })}
+        progress={null}
+        busy={false}
+        readOnly={false}
+        onChanged={vi.fn()}
+        documents={{ onManage: vi.fn() }}
+      />,
+    );
+    const mine = [...view.container.querySelectorAll('[data-testid="passage-sources"]')].flatMap(
+      controlsIn,
+    );
+    expect(mine).toHaveLength(3);
+    expect(lacking(mine, view.container)).toEqual([]);
+    for (const toggle of screen.getAllByTestId("passage-toggle")) {
+      expect(toggle.getAttribute("aria-label")).toMatch(/, found by (words|meaning|both)/);
+    }
+  });
+});
+
 // --- the gate can fail ---
 
 describe("the gate itself", () => {
@@ -592,5 +867,33 @@ describe("the gate itself", () => {
     );
     expect(() => everyControlIsNamed(one, 2)).toThrow(/controls on the screen/);
     expect(() => everyControlIsNamed(one, 1)).not.toThrow();
+  });
+
+  it("fails for a link that opens a new tab and has no rel=noopener, and passes for one that says noopener or noreferrer", () => {
+    const loose = render(
+      <a href="http://nas:8279/library/" target="_blank" data-testid="console">
+        Get a search model
+      </a>,
+    );
+    expect(() => everyControlIsNamed(loose)).toThrow(/opens a new tab and has no rel="noopener"/);
+    expect(wrong(loose)).toHaveLength(1);
+    loose.unmount();
+    for (const rel of ["noopener noreferrer", "noreferrer", "noopener"]) {
+      const safe = render(
+        <a href="http://nas:8279/library/" target="_blank" rel={rel} data-testid="console">
+          Get a search model
+        </a>,
+      );
+      expect(() => everyControlIsNamed(safe), rel).not.toThrow();
+      expect(wrong(safe), rel).toEqual([]);
+      safe.unmount();
+    }
+    // A link that stays in this tab is not held to it.
+    const same = render(
+      <a href="/documents" data-testid="same">
+        Documents
+      </a>,
+    );
+    expect(() => everyControlIsNamed(same)).not.toThrow();
   });
 });

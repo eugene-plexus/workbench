@@ -35,6 +35,8 @@ from joserfc.jwk import RSAKey
 from eugene_plexus_workbench.app import create_app
 from eugene_plexus_workbench.settings import Settings
 
+from . import fake_embedding
+
 CLIENT_ID = "wb-client"
 CLIENT_SECRET = "wb-client-secret"
 APP_KEY = "app-key-token"
@@ -285,6 +287,25 @@ def chat_model(
         info["locality"] = locality
     if owned_by is not None:
         info["drivers"] = [owned_by]
+    entry: dict[str, Any] = {"id": model_id, "object": "model", "x_eugene_plexus": info}
+    if owned_by is not None:
+        entry["owned_by"] = owned_by
+    return entry
+
+
+def search_model(
+    model_id: str,
+    *,
+    locality: str | None = "local",
+    ready: bool = True,
+    owned_by: str | None = None,
+) -> dict[str, Any]:
+    """A search model as the gateway lists it (MR5): the `embeddings` surface, where it
+    runs (`locality=None` leaves the key out, as an older gateway would) and whether a
+    backend is running it."""
+    info: dict[str, Any] = {"surfaces": ["embeddings"], "ready_backends": 1 if ready else 0}
+    if locality is not None:
+        info["locality"] = locality
     entry: dict[str, Any] = {"id": model_id, "object": "model", "x_eugene_plexus": info}
     if owned_by is not None:
         entry["owned_by"] = owned_by
@@ -587,6 +608,32 @@ class FakeGateway:
     video_refusal: tuple[int, str, str | None] | None = None
     #: Polls to answer with this (status, message) before answering again.
     video_poll_trouble: list[tuple[int, str]] = field(default_factory=list)
+    #: The one model every gateway of these tests lists that only embeds, and says nothing of
+    #: where it runs (so Workbench cannot place it); search by meaning's tests do without it.
+    embedder_listed: bool = True
+    #: Search models listed (`search_model`), whole; `/v1/embeddings` answers for each that is
+    #: ready, with the stand-in meaning of `fake_embedding`.
+    search_models: list[dict[str, Any]] = field(default_factory=list)
+    #: Every embeddings request: its body, when it came, and how many were in the air then.
+    embed_requests: list[dict[str, Any]] = field(default_factory=list)
+    embed_in_flight: int = 0
+    embed_peak: int = 0
+    #: Requests whose caller hung up while they were held at the gate.
+    embed_disconnects: int = 0
+    #: A batch of passages is held until this is set (a thread's event: the test and the
+    #: server are not one loop). Requests of one text are not held.
+    embed_gate: threading.Event | None = None
+    embed_delay: float = 0.0
+    #: What an answer calls the model that was asked for, and how long its vectors are.
+    embed_names: dict[str, str] = field(default_factory=dict)
+    embed_dims: dict[str, int] = field(default_factory=dict)
+    embed_dim: int = fake_embedding.DIM
+    #: Answers for the next requests, as (status, body, headers), before it behaves.
+    embed_script: list[tuple[int, dict[str, Any], dict[str, str]]] = field(default_factory=list)
+    #: A passage with this text in it is refused as too long, whatever else is in its request.
+    embed_refuse: str | None = None
+    #: A request with this text in it answers with a vector that is not a number.
+    embed_nan: str | None = None
 
     def app(self) -> FastAPI:
         app = FastAPI()
@@ -617,11 +664,18 @@ class FakeGateway:
                         },
                     },
                     *self.more_chat_models,
-                    {
-                        "id": "embedder",
-                        "object": "model",
-                        "x_eugene_plexus": {"surfaces": ["embeddings"]},
-                    },
+                    *(
+                        [
+                            {
+                                "id": "embedder",
+                                "object": "model",
+                                "x_eugene_plexus": {"surfaces": ["embeddings"]},
+                            }
+                        ]
+                        if self.embedder_listed
+                        else []
+                    ),
+                    *self.search_models,
                     *self.image_models,
                     *self.audio_models,
                     *self.video_models,
@@ -797,6 +851,105 @@ class FakeGateway:
             if handle not in self.video_jobs:
                 return video_error(404, f"No video job '{handle}' for this key.", "video_id")
             return Response(content=self.video_content, media_type="video/mp4")
+
+        @app.post("/__fake/search-models")
+        async def fake_search_models(request: Request) -> Any:
+            """A test's hand on the gateway while a browser drives Workbench (MR5): which search
+            models it lists from now on, as `{"models": [{"id": ..., "ready": true}]}`. The
+            Chrome check starts and stops a search model through it, as the owner would in
+            Eugene's console."""
+            body = await request.json()
+            self.embedder_listed = False
+            self.search_models = [
+                search_model(
+                    m["id"], locality=m.get("locality", "local"), ready=m.get("ready", True)
+                )
+                for m in body["models"]
+            ]
+            # `hold`: the passages' answers wait (so a screen can be seen while meaning is being
+            # added), and are let go when it is false.
+            if body.get("hold"):
+                self.embed_gate = threading.Event()
+            elif "hold" in body and self.embed_gate is not None:
+                self.embed_gate.set()
+                self.embed_gate = None
+            return {"listed": [m["id"] for m in self.search_models]}
+
+        @app.post("/v1/embeddings")
+        async def embeddings(request: Request) -> Any:
+            body = await request.json()
+            self.embed_requests.append(
+                {"body": body, "at": time.perf_counter(), "in_flight": self.embed_in_flight}
+            )
+            if request.headers.get("authorization") != f"Bearer {APP_KEY}":
+                return JSONResponse({"error": {"message": "invalid key"}}, status_code=401)
+            self.embed_in_flight += 1
+            self.embed_peak = max(self.embed_peak, self.embed_in_flight)
+            try:
+                given = body["input"] if isinstance(body["input"], list) else [body["input"]]
+                # Only a batch of passages is held: the one-text requests (a question, and the
+                # tiny one that asks which model answers) go through.
+                while (
+                    self.embed_gate is not None and len(given) > 1 and not self.embed_gate.is_set()
+                ):
+                    if await request.is_disconnected():
+                        self.embed_disconnects += 1
+                        return Response(status_code=499)
+                    await asyncio.sleep(0.01)
+                if self.embed_delay:
+                    await asyncio.sleep(self.embed_delay)
+                if self.embed_script:
+                    code, payload, headers = self.embed_script.pop(0)
+                    return JSONResponse(payload, status_code=code, headers=headers)
+                model = body["model"]
+                entry = next((m for m in self.search_models if m["id"] == model), None)
+                if entry is None:
+                    return JSONResponse(
+                        {"error": {"message": f"The model '{model}' is not served here."}},
+                        status_code=404,
+                    )
+                if not entry["x_eugene_plexus"].get("ready_backends"):
+                    return JSONResponse(
+                        {"error": {"message": f"No backend for '{model}' is ready."}},
+                        status_code=503,
+                    )
+                texts = body["input"] if isinstance(body["input"], list) else [body["input"]]
+                if self.embed_refuse and any(self.embed_refuse in t for t in texts):
+                    return JSONResponse(
+                        {
+                            "error": {
+                                "message": "input (1631 tokens) is too large to process. "
+                                "increase the physical batch size (current batch size: 512)",
+                                "type": "invalid_request_error",
+                            }
+                        },
+                        status_code=400,
+                    )
+                dim = self.embed_dims.get(model, self.embed_dim)
+                vectors = [fake_embedding.vector(t, dim) for t in texts]
+                if self.embed_nan and any(self.embed_nan in t for t in texts):
+                    vectors[0] = [float("nan"), *vectors[0][1:]]
+                # Not JSONResponse: it refuses the NaN a broken model can answer with.
+                return Response(
+                    json.dumps(
+                        {
+                            "object": "list",
+                            "data": [
+                                {"object": "embedding", "index": i, "embedding": v}
+                                for i, v in enumerate(vectors)
+                            ],
+                            "model": self.embed_names.get(model, model),
+                            "usage": {
+                                "prompt_tokens": sum(len(t.split()) for t in texts),
+                                "total_tokens": sum(len(t.split()) for t in texts),
+                            },
+                        }
+                    ),
+                    media_type="application/json",
+                    headers={"x-request-id": f"embed-{len(self.embed_requests)}"},
+                )
+            finally:
+                self.embed_in_flight -= 1
 
         @app.post("/v1/chat/completions")
         async def chat(request: Request) -> Any:

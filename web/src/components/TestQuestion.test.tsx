@@ -6,8 +6,17 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 
 import { ApiError, post } from "../lib/api";
-import type { TestedQuestion } from "../lib/types";
-import { hit, tested } from "../test-saved";
+import type { TestedPassage, TestedQuestion } from "../lib/types";
+import {
+  CODES,
+  hit,
+  meaningRun,
+  noSearchModel,
+  ranByMeaning,
+  searchFor,
+  tested,
+  why,
+} from "../test-saved";
 import { TestQuestion } from "./TestQuestion";
 
 vi.mock("../lib/api", async (importOriginal) => ({
@@ -147,7 +156,7 @@ describe("what a question found", () => {
       passages: [
         hit({
           heading: "Conclusion",
-          why: { via: "words", terms: ["conclusion"], phrases: [], inHeading: ["conclusion"] },
+          why: why({ terms: ["conclusion"], inHeading: ["conclusion"] }),
         }),
       ],
     });
@@ -160,9 +169,7 @@ describe("what a question found", () => {
     render(<TestQuestion />);
     await tries('"code word"', {
       ...tested(),
-      passages: [
-        hit({ why: { via: "words", terms: ["code"], phrases: ["code word"], inHeading: [] } }),
-      ],
+      passages: [hit({ why: why({ terms: ["code"], phrases: ["code word"] }) })],
     });
     expect(screen.getByTestId("documents-test-matched")).toHaveTextContent(
       "Matched: code, “code word”",
@@ -298,5 +305,313 @@ describe("a question that could not be tried", () => {
     expect(screen.queryByTestId("documents-test-problem")).toBeNull();
     expect(screen.getByTestId("documents-test-result")).toBeInTheDocument();
     expect(question()).not.toHaveAttribute("aria-invalid");
+  });
+});
+
+// --- search by meaning (MR5) ---
+
+const dialog = () => screen.getByTestId("documents-test-ways");
+const way = (which: string) =>
+  screen.getByTestId(`documents-test-way-${which}`) as HTMLInputElement;
+
+/** A passage that only meaning found: none of the question's words are in it. */
+const byMeaning = (over: Partial<TestedPassage> = {}) =>
+  hit({
+    rank: 1,
+    docId: "d7",
+    name: "harbour-office.md",
+    pageStart: null,
+    pageEnd: null,
+    heading: "Arrivals",
+    snippet: "The harbour master keeps the vessel registry and the logbook of every ship.",
+    text: "The harbour master keeps the vessel registry and the logbook of every ship.",
+    via: "meaning",
+    why: why({ via: "meaning", ranks: { meaning: 1 }, similarity: 0.62 }),
+    ...over,
+  });
+
+describe("how each passage was found", () => {
+  it("says words for a passage that has the words, with the places of that way", async () => {
+    render(<TestQuestion />);
+    await tries("code word");
+    const first = hits()[0]!;
+    expect(within(first).getByTestId("documents-test-via")).toHaveTextContent(/^Found by words$/);
+    expect(within(first).getByTestId("documents-test-via")).toHaveAttribute("data-via", "words");
+    expect(within(first).getByTestId("documents-test-places")).toHaveTextContent(
+      "Words put it 1st.",
+    );
+  });
+
+  it("says meaning for a passage with none of the words, with no words matched and none marked, and how near it was", async () => {
+    render(<TestQuestion />);
+    await tries("who records the boats arriving?", {
+      ...tested({ mode: "meaning and words", meaning: ranByMeaning() }),
+      passages: [byMeaning()],
+    });
+    const only = hits()[0]!;
+    expect(within(only).getByTestId("documents-test-via")).toHaveTextContent(
+      "Found by meaning: none of your words are in it",
+    );
+    expect(within(only).queryByTestId("documents-test-matched")).toBeNull();
+    expect(only.querySelectorAll("mark")).toHaveLength(0);
+    expect(within(only).getByTestId("documents-test-places")).toHaveTextContent(
+      "Meaning put it 1st (closeness 0.62).",
+    );
+  });
+
+  it("says both, with the words it has and where each way put it", async () => {
+    render(<TestQuestion />);
+    await tries("code word", {
+      ...tested({ mode: "meaning and words", meaning: ranByMeaning() }),
+      passages: [
+        hit({
+          via: "both",
+          why: why({
+            via: "both",
+            terms: ["code", "word"],
+            ranks: { words: 3, meaning: 1 },
+            similarity: 0.71,
+          }),
+        }),
+      ],
+    });
+    const both = hits()[0]!;
+    expect(within(both).getByTestId("documents-test-via")).toHaveTextContent(
+      /^Found by both words and meaning$/,
+    );
+    expect(within(both).getByTestId("documents-test-matched")).toHaveTextContent(
+      "Matched: code, word",
+    );
+    expect(within(both).getByTestId("documents-test-places")).toHaveTextContent(
+      "Words put it 3rd, meaning put it 1st (closeness 0.71).",
+    );
+  });
+
+  it("lists a passage found by words and one found by meaning side by side, each said as it was found", async () => {
+    render(<TestQuestion />);
+    await tries("code word boats", {
+      ...tested({ mode: "meaning and words", meaning: ranByMeaning() }),
+      passages: [hit(), byMeaning({ rank: 2 })],
+    });
+    expect(
+      hits().map((h) => within(h).getByTestId("documents-test-via").getAttribute("data-via")),
+    ).toEqual(["words", "meaning"]);
+  });
+
+  it("says a passage that meaning found and that has some of the words, with those words", async () => {
+    render(<TestQuestion />);
+    await tries("code", {
+      ...tested({ mode: "meaning and words", meaning: ranByMeaning() }),
+      passages: [
+        byMeaning({ why: why({ via: "meaning", terms: ["code"], ranks: { meaning: 2 } }) }),
+      ],
+    });
+    expect(screen.getByTestId("documents-test-via")).toHaveTextContent(/^Found by meaning$/);
+    expect(screen.getByTestId("documents-test-matched")).toHaveTextContent("Matched: code");
+  });
+});
+
+describe("trying one way at a time", () => {
+  it("is an expert option, closed to begin with, and not said to be in use", () => {
+    render(<TestQuestion />);
+    const ways = dialog() as HTMLDetailsElement;
+    expect(ways.open).toBe(false);
+    expect(screen.getByTestId("documents-test-ways-toggle")).toHaveTextContent(
+      "Try one way at a time",
+    );
+    expect(way("both")).toBeChecked();
+  });
+
+  it("offers both, words only and meaning only, and says what each is for", () => {
+    render(<TestQuestion />);
+    fireEvent.click(screen.getByTestId("documents-test-ways-toggle"));
+    expect(way("both")).toHaveAccessibleName("Words and meaning, as a chat does");
+    expect(way("words")).toHaveAccessibleName("Words only");
+    expect(way("meaning")).toHaveAccessibleName("Meaning only");
+    const group = screen.getByRole("group", { name: "Search by" });
+    expect(group).toHaveAccessibleDescription(/sets aside a passage that is not near enough/);
+    expect(group).toHaveAccessibleDescription(/here, nothing is set aside/);
+  });
+
+  it("asks the server for the one way that was chosen, by its name", async () => {
+    render(<TestQuestion />);
+    fireEvent.click(way("words"));
+    await tries("code word");
+    expect(post).toHaveBeenLastCalledWith("/api/documents/test", {
+      question: "code word",
+      ways: ["words"],
+    });
+    fireEvent.click(way("meaning"));
+    fireEvent.click(ask());
+    await settle();
+    expect(post).toHaveBeenLastCalledWith("/api/documents/test", {
+      question: "code word",
+      ways: ["meaning"],
+    });
+  });
+
+  it("asks both ways, naming none, when it is put back, so a chat's own rule applies", async () => {
+    render(<TestQuestion />);
+    fireEvent.click(way("words"));
+    fireEvent.click(way("both"));
+    await tries("code word");
+    expect(post).toHaveBeenLastCalledWith("/api/documents/test", { question: "code word" });
+  });
+
+  it("says in its name which way is chosen when it is closed, so a choice is not hidden", () => {
+    render(<TestQuestion />);
+    fireEvent.click(way("meaning"));
+    expect(screen.getByTestId("documents-test-ways-toggle")).toHaveTextContent(
+      "Try one way at a time: meaning only",
+    );
+  });
+
+  it("is held while a question is asked", async () => {
+    render(<TestQuestion />);
+    let answer: (found: TestedQuestion) => void = () => undefined;
+    vi.mocked(post).mockReturnValue(
+      new Promise<TestedQuestion>((resolve) => (answer = resolve)) as never,
+    );
+    fireEvent.change(question(), { target: { value: "code" } });
+    fireEvent.click(ask());
+    expect(way("words")).toBeDisabled();
+    await act(async () => answer(tested()));
+    expect(way("words")).toBeEnabled();
+  });
+
+  it("says a question was searched the way it was chosen", async () => {
+    render(<TestQuestion />);
+    fireEvent.click(way("words"));
+    await tries("code word", tested({ mode: "words" }));
+    expect(screen.getByTestId("documents-test-mode")).toHaveTextContent(
+      "Searched by words only. You chose this.",
+    );
+  });
+
+  it.each(CODES)("is offered for %s unless no search model has been set up", (code) => {
+    render(<TestQuestion search={searchFor(code)} />);
+    const none = code === "none_set_up" || code === "no_gateway";
+    expect(screen.queryByTestId("documents-test-ways") === null).toBe(none);
+  });
+
+  it("is not asked for where it is not offered, whatever was chosen before", async () => {
+    const view = render(<TestQuestion search={searchFor("ok")} />);
+    fireEvent.click(way("meaning"));
+    view.rerender(<TestQuestion search={noSearchModel()} />);
+    await tries("code word");
+    expect(post).toHaveBeenLastCalledWith("/api/documents/test", { question: "code word" });
+  });
+});
+
+describe("how a tried question was searched", () => {
+  it.each([
+    ["meaning and words", "Searched by meaning and words."],
+    ["words", "Searched by words only."],
+    ["meaning", "Searched by meaning only."],
+  ] as const)("says %s", async (mode, said) => {
+    render(<TestQuestion />);
+    await tries("code word", tested({ mode }));
+    expect(screen.getByTestId("documents-test-mode")).toHaveTextContent(said);
+    expect(screen.getByTestId("documents-test-result")).toHaveAttribute("data-mode", mode);
+    expect(screen.getByTestId("documents-test-mode")).not.toHaveTextContent("You chose");
+  });
+
+  it("says why meaning did not run, in the server's words, when a search model was in play", async () => {
+    render(<TestQuestion />);
+    await tries(
+      "code word",
+      tested({
+        mode: "words",
+        meaning: meaningRun({
+          code: "not_running",
+          message:
+            "Searching by words only: the search model m is not running. Start it in Eugene's console under Backends.",
+          quiet: false,
+        }),
+      }),
+    );
+    expect(screen.getByTestId("documents-test-meaning")).toHaveTextContent(
+      "Searching by words only: the search model m is not running. Start it in Eugene's console under Backends.",
+    );
+  });
+
+  it("does not say it when a search model was never in play", async () => {
+    render(<TestQuestion />);
+    await tries(
+      "code word",
+      tested({
+        meaning: meaningRun({
+          code: "none_set_up",
+          message: "Searching by words only: no search model is set up.",
+          quiet: true,
+        }),
+      }),
+    );
+    expect(screen.queryByTestId("documents-test-meaning")).toBeNull();
+  });
+
+  it("says how near the nearest passage was by meaning, and what counts when no word matched", async () => {
+    render(<TestQuestion />);
+    await tries(
+      "zebra",
+      tested({
+        status: "nothing_matched",
+        passages: [],
+        mode: "meaning and words",
+        meaning: ranByMeaning({ best: 0.27, belowFloor: true }),
+      }),
+    );
+    expect(screen.getByTestId("documents-test-closeness")).toHaveTextContent(
+      "By meaning, the nearest passage scored 0.27. When no word matches, a passage needs 0.50 to count, so none was kept.",
+    );
+    expect(screen.getByTestId("documents-test-words")).toHaveTextContent(
+      "Nothing in your documents matched",
+    );
+  });
+
+  it("says a search that none of its ways could run, and that nothing was searched, once", async () => {
+    render(<TestQuestion />);
+    fireEvent.click(way("meaning"));
+    await tries(
+      "code word",
+      tested({
+        status: "unavailable",
+        mode: "none",
+        passages: [],
+        meaning: meaningRun({
+          code: "none_set_up",
+          message: "Searching by words only: no search model is set up.",
+          quiet: true,
+        }),
+      }),
+    );
+    expect(screen.getByTestId("documents-test-result")).toHaveAttribute(
+      "data-status",
+      "unavailable",
+    );
+    expect(screen.getByTestId("documents-test-words")).toHaveTextContent(
+      "Nothing was searched: search by meaning could not run. No search model is set up.",
+    );
+    expect(screen.getByTestId("documents-test-words")).not.toHaveTextContent("matched");
+    // Not said twice, and no mode for a search that was none.
+    expect(screen.queryByTestId("documents-test-meaning")).toBeNull();
+    expect(screen.queryByTestId("documents-test-mode")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("says how it was searched only for a question that was searched: not one with no words or no documents", async () => {
+    render(<TestQuestion />);
+    await tries("?!", {
+      ...tested({ mode: "meaning and words" }),
+      status: "no_words",
+      passages: [],
+    });
+    expect(screen.queryByTestId("documents-test-mode")).toBeNull();
+    await tries("code", {
+      ...tested({ mode: "meaning and words" }),
+      status: "no_documents",
+      passages: [],
+    });
+    expect(screen.queryByTestId("documents-test-mode")).toBeNull();
   });
 });
