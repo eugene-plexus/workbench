@@ -13,6 +13,7 @@ from . import (
     api,
     config,
     documents_api,
+    folder_docs_api,
     folders_api,
     job_sites_api,
     media_api,
@@ -25,6 +26,7 @@ from ._build import commit
 from ._http import ssl_context
 from .answers import Answers
 from .hub import Hub
+from .knowledge.folder_sync import FolderSync
 from .knowledge.index import IndexUnavailable
 from .knowledge.reader import Reader
 from .knowledge.saved import SavedDocuments
@@ -94,6 +96,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             settings.data_dir, reader, passage_limit, gateway=hub, settings=document_settings
         )
         reconciled = await saved.start(store.chat_owners)
+
+        async def folder_settings() -> config.FolderSettings:
+            return await config.folder_settings(store)
+
+        # The folders people pointed their Documents at (MR7): a folder whose grant was withdrawn
+        # while Workbench was stopped has its documents removed, and each is checked in turn.
+        folder_sync = FolderSync(store, saved, tools.folders, document_settings, folder_settings)
+        await folder_sync.start()
         if any(
             (
                 reconciled.chat_documents,
@@ -127,6 +137,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.media = media
         app.state.reader = reader
         app.state.saved = saved
+        app.state.folder_sync = folder_sync
         app.state.sessions = Sessions(store, provider)
         for problem in (provider.why_not(), hub.why_not()):
             if problem:
@@ -142,6 +153,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             yield
         finally:
             await answers.aclose()
+            await folder_sync.aclose()
             await saved.aclose()
             await reader.aclose()
             await media.aclose()
@@ -161,6 +173,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(media_api.router)
     app.include_router(memory_api.router)
     app.include_router(documents_api.router)
+    # Before `saved_api`: `/api/documents/folders` is not a document's id.
+    app.include_router(folder_docs_api.router)
     app.include_router(saved_api.router)
     app.include_router(tools_api.router)
     app.include_router(folders_api.router)

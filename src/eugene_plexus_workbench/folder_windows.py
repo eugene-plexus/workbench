@@ -18,7 +18,7 @@ from ctypes import wintypes as w
 from pathlib import Path
 from typing import Any, Self
 
-from .folder_io import FolderError, parts
+from .folder_io import Entry, FolderError, entry_from_attributes, parts
 
 if sys.platform == "win32":
 
@@ -86,7 +86,13 @@ if sys.platform == "win32":
         return int(msvcrt.get_osfhandle(fd))
 
     def _open(
-        parent: int | None, name: str, *, directory: bool, write: bool = False, create: bool = False
+        parent: int | None,
+        name: str,
+        *,
+        directory: bool,
+        write: bool = False,
+        create: bool = False,
+        share: int | None = None,
     ) -> int:
         import msvcrt
 
@@ -114,7 +120,10 @@ if sys.platform == "win32":
             ctypes.byref(status),
             None,
             0,
-            3 if directory else 1,
+            # A directory is shared for reading and writing but not for delete or rename, which
+            # holds a parent in place for the call; a file for reading only, unless the caller
+            # says otherwise (a read that must never block someone else's save asks for all three).
+            share if share is not None else (3 if directory else 1),
             2 if create else 1,
             options,
             None,
@@ -124,7 +133,10 @@ if sys.platform == "win32":
             raise ctypes.WinError(nt.RtlNtStatusToDosError(result))
         try:
             if kernel.GetFileType(handle) != 1:  # FILE_TYPE_DISK
-                raise FolderError("Only ordinary files and folders on a local disk are supported.")
+                raise FolderError(
+                    "Only ordinary files and folders on a local disk are supported.",
+                    code="not_disk",
+                )
             assert handle.value is not None
             fd = msvcrt.open_osfhandle(
                 handle.value, os.O_BINARY | (os.O_RDWR if write else os.O_RDONLY)
@@ -134,7 +146,9 @@ if sys.platform == "win32":
             raise
         try:
             if os.fstat(fd).st_file_attributes & 0x400:  # FILE_ATTRIBUTE_REPARSE_POINT
-                raise FolderError("Links, junctions and other reparse points are not allowed.")
+                raise FolderError(
+                    "Links, junctions and other reparse points are not allowed.", code="link"
+                )
             return fd
         except BaseException:
             os.close(fd)
@@ -187,10 +201,25 @@ if sys.platform == "win32":
 
         @contextmanager
         def file(
-            self, names: list[str], *, write: bool = False, create: bool = False
+            self,
+            names: list[str],
+            *,
+            write: bool = False,
+            create: bool = False,
+            shared: bool = False,
         ) -> Iterator[int]:
+            # `shared`: others may write, rename and delete the file while it is open (7 is
+            # FILE_SHARE_READ | WRITE | DELETE). Its parents are held all the same, so the path
+            # it was opened by cannot be moved elsewhere in the meantime.
             with self._directory(names[:-1]) as parent:
-                fd = _open(parent, names[-1], directory=False, write=write, create=create)
+                fd = _open(
+                    parent,
+                    names[-1],
+                    directory=False,
+                    write=write,
+                    create=create,
+                    share=7 if shared else None,
+                )
                 try:
                     yield fd
                 finally:
@@ -228,6 +257,50 @@ if sys.platform == "win32":
                         name = buffer.raw[offset + 12 : offset + 12 + size].decode("utf-16-le")
                         if name not in {".", ".."}:
                             result.append(name)
+                        if not next_offset or len(result) >= limit:
+                            break
+                        offset += next_offset
+                return result
+
+        def entries(self, names: list[str], limit: int) -> list[Entry]:
+            """The entries of the directory at `names`, with what each is (attributes, size,
+            last-write time, a reparse point's tag), up to `limit`: FileFullDirectoryInformation
+            of the held handle, so nothing is opened to learn it."""
+            nt, _ = _apis()
+            with self._directory(names) as parent:
+                result: list[Entry] = []
+                buffer = ctypes.create_string_buffer(65536)
+                status = _Status()
+                first = True
+                while len(result) < limit:
+                    code = nt.NtQueryDirectoryFile(
+                        _handle(parent),
+                        None,
+                        None,
+                        None,
+                        ctypes.byref(status),
+                        buffer,
+                        len(buffer),
+                        2,  # FileFullDirectoryInformation
+                        False,
+                        None,
+                        first,
+                    )
+                    first = False
+                    if code & 0xFFFFFFFF == 0x80000006:  # STATUS_NO_MORE_FILES
+                        break
+                    if code < 0:
+                        raise ctypes.WinError(nt.RtlNtStatusToDosError(code))
+                    offset = 0
+                    while offset < status.Information:
+                        (next_offset, _, _, _, written, _, size, _, attributes, length, tag) = (
+                            struct.unpack_from("<IIqqqqqqIII", buffer, offset)
+                        )
+                        name = buffer.raw[offset + 68 : offset + 68 + length].decode("utf-16-le")
+                        if name not in {".", ".."}:
+                            result.append(
+                                entry_from_attributes(name, attributes, size, written, tag)
+                            )
                         if not next_offset or len(result) >= limit:
                             break
                         offset += next_offset

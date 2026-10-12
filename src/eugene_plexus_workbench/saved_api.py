@@ -69,6 +69,7 @@ from .knowledge import extract
 from .knowledge import index as index_module
 from .knowledge import reader as reading_module
 from .knowledge.embedders import Identity
+from .knowledge.folder_sync import IgnoreListFull
 from .knowledge.index import (
     FOUND,
     LIBRARY,
@@ -265,8 +266,11 @@ async def list_documents(request: Request) -> dict[str, Any]:
     totals = None
     kept = 0
     if index is not None:
-        documents = await index.documents(LIBRARY)
-        totals = await index.totals(LIBRARY)
+        # The files the person added themselves: a folder's files are listed under the folder
+        # (`GET /api/documents/folders/{id}/files`), so that a folder of ten thousand files is
+        # not part of every poll.
+        documents = await index.documents(LIBRARY, only="upload")
+        totals = await index.totals(LIBRARY, only="upload")
         kept = await index.passages_total()
     status = await meaning_status(request, person)
     return {
@@ -680,7 +684,19 @@ async def remove_document(request: Request, doc_id: str) -> Response:
     text, in one transaction, and its reader if it was being read. If a file cannot
     be removed, nothing is (500, with the cause), and it can be tried again."""
     person = await _person(request)
-    await _own_document(request, person, doc_id)
+    _, doc = await _own_document(request, person, doc_id)
+    split = index_module.split_source(doc.source)
+    if split is not None:
+        # A file of a folder would come back at the next check: removing it is telling Workbench
+        # to stop reading it, so its path goes on the folder's ignore list.
+        try:
+            await _state(request).folder_sync.ignore_file(person.sub, *split)
+        except IgnoreListFull:
+            raise _problem(
+                status.HTTP_409_CONFLICT,
+                "This folder's ignore list is full, so this file would come back at the next "
+                "check. Remove a pattern from the list first.",
+            ) from None
     try:
         gone = await _saved(request).remove(person.sub, doc_id)
     except DeleteFailed as exc:
@@ -696,12 +712,18 @@ async def reread_document(request: Request, doc_id: str) -> dict[str, Any]:
     so nothing of the old reading is found, and it is `queued`. 409 when its original is
     not on the disk any more."""
     person = await _person(request)
-    await _own_document(request, person, doc_id)
+    _, doc = await _own_document(request, person, doc_id)
     if not (await config.document_settings(_store(request))).enabled:
         raise _problem(status.HTTP_403_FORBIDDEN, _OWNER_OFF)
     try:
         again = await _saved(request).reread(person.sub, doc_id)
     except OriginalMissing:
+        if index_module.split_source(doc.source) is not None:
+            raise _problem(
+                status.HTTP_409_CONFLICT,
+                "Workbench has no copy of this file to read again (it was not read). Use Sync now "
+                "on its folder.",
+            ) from None
         raise _problem(
             status.HTTP_409_CONFLICT,
             "Workbench's copy of this file is not on its disk any more. Add the file again.",
@@ -766,7 +788,8 @@ async def document_original(request: Request, doc_id: str) -> Response:
     return FileResponse(
         path,
         media_type=doc.media_type,
-        filename=doc.name,
+        # A file of a folder is named by its folder and path; the download is the file's own name.
+        filename=doc.name.rsplit("/", 1)[-1],
         content_disposition_type="attachment",
         headers={"Content-Security-Policy": "sandbox", "Cache-Control": "private, no-store"},
     )

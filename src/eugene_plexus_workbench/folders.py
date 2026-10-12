@@ -89,6 +89,13 @@ def problem(exc: OSError) -> str:
     )
 
 
+class GrantGone(folder_io.FolderError):
+    """The grant is not there any more, or is not this person's. No file operation ran."""
+
+    def __init__(self) -> None:
+        super().__init__("This folder grant is no longer available to you. No file operation ran.")
+
+
 class Folders:
     def __init__(self, store: Store, settings: Settings) -> None:
         self.store, self.settings = store, settings
@@ -121,7 +128,7 @@ class Folders:
         try:
             return task.result()
         except OSError as exc:
-            raise folder_io.FolderError(problem(exc)) from None
+            raise folder_io.FolderError(problem(exc), cause=exc) from None
 
     async def add(self, grant: dict[str, Any]) -> dict[str, Any]:
         async with self.lock:
@@ -139,6 +146,53 @@ class Folders:
     async def remove(self, grant_id: str) -> None:
         async with self.lock:
             await self.store.delete_folder_grant(grant_id)
+
+    async def _grant_of(self, grant_id: str, sub: str) -> dict[str, Any]:
+        """The grant, if it is still there and names this person; else `GrantGone`."""
+        grant = next((g for g in await self.store.folder_grants() if g["id"] == grant_id), None)
+        if grant is None or grant["subject"] != sub or await self.store.person(sub) is None:
+            raise GrantGone
+        return grant
+
+    async def scan[T](self, grant_id: str, sub: str, walker: Callable[[folder_io.Tree], T]) -> T:
+        """Walk a granted folder for its owner's saved documents, read-only (`folder_io.scan`).
+        One call under the same lock as every other file call, so a grant withdrawn while it waits
+        is never walked. `GrantGone` when the grant is not there or not this person's."""
+        async with self.lock:
+            if reason := self.unavailable():
+                raise folder_io.FolderError(reason)
+            grant = await self._grant_of(grant_id, sub)
+            return await self._io(
+                folder_io.scan, grant["path"], grant["identity"], self.protected, walker
+            )
+
+    async def read(
+        self,
+        grant_id: str,
+        sub: str,
+        names: list[str],
+        dest_fd: int,
+        limit: int,
+        head_size: int,
+        head_check: Callable[[bytes, int], folder_io.Declined | None],
+    ) -> folder_io.Taken | folder_io.Declined:
+        """Copy one file of a granted folder to `dest_fd` (`folder_io.read_file`), under the
+        lock."""
+        async with self.lock:
+            if reason := self.unavailable():
+                raise folder_io.FolderError(reason)
+            grant = await self._grant_of(grant_id, sub)
+            return await self._io(
+                folder_io.read_file,
+                grant["path"],
+                grant["identity"],
+                self.protected,
+                names,
+                dest_fd,
+                limit,
+                head_size,
+                head_check,
+            )
 
     async def execute(
         self, grant_id: str, person: Person | None, tool: str, arguments: dict[str, Any]

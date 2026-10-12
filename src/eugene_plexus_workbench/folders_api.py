@@ -91,4 +91,7 @@ async def remove(request: Request, grant_id: str) -> Response:
     if not (await _person(request)).is_owner:
         raise _problem(403, "Only the owner can remove folder access.")
     await _state(request).tools.folders.remove(grant_id)
+    # The grant is gone: what was read from the folder leaves the person's documents before this
+    # returns (`knowledge/folder_sync.py`).
+    await _state(request).folder_sync.grant_withdrawn(grant_id)
     return Response(status_code=204)

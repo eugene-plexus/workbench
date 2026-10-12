@@ -15,7 +15,9 @@ finds a passage by what it says; a document that goes ends the request that was 
 There are two kinds, told by their scope (`index.LIBRARY`, `index.chat_scope`): the
 ones a person keeps in My documents, searched by every chat that has Documents on,
 and the ones made from a file attached to one chat ("Search it instead"), searched
-only there and deleted with it.
+only there and deleted with it. A person's My documents hold the files they added and, since
+MR7, the files read from the folders they pointed it at (`folder_sync.py`): the same documents in
+every way but one, that their `source` names the folder and the path.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ import os
 import secrets
 import shutil
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,10 +40,12 @@ from .index import (
     Added,
     DeleteFailed,
     Document,
+    Held,
     Index,
     Indexes,
     NewDocument,
     chat_scope,
+    folder_source,
 )
 from .ingest import ChatOwners, Ingest, Owed, Reconciled
 from .meaning import Gateway, Meaning, SettingsReader
@@ -147,11 +151,14 @@ class SavedDocuments:
         size: int,
         sha256: str,
         source: str,
+        source_mtime: str | None = None,
     ) -> Added:
         """Keep a file that is whole at `index.part_path(doc_id)`: it goes in place as
         the original, the document is made `queued`, and the worker is woken. A file of
         the same name in My documents is replaced, and its reader ended; one that is
-        there already, byte for byte, is left, and the copy brought now is thrown away."""
+        there already, byte for byte, is left, and the copy brought now is thrown away.
+        A file read from a folder is the one at the same path (`source`), whatever it is
+        called, and `source_mtime` is the modified time it was read at."""
         index = self.indexes.get(sub)
         assert index is not None
         final = index.original_path(doc_id)
@@ -166,6 +173,7 @@ class SavedDocuments:
             source=source,
             kind=detected.kind,
             language=detected.language,
+            source_mtime=source_mtime,
             added_at=time.time(),
         )
         try:
@@ -241,6 +249,75 @@ class SavedDocuments:
                     raise
                 await asyncio.sleep(0.4)
         return None  # unreachable
+
+    async def remove_documents(self, sub: str, doc_ids: Sequence[str]) -> list[Document]:
+        """Remove these documents as `remove` does each, in one transaction: their readers
+        are ended first, then rows, passages, search entries, originals and texts go together or
+        not at all (`DeleteFailed` after three tries). The documents that were there."""
+        index = self.indexes.get(sub, create=False)
+        if index is None or not doc_ids:
+            return []
+        for attempt in range(3):
+            await self._cancel(sub, list(doc_ids))
+            try:
+                return await index.delete_many(doc_ids)
+            except DeleteFailed:
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(0.4)
+        return []  # unreachable
+
+    async def drop_folder(self, sub: str, grant_id: str) -> list[Document]:
+        """Every document read from a folder is removed, as `remove_documents` does: the folder
+        was withdrawn, or was removed from the person's documents, or is not there. The documents
+        that were there."""
+        index = self.indexes.get(sub, create=False)
+        if index is None:
+            return []
+        for attempt in range(3):
+            await self._cancel(sub, [h.doc_id for h in await index.folder_files(grant_id)])
+            try:
+                return await index.delete_folder(grant_id)
+            except DeleteFailed:
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(0.4)
+        return []  # unreachable
+
+    async def move_folder_document(
+        self, sub: str, held: Held, grant_id: str, path: str, name: str, mtime: str | None
+    ) -> Document | None:
+        """A file of a folder moved, and its content is the same: its document is the one it
+        was, with its passages and vectors, under the new path and name. None when it is not
+        there (removed meanwhile)."""
+        index = self.indexes.get(sub, create=False)
+        if index is None:
+            return None
+        moved = await index.move_folder_document(
+            held.doc_id,
+            folder_source(grant_id, held.path),
+            folder_source(grant_id, path),
+            name,
+            mtime,
+        )
+        if moved is not None:
+            await asyncio.to_thread(
+                index.write_sidecar,
+                NewDocument(
+                    id=moved.id,
+                    scope=moved.scope,
+                    name=moved.name,
+                    media_type=moved.media_type,
+                    bytes=moved.bytes,
+                    sha256=moved.sha256,
+                    source=moved.source,
+                    kind=moved.kind,
+                    language=moved.language,
+                    source_mtime=moved.source_mtime,
+                    added_at=moved.added_at,
+                ),
+            )
+        return moved
 
     async def reread(self, sub: str, doc_id: str) -> Document | None:
         """Read a document again from its original: its passages go now, so nothing of
