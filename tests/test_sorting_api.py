@@ -541,6 +541,39 @@ def test_a_sorter_that_fails_leaves_the_search_whole_and_says_what_it_said(
     assert sort_of(again)["used"] is True, "and the next question is sorted again"
 
 
+def test_a_gateway_holding_requests_back_after_a_sorter_was_started_again_is_not_said_to_be_stopped(
+    world: World,
+    quick: None,  # noqa: F811
+    quick_sorting: None,  # noqa: F811
+) -> None:
+    """Measured live (MR6b acceptance): the sorter's engine was ended and started again, and the
+    gateway answered the questions that came in the next second with a 503 that asks for a wait
+    (a backend that failed is tried again before it is trusted). The sorter was running, and each
+    of those questions told a person it was not and to start it in Eugene's console."""
+    cooling = (
+        "A backend serving this model is not ready yet: Eligible backends are cooling down or "
+        "already probing recovery. Try a new request later.. If an engine is still loading its "
+        "weights this will clear on its own."
+    )
+    sorter_world(world)
+    ada = start(world)
+    keep(ada, *corpus())
+    _, found_order = _failing(world, ada)
+    world.gateway.rerank_requests.clear()
+    world.gateway.rerank_script.append((503, {"error": {"message": cooling}}, {"retry-after": "1"}))
+    got = try_question(ada, QUESTION)
+    assert got["status"] == "found" and texts(got) == found_order, "the search is whole"
+    block = sort_of(got)
+    assert block["used"] is False and block["code"] == "error" and block["quiet"] is False
+    assert block["message"] == (
+        f"Not sorted: Eugene's gateway asked Workbench to wait 1 s before asking the sorter "
+        f"{SORTER} again ({cooling}), so the passages are in the order the search found them."
+    )
+    assert "is not running" not in block["message"] and "Start it" not in block["message"]
+    assert block["model"] == SORTER and block["passages"] == 5
+    assert sort_of(try_question(ada, QUESTION))["used"] is True, "and the next is sorted"
+
+
 def test_a_sorter_that_stops_is_noticed_and_the_questions_go_on_in_the_order_found(
     world: World,
     quick: None,  # noqa: F811

@@ -313,6 +313,39 @@ CASES: list[Case] = [
         API + "test_a_sorter_that_fails_leaves_the_search_whole_and_says_what_it_said",
     ),
     one(
+        "a gateway holding requests back is said to be a sorter that is stopped",
+        SORTING,
+        "    if exc.status == 503 and exc.retry_after is not None:",
+        "    if False:",
+        UNIT
+        + "test_a_gateway_that_holds_requests_back_for_a_moment_is_not_a_sorter_that_is_stopped",
+        UNIT + "test_a_wait_the_gateway_asks_for_is_said_in_seconds_as_a_person_reads_them",
+        API
+        + "test_a_gateway_holding_requests_back_after_a_sorter_was_started_again_is_not_said_to_be_stopped",
+    ),
+    one(
+        "every 503 is a gateway holding requests back",
+        SORTING,
+        "    if exc.status == 503 and exc.retry_after is not None:",
+        "    if exc.status == 503:",
+        UNIT
+        + "test_a_gateway_that_holds_requests_back_for_a_moment_is_not_a_sorter_that_is_stopped",
+        UNIT
+        + "test_a_sorter_that_fails_is_a_report_in_its_own_words_and_the_passages_are_left_as_found",
+        API + "test_a_sorter_that_fails_leaves_the_search_whole_and_says_what_it_said",
+    ),
+    one(
+        "a wait is said in no seconds",
+        SORTING,
+        '            f"{seconds_words(exc.retry_after)} before asking the sorter {model} again ({said}), "',
+        '            f"a moment before asking the sorter {model} again ({said}), "',
+        UNIT
+        + "test_a_gateway_that_holds_requests_back_for_a_moment_is_not_a_sorter_that_is_stopped",
+        UNIT + "test_a_wait_the_gateway_asks_for_is_said_in_seconds_as_a_person_reads_them",
+        API
+        + "test_a_gateway_holding_requests_back_after_a_sorter_was_started_again_is_not_said_to_be_stopped",
+    ),
+    one(
         "a refusal does not say what the sorter said",
         SORTING,
         '            f"{NOT_SORTED}the sorter {model} refused the request ({engine_words(exc)}), {LEFT}."',

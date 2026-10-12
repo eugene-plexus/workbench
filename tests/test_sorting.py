@@ -604,6 +604,59 @@ async def test_a_sorter_that_fails_is_a_report_in_its_own_words_and_the_passages
     assert (await rig.sorting.sort(QUESTION, sheets())).report.sorted, "and the next is sorted"
 
 
+#: What the gateway says to a request that comes while a backend that failed is cooling down, or
+#: while its recovery is being tried (measured, MR6b acceptance): a 503 that asks for a second's
+#: wait. The sorter it is about is running, or has just been started again.
+COOLING_DOWN = (
+    "A backend serving this model is not ready yet: Eligible backends are cooling down or "
+    "already probing recovery. Try a new request later.. If an engine is still loading its "
+    "weights this will clear on its own."
+)
+
+
+async def test_a_gateway_that_holds_requests_back_for_a_moment_is_not_a_sorter_that_is_stopped(
+    rig: Rig,
+) -> None:
+    """Measured live: after a sorter's engine was ended and started again, the gateway answered
+    the next sorts with a 503 and `Retry-After: 1` while it tried the backend again, and Workbench
+    told a person "the sorter is not running. Start it in Eugene's console under Backends" of a
+    sorter that was running. A 503 that asks for a wait is the gateway holding requests back, said
+    as that, in its own words; a 503 that does not is a sorter that is not ready, as before."""
+    await rig.sorting.sort(QUESTION, sheets())  # it is measured, and sorts
+    rig.gateway.errors.append(HubError("x", status=503, words=COOLING_DOWN, retry_after=1.0))
+    held = await rig.sorting.sort(QUESTION, sheets())
+    assert held.order is None and not held.report.sorted
+    assert held.report.code == "error" and not held.report.quiet
+    assert held.report.message == (
+        "Not sorted: Eugene's gateway asked Workbench to wait 1 s before asking the sorter "
+        f"reranker-a again ({COOLING_DOWN}), so the passages are in the order the search found "
+        "them."
+    )
+    assert "is not running" not in (held.report.message or "")
+    assert "Start it" not in (held.report.message or ""), "there is nothing for a person to start"
+    assert held.report.model == SORTER and held.report.passages == 4
+    # The same 503 without a wait to ask for is what it was: nothing is ready.
+    rig.gateway.errors.append(HubError("x", status=503, words="No backend is ready."))
+    stopped = await rig.sorting.sort(QUESTION, sheets())
+    assert stopped.report.code == "not_running"
+    assert "is not running. Start it in Eugene's console under Backends." in (
+        stopped.report.message or ""
+    )
+    assert (await rig.sorting.sort(QUESTION, sheets())).report.sorted, "and the next is sorted"
+
+
+async def test_a_wait_the_gateway_asks_for_is_said_in_seconds_as_a_person_reads_them(
+    rig: Rig,
+) -> None:
+    await rig.sorting.sort(QUESTION, sheets())
+    rig.gateway.errors.append(HubError("x", status=503, words=COOLING_DOWN, retry_after=12.0))
+    long = await rig.sorting.sort(QUESTION, sheets())
+    assert "wait 12 s before asking the sorter reranker-a again" in (long.report.message or "")
+    rig.gateway.errors.append(HubError("x", status=503, words=COOLING_DOWN, retry_after=0.0))
+    none = await rig.sorting.sort(QUESTION, sheets())
+    assert none.report.code == "error" and "is not running" not in (none.report.message or "")
+
+
 async def test_a_sorter_that_takes_over_twice_the_budget_is_given_up_on_and_that_is_remembered(
     rig: Rig,
 ) -> None:

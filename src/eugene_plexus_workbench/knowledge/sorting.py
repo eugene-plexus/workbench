@@ -26,12 +26,14 @@ measured again behind the search, so a sorter that was slow for a moment is not 
 Over the budget the passages stay in the order the search found them, and the report says why
 with the numbers: the rate, the tokens, the seconds expected and the seconds allowed.
 
-**A sorter that fails never fails a search.** It may be stopped, refuse the request (a passage
-longer than it reads), take more than twice the budget, or answer with something that is not a
-score for each passage. The search goes on in the order it found, and what the sorter said is kept
-(`SortReport`), as a way of searching that cannot run is (`search.SignalUnavailable`): in words,
-beginning "Not sorted", naming what was observed. A sort that was given up on counts as a slow
-one, so the next question is not made to wait the same time again.
+**A sorter that fails never fails a search.** It may be stopped, be held back by the gateway for a
+moment after it failed (a 503 that asks for a wait: said as that, and not as a sorter that is not
+running), refuse the request (a passage longer than it reads), take more than twice the budget,
+or answer with something that is not a score for each passage. The search goes on in the order it
+found, and what the sorter said is kept (`SortReport`), as a way of searching that cannot run is
+(`search.SignalUnavailable`): in words, beginning "Not sorted", naming what was observed. A sort
+that was given up on counts as a slow one, so the next question is not made to wait the same time
+again.
 
 What a person is told of the sorter (the header of the Documents screen, Test a question, the two
 settings) is read from a live look at the gateway and at what was measured, never from what was
@@ -233,6 +235,17 @@ def problem(exc: HubError, model: str, budget: float) -> tuple[str, str]:
         return (
             "unusable",
             f"{NOT_SORTED}{exc.message} The passages are in the order the search found them.",
+        )
+    if exc.status == 503 and exc.retry_after is not None:
+        # The gateway is holding requests back for a moment and says for how long: a backend
+        # that failed is cooling down, or its recovery is being tried (measured, MR6b acceptance:
+        # the next second's sorts after a sorter was started again). The sorter is running or has
+        # just been started, so it is not "not running", and there is nothing for a person to
+        # start. Said as what was observed, in the gateway's words.
+        return "error", (
+            f"{NOT_SORTED}Eugene's gateway asked Workbench to wait "
+            f"{seconds_words(exc.retry_after)} before asking the sorter {model} again ({said}), "
+            f"{LEFT}."
         )
     if exc.status in (503, 404):
         return "not_running", (

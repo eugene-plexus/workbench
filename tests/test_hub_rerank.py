@@ -219,3 +219,30 @@ async def test_a_gateway_that_cannot_be_reached_is_said_as_that(tmp_path: Path) 
         await hub.rerank("sorter", "q", ["a"])
     assert caught.value.kind == "unreachable" and caught.value.status == 503
     await hub.aclose()
+
+
+async def test_a_503_that_asks_for_a_wait_keeps_the_seconds_and_what_the_gateway_said(
+    tmp_path: Path,
+) -> None:
+    """A gateway that holds requests back while it tries a backend again says so as a 503 with a
+    `Retry-After`: the seconds are kept, so that a sorter that is running is not told to a person
+    as one that is stopped (a 503 with none is nothing ready)."""
+    said = "A backend serving this model is not ready yet: Eligible backends are cooling down."
+    held = hub_over(
+        tmp_path,
+        lambda r: httpx.Response(
+            503, json={"error": {"message": said}}, headers={"retry-after": "1"}
+        ),
+    )
+    with pytest.raises(HubError) as caught:
+        await held.rerank("sorter", "q", ["a"])
+    assert caught.value.status == 503 and caught.value.retry_after == 1.0
+    assert caught.value.words == said and caught.value.kind == "gateway"
+    nothing = hub_over(
+        tmp_path, lambda r: httpx.Response(503, json={"error": {"message": "No backend is ready."}})
+    )
+    with pytest.raises(HubError) as caught:
+        await nothing.rerank("sorter", "q", ["a"])
+    assert caught.value.status == 503 and caught.value.retry_after is None
+    await held.aclose()
+    await nothing.aclose()
