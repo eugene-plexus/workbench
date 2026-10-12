@@ -35,10 +35,12 @@ vi.mock("./components/Documents", () => ({
   Documents: ({
     onClose,
     onAsk,
+    onTools,
     me,
   }: {
     onClose: () => void;
     onAsk: () => void;
+    onTools?: () => void;
     me?: { owner: boolean; consoleUrl?: string | null } | null;
   }) => (
     <section>
@@ -47,6 +49,7 @@ vi.mock("./components/Documents", () => ({
         {me ? `${me.owner ? "owner" : "person"} ${me.consoleUrl ?? "no console"}` : "nobody"}
       </p>
       <button onClick={onAsk}>Ask about the documents</button>
+      <button onClick={onTools}>Give folders in the tools page</button>
       <button onClick={onClose}>Back to chat</button>
     </section>
   ),
@@ -727,6 +730,17 @@ describe("the Documents page", () => {
     expect(tab("Documents")).not.toHaveAttribute("aria-current");
   });
 
+  it("opens Toolbox · Tools from the Folders section, where the owner gives folders to people, and goes back to the chat from there", async () => {
+    await open("/documents");
+    fireEvent.click(screen.getByRole("button", { name: "Give folders in the tools page" }));
+    expect(screen.getByRole("heading", { name: "The tools page" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "The documents page" })).toBeNull();
+    expect(tab("Toolbox · Tools")).toHaveAttribute("aria-current", "page");
+    const tools = screen.getByRole("heading", { name: "The tools page" }).closest("section")!;
+    fireEvent.click(within(tools).getByRole("button", { name: "Back to chat" }));
+    expect(screen.queryByRole("heading", { name: "The tools page" })).toBeNull();
+  });
+
   it("opens the chat all the same, and says so, when Documents could not be turned on in it", async () => {
     vi.mocked(post).mockResolvedValue({ ...chat, id: "fresh" });
     vi.mocked(patch).mockRejectedValue(new Error("Workbench answered 500."));
@@ -767,7 +781,9 @@ describe("six pages in the top bar of a phone", () => {
     HTMLElement.prototype.scrollIntoView = into;
     try {
       await open("/documents");
-      expect(into).toHaveBeenCalled();
+      // The effect that brings the tab into view runs after the bar is drawn: wait for it, as a
+      // busy machine can draw the bar first (this failed one run in three with the whole suite).
+      await waitFor(() => expect(into).toHaveBeenCalled());
       expect(into.mock.instances.at(-1)).toBe(tab("Documents"));
       expect(into).toHaveBeenLastCalledWith({ block: "nearest", inline: "nearest" });
       into.mockClear();

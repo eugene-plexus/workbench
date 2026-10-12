@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Self
 
-from .folder_io import FolderError
+from .folder_io import DIRECTORY, FILE, LINK, OTHER, Entry, FolderError
 
 _fcntl = importlib.import_module("fcntl")
 
@@ -150,7 +150,7 @@ class Root:
 
     def _same_mount(self, fd: int) -> None:
         if _mount(fd) != self.mount:
-            raise FolderError("Mounted subfolders and files are not supported.")
+            raise FolderError("Mounted subfolders and files are not supported.", code="mount")
 
     @contextmanager
     def _directory(self, names: list[str]) -> Iterator[int]:
@@ -166,7 +166,14 @@ class Root:
                 os.close(fd)
 
     @contextmanager
-    def file(self, names: list[str], *, write: bool = False, create: bool = False) -> Iterator[int]:
+    def file(
+        self,
+        names: list[str],
+        *,
+        write: bool = False,
+        create: bool = False,
+        shared: bool = False,
+    ) -> Iterator[int]:
         flags = (os.O_RDWR if write else os.O_RDONLY) | _flag("O_NONBLOCK")
         if create:
             flags |= os.O_CREAT | os.O_EXCL
@@ -174,7 +181,10 @@ class Root:
             fd = _open(parent, names[-1], flags)
             try:
                 self._same_mount(fd)
-                _fcntl.flock(fd, (_fcntl.LOCK_EX if write else _fcntl.LOCK_SH) | _fcntl.LOCK_NB)
+                if not shared:
+                    # A `shared` read (saved documents) takes no lock: a program that wants the
+                    # file to itself must not wait for, or be refused by, a copy being made.
+                    _fcntl.flock(fd, (_fcntl.LOCK_EX if write else _fcntl.LOCK_SH) | _fcntl.LOCK_NB)
                 yield fd
             finally:
                 os.close(fd)
@@ -186,4 +196,29 @@ class Root:
                 out.append(entry.name)
                 if len(out) >= limit:
                     break
+            return out
+
+    def entries(self, names: list[str], limit: int) -> list[Entry]:
+        """The entries of the directory at `names`, up to `limit`, each with what it is, its size
+        and its modified time, from the directory itself (`lstat`: a link is a link, never what
+        it points at)."""
+        with self._directory(names) as parent, os.scandir(parent) as scanned:
+            out: list[Entry] = []
+            for entry in scanned:
+                if len(out) >= limit:
+                    break
+                try:
+                    if entry.is_symlink():
+                        kind = LINK
+                    elif entry.is_dir(follow_symlinks=False):
+                        kind = DIRECTORY
+                    elif entry.is_file(follow_symlinks=False):
+                        kind = FILE
+                    else:
+                        kind = OTHER
+                    info = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue  # gone since the listing began: not there to be looked at
+                size = info.st_size if kind == FILE else 0
+                out.append(Entry(entry.name, kind, size, info.st_mtime_ns))
             return out

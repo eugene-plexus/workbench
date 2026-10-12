@@ -11,7 +11,23 @@ import { act, cleanup, fireEvent, render, screen, within } from "@testing-librar
 import { ApiError, api, del, documentText, fileOf, post, put, upload } from "../lib/api";
 import { saveFile } from "../lib/memory";
 import { FIRST_POLL_MS, IDLE_POLL_MS, POLL_MS } from "../lib/savedDocuments";
-import type { DocumentsPrefs, Me, SavedDocument, SearchFacts, TestedQuestion } from "../lib/types";
+import type {
+  DocumentFolders,
+  DocumentsPrefs,
+  Me,
+  SavedDocument,
+  SearchFacts,
+  TestedQuestion,
+} from "../lib/types";
+import {
+  choice,
+  counts as folderCounts,
+  folder,
+  foldersPage,
+  problemFolder,
+  readingFolder,
+  waitingFolder,
+} from "../test-folders";
 import {
   adding,
   broken,
@@ -76,6 +92,8 @@ interface Server {
   meaningRefused: ApiError | null;
   /** How a document moves on each time the list is read. */
   advance: (docs: SavedDocument[]) => SavedDocument[];
+  /** The folders (MR7): none, as most of these tests are about the person's own files. */
+  folders: DocumentFolders;
 }
 
 let server: Server;
@@ -100,6 +118,7 @@ const fresh = (over: Partial<Server> = {}): Server => ({
   rebuilt: { documents: 2, left: 0 },
   meaningRefused: null,
   advance: (docs) => docs,
+  folders: foldersPage(),
   ...over,
 });
 
@@ -120,6 +139,7 @@ const refuse = (message: string, status: number, extra: object = {}) =>
 
 function listen() {
   vi.mocked(api).mockImplementation((async (path: string) => {
+    if (path === "/api/documents/folders") return server.folders;
     if (path !== "/api/documents") throw new Error(`not served: ${path}`);
     reads += 1;
     if (server.refusing) throw server.refusing;
@@ -1317,5 +1337,191 @@ describe("Test a question, on the screen, with a search model", () => {
     // But it is offered for a search model that is stopped, which is when a person wants to know.
     await opened({ docs: [withMeaning()], search: searchFor("not_running") });
     expect(screen.getByTestId("documents-test-ways")).toBeInTheDocument();
+  });
+});
+
+describe("the Folders section, on the screen (MR7)", () => {
+  const first = (id: string) => screen.getByTestId(id);
+  /** Whether `a` comes before `b` on the page. */
+  const before = (a: string, b: string) =>
+    Boolean(first(a).compareDocumentPosition(first(b)) & Node.DOCUMENT_POSITION_FOLLOWING);
+  const folderReads = () =>
+    vi.mocked(api).mock.calls.filter(([path]) => path === "/api/documents/folders").length;
+
+  it("is below the person's own files and above Test a question", async () => {
+    await opened({ docs: [saved()], folders: foldersPage([folder()]) });
+    expect(first("folders-section")).toBeInTheDocument();
+    expect(before("documents-list", "folders-section")).toBe(true);
+    expect(before("folders-section", "documents-test")).toBe(true);
+  });
+
+  it("is there for a person with no folder, to add one", async () => {
+    await opened({ folders: foldersPage([], { grants: [choice()] }) });
+    expect(first("folders-section")).toBeInTheDocument();
+    expect(first("folders-add-go")).toBeInTheDocument();
+    expect(screen.queryAllByTestId("folder")).toHaveLength(0);
+  });
+
+  it("counts a folder's files apart from the files the person added themselves", async () => {
+    await opened({ docs: [saved(), markdown()], folders: foldersPage([readingFolder()]) });
+    // The list and its totals are the person's own files, as before.
+    expect(first("documents-totals")).toHaveTextContent(/^2 documents · /);
+    expect(rows()).toHaveLength(2);
+    // The folders are counted in their own place.
+    expect(first("folders-totals")).toHaveTextContent(
+      "1 folder · 404 files · 1,904 passages · 4.2 MiB",
+    );
+    expect(within(first("folders-section")).getAllByTestId("folder")).toHaveLength(1);
+    expect(within(first("documents-list")).queryByTestId("folder")).toBeNull();
+  });
+
+  it("reads folders on their own schedule, apart from the list", async () => {
+    await opened({ docs: [saved()], folders: foldersPage([folder()]) });
+    const listReads = reads;
+    expect(folderReads()).toBe(1);
+    await wait(30_000);
+    expect(reads).toBeGreaterThan(listReads);
+    expect(folderReads()).toBeGreaterThan(1);
+  });
+
+  it("offers Test a question to a person who has only folder files, and not to one who has nothing", async () => {
+    await opened({ folders: foldersPage([folder()]) });
+    expect(first("documents-test")).toBeInTheDocument();
+    cleanup();
+    await opened({ folders: foldersPage([]) });
+    expect(screen.queryByTestId("documents-test")).toBeNull();
+    cleanup();
+    // A folder that has read no file yet has nothing to try a question on.
+    await opened({ folders: foldersPage([waitingFolder()]) });
+    expect(screen.queryByTestId("documents-test")).toBeNull();
+  });
+
+  it("has Ask about your documents once: above, with the person's own files, when they can be asked about", async () => {
+    await opened({ docs: [saved()], folders: foldersPage([folder()]) });
+    expect(screen.getAllByTestId("documents-ask")).toHaveLength(1);
+    expect(within(first("folders-section")).queryByTestId("documents-ask")).toBeNull();
+    expect(before("documents-ask", "documents-list")).toBe(true);
+  });
+
+  it("has Ask about your documents in Folders for a person who has files only in folders, and it asks", async () => {
+    const { onAsk } = await opened({ folders: foldersPage([folder()]) });
+    expect(screen.getAllByTestId("documents-ask")).toHaveLength(1);
+    expect(within(first("folders-section")).getByTestId("documents-ask")).toBeInTheDocument();
+    fireEvent.click(first("documents-ask"));
+    expect(onAsk).toHaveBeenCalledTimes(1);
+  });
+
+  it("has Ask about your documents in Folders when the person's own files cannot be asked about yet", async () => {
+    await opened({ docs: [queued()], folders: foldersPage([folder()]) });
+    expect(screen.getAllByTestId("documents-ask")).toHaveLength(1);
+    expect(within(first("folders-section")).getByTestId("documents-ask")).toBeInTheDocument();
+  });
+
+  it("has no Ask about your documents when nothing can be searched yet", async () => {
+    await opened({
+      folders: foldersPage([
+        folder({
+          counts: folderCounts({
+            files: 3,
+            byState: { queued: 2, reading: 1, ready: 0, skipped: 0 },
+            byCode: {},
+          }),
+        }),
+      ]),
+    });
+    expect(screen.queryByTestId("documents-ask")).toBeNull();
+  });
+
+  it("keeps the person's own files, and says in the section that the folders could not be read", async () => {
+    server = fresh({ docs: [saved()] });
+    vi.mocked(api).mockImplementation((async (path: string) => {
+      if (path === "/api/documents/folders") throw new Error("Workbench answered 502.");
+      return seen();
+    }) as never);
+    render(<Documents onClose={vi.fn()} onAsk={vi.fn()} />);
+    await wait(0);
+    expect(rows()).toHaveLength(1);
+    expect(first("folders-problem")).toHaveTextContent(
+      "Could not read your folders" + "Workbench answered 502.",
+    );
+    // It is the section's own, not the screen's: the screen's problem is not said.
+    expect(screen.queryByTestId("documents-retry")).toBeNull();
+    expect(screen.queryByTestId("documents-problem")).toBeNull();
+  });
+
+  it("says nothing of folders where the search is damaged, as of everything else", async () => {
+    vi.mocked(api).mockImplementation((async (path: string) => {
+      if (path === "/api/documents/folders") return foldersPage([folder()]);
+      throw refuse("The search index for your documents is damaged.", 503, {
+        code: "index_damaged",
+        canRebuild: true,
+      });
+    }) as never);
+    render(<Documents onClose={vi.fn()} onAsk={vi.fn()} />);
+    await wait(0);
+    expect(first("documents-damaged")).toBeInTheDocument();
+    expect(screen.queryByTestId("folders-section")).toBeNull();
+  });
+
+  it("where the owner has turned documents off: nothing of folders for a person who has none", async () => {
+    await opened({ installEnabled: false, folders: foldersPage([]) });
+    expect(first("documents-owner-off")).toBeInTheDocument();
+    expect(screen.queryByTestId("folders-section")).toBeNull();
+    expect(screen.queryByTestId("documents-test")).toBeNull();
+  });
+
+  it("where the owner has turned documents off: the person's folders are there to be looked at and removed", async () => {
+    await opened({ installEnabled: false, folders: foldersPage([folder()]) });
+    expect(first("folders-section")).toBeInTheDocument();
+    expect(first("folder-remove")).toBeInTheDocument();
+    expect(screen.queryByTestId("folder-sync")).toBeNull();
+    expect(screen.queryByTestId("folders-add")).toBeNull();
+    expect(screen.queryByTestId("documents-test")).toBeNull();
+    expect(screen.queryByTestId("documents-ask")).toBeNull();
+  });
+
+  it("opens Toolbox · Tools for the owner who was given no folder, and gives anyone else the words to ask", async () => {
+    server = fresh({ folders: foldersPage([], { grants: [] }) });
+    const opensTools = vi.fn();
+    render(
+      <Documents
+        onClose={vi.fn()}
+        onAsk={vi.fn()}
+        onTools={opensTools}
+        me={{ owner: true, consoleUrl: "http://nas:8279/" }}
+      />,
+    );
+    await wait(0);
+    fireEvent.click(first("folders-open-tools"));
+    expect(opensTools).toHaveBeenCalledTimes(1);
+    cleanup();
+    server = fresh({ folders: foldersPage([], { grants: [] }) });
+    render(
+      <Documents
+        onClose={vi.fn()}
+        onAsk={vi.fn()}
+        onTools={opensTools}
+        me={{ owner: false, consoleUrl: null }}
+      />,
+    );
+    await wait(0);
+    expect(screen.queryByTestId("folders-open-tools")).toBeNull();
+    expect(first("folders-add-none")).toHaveTextContent("Ask them to give you one.");
+  });
+
+  it("says a folder with a problem in its section, and leaves the screen's own problems alone", async () => {
+    await opened({ docs: [saved()], folders: foldersPage([problemFolder()]) });
+    expect(first("folder-status")).toHaveClass("notice--error");
+    expect(screen.queryByTestId("documents-problem")).toBeNull();
+  });
+
+  it("says nothing of how it works underneath, in any state a folder is in", async () => {
+    await opened({
+      docs: [saved()],
+      folders: foldersPage([folder(), readingFolder({ id: "g2" }), problemFolder({ id: "g3" })]),
+    });
+    expect(first("documents-page").textContent).not.toMatch(
+      /\b(RAG|vectors?|embeddings?|chunks?|retriev\w*)\b/i,
+    );
   });
 });

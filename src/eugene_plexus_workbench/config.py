@@ -7,7 +7,7 @@ agent hands Workbench at each start, and nothing else: no person signed
 in to Workbench can change these, the owner included -- they are changed
 from Eugene's console, by its operator.
 
-Twelve settings. `ownerReadsChats` (W13): whether the owner may read the chats
+Sixteen settings. `ownerReadsChats` (W13): whether the owner may read the chats
 of the people they give Workbench to (Troy, C3 call 3: each business
 decides). Three are memory's (`memory.py`, MR1): whether people
 may keep notes at all, how many each may keep, and whether notes may be sent
@@ -21,7 +21,9 @@ documents may be sent to a model that runs outside this install's machines. Thre
 search by meaning's (MR5, `knowledge/meaning.py`): which search model finds passages by
 what they say (`auto`, or one named), whether the text of documents may go to one that
 runs outside the machines, and how fast Workbench asks it to add meaning to documents.
-Saved documents are not covered by `ownerReadsChats` either. Every one takes
+Four are the folders people point their documents at (MR7, `knowledge/folder_sync.py`): how
+often Workbench looks at them, and how many files, how many megabytes and how many folders deep
+it takes of one. Saved documents are not covered by `ownerReadsChats` either. Every one takes
 effect at once, and `null` puts one back to its default.
 """
 
@@ -56,6 +58,10 @@ DOCUMENTS_EXTERNAL_MODELS = "documentsExternalModels"
 DOCUMENTS_EMBEDDING_MODEL = "documentsEmbeddingModel"
 DOCUMENTS_EXTERNAL_EMBEDDING = "documentsExternalEmbedding"
 DOCUMENTS_EMBED_PER_MINUTE = "documentsEmbedRequestsPerMinute"
+DOCUMENTS_FOLDER_SYNC_MINUTES = "documentsFolderSyncMinutes"
+DOCUMENTS_FOLDER_MAX_FILES = "documentsFolderMaxFiles"
+DOCUMENTS_FOLDER_MAX_MB = "documentsFolderMaxMB"
+DOCUMENTS_FOLDER_MAX_DEPTH = "documentsFolderMaxDepth"
 
 #: How far a note, or a passage of a saved document, may travel to a model outside
 #: the machines (`memory_api`'s `resolve_external` says how the owner's and a person's
@@ -66,6 +72,10 @@ MAX_FILE_MB_LIMIT = 500
 MIN_WHOLE_TOKENS, MAX_WHOLE_TOKENS = 500, 200_000
 MIN_PASSAGES_LIMIT, MAX_PASSAGES_LIMIT = 100, 1_000_000
 MIN_EMBED_PER_MINUTE, MAX_EMBED_PER_MINUTE = 1, 6_000
+MIN_SYNC_MINUTES, MAX_SYNC_MINUTES = 1, 1_440
+MIN_FOLDER_FILES, MAX_FOLDER_FILES = 10, 100_000
+MIN_FOLDER_MB, MAX_FOLDER_MB = 1, 102_400
+MIN_FOLDER_DEPTH, MAX_FOLDER_DEPTH = 1, 31
 MAX_MODEL_ID = 256
 #: The search model setting's own word for "the first one that runs on this install's machines".
 AUTO = "auto"
@@ -269,6 +279,71 @@ FIELDS = [
         minimum=MIN_EMBED_PER_MINUTE,
         maximum=MAX_EMBED_PER_MINUTE,
     ),
+    ConfigField(
+        key=DOCUMENTS_FOLDER_SYNC_MINUTES,
+        label="How often Workbench looks at people's folders (minutes)",
+        description=(
+            "A person can point their documents at a folder the owner has granted them. "
+            "Workbench looks at each such folder this often (default 10 minutes): it adds new "
+            "files, reads again a file that was edited (and keeps what it had if the words are "
+            "the same), and takes out a file that was deleted, so an answer is never more than "
+            "this many minutes behind the folder. Each person can also choose Sync now. A "
+            "shorter time finds edits sooner and reads the disk more often. Workbench only "
+            "reads a folder: it never changes anything in it."
+        ),
+        category="documents",
+        valueType=ConfigValueType.integer,
+        default=10,
+        minimum=MIN_SYNC_MINUTES,
+        maximum=MAX_SYNC_MINUTES,
+    ),
+    ConfigField(
+        key=DOCUMENTS_FOLDER_MAX_FILES,
+        label="Most files Workbench keeps from one folder",
+        description=(
+            "The most files one folder in a person's documents may give (default 10,000), "
+            "counting the files that are not ignored. Files are taken in name order, the ones "
+            "nearest the top first; the rest are left out, and the person is told. Lowering it "
+            "removes the extra files at the next look. A small file is read in a fraction of a "
+            "second and a long PDF takes longer, so a big folder is searchable by degrees, and "
+            "the Documents screen says how far it has got."
+        ),
+        category="documents",
+        valueType=ConfigValueType.integer,
+        default=10_000,
+        minimum=MIN_FOLDER_FILES,
+        maximum=MAX_FOLDER_FILES,
+    ),
+    ConfigField(
+        key=DOCUMENTS_FOLDER_MAX_MB,
+        label="Most megabytes Workbench copies from one folder",
+        description=(
+            "Workbench keeps its own copy of each file it reads from a folder, so the most it "
+            "copies from one folder is limited (default 2,048 MB). A file that would take the "
+            "folder past it is skipped, and says so. This counts only the files Workbench reads, "
+            "not pictures or other files it skips. The most it reads of one file is the setting "
+            "for the largest file above."
+        ),
+        category="documents",
+        valueType=ConfigValueType.integer,
+        default=2_048,
+        minimum=MIN_FOLDER_MB,
+        maximum=MAX_FOLDER_MB,
+    ),
+    ConfigField(
+        key=DOCUMENTS_FOLDER_MAX_DEPTH,
+        label="How many folders deep Workbench looks",
+        description=(
+            "How many folders below the one a person added Workbench goes into (default 12). "
+            "A folder deeper than this is not looked at, and the person is told which. Links "
+            "are never followed, whatever this is."
+        ),
+        category="documents",
+        valueType=ConfigValueType.integer,
+        default=12,
+        minimum=MIN_FOLDER_DEPTH,
+        maximum=MAX_FOLDER_DEPTH,
+    ),
 ]
 
 DEFAULTS: dict[str, Any] = {
@@ -284,6 +359,10 @@ DEFAULTS: dict[str, Any] = {
     DOCUMENTS_EMBEDDING_MODEL: AUTO,
     DOCUMENTS_EXTERNAL_EMBEDDING: False,
     DOCUMENTS_EMBED_PER_MINUTE: 30,
+    DOCUMENTS_FOLDER_SYNC_MINUTES: 10,
+    DOCUMENTS_FOLDER_MAX_FILES: 10_000,
+    DOCUMENTS_FOLDER_MAX_MB: 2_048,
+    DOCUMENTS_FOLDER_MAX_DEPTH: 12,
 }
 
 
@@ -370,6 +449,33 @@ async def document_settings(store: Store) -> DocumentSettings:
     )
 
 
+@dataclass(frozen=True)
+class FolderSettings:
+    """What the install lets a folder in a person's documents be, as it is in effect now."""
+
+    sync_minutes: int = 10
+    max_files: int = 10_000
+    max_mb: int = 2_048
+    max_depth: int = 12
+
+    @property
+    def max_bytes(self) -> int:
+        return self.max_mb * 1024 * 1024
+
+
+async def folder_settings(store: Store) -> FolderSettings:
+    async def number(key: str) -> int:
+        value = await store.setting(key)
+        return int(value) if value is not None else int(DEFAULTS[key])
+
+    return FolderSettings(
+        sync_minutes=await number(DOCUMENTS_FOLDER_SYNC_MINUTES),
+        max_files=await number(DOCUMENTS_FOLDER_MAX_FILES),
+        max_mb=await number(DOCUMENTS_FOLDER_MAX_MB),
+        max_depth=await number(DOCUMENTS_FOLDER_MAX_DEPTH),
+    )
+
+
 def _admin(request: Request) -> None:
     expected = request.app.state.settings.admin_token
     given = request.headers.get("authorization", "")
@@ -422,6 +528,7 @@ async def get_config(request: Request) -> ConfigDocument:
     store: Store = request.app.state.store
     memory = await memory_settings(store)
     documents = await document_settings(store)
+    folders = await folder_settings(store)
     return ConfigDocument.model_validate(
         {
             OWNER_READS_CHATS: await owner_reads_chats(store),
@@ -436,6 +543,10 @@ async def get_config(request: Request) -> ConfigDocument:
             DOCUMENTS_EMBEDDING_MODEL: documents.embedding_model,
             DOCUMENTS_EXTERNAL_EMBEDDING: documents.external_embedding,
             DOCUMENTS_EMBED_PER_MINUTE: documents.embed_per_minute,
+            DOCUMENTS_FOLDER_SYNC_MINUTES: folders.sync_minutes,
+            DOCUMENTS_FOLDER_MAX_FILES: folders.max_files,
+            DOCUMENTS_FOLDER_MAX_MB: folders.max_mb,
+            DOCUMENTS_FOLDER_MAX_DEPTH: folders.max_depth,
         }
     )
 
@@ -457,6 +568,17 @@ def _problem_with(key: str, value: Any) -> str | None:
         ):
             return None
         return f"Must be a whole number from {MIN_EMBED_PER_MINUTE} to {MAX_EMBED_PER_MINUTE:,}."
+    ranges = {
+        DOCUMENTS_FOLDER_SYNC_MINUTES: (MIN_SYNC_MINUTES, MAX_SYNC_MINUTES),
+        DOCUMENTS_FOLDER_MAX_FILES: (MIN_FOLDER_FILES, MAX_FOLDER_FILES),
+        DOCUMENTS_FOLDER_MAX_MB: (MIN_FOLDER_MB, MAX_FOLDER_MB),
+        DOCUMENTS_FOLDER_MAX_DEPTH: (MIN_FOLDER_DEPTH, MAX_FOLDER_DEPTH),
+    }
+    if key in ranges:
+        low, high = ranges[key]
+        if isinstance(value, int) and not isinstance(value, bool) and low <= value <= high:
+            return None
+        return f"Must be a whole number from {low:,} to {high:,}."
     if key == DOCUMENTS_MAX_FILE_MB:
         if (
             isinstance(value, int)

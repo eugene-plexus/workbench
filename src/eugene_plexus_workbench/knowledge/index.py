@@ -61,12 +61,52 @@ from . import chunk, vectors
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 INDEX_FILE = "index.sqlite3"
+#: Where files wait, beside the index, while documents are removed (`Index._stage_files`).
+TRASH = "trash"
 #: Where a person's saved documents are: the scope of one is `library`, or
 #: `chat:<id>` for one searched only in the chat it was attached to.
 LIBRARY = "library"
 CHAT = "chat:"
+#: What a document's `source` starts with when it was read from a folder the person was granted
+#: (MR7): `folder:<grant id>/<path below the folder>`. A document is the same document while
+#: its source is, so an edited file replaces the one it was and a deleted one is found by its path.
+FOLDER = "folder:"
+UPLOAD = "upload"
+
+
+def folder_source(grant_id: str, path: str) -> str:
+    return f"{FOLDER}{grant_id}/{path}"
+
+
+def folder_prefix(grant_id: str) -> str:
+    return f"{FOLDER}{grant_id}/"
+
+
+def split_source(source: str) -> tuple[str, str] | None:
+    """`(grant id, path)` of a document read from a folder; None for any other."""
+    if not source.startswith(FOLDER):
+        return None
+    grant, _, path = source[len(FOLDER) :].partition("/")
+    return (grant, path) if grant and path else None
+
+
+def _only(source: str | None) -> str:
+    """The SQL that keeps only the documents a person added (`upload`) or only those read from a
+    folder (`folder`), as a clause to add to a `WHERE`; nothing for either."""
+    if source == "upload":
+        return " AND source NOT LIKE 'folder:%'"
+    if source == "folder":
+        return " AND source LIKE 'folder:%'"
+    return ""
+
+
+def _bounds(grant_id: str) -> tuple[str, str]:
+    """The least and greatest `source` of a folder's documents: `/` is followed by `0`, so a range
+    on the indexed column holds exactly the sources that start with `folder:<grant id>/`."""
+    return folder_prefix(grant_id), f"{FOLDER}{grant_id}0"
+
 
 QUEUED, READING, SEARCHABLE, EMBEDDING, READY, SKIPPED, FAILED = (
     "queued",
@@ -187,9 +227,11 @@ _SCHEMA: list[str] = [
 
 #: What brings an index at version N-1 to N (`_SCHEMA` is version 1 whole). Version 2
 #: (MR5) keeps, for a document, the passages the search model refused (a JSON list), so
-#: the Documents screen can say which, in words, without reading every passage.
+#: the Documents screen can say which, in words, without reading every passage. Version 3
+#: (MR7) indexes a document's `source`, which names a folder's files by path.
 _MIGRATIONS: dict[int, list[str]] = {
     2: ["ALTER TABLE documents ADD COLUMN refused TEXT"],
+    3: ["CREATE INDEX IF NOT EXISTS documents_by_source ON documents (source)"],
 }
 
 #: The `meta` key that holds the search model an index was built with.
@@ -355,6 +397,55 @@ class MeaningCounts:
     owed: int
     #: Passages of documents that are `ready` without it (no search model was in play).
     words_only: int
+
+
+@dataclass(frozen=True)
+class Held:
+    """What the index holds of one file of a granted folder (MR7): its document, the size and the
+    modified time it was read at (nanoseconds as text, with a `!` after it when the file was too
+    new to trust that it would not change again unseen), and the hash of what was read. A
+    document with no hash was never read: skipped before it was, with no copy kept."""
+
+    doc_id: str
+    path: str
+    size: int
+    mtime: str | None
+    sha256: str
+    status: str
+    code: str | None
+
+    @property
+    def copied(self) -> bool:
+        return bool(self.sha256)
+
+
+@dataclass(frozen=True)
+class FolderCounts:
+    """A folder's documents, counted: by state, and by reason for the ones that were skipped or
+    failed, with their passages, the meaning added to them and the bytes of their files."""
+
+    files: int
+    passages: int
+    embedded: int
+    owed: int
+    #: The bytes of the folder's files that were looked at, and of those that were copied.
+    bytes: int
+    copied: int
+    by_state: Mapping[str, int]
+    by_code: Mapping[str, int]
+
+
+@dataclass(frozen=True)
+class FolderSkip:
+    """A file of a folder that was looked at and could not be read, to be kept as a `skipped` (or
+    `failed`) document: its reason in the words a person reads, and a code the page can act on. No
+    copy of it is kept, so it has no hash."""
+
+    new: NewDocument
+    code: str
+    reason: str
+    detail: str | None = None
+    state: str = SKIPPED
 
 
 def _document(row: sqlite3.Row) -> Document:
@@ -668,11 +759,18 @@ class Index:
 
     # --- what is there --------------------------------------------------
 
-    async def documents(self, scope: str | None = None) -> list[Document]:
-        """The documents, newest first: those of one scope, or every one."""
+    async def documents(
+        self, scope: str | None = None, *, only: str | None = None
+    ) -> list[Document]:
+        """The documents, newest first: those of one scope, or every one. With `only`, just the
+        ones the person added themselves (`upload`), or just the files of their folders
+        (`folder`): a folder's files are listed under it, so that a folder of ten thousand
+        files is not part of every poll."""
 
         def go(db: sqlite3.Connection) -> list[Document]:
             where, params = ("", ()) if scope is None else (" WHERE scope = ?", (scope,))
+            if only is not None:
+                where = (where or " WHERE 1") + _only(only)
             rows = db.execute(
                 f"SELECT * FROM documents{where} ORDER BY added_at DESC, rowid DESC", params
             )
@@ -687,14 +785,17 @@ class Index:
 
         return await self._run(go)
 
-    async def totals(self, scope: str = LIBRARY) -> Totals:
+    async def totals(self, scope: str = LIBRARY, *, only: str | None = None) -> Totals:
+        """What a scope holds, counted; with `only`, just the files the person added themselves
+        (`upload`) or just those read from their folders (`folder`)."""
+
         def go(db: sqlite3.Connection) -> Totals:
             by_state = dict.fromkeys(STATES, 0)
             documents = passages = size = embedded = owed = 0
             for row in db.execute(
                 "SELECT status, COUNT(*) AS n, COALESCE(SUM(chunks), 0) AS c, "
                 "COALESCE(SUM(bytes), 0) AS b, COALESCE(SUM(embedded), 0) AS e "
-                "FROM documents WHERE scope = ? GROUP BY status",
+                f"FROM documents WHERE scope = ?{_only(only)} GROUP BY status",
                 (scope,),
             ):
                 by_state[row["status"]] = row["n"]
@@ -771,12 +872,23 @@ class Index:
 
         def go(db: sqlite3.Connection) -> Added:
             def body() -> Added:
-                if new.scope == LIBRARY:
+                if new.source.startswith(FOLDER):
+                    # A file of a folder is the one at its path, whatever it is called: an edited
+                    # file replaces the document it was, and nothing else does.
+                    twins = [
+                        _document(r)
+                        for r in db.execute(
+                            "SELECT * FROM documents WHERE source = ? "
+                            "ORDER BY added_at DESC, rowid DESC",
+                            (new.source,),
+                        )
+                    ]
+                elif new.scope == LIBRARY:
                     twins = [
                         _document(r)
                         for r in db.execute(
                             "SELECT * FROM documents WHERE scope = ? AND name = ? COLLATE NOCASE "
-                            "ORDER BY added_at DESC, rowid DESC",
+                            "AND source NOT LIKE 'folder:%' ORDER BY added_at DESC, rowid DESC",
                             (LIBRARY, new.name),
                         )
                     ]
@@ -798,6 +910,16 @@ class Index:
                     None,
                 )
                 if same is not None:
+                    if new.source.startswith(FOLDER) and (
+                        same.source_mtime != new.source_mtime or same.bytes != new.bytes
+                    ):
+                        # The same words under a new modified time: the file was touched, or
+                        # saved again unchanged. What is kept is the time it is now at.
+                        db.execute(
+                            "UPDATE documents SET source_mtime = ?, bytes = ? WHERE id = ?",
+                            (new.source_mtime, new.bytes, same.id),
+                        )
+                        same.source_mtime, same.bytes = new.source_mtime, new.bytes
                     return Added(same, unchanged=True)
                 for old in twins:
                     db.execute("DELETE FROM documents WHERE id = ?", (old.id,))
@@ -1337,19 +1459,71 @@ class Index:
 
     # --- taking one away ------------------------------------------------
 
-    def _remove_files(self, doc_id: str) -> None:
-        """A document's files off the disk, inside the transaction that removes its
-        rows. A file that is already gone is fine; one that cannot be removed
-        raises `DeleteFailed`, which rolls the whole removal back. A program that
-        holds a file for a moment (a scanner, a download) is waited out briefly."""
-        for path in (
+    def _files_of(self, doc_id: str) -> list[Path]:
+        """Every file a document can have beside the index: its original, its text, what the
+        index says of it, and the halves of each that were being written."""
+        return [
             self.original_path(doc_id),
             self.part_path(doc_id),
             self.text_path(doc_id),
             self.text_path(doc_id).with_name(f"{doc_id}.txt.part"),
             self.meta_path(doc_id),
             self.meta_path(doc_id).with_name(f"{doc_id}.meta.json.part"),
-        ):
+        ]
+
+    def _stage_files(self, doc_ids: Sequence[str]) -> list[tuple[Path, Path]]:
+        """Take these documents' files out of the way, into `trash/` beside the index, **as
+        renames**: quick, and undone by renaming back, so that removing many documents is all or
+        nothing, files included (`_unstage` puts them back; `_discard` deletes them once the rows
+        are gone). A file that cannot be moved (a Windows program holds it, and is waited for
+        briefly) puts back every one that was, and raises `DeleteFailed`."""
+        trash = self.dir / TRASH
+        staged: list[tuple[Path, Path]] = []
+        try:
+            for doc_id in doc_ids:
+                for path in self._files_of(doc_id):
+                    target = trash / path.name
+                    for attempt in range(6):
+                        try:
+                            trash.mkdir(parents=True, exist_ok=True)
+                            path.replace(target)
+                            staged.append((path, target))
+                            break
+                        except FileNotFoundError:
+                            break  # not there: nothing of it to remove
+                        except OSError as exc:
+                            if attempt == 5:
+                                raise DeleteFailed(
+                                    f"Workbench could not remove a file of a document ({exc}). "
+                                    "Nothing was removed; close whatever is using it and try again."
+                                ) from exc
+                            time.sleep(0.1)
+        except BaseException:
+            self._unstage(staged)
+            raise
+        return staged
+
+    @staticmethod
+    def _unstage(staged: list[tuple[Path, Path]]) -> None:
+        """Put staged files back where they were."""
+        for path, target in reversed(staged):
+            with contextlib.suppress(OSError):
+                target.replace(path)
+
+    @staticmethod
+    def _discard(staged: list[tuple[Path, Path]]) -> None:
+        """Delete staged files for good. Best effort: the documents are already gone, and a file
+        that cannot be deleted now is one nothing claims, which the next boot removes."""
+        for _, target in staged:
+            with contextlib.suppress(OSError):
+                target.unlink(missing_ok=True)
+
+    def _remove_files(self, doc_id: str) -> None:
+        """A document's files off the disk, inside the transaction that removes its
+        rows. A file that is already gone is fine; one that cannot be removed
+        raises `DeleteFailed`, which rolls the whole removal back. A program that
+        holds a file for a moment (a scanner, a download) is waited out briefly."""
+        for path in self._files_of(doc_id):
             for attempt in range(6):
                 try:
                     path.unlink(missing_ok=True)
@@ -1413,6 +1587,279 @@ class Index:
             if found:
                 self._scrub(db)
             return found
+
+        return await self._run(go)
+
+    # --- a granted folder's files (MR7) -----------------------------------
+
+    async def delete_many(self, doc_ids: Sequence[str]) -> list[Document]:
+        """Remove these documents as `delete` does each, **in one transaction**: rows, passages,
+        search entries, originals and texts, so a file that cannot be removed rolls all of it
+        back. The documents as they were (those that were there)."""
+        ids = list(dict.fromkeys(doc_ids))
+        if not ids:
+            return []
+
+        def go(db: sqlite3.Connection) -> list[Document]:
+            staged: list[tuple[Path, Path]] = []
+
+            def body() -> list[Document]:
+                gone: list[Document] = []
+                for start in range(0, len(ids), 500):
+                    part = ids[start : start + 500]
+                    marks = ", ".join("?" for _ in part)
+                    for row in db.execute(
+                        f"SELECT * FROM documents WHERE id IN ({marks})", part
+                    ).fetchall():
+                        gone.append(_document(row))
+                staged.extend(self._stage_files([d.id for d in gone]))
+                for doc in gone:
+                    db.execute("DELETE FROM documents WHERE id = ?", (doc.id,))
+                return gone
+
+            try:
+                found = self._transaction(db, body)
+            except BaseException:
+                self._unstage(staged)
+                raise
+            self._discard(staged)
+            if any(d.chunks for d in found):
+                self._scrub(db)
+            return found
+
+        return await self._run(go)
+
+    async def delete_folder(self, grant_id: str) -> list[Document]:
+        """Remove every document read from a folder, as `delete_many` does. The documents as they
+        were."""
+        low, high = _bounds(grant_id)
+
+        def go(db: sqlite3.Connection) -> list[Document]:
+            staged: list[tuple[Path, Path]] = []
+
+            def body() -> list[Document]:
+                gone = [
+                    _document(r)
+                    for r in db.execute(
+                        "SELECT * FROM documents WHERE source >= ? AND source < ?", (low, high)
+                    ).fetchall()
+                ]
+                staged.extend(self._stage_files([d.id for d in gone]))
+                for doc in gone:
+                    db.execute("DELETE FROM documents WHERE id = ?", (doc.id,))
+                return gone
+
+            try:
+                found = self._transaction(db, body)
+            except BaseException:
+                self._unstage(staged)
+                raise
+            self._discard(staged)
+            if any(d.chunks for d in found):
+                self._scrub(db)
+            return found
+
+        return await self._run(go)
+
+    async def folder_files(self, grant_id: str) -> list[Held]:
+        """What the index holds of a folder, one entry for each of its files, by path."""
+        low, high = _bounds(grant_id)
+
+        def go(db: sqlite3.Connection) -> list[Held]:
+            cut = len(low)
+            rows = db.execute(
+                "SELECT id, source, bytes, source_mtime, sha256, status, code FROM documents "
+                "WHERE source >= ? AND source < ?",
+                (low, high),
+            )
+            return [
+                Held(
+                    r["id"],
+                    r["source"][cut:],
+                    r["bytes"],
+                    r["source_mtime"],
+                    r["sha256"],
+                    r["status"],
+                    r["code"],
+                )
+                for r in rows
+            ]
+
+        return await self._run(go)
+
+    async def folder_grants(self) -> set[str]:
+        """The ids of the grants any document was read from: what the boot reconcile checks against
+        the folders people have."""
+
+        def go(db: sqlite3.Connection) -> set[str]:
+            rows = db.execute(
+                "SELECT DISTINCT substr(source, 8, instr(substr(source, 8), '/') - 1) "
+                "FROM documents WHERE source >= 'folder:' AND source < 'folder;'"
+            )
+            return {r[0] for r in rows if r[0]}
+
+        return await self._run(go)
+
+    async def folder_counts(self, grant_id: str) -> FolderCounts:
+        low, high = _bounds(grant_id)
+
+        def go(db: sqlite3.Connection) -> FolderCounts:
+            by_state = dict.fromkeys(STATES, 0)
+            by_code: dict[str, int] = {}
+            files = passages = size = copied = embedded = owed = 0
+            for row in db.execute(
+                "SELECT status, code, COUNT(*) AS n, COALESCE(SUM(chunks), 0) AS c, "
+                "COALESCE(SUM(bytes), 0) AS b, COALESCE(SUM(embedded), 0) AS e, "
+                "COALESCE(SUM(CASE WHEN sha256 != '' THEN bytes ELSE 0 END), 0) AS k "
+                "FROM documents WHERE source >= ? AND source < ? GROUP BY status, code",
+                (low, high),
+            ):
+                by_state[row["status"]] += row["n"]
+                if row["status"] in (SKIPPED, FAILED) and row["code"]:
+                    by_code[row["code"]] = by_code.get(row["code"], 0) + row["n"]
+                files += row["n"]
+                passages += row["c"]
+                size += row["b"]
+                copied += row["k"]
+                embedded += row["e"]
+                if row["status"] in (SEARCHABLE, EMBEDDING):
+                    owed += row["c"] - row["e"]
+            return FolderCounts(files, passages, embedded, owed, size, copied, by_state, by_code)
+
+        return await self._run(go)
+
+    async def folder_documents(
+        self,
+        grant_id: str,
+        *,
+        state: str | None = None,
+        code: str | None = None,
+        match: str | None = None,
+        offset: int = 0,
+        limit: int = 200,
+    ) -> tuple[list[Document], int]:
+        """A page of a folder's documents in path order, and how many there are in all (that fit
+        the filters): by state, by the reason they were skipped or failed, and by a word in their
+        path (without regard to case)."""
+        low, high = _bounds(grant_id)
+
+        def go(db: sqlite3.Connection) -> tuple[list[Document], int]:
+            where = "source >= ? AND source < ?"
+            params: list[str | int] = [low, high]
+            if state is not None:
+                where, params = where + " AND status = ?", [*params, state]
+            if code is not None:
+                where, params = where + " AND code = ?", [*params, code]
+            if match:
+                where += " AND instr(lower(substr(source, ?)), ?) > 0"
+                params = [*params, len(low) + 1, match.lower()]
+            total = int(
+                db.execute(f"SELECT COUNT(*) FROM documents WHERE {where}", params).fetchone()[0]
+            )
+            rows = db.execute(
+                f"SELECT * FROM documents WHERE {where} "
+                "ORDER BY lower(source), source LIMIT ? OFFSET ?",
+                [*params, limit, offset],
+            )
+            return [_document(r) for r in rows], total
+
+        return await self._run(go)
+
+    async def put_folder_skips(self, rows: Sequence[FolderSkip]) -> int:
+        """Keep these files of a folder as `skipped` (or `failed`) documents with their reasons,
+        **in one transaction**, each in place of whatever document its path had (and its
+        passages and files). A write makes every cached matrix of the vectors stale, so a
+        batch is one write. How many were kept."""
+        if not rows:
+            return 0
+
+        def go(db: sqlite3.Connection) -> int:
+            staged: list[tuple[Path, Path]] = []
+
+            def body() -> int:
+                removed_passages = 0
+                for skip in rows:
+                    new = skip.new
+                    for old in db.execute(
+                        "SELECT id, chunks FROM documents WHERE source = ?", (new.source,)
+                    ).fetchall():
+                        removed_passages += old["chunks"]
+                        staged.extend(self._stage_files([old["id"]]))
+                        db.execute("DELETE FROM documents WHERE id = ?", (old["id"],))
+                    db.execute(
+                        "INSERT INTO documents (id, scope, name, media_type, bytes, sha256, "
+                        "source, status, reason, code, detail, kind, language, added_at, "
+                        "source_mtime) VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            new.id,
+                            new.scope,
+                            new.name,
+                            new.media_type,
+                            new.bytes,
+                            new.source,
+                            skip.state,
+                            skip.reason,
+                            skip.code,
+                            skip.detail,
+                            new.kind,
+                            new.language,
+                            new.added_at if new.added_at is not None else time.time(),
+                            new.source_mtime,
+                        ),
+                    )
+                return removed_passages
+
+            try:
+                removed = self._transaction(db, body)
+            except BaseException:
+                self._unstage(staged)
+                raise
+            self._discard(staged)
+            if removed:
+                self._scrub(db)
+            return len(rows)
+
+        return await self._run(go)
+
+    async def set_signature(self, doc_id: str, mtime: str | None, size: int) -> bool:
+        """A file read again came to the same words: keep the time and size it is at now, so it is
+        not read again until it changes. False when the document is not there."""
+
+        def go(db: sqlite3.Connection) -> bool:
+            def body() -> bool:
+                return (
+                    db.execute(
+                        "UPDATE documents SET source_mtime = ?, bytes = ? WHERE id = ?",
+                        (mtime, size, doc_id),
+                    ).rowcount
+                    == 1
+                )
+
+            return self._transaction(db, body)
+
+        return await self._run(go)
+
+    async def move_folder_document(
+        self, doc_id: str, old_source: str, source: str, name: str, mtime: str | None
+    ) -> Document | None:
+        """A file of a folder moved: its document is the same one, with its passages and their
+        vectors, under its new path. None when it is not there, or is not at `old_source` any
+        more."""
+
+        def go(db: sqlite3.Connection) -> Document | None:
+            def body() -> Document | None:
+                changed = db.execute(
+                    "UPDATE documents SET source = ?, name = ?, source_mtime = ? "
+                    "WHERE id = ? AND source = ?",
+                    (source, name, mtime, doc_id, old_source),
+                ).rowcount
+                if changed != 1:
+                    return None
+                return _document(
+                    db.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
+                )
+
+            return self._transaction(db, body)
 
         return await self._run(go)
 
@@ -1487,6 +1934,9 @@ class Index:
 
         def scan() -> list[Path]:
             found: list[Path] = []
+            trash = self.dir / TRASH
+            if trash.is_dir():
+                found.extend(trash.iterdir())  # files that were being removed when a stop came
             if self.originals.is_dir():
                 for path in self.originals.iterdir():
                     stem = path.name.removesuffix(".part")

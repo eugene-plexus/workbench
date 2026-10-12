@@ -594,6 +594,10 @@ export default function App() {
             me={phase.me}
             onClose={() => open(chatId)}
             onAsk={() => void askAboutDocuments()}
+            onTools={() => {
+              setShowSites(false);
+              setShowTools(true);
+            }}
           />
         ) : memoryOpen ? (
           <Memory

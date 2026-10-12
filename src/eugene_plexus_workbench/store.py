@@ -46,6 +46,10 @@ What is here is what belongs with the chats: a message's `retrieval`, JSON sayin
 what searching the person's documents for that answer came to (the words searched
 for, how many passages went, why none did), and `documents_prefs`, a person's own
 settings for them.
+
+**Folders** (schema 13): `document_folders` is the granted folders a person has pointed their
+Documents at (MR7), each filtered by `owner` in its own query. What was read from them is not
+here: those are documents in the person's own index, named by `folder:<grant id>/<path>`.
 """
 
 from __future__ import annotations
@@ -61,7 +65,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -167,6 +171,21 @@ CREATE TABLE IF NOT EXISTS documents_prefs (
     owner TEXT PRIMARY KEY,
     new_chats INTEGER NOT NULL DEFAULT 0 CHECK (new_chats IN (0, 1)),
     external TEXT CHECK (external IS NULL OR external IN ('never', 'ask', 'always'))
+);
+CREATE TABLE IF NOT EXISTS document_folders (
+    owner TEXT NOT NULL,
+    grant_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    ignore TEXT NOT NULL DEFAULT '[]',
+    include_hidden INTEGER NOT NULL DEFAULT 0 CHECK (include_hidden IN (0, 1)),
+    use_gitignore INTEGER NOT NULL DEFAULT 1 CHECK (use_gitignore IN (0, 1)),
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'withdrawn')),
+    problem TEXT,
+    report TEXT,
+    added_at REAL NOT NULL,
+    synced_at REAL,
+    checked_at REAL,
+    PRIMARY KEY (owner, grant_id)
 );
 """
 
@@ -328,6 +347,18 @@ _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
         "new_chats INTEGER NOT NULL DEFAULT 0 CHECK (new_chats IN (0, 1)), "
         "external TEXT CHECK (external IS NULL OR external IN ('never', 'ask', 'always')))",
     ],
+    # Folders (2026-10-11): the granted folders a person has pointed their Documents at, with
+    # their own ignore rules, how the last check went and what it found (JSON). The files read
+    # from them are documents in the person's own index, named by `folder:<grant id>/<path>`.
+    13: [
+        "CREATE TABLE IF NOT EXISTS document_folders (owner TEXT NOT NULL, grant_id TEXT NOT NULL, "
+        "name TEXT NOT NULL, ignore TEXT NOT NULL DEFAULT '[]', "
+        "include_hidden INTEGER NOT NULL DEFAULT 0 CHECK (include_hidden IN (0, 1)), "
+        "use_gitignore INTEGER NOT NULL DEFAULT 1 CHECK (use_gitignore IN (0, 1)), "
+        "status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'withdrawn')), "
+        "problem TEXT, report TEXT, added_at REAL NOT NULL, synced_at REAL, checked_at REAL, "
+        "PRIMARY KEY (owner, grant_id))",
+    ],
 }
 
 
@@ -463,6 +494,29 @@ class MemoryNote:
     revisit_at: str | None = None
     last_used_at: float | None = None
     use_count: int = 0
+
+
+@dataclass
+class FolderRecord:
+    """A granted folder a person pointed their Documents at (`knowledge/folder_sync.py`): which
+    grant, what the owner called it, the person's own rules for it, and how it stands. `status` is
+    `active`, or `withdrawn` once the owner took the grant away (its documents are gone and the
+    record stays, with `problem` saying so, until the person dismisses it). `problem` is what is
+    wrong now, as `{code, message, at}`; `report` what the last check found; `synced_at` when a
+    check last finished well and `checked_at` when one last ended, either way."""
+
+    owner: str
+    grant_id: str
+    name: str
+    added_at: float
+    ignore: list[str] = field(default_factory=list)
+    include_hidden: bool = False
+    use_gitignore: bool = True
+    status: str = "active"
+    problem: dict[str, Any] | None = None
+    report: dict[str, Any] | None = None
+    synced_at: float | None = None
+    checked_at: float | None = None
 
 
 class MemoryFull(Exception):
@@ -778,6 +832,57 @@ def interrupt_tools(rounds: list[dict[str, Any]]) -> None:
                     result="The call was interrupted while it waited for your signature. If you "
                     "signed it on the machine, it may have run. Check before trying again.",
                 )
+
+
+_FOLDER_FIELDS = frozenset(
+    {
+        "name",
+        "ignore",
+        "include_hidden",
+        "use_gitignore",
+        "status",
+        "problem",
+        "report",
+        "synced_at",
+        "checked_at",
+    }
+)
+
+
+def _folder_record(row: sqlite3.Row) -> FolderRecord:
+    def loaded(text: str | None, empty: Any) -> Any:
+        if text is None:
+            return empty
+        try:
+            return json.loads(text)
+        except ValueError:
+            return empty
+
+    ignore = loaded(row["ignore"], [])
+    problem = loaded(row["problem"], None)
+    report = loaded(row["report"], None)
+    return FolderRecord(
+        owner=row["owner"],
+        grant_id=row["grant_id"],
+        name=row["name"],
+        added_at=row["added_at"],
+        ignore=[str(p) for p in ignore] if isinstance(ignore, list) else [],
+        include_hidden=bool(row["include_hidden"]),
+        use_gitignore=bool(row["use_gitignore"]),
+        status=row["status"],
+        problem=problem if isinstance(problem, dict) else None,
+        report=report if isinstance(report, dict) else None,
+        synced_at=row["synced_at"],
+        checked_at=row["checked_at"],
+    )
+
+
+def _encode_folder(column: str, value: Any) -> Any:
+    if column in ("ignore", "problem", "report"):
+        return json.dumps(value) if value is not None else None
+    if isinstance(value, bool):
+        return int(value)
+    return value
 
 
 def _encode(column: str, value: Any) -> Any:
@@ -1894,6 +1999,95 @@ class Store:
 
         await self._run(go)
         return await self.documents_prefs(owner)
+
+    # --- the folders a person's documents are read from -------------------
+
+    async def folder_records(self, owner: str | None = None) -> list[FolderRecord]:
+        """Every folder, or one person's, oldest first."""
+
+        def go() -> list[FolderRecord]:
+            where, params = ("", ()) if owner is None else (" WHERE owner = ?", (owner,))
+            rows = self._conn().execute(
+                f"SELECT * FROM document_folders{where} ORDER BY added_at, rowid", params
+            )
+            return [_folder_record(r) for r in rows]
+
+        return await self._run(go)
+
+    async def folder_record(self, owner: str, grant_id: str) -> FolderRecord | None:
+        def go() -> FolderRecord | None:
+            row = (
+                self._conn()
+                .execute(
+                    "SELECT * FROM document_folders WHERE owner = ? AND grant_id = ?",
+                    (owner, grant_id),
+                )
+                .fetchone()
+            )
+            return _folder_record(row) if row is not None else None
+
+        return await self._run(go)
+
+    async def add_folder_record(self, record: FolderRecord) -> bool:
+        """Keep a folder. False when the person already has it."""
+
+        def go() -> bool:
+            cursor = self._conn().execute(
+                "INSERT OR IGNORE INTO document_folders (owner, grant_id, name, ignore, "
+                "include_hidden, use_gitignore, status, problem, report, added_at, synced_at, "
+                "checked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    record.owner,
+                    record.grant_id,
+                    record.name,
+                    json.dumps(record.ignore),
+                    int(record.include_hidden),
+                    int(record.use_gitignore),
+                    record.status,
+                    json.dumps(record.problem) if record.problem is not None else None,
+                    json.dumps(record.report) if record.report is not None else None,
+                    record.added_at,
+                    record.synced_at,
+                    record.checked_at,
+                ),
+            )
+            return cursor.rowcount == 1
+
+        return await self._run(go)
+
+    async def update_folder_record(
+        self, owner: str, grant_id: str, **changes: Any
+    ) -> FolderRecord | None:
+        """Change the fields named, and only those. None when the person has no such folder."""
+        unknown = set(changes) - _FOLDER_FIELDS
+        if unknown:
+            raise ValueError(f"not folder fields: {sorted(unknown)}")
+
+        def go() -> FolderRecord | None:
+            db = self._conn()
+            if changes:
+                columns = ", ".join(f"{k} = ?" for k in changes)
+                params = [_encode_folder(k, v) for k, v in changes.items()]
+                db.execute(
+                    f"UPDATE document_folders SET {columns} WHERE owner = ? AND grant_id = ?",
+                    (*params, owner, grant_id),
+                )
+            row = db.execute(
+                "SELECT * FROM document_folders WHERE owner = ? AND grant_id = ?",
+                (owner, grant_id),
+            ).fetchone()
+            return _folder_record(row) if row is not None else None
+
+        return await self._run(go)
+
+    async def delete_folder_record(self, owner: str, grant_id: str) -> bool:
+        def go() -> bool:
+            cursor = self._conn().execute(
+                "DELETE FROM document_folders WHERE owner = ? AND grant_id = ?", (owner, grant_id)
+            )
+            return cursor.rowcount == 1
+
+        return await self._run(go)
 
     async def chat_owners(self, chat_ids: Iterable[str]) -> dict[str, str]:
         """Whose each of these chats is, for the ones that exist: what the boot

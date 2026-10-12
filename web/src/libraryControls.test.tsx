@@ -18,6 +18,24 @@ import { TestQuestion } from "./components/TestQuestion";
 import { ApiError, api, documentText, post, upload } from "./lib/api";
 import type { ChatDocumentsView, ChatFile, Me, Message, SavedDocument } from "./lib/types";
 import { choose, file, fresh, MODEL, preparing, searched, tooLong } from "./test-documents";
+import {
+  brokenFile,
+  choice,
+  counts as folderCounts,
+  detail,
+  FakeFolders,
+  folder,
+  folderFile,
+  foldersPage,
+  goneFolder,
+  pictureFile,
+  problemFolder,
+  readingFolder,
+  syncingFolder,
+  waitingFile,
+  waitingFolder,
+  withdrawnFolder,
+} from "./test-folders";
 import { controlsIn, everyControlIsNamed, lacking, wrong } from "./test-controls";
 import {
   adding,
@@ -97,7 +115,9 @@ async function screenOf(
   over: Parameters<typeof page>[1] = {},
   me?: Pick<Me, "owner" | "consoleUrl">,
 ) {
-  vi.mocked(api).mockResolvedValue(page(docs, over) as never);
+  // The folders (MR7) are asked for apart from the documents: none, here.
+  vi.mocked(api).mockImplementation((async (path: string) =>
+    path === "/api/documents/folders" ? foldersPage() : page(docs, over)) as never);
   const view = render(<Documents onClose={vi.fn()} onAsk={vi.fn()} me={me} />);
   await settle();
   return view;
@@ -833,6 +853,272 @@ describe("under an answer, with search by meaning", () => {
     for (const toggle of screen.getAllByTestId("passage-toggle")) {
       expect(toggle.getAttribute("aria-label")).toMatch(/, found by (words|meaning|both)/);
     }
+  });
+});
+
+// --- folders (MR7) ---
+
+describe("the Folders section", () => {
+  /** The Documents screen with these folders, from a fake Workbench that answers each route the
+   * section uses; `docs` are the person's own files. */
+  async function foldersOf(
+    fake: FakeFolders,
+    me: Pick<Me, "owner" | "consoleUrl"> = PERSON,
+    docs: SavedDocument[] = [saved()],
+    over: Parameters<typeof page>[1] = {},
+  ) {
+    fake.install();
+    const folders = vi.mocked(api).getMockImplementation()!;
+    vi.mocked(api).mockImplementation((async (path: string, init?: RequestInit) =>
+      path === "/api/documents" ? page(docs, over) : folders(path, init)) as never);
+    const view = render(<Documents onClose={vi.fn()} onAsk={vi.fn()} onTools={vi.fn()} me={me} />);
+    await settle();
+    return view;
+  }
+
+  const click = (id: string, at = 0) => fireEvent.click(screen.getAllByTestId(id)[at]!);
+
+  it("with a folder in every state, each with its own buttons", async () => {
+    const view = await foldersOf(
+      new FakeFolders(
+        [
+          folder(),
+          waitingFolder({ id: "g2", name: "Waiting" }),
+          syncingFolder({}, { id: "g3", name: "Syncing" }),
+          readingFolder({ id: "g4", name: "Reading" }),
+          problemFolder({ id: "g5", name: "Problem" }),
+          goneFolder({ id: "g6", name: "Gone" }),
+          withdrawnFolder({ id: "g7", name: "Withdrawn" }),
+        ],
+        { grants: [choice()] },
+      ),
+    );
+    expect(screen.getAllByTestId("folder")).toHaveLength(7);
+    // Sync now, a deep check, files, what was left out, rules and Remove on most of seven, the
+    // way back, the settings, the add card, and more.
+    expect(controlsIn(view.container).length).toBeGreaterThanOrEqual(50);
+    everyControlIsNamed(view, 50);
+  });
+
+  it("with no folder given: the owner is offered Toolbox · Tools, and anyone else is told whom to ask", async () => {
+    const owner = await foldersOf(new FakeFolders([], { grants: [] }), OWNER);
+    expect(screen.getByTestId("folders-open-tools")).toBeInTheDocument();
+    everyControlIsNamed(owner, 5);
+    owner.unmount();
+    const person = await foldersOf(new FakeFolders([], { grants: [] }), PERSON);
+    expect(screen.queryByTestId("folders-open-tools")).toBeNull();
+    everyControlIsNamed(person, 5);
+  });
+
+  it("with Add a folder: the choice, what to leave out first (closed and open), and a refusal", async () => {
+    const fake = new FakeFolders([folder()], {
+      grants: [
+        choice({ id: "g1", name: "Work notes", added: true }),
+        choice(),
+        choice({ id: "g3", name: "Archive" }),
+      ],
+    });
+    const view = await foldersOf(fake);
+    expect(screen.getByTestId("folders-add-select")).toBeInTheDocument();
+    everyControlIsNamed(view, 20);
+    fireEvent.click(screen.getByTestId("folders-add-rules-toggle"));
+    everyControlIsNamed(view, 20);
+    fake.refuse.set(
+      "POST /api/documents/folders",
+      new ApiError("A pattern cannot start with #.", 422, {
+        message: "A pattern cannot start with #.",
+      }),
+    );
+    fireEvent.change(screen.getByTestId("folders-add-ignore"), { target: { value: "# x" } });
+    click("folders-add-go");
+    await settle();
+    expect(screen.getByTestId("folders-add-error")).toBeInTheDocument();
+    everyControlIsNamed(view, 20);
+    fake.refuse.set(
+      "POST /api/documents/folders",
+      new ApiError("This folder is already in your documents.", 409, {
+        message: "This folder is already in your documents.",
+      }),
+    );
+    click("folders-add-go");
+    await settle();
+    expect(screen.getByTestId("folders-add-problem")).toBeInTheDocument();
+    everyControlIsNamed(view, 20);
+  });
+
+  it("with a folder being removed, asked about first, and one that was withdrawn", async () => {
+    const view = await foldersOf(
+      new FakeFolders([folder(), withdrawnFolder({ id: "g2", name: "Gone away" })]),
+    );
+    click("folder-remove");
+    expect(screen.getByTestId("folder-remove-confirm")).toBeInTheDocument();
+    everyControlIsNamed(view, 17);
+  });
+
+  it("with a deep check opened, and a refusal on the card", async () => {
+    const fake = new FakeFolders([folder()]);
+    const view = await foldersOf(fake);
+    fireEvent.click(screen.getByTestId("folder-deep-toggle"));
+    everyControlIsNamed(view, 20);
+    fake.refuse.set(
+      "POST /api/documents/folders/g1/sync",
+      new ApiError("The owner took away your access to this folder.", 409, {
+        message: "The owner took away your access to this folder.",
+      }),
+    );
+    click("folder-sync");
+    await settle();
+    expect(screen.getByTestId("folder-problem")).toBeInTheDocument();
+    everyControlIsNamed(view, 20);
+  });
+
+  it("with a folder's files open: the filters, the find box, each file's buttons and the pages", async () => {
+    const fake = new FakeFolders([
+      folder({
+        counts: folderCounts({
+          files: 120,
+          byState: { ready: 118, skipped: 1, failed: 1 },
+          byCode: { not_document: 1, damaged: 1 },
+        }),
+      }),
+    ]);
+    fake.files.set("g1", [
+      folderFile(),
+      pictureFile(),
+      brokenFile(),
+      waitingFile(),
+      ...Array.from({ length: 60 }, (_, i) =>
+        folderFile({ id: `p${i}`, path: `more/file-${String(i).padStart(2, "0")}.md` }),
+      ),
+    ]);
+    const view = await foldersOf(fake);
+    click("folder-files-toggle");
+    await settle();
+    expect(screen.getAllByTestId("folder-file").length).toBe(50);
+    expect(screen.getByTestId("folder-files-next")).toBeInTheDocument();
+    // Open original, the text, and Leave out on fifty, the filters, the find box and the pages.
+    expect(controlsIn(view.container).length).toBeGreaterThanOrEqual(150);
+    everyControlIsNamed(view, 150);
+  });
+
+  it("with a file's text open, and a file being left out, asked about first", async () => {
+    const fake = new FakeFolders([folder()]);
+    fake.files.set("g1", [folderFile(), pictureFile()]);
+    const view = await foldersOf(fake);
+    click("folder-files-toggle");
+    await settle();
+    fireEvent.click(screen.getByTestId("folder-file-text-toggle"));
+    await settle();
+    expect(screen.getByTestId("folder-file-text")).toBeInTheDocument();
+    everyControlIsNamed(view, 20);
+    fireEvent.click(screen.getAllByTestId("folder-file-leave")[0]!);
+    expect(screen.getByTestId("folder-file-leave-confirm")).toBeInTheDocument();
+    everyControlIsNamed(view, 20);
+  });
+
+  it("with its files that could not be read, and the retry", async () => {
+    const fake = new FakeFolders([folder()]);
+    const view = await foldersOf(fake);
+    fake.refuse.set("GET /api/documents/folders/g1/files", new Error("Workbench answered 502."));
+    click("folder-files-toggle");
+    await settle();
+    expect(screen.getByTestId("folder-files-retry")).toBeInTheDocument();
+    everyControlIsNamed(view, 20);
+  });
+
+  it("with what was left out open, and when it could not be read", async () => {
+    const fake = new FakeFolders([folder()]);
+    const view = await foldersOf(fake);
+    click("folder-left-toggle");
+    await settle();
+    expect(screen.getAllByTestId("folder-left-item").length).toBeGreaterThan(0);
+    everyControlIsNamed(view, 20);
+    click("folder-left-toggle");
+    fake.refuse.set("GET /api/documents/folders/g1", new Error("Workbench answered 502."));
+    click("folder-left-toggle");
+    await settle();
+    expect(screen.getByTestId("folder-left-retry")).toBeInTheDocument();
+    everyControlIsNamed(view, 20);
+  });
+
+  it("with what was left out, long and with folders that could not be looked into", async () => {
+    const fake = new FakeFolders([folder()]);
+    fake.details.set(
+      "g1",
+      detail({
+        unlisted: [{ path: "private", cause: "permission denied" }],
+        leftCounts: { ignored_default: 500 },
+      }),
+    );
+    const view = await foldersOf(fake);
+    click("folder-left-toggle");
+    await settle();
+    expect(screen.getByTestId("folder-left-unlisted")).toBeInTheDocument();
+    everyControlIsNamed(view, 20);
+  });
+
+  it("with the rules open, changed, saved, and refused", async () => {
+    const fake = new FakeFolders([folder({ ignore: ["*.log"] })]);
+    const view = await foldersOf(fake);
+    click("folder-rules-toggle");
+    everyControlIsNamed(view, 20);
+    fireEvent.change(screen.getByTestId("folder-rules-ignore"), {
+      target: { value: "*.log\n*.tmp" },
+    });
+    everyControlIsNamed(view, 20);
+    fireEvent.click(screen.getByTestId("folder-rules-save"));
+    await settle();
+    expect(screen.getByTestId("folder-rules-saved")).toBeInTheDocument();
+    everyControlIsNamed(view, 20);
+    fake.refuse.set(
+      "PATCH /api/documents/folders/g1",
+      new ApiError("A pattern is at most 200 characters.", 422, {
+        message: "A pattern is at most 200 characters.",
+      }),
+    );
+    fireEvent.change(screen.getByTestId("folder-rules-ignore"), {
+      target: { value: "x".repeat(300) },
+    });
+    fireEvent.click(screen.getByTestId("folder-rules-save"));
+    await settle();
+    expect(screen.getByTestId("folder-rules-error")).toBeInTheDocument();
+    everyControlIsNamed(view, 20);
+  });
+
+  it("where this Workbench cannot read folders, and where the folders could not be read at all", async () => {
+    const view = await foldersOf(
+      new FakeFolders([folder()], {
+        available: false,
+        reason: "Local servers need Workbench's own OS account.",
+      }),
+    );
+    expect(screen.getByTestId("folders-unavailable")).toBeInTheDocument();
+    everyControlIsNamed(view, 10);
+    view.unmount();
+    const fake = new FakeFolders([folder()]);
+    fake.refuse.set("GET /api/documents/folders", new Error("Workbench answered 502."));
+    const failed = await foldersOf(fake);
+    expect(screen.getByTestId("folders-retry")).toBeInTheDocument();
+    everyControlIsNamed(failed, 5);
+  });
+
+  it("where the owner has turned documents off, with a folder to look at and to remove", async () => {
+    const view = await foldersOf(
+      new FakeFolders([folder(), withdrawnFolder({ id: "g2", name: "Gone away" })]),
+      PERSON,
+      [saved()],
+      {
+        installEnabled: false,
+      },
+    );
+    expect(screen.queryByTestId("folder-sync")).toBeNull();
+    everyControlIsNamed(view, 7);
+  });
+
+  it("with the files of the person's own and the folders both, there is one Ask about your documents, named", async () => {
+    const view = await foldersOf(new FakeFolders([folder()]), PERSON, []);
+    expect(screen.getAllByTestId("documents-ask")).toHaveLength(1);
+    everyControlIsNamed(view, 15);
   });
 });
 

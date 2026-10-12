@@ -757,7 +757,9 @@ describe("the page's frame", () => {
       const items = screen.getAllByTestId("media-item");
       expect(items.find((i) => i.id === "media-m2")).toHaveClass("border-accent");
       expect(items.find((i) => i.id === "media-m1")).not.toHaveClass("border-accent");
-      expect(scrolled).toHaveBeenCalledWith({ block: "center" });
+      // It scrolls in an effect after the results are drawn: wait for it (a busy machine can draw
+      // them first, and this failed one run in three with the whole suite).
+      await waitFor(() => expect(scrolled).toHaveBeenCalledWith({ block: "center" }));
     } finally {
       delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
     }

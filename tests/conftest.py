@@ -1211,6 +1211,28 @@ def world(tmp_path: Path) -> Iterator[World]:
         eugene_server.stop()
 
 
+@pytest.fixture
+def notes(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """An empty folder to grant (MR7): apart from Workbench's own files, which cannot be granted."""
+    return tmp_path_factory.mktemp("mr7-notes")
+
+
+@pytest.fixture
+def more_notes(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A second empty folder to grant, for a test with two."""
+    return tmp_path_factory.mktemp("mr7-more")
+
+
+@pytest.fixture
+def quiet_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The folder loop looks again often, so a test that changes what it waits for is not kept
+    waiting half a minute for the loop to notice. (What is asked for is checked at once; this only
+    shortens its idle sleep.)"""
+    from eugene_plexus_workbench.knowledge import folder_sync
+
+    monkeypatch.setattr(folder_sync, "TICK", 0.05)
+
+
 def _static(tmp_path: Path) -> Path:
     static = tmp_path / "static"
     (static / "assets").mkdir(parents=True)

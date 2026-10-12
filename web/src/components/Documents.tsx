@@ -13,6 +13,10 @@
  * screen says so and offers nothing that would keep a document; what a person already
  * has stays theirs to read and remove. A search that is damaged says so in the
  * server's words and offers to make it again from the person's own files.
+ *
+ * Folders (MR7) are a section of their own (DocumentFolders): the folders the owner gave the
+ * person, which Workbench reads and keeps in step. Their files are documents too, searched by every
+ * chat with Documents on, and counted apart from the files the person added themselves.
  */
 
 import {
@@ -46,9 +50,12 @@ import {
   totalsWords,
 } from "../lib/savedDocuments";
 import type { DocumentsPage, ExternalChoice, Me, MeaningRebuilt, Rebuilt } from "../lib/types";
+import { anySearchable } from "../lib/documentFolders";
+import { useDocumentFolders } from "../lib/useDocumentFolders";
 import { useKeepFocus } from "../lib/useKeepFocus";
 import { useSavedDocuments } from "../lib/useSavedDocuments";
 import { AddDocuments } from "./AddDocuments";
+import { DocumentFolders } from "./DocumentFolders";
 import { DocumentRow } from "./DocumentRow";
 import { DocumentsSearch } from "./DocumentsSearch";
 import { TestQuestion } from "./TestQuestion";
@@ -58,15 +65,21 @@ type Working = <T>(work: () => Promise<T>) => Promise<T>;
 export function Documents({
   onClose,
   onAsk,
+  onTools,
   me,
 }: {
   onClose: () => void;
   onAsk: () => void;
+  /** Opens Toolbox · Tools, where the owner gives folders to people (the Folders section says so). */
+  onTools?: () => void;
   /** Who is reading, and where Eugene's console is: a search model is the owner's to get. */
   me?: Pick<Me, "owner" | "consoleUrl"> | null;
 }) {
   const uid = useId();
   const { data, blocked, problem: loadProblem, reload } = useSavedDocuments();
+  // The folders the person pointed their Documents at (MR7): read apart from their own files, so a
+  // folder of ten thousand files is not part of every look at the list.
+  const folders = useDocumentFolders();
   const [problem, setProblem] = useState<string | null>(null);
   const [rebuilt, setRebuilt] = useState<Rebuilt | null>(null);
   const [meaningRebuilt, setMeaningRebuilt] = useState<MeaningRebuilt | null>(null);
@@ -273,6 +286,11 @@ export function Documents({
   const off = !data.installEnabled;
   const bare = off && data.documents.length === 0;
   const ready = data.documents.filter((doc) => doc.searchable).length;
+  const kept = folders.data?.folders ?? [];
+  // Where the owner has turned documents off, a person's folders are shown only so that they can be
+  // removed: with none, there is nothing to say about folders.
+  const showFolders = !off || kept.length > 0;
+  const fromFolders = kept.some((folder) => folder.counts.files > 0);
 
   const list = (
     <ul
@@ -402,7 +420,20 @@ export function Documents({
             )}
           </section>
         )}
-        {!off && data.documents.length > 0 && <TestQuestion search={data.search} />}
+        {showFolders && (
+          <DocumentFolders
+            folders={folders}
+            me={me}
+            off={off}
+            busy={busy}
+            askHere={!off && ready === 0 && anySearchable(kept)}
+            onAsk={onAsk}
+            onTools={onTools}
+          />
+        )}
+        {!off && (data.documents.length > 0 || fromFolders) && (
+          <TestQuestion search={data.search} />
+        )}
       </div>
     </section>
   );

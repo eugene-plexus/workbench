@@ -269,6 +269,7 @@ def fuse(found: dict[str, list[Hit]], similar: Collection[str] = frozenset()) ->
 def names_document(name: str, question: str) -> bool:
     """Whether a question names a file: every word of its name (without the
     extension) is in the question, and at least one of them is a real word."""
+    name = name.rsplit("/", 1)[-1]  # a file of a folder is named `folder/path/file.md`
     stem = name.rsplit(".", 1)[0] if "." in name else name
     parts = words_of(stem)
     if not parts or all(len(p) < MIN_TERM for p in parts):

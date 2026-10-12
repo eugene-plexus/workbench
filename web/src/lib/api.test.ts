@@ -6,6 +6,7 @@ import {
   fileText,
   problemOf,
   put,
+  serverNow,
   SignedOut,
   upload,
 } from "./api";
@@ -377,5 +378,59 @@ describe("an upload", () => {
     });
     // No request was even made for it.
     expect(Sending.last).toBe(request);
+  });
+});
+
+describe("Workbench's clock", () => {
+  const AT = Date.UTC(2026, 9, 11, 15, 0, 0);
+  const said = (offsetSeconds: number) => new Date(AT + offsetSeconds * 1000).toUTCString();
+
+  afterEach(() => vi.useRealTimers());
+
+  async function read(headers: Record<string, string>, status = 200) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => answer(status, status === 200 ? {} : { detail: "No." }, headers)),
+    );
+    await api("/api/documents/folders").catch(() => undefined);
+  }
+
+  it("is told by the Date header of an answer, so a browser whose clock is out says the right time", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(AT);
+    await read({ Date: said(300) });
+    // Workbench's clock is five minutes ahead of this browser's, and stays so as time passes.
+    expect(serverNow()).toBeCloseTo(AT / 1000 + 300, 0);
+    vi.setSystemTime(AT + 60_000);
+    expect(serverNow()).toBeCloseTo(AT / 1000 + 360, 0);
+    // The next answer corrects it: now Workbench says it is a minute ahead.
+    await read({ Date: said(120) });
+    expect(serverNow()).toBeCloseTo(AT / 1000 + 120, 0);
+  });
+
+  it("is kept when an answer has no Date header, or one that is not a date", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(AT);
+    await read({ Date: said(-90) });
+    expect(serverNow()).toBeCloseTo(AT / 1000 - 90, 0);
+    await read({});
+    expect(serverNow()).toBeCloseTo(AT / 1000 - 90, 0);
+    await read({ Date: "yesterday, probably" });
+    expect(serverNow()).toBeCloseTo(AT / 1000 - 90, 0);
+  });
+
+  it("is not told by a refusal, which is not an answer to what was asked", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(AT);
+    await read({ Date: said(0) });
+    await read({ Date: said(900) }, 500);
+    expect(serverNow()).toBeCloseTo(AT / 1000, 0);
+  });
+
+  it("is the browser's own clock when Workbench's is the same", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(AT);
+    await read({ Date: said(0) });
+    expect(serverNow()).toBeCloseTo(Date.now() / 1000, 0);
   });
 });

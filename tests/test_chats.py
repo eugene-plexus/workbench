@@ -447,6 +447,10 @@ def test_settings_are_changed_only_with_the_agents_admin_token(world: World) -> 
         "documentsEmbeddingModel",
         "documentsExternalEmbedding",
         "documentsEmbedRequestsPerMinute",
+        "documentsFolderSyncMinutes",
+        "documentsFolderMaxFiles",
+        "documentsFolderMaxMB",
+        "documentsFolderMaxDepth",
     ]
     assert schema["fields"][0]["default"] is False
     assert httpx.get(f"{world.workbench}/v1/config", headers=good, trust_env=False).json() == {
@@ -462,6 +466,10 @@ def test_settings_are_changed_only_with_the_agents_admin_token(world: World) -> 
         "documentsEmbeddingModel": "auto",
         "documentsExternalEmbedding": False,
         "documentsEmbedRequestsPerMinute": 30,
+        "documentsFolderSyncMinutes": 10,
+        "documentsFolderMaxFiles": 10000,
+        "documentsFolderMaxMB": 2048,
+        "documentsFolderMaxDepth": 12,
     }
     result = httpx.patch(
         f"{world.workbench}/v1/config",
