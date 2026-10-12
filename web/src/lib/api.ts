@@ -69,8 +69,25 @@ export async function problemOf(response: Response): Promise<string> {
   return (await refusalOf(response)).message;
 }
 
+/** How far Workbench's clock is ahead of this browser's, in seconds, as the last answer said (its
+ * `Date` header): zero until one does. A time Workbench stamped (when a folder was last checked)
+ * is told against Workbench's own clock, so a browser whose clock is minutes out does not say a
+ * check was minutes ago when it was a moment ago. */
+let skew = 0;
+
+/** The time now by Workbench's clock, in seconds. */
+export const serverNow = (): number => Date.now() / 1000 + skew;
+
+function noteClock(response: Response): void {
+  const said = Date.parse(response.headers?.get?.("Date") ?? "");
+  if (Number.isFinite(said)) skew = said / 1000 - Date.now() / 1000;
+}
+
 export async function checked(response: Response): Promise<Response> {
-  if (response.ok) return response;
+  if (response.ok) {
+    noteClock(response);
+    return response;
+  }
   if (response.status === 401) {
     let reason = "none";
     let message = "Sign in with Eugene to use Workbench.";

@@ -14,8 +14,9 @@ from pathlib import Path
 import pytest
 
 from . import documents as docs
-from .conftest import World
-from .saved import chat_on, keep, md, survey_pdf
+from .conftest import PNG, World
+from .folderdocs import add_and_settle, grant, write
+from .saved import chat_on, keep, md, start, survey_pdf
 
 # What a local model writes when it is asked something technical: headings,
 # bold lead-ins, a formula, a table, steps with nested bullets, a quote, a
@@ -135,7 +136,12 @@ def pieces(text: str, size: int = 24) -> list[str]:
 
 
 @pytest.mark.skipif(not os.getenv("WORKBENCH_PLAYWRIGHT"), reason="opt-in system Chrome acceptance")
-def test_reading_in_chrome(world: World, tmp_path: Path) -> None:
+def test_reading_in_chrome(
+    world: World,
+    tmp_path: Path,
+    notes: Path,
+    quiet_loop: None,
+) -> None:
     root = Path(__file__).resolve().parents[1]
     assert world.settings.static_dir is not None
     shutil.copytree(
@@ -211,6 +217,15 @@ def test_reading_in_chrome(world: World, tmp_path: Path) -> None:
         ("field-notes.md", md("The tide table is on the wall.", title="Field notes")),
         ("quarterly-report.docx", docs.docx(code_word="PLUMBAGO-77")),
     )
+    # Folders (MR7): a granted folder of notes, read: its files, what was left out and its rules
+    # are another screen to read, beside the person's own files.
+    write(notes, "harbour-notes.md", md("The tide table is on the wall.", title="Harbour notes"))
+    write(notes, "docs/field-notes.md", md("The kettle is in the cupboard.", title="Field notes"))
+    write(notes, "picture.png", PNG)
+    write(notes, ".env", "A=1\n")
+    write(notes, "node_modules/leftpad/index.js", "module.exports = 1;\n")
+    folder = grant(world, start(world, "operator"), notes, subject="p-ada", name="Work notes")
+    add_and_settle(person, folder)
     library = chat_on(person)
     ask(
         library,
@@ -255,6 +270,7 @@ def test_reading_in_chrome(world: World, tmp_path: Path) -> None:
                     "library": library,
                 },
                 "library": {"question": QUESTION},
+                "folder": {"name": "Work notes"},
                 "documents": {
                     "long": str(files / "long-12-pages.pdf"),
                     "scan": str(files / "scan.pdf"),

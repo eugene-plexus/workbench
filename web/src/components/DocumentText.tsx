@@ -21,6 +21,7 @@ export function useDocumentText({
   name,
   describedBy,
   saved = false,
+  prefix,
 }: {
   id: string;
   name: string;
@@ -30,6 +31,9 @@ export function useDocumentText({
   /** A document the person keeps (read from `/api/documents`), not a file attached
    * to a chat. */
   saved?: boolean;
+  /** What the test ids start with, where this box sits beside another that has its own (a folder's
+   * file beside the person's own): `<prefix>-text-toggle`, `<prefix>-text`, `<prefix>-text-error`. */
+  prefix?: string;
 }): { action: ReactNode; panel: ReactNode } {
   const uid = useId();
   const [open, setOpen] = useState(false);
@@ -38,7 +42,7 @@ export function useDocumentText({
   const [loading, setLoading] = useState(false);
   // An answer that arrives after the box was closed (or opened again) is not shown.
   const latest = useRef(0);
-  const test = saved ? "saved-document" : "document";
+  const test = prefix ?? (saved ? "saved-document" : "document");
 
   async function toggle() {
     const mine = ++latest.current;

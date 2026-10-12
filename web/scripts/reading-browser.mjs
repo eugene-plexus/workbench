@@ -273,6 +273,19 @@ async function takeFilesBack(page) {
   await page.waitForFunction(() => !document.querySelector("[data-testid=document-chip]"));
 }
 
+// The Documents screen's folder (MR7), opened as far as it goes: its files with their reasons, what
+// was left out and why, and its rules, each read before the picture is taken.
+async function openFolder(page) {
+  await page.locator("[data-testid=folder][data-state=synced]").first().waitFor();
+  const card = page.getByTestId("folder").first();
+  await card.getByTestId("folder-files-toggle").click();
+  await page.locator("[data-testid=folder-file][data-state=skipped]").first().waitFor();
+  await card.getByTestId("folder-left-toggle").click();
+  await page.getByTestId("folder-left-group").first().waitFor();
+  await card.getByTestId("folder-rules-toggle").click();
+  await page.getByTestId("folder-rules").waitFor();
+}
+
 // The acceptance: each look the design promises, held to a number.
 const failures = [];
 function check(name, ok, detail, { always = false } = {}) {
@@ -468,6 +481,12 @@ try {
           await page.getByTestId("documents-test-hit").first().waitFor();
           await settle(page);
           judgeFaint(scheme, "the Documents screen", await page.evaluate(probe));
+          // Folders (MR7): a folder that is synced, with its files, what was left out and its
+          // rules open, so the text of every one of them is read too.
+          await openFolder(page);
+          await settle(page);
+          await page.screenshot(shot(`folders-${scheme}-desk`));
+          judgeFaint(scheme, "the Folders section", await page.evaluate(probe));
         }
         await page.keyboard.press("Escape");
       }
@@ -558,6 +577,20 @@ try {
         libraryWide <= 1,
         `${libraryWide}px too wide`,
       );
+      // The folder on it, opened as far as it goes (its files, what was left out, its rules):
+      // nothing wider than the screen, and every text on it readable.
+      await openFolder(page);
+      await settle(page);
+      await page.screenshot(shot(`folders-${scheme}-phone`));
+      const foldersWide = await page.evaluate(
+        () => document.documentElement.scrollWidth - window.innerWidth,
+      );
+      check(
+        `${scheme} phone: the Folders section, open, is nothing wider than the screen`,
+        foldersWide <= 1,
+        `${foldersWide}px too wide`,
+      );
+      judgeFaint(scheme, "the Folders section on a phone", await page.evaluate(probe));
       // The Memory page, on a phone: nothing wider than the screen.
       await page.goto(`${cfg.url}/memory`);
       await page.getByTestId("memory-note").first().waitFor();

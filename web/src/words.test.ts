@@ -114,6 +114,18 @@ const DOCUMENT_FILES = [
   // made of underneath.
   "components/DocumentsSearch.tsx",
   "lib/documentMeaning.ts",
+  // Folders (MR7): "folder", "files", "ready", "being read", "left out", never what a file is
+  // made into underneath.
+  "components/AddFolder.tsx",
+  "components/DocumentFolders.tsx",
+  "components/FolderCard.tsx",
+  "components/FolderFiles.tsx",
+  "components/FolderLeftOut.tsx",
+  "components/FolderRules.tsx",
+  "lib/documentFolders.ts",
+  "lib/useDocumentFolders.ts",
+  "lib/useFolderDetail.ts",
+  "lib/useFolderFiles.ts",
 ];
 const NOT_ON_THE_DOCUMENT_PATH = /\b(RAG|vectors?|embeddings?|retrieval|retrieve[ds]?|chunks?)\b/i;
 

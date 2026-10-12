@@ -124,6 +124,7 @@ ignore = []
 "scripts/mr5-meaning-acceptance.py" = ["E501"]
 "scripts/mr7-folders-acceptance.py" = ["E501"]
 "scripts/check-folders-sabotage.py" = ["E501"]
+"scripts/check-folders-page-sabotage.py" = ["E501"]
 
 # -----------------------------------------------------------------------------
 # Mypy

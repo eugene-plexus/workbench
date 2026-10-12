@@ -1278,3 +1278,173 @@ export interface SearchRecord {
    * why; null for a search that was not run (MR5). */
   meaning: MeaningRun | null;
 }
+
+// --- folders (MR7): `/api/documents/folders`, as `folder_docs_api.py` answers ---
+
+/** Where a folder stands: `waiting` (its turn is soon, or it was never checked), `syncing` (a
+ * check is under way), `synced`, `problem` (the last check could not finish), `unavailable` (the
+ * folder is not there, or another one is in its place) and `withdrawn` (the owner took the
+ * grant away). */
+export type FolderState =
+  "waiting" | "syncing" | "synced" | "problem" | "unavailable" | "withdrawn";
+
+/** A check under way: `looking` (the walk) and then `reading` (`done` of `total` files taken). */
+export interface FolderRun {
+  phase: string;
+  done: number;
+  total: number;
+  /** Epoch seconds. */
+  since: number;
+  /** Whether the person asked for it (Sync now). */
+  manual: boolean;
+  /** A deep check reads and compares every file. */
+  deep: boolean;
+}
+
+/** What a folder holds, counted by the server. */
+export interface FolderCounts {
+  files: number;
+  byState: Record<string, number>;
+  /** For the files that were skipped or failed: how many of each reason. */
+  byCode: Record<string, number>;
+  passages: number;
+  embedded: number;
+  owed: number;
+  bytes: number;
+}
+
+/** The limits a folder is held to, and how near this one is. */
+export interface FolderCaps {
+  files: { limit: number; found: number; reached: boolean };
+  bytes: { limit: number; used: number; reached: boolean };
+  /** `reached` counts the folders that were too deep to be looked at. */
+  depth: { limit: number; reached: number };
+  entries: { reached: boolean };
+  fileBytes: { limit: number };
+}
+
+/** What the last check did. */
+export interface FolderLast {
+  finishedAt: number | null;
+  seconds: number | null;
+  mode: "quick" | "now" | "deep" | null;
+  added: number;
+  changed: number;
+  moved: number;
+  removed: number;
+  skipped: number;
+  unchanged: number;
+  files: number;
+  directories: number;
+  ignored: { files: number; folders: number };
+  links: number;
+  unlistedTotal: number;
+}
+
+/** Why a folder is not as it should be, in the server's words, and when. A withdrawn or missing
+ * folder also says how many documents it took out of the search. */
+export interface FolderProblem {
+  code: string;
+  message: string;
+  at: number;
+  removed?: number;
+}
+
+/** One of the person's folders (`folder_docs_api.folder_view`). A person never gets a path. */
+export interface DocumentFolder {
+  id: string;
+  name: string;
+  state: FolderState;
+  headline: string;
+  granted: boolean;
+  writable: boolean;
+  ignore: string[];
+  includeHidden: boolean;
+  useGitignore: boolean;
+  addedAt: number | null;
+  syncedAt: number | null;
+  checkedAt: number | null;
+  /** When the next check is due; only while `synced`. */
+  nextAt: number | null;
+  syncing: FolderRun | null;
+  counts: FolderCounts;
+  caps: FolderCaps;
+  last: FolderLast | null;
+  problem: FolderProblem | null;
+}
+
+/** What a check left out: `kind` is `file`, `folder`, `link` or `other`, `code` says which rule
+ * or limit, and `reason` is the server's sentence. */
+export interface LeftOut {
+  path: string;
+  kind: string;
+  code: string;
+  reason: string;
+}
+
+/** A folder with everything its last check left out (`GET /api/documents/folders/{id}`). */
+export interface DocumentFolderDetail extends DocumentFolder {
+  left: LeftOut[];
+  /** Every one that was left out, by code: `left` holds the first 200 of them. */
+  leftCounts: Record<string, number>;
+  /** Directories that could not be looked into, and what was seen. */
+  unlisted: { path: string; cause: string }[];
+}
+
+/** A folder the person may add: its name, never its path. */
+export interface FolderChoice {
+  id: string;
+  name: string;
+  writable: boolean;
+  added: boolean;
+}
+
+/** The limits Workbench states, and the rules that are always in force. */
+export interface FolderLimits {
+  syncMinutes: number;
+  maxFiles: number;
+  maxMB: number;
+  maxBytes: number;
+  maxDepth: number;
+  maxFileMB: number;
+  maxFileBytes: number;
+  maxPassages: number;
+  maxIgnore: number;
+  maxPattern: number;
+  reads: string;
+  rules: {
+    folders: string[];
+    files: string[];
+    temporary: string[];
+    hidden: string;
+    gitignore: string;
+    list: string;
+  };
+}
+
+/** `GET /api/documents/folders`. `available` is false where this Workbench has no account of its
+ * own to read folders with, and `reason` says so. */
+export interface DocumentFolders {
+  available: boolean;
+  reason: string | null;
+  enabled: boolean;
+  folders: DocumentFolder[];
+  grants: FolderChoice[];
+  limits: FolderLimits;
+}
+
+/** A document read from a folder, with the folder and its path below it. */
+export interface FolderFile extends SavedDocument {
+  folderId: string | null;
+  path: string;
+}
+
+/** `GET /api/documents/folders/{id}/files`: a page of a folder's documents in path order. */
+export interface FolderFiles {
+  folderId: string;
+  files: FolderFile[];
+  total: number;
+  offset: number;
+  limit: number;
+  counts: FolderCounts;
+}
