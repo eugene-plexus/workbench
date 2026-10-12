@@ -1,0 +1,95 @@
+{
+ "ok": {
+  "headline": "Searching by meaning and words.",
+  "detail": null,
+  "actions": []
+ },
+ "none_set_up": {
+  "headline": "Searching by words only. No search model is running.",
+  "detail": "Searching by words only: no search model is set up.",
+  "actions": [
+   "get_search_model"
+  ]
+ },
+ "not_running": {
+  "headline": "Searching by words only. No search model is running.",
+  "detail": "Searching by words only: the search model Qwen3-Embedding-0.6B-Q8_0 is not running. Start it in Eugene's console under Backends.",
+  "actions": []
+ },
+ "not_listed": {
+  "headline": "Searching by words only. No search model is running.",
+  "detail": "Searching by words only: Eugene lists no search model named nomic-embed. Check the Search model setting in Eugene's console.",
+  "actions": []
+ },
+ "not_search_model": {
+  "headline": "Searching by words only. No search model is running.",
+  "detail": "Searching by words only: gemma-3 is not a search model. Choose one in the Search model setting in Eugene's console.",
+  "actions": []
+ },
+ "outside": {
+  "headline": "Searching by words only. No search model is running.",
+  "detail": "Searching by words only: text-embedding-3-small runs on OpenAI, outside your machines, and the owner has not allowed sending your documents' text there.",
+  "actions": []
+ },
+ "outside_only": {
+  "headline": "Searching by words only. No search model is running.",
+  "detail": "Searching by words only: the only search models Eugene lists run outside your machines (text-embedding-3-small), and the owner has not allowed sending your documents' text there.",
+  "actions": []
+ },
+ "unreachable": {
+  "headline": "Searching by words only.",
+  "detail": "Searching by words only: Eugene's gateway could not be reached.",
+  "actions": []
+ },
+ "key": {
+  "headline": "Searching by words only.",
+  "detail": "Searching by words only: The gateway refused Workbench's key.",
+  "actions": []
+ },
+ "limited": {
+  "headline": "Searching by words only.",
+  "detail": "Searching by words only: this Workbench's key is at its limit (too many requests), so a question could not be searched by meaning. The owner can raise the key's limits in Eugene's console.",
+  "actions": []
+ },
+ "slow": {
+  "headline": "Searching by words only.",
+  "detail": "Searching by words only: The gateway took too long to answer.",
+  "actions": []
+ },
+ "refused": {
+  "headline": "Searching by words only.",
+  "detail": "Searching by words only: the search model Qwen3-Embedding-0.6B-Q8_0 refused the request (the input is empty).",
+  "actions": []
+ },
+ "error": {
+  "headline": "Searching by words only.",
+  "detail": "Searching by words only: the search model Qwen3-Embedding-0.6B-Q8_0 failed (the engine stopped).",
+  "actions": []
+ },
+ "changed": {
+  "headline": "Search by meaning is paused: this search was built with Qwen3-Embedding-0.6B-Q8_0 and nomic-embed-text-v1.5 is running now.",
+  "detail": "Your documents are searched by words until you choose Rebuild, which adds meaning again with the model that is running.",
+  "actions": [
+   "rebuild"
+  ]
+ },
+ "dimension": {
+  "headline": "Search by meaning is paused: Qwen3-Embedding-0.6B-Q8_0 now gives 768 numbers for each passage, and this search was built with 1,024.",
+  "detail": "Your documents are searched by words until you choose Rebuild, which adds meaning again with the model that is running.",
+  "actions": [
+   "rebuild"
+  ]
+ },
+ "damaged": {
+  "headline": "Search by meaning is off: what this search was built with is unreadable (not JSON). Your files are safe. Rebuild adds meaning again.",
+  "detail": null,
+  "actions": [
+   "rebuild"
+  ]
+ },
+ "no_gateway": {
+  "headline": "Searching by words only.",
+  "detail": null,
+  "actions": []
+ }
+}

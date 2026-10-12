@@ -852,6 +852,29 @@ class FakeGateway:
                 return video_error(404, f"No video job '{handle}' for this key.", "video_id")
             return Response(content=self.video_content, media_type="video/mp4")
 
+        @app.post("/__fake/search-models")
+        async def fake_search_models(request: Request) -> Any:
+            """A test's hand on the gateway while a browser drives Workbench (MR5): which search
+            models it lists from now on, as `{"models": [{"id": ..., "ready": true}]}`. The
+            Chrome check starts and stops a search model through it, as the owner would in
+            Eugene's console."""
+            body = await request.json()
+            self.embedder_listed = False
+            self.search_models = [
+                search_model(
+                    m["id"], locality=m.get("locality", "local"), ready=m.get("ready", True)
+                )
+                for m in body["models"]
+            ]
+            # `hold`: the passages' answers wait (so a screen can be seen while meaning is being
+            # added), and are let go when it is false.
+            if body.get("hold"):
+                self.embed_gate = threading.Event()
+            elif "hold" in body and self.embed_gate is not None:
+                self.embed_gate.set()
+                self.embed_gate = None
+            return {"listed": [m["id"] for m in self.search_models]}
+
         @app.post("/v1/embeddings")
         async def embeddings(request: Request) -> Any:
             body = await request.json()

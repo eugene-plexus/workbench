@@ -6,14 +6,24 @@
  * file. Read only by tests; the page never imports it.
  */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import type {
+  AddingView,
   ChatDocuments,
   ChatDocumentsReadOnly,
+  DocumentMeaning,
   DocumentsPage,
   DocumentsPrefs,
   HiddenPassage,
+  MeaningRun,
   PassageSource,
   SavedDocument,
+  SearchAction,
+  SearchCode,
+  SearchFacts,
+  SearchModelView,
   SearchRecord,
   TestedPassage,
   TestedQuestion,
@@ -45,9 +55,233 @@ export function saved(over: Partial<SavedDocument> = {}): SavedDocument {
     addedAt: ADDED,
     readAt: ADDED + 1,
     indexedAt: ADDED + 1,
+    meaning: null,
     ...over,
   };
 }
+
+// --- search by meaning (MR5) ---
+
+/** A document's meaning, as `Meaning.document_view` says it: every passage of a ready one. */
+export function meaningOf(over: Partial<DocumentMeaning> = {}): DocumentMeaning {
+  return {
+    embedded: 5,
+    total: 5,
+    etaSeconds: null,
+    refused: 0,
+    notes: [],
+    state: "ready",
+    message: null,
+    ...over,
+  };
+}
+
+/** A document that has all its meaning. */
+export const withMeaning = (over: Partial<SavedDocument> = {}) =>
+  saved({ embedded: 5, meaning: meaningOf(), ...over });
+
+/** A document that can be found by words and is having its meaning added (the server's own sentence). */
+export const adding = (over: Partial<SavedDocument> = {}) =>
+  saved({
+    state: "embedding",
+    embedded: 2,
+    meaning: meaningOf({
+      embedded: 2,
+      state: "adding",
+      etaSeconds: 840,
+      message: "Ready for words. Adding meaning: 2 of 5 passages, about 14 minutes left.",
+    }),
+    ...over,
+  });
+
+/** One that waits for the search model. */
+export const waiting = (over: Partial<SavedDocument> = {}) =>
+  saved({
+    state: "searchable",
+    meaning: meaningOf({
+      embedded: 0,
+      state: "waiting",
+      message:
+        "Ready for words. Meaning is waiting: the search model qwen3-embedding is not running. Start it in Eugene's console under Backends.",
+    }),
+    ...over,
+  });
+
+/** One held back by the key's limit. */
+export const limited = (over: Partial<SavedDocument> = {}) =>
+  saved({
+    state: "embedding",
+    embedded: 2,
+    meaning: meaningOf({
+      embedded: 2,
+      state: "limited",
+      message:
+        "Ready for words. Adding meaning to your documents is slow right now: this Workbench's key is at its limit (HTTP 429) and chats use it too. It will carry on by itself. The owner can raise the key's limits in Eugene's console.",
+    }),
+    ...over,
+  });
+
+/** One read while no search model was running. */
+export const wordsOnlyDoc = (over: Partial<SavedDocument> = {}) =>
+  saved({ meaning: meaningOf({ embedded: 0, state: "words_only" }), ...over });
+
+/** The search model in use, as `Meaning.status` says it. */
+export function modelView(over: Partial<SearchModelView> = {}): SearchModelView {
+  return {
+    setting: "auto",
+    automatic: true,
+    resolved: "Qwen3-Embedding-0.6B-Q8_0",
+    label: "In use: Qwen3-Embedding-0.6B-Q8_0 (automatic)",
+    locality: "local",
+    runsOn: null,
+    allowExternal: false,
+    outside: [],
+    builtWith: "Qwen3-Embedding-0.6B-Q8_0",
+    dimension: 1024,
+    prefixes: {
+      known: true,
+      family: "qwen3-embedding",
+      query:
+        "Instruct: Given a question, retrieve passages from the person's documents that answer it\nQuery:",
+      document: "",
+      note: null,
+    },
+    floor: 0.5,
+    ...over,
+  };
+}
+
+/** How adding meaning is going: nothing to add. */
+export function addingView(over: Partial<AddingView> = {}): AddingView {
+  return {
+    state: "idle",
+    message: null,
+    passages: 5,
+    embedded: 5,
+    owed: 0,
+    wordsOnly: 0,
+    etaSeconds: null,
+    ratePerSecond: null,
+    ...over,
+  };
+}
+
+/** A Workbench with no gateway to ask about a search model: words only, and nothing to say why. */
+export function wordsOnly(over: Partial<SearchFacts> = {}): SearchFacts {
+  return {
+    mode: "words",
+    words: true,
+    meaning: false,
+    headline: "Searching by words only.",
+    code: "no_gateway",
+    detail: null,
+    actions: [],
+    model: null,
+    adding: null,
+    rebuild: null,
+    ...over,
+  };
+}
+
+/** No search model has been set up. */
+export const noSearchModel = (over: Partial<SearchFacts> = {}) =>
+  wordsOnly({
+    headline: "Searching by words only. No search model is running.",
+    code: "none_set_up",
+    detail: "Searching by words only: no search model is set up.",
+    actions: ["get_search_model"],
+    ...over,
+  });
+
+/** Meaning and words: a search model is in use. */
+export const byMeaning = (over: Partial<SearchFacts> = {}): SearchFacts => ({
+  mode: "meaning and words",
+  words: true,
+  meaning: true,
+  headline: "Searching by meaning and words.",
+  code: "ok",
+  detail: null,
+  actions: [],
+  model: modelView(),
+  adding: addingView(),
+  rebuild: null,
+  ...over,
+});
+
+/** This search was built with one search model and another is running now. */
+export const paused = (over: Partial<SearchFacts> = {}) =>
+  wordsOnly({
+    headline:
+      "Search by meaning is paused: this search was built with Qwen3-Embedding-0.6B-Q8_0 and nomic-embed-text-v1.5 is running now.",
+    code: "changed",
+    detail:
+      "Your documents are searched by words until you choose Rebuild, which adds meaning again with the model that is running.",
+    actions: ["rebuild"],
+    model: modelView({
+      resolved: "nomic-embed-text-v1.5",
+      label: "In use: nomic-embed-text-v1.5 (automatic)",
+    }),
+    rebuild: { passages: 3000, seconds: 720, model: "nomic-embed-text-v1.5" },
+    ...over,
+  });
+
+/** What the header says for each code, as the server's own functions make it: the headline, the
+ * detail and what a person can do (`tests/fixtures/search_codes.json`, which the server's tests
+ * hold to what it says: tests/test_meaning_page.py). */
+const SAYS = JSON.parse(
+  readFileSync(join(import.meta.dirname, "../../tests/fixtures/search_codes.json"), "utf8"),
+) as Record<SearchCode, { headline: string; detail: string | null; actions: SearchAction[] }>;
+
+/** Every code the server can say. */
+export const CODES = Object.keys(SAYS) as SearchCode[];
+
+/** The header for a code, in the server's own words. */
+export function searchFor(code: SearchCode, over: Partial<SearchFacts> = {}): SearchFacts {
+  const said = SAYS[code];
+  if (code === "ok") return byMeaning(over);
+  const rebuild = said.actions.includes("rebuild");
+  return wordsOnly({
+    headline: said.headline,
+    code,
+    detail: said.detail,
+    actions: said.actions,
+    // A paused search has the search model that is running now, and what Rebuild would do.
+    model: rebuild
+      ? modelView({
+          resolved: "nomic-embed-text-v1.5",
+          label: "In use: nomic-embed-text-v1.5 (automatic)",
+        })
+      : null,
+    rebuild: rebuild ? { passages: 3000, seconds: 720, model: "nomic-embed-text-v1.5" } : null,
+    ...over,
+  });
+}
+
+/** What a search by meaning came to for a question: it was not asked for. */
+export function meaningRun(over: Partial<MeaningRun> = {}): MeaningRun {
+  return {
+    used: false,
+    code: "not_asked",
+    message: null,
+    quiet: true,
+    model: null,
+    best: null,
+    floor: null,
+    belowFloor: false,
+    ...over,
+  };
+}
+
+/** Meaning ran, with this search model. */
+export const ranByMeaning = (over: Partial<MeaningRun> = {}) =>
+  meaningRun({
+    used: true,
+    code: "ok",
+    model: "Qwen3-Embedding-0.6B-Q8_0",
+    best: 0.74,
+    floor: 0.5,
+    ...over,
+  });
 
 /** Waiting its turn to be read. */
 export const queued = (over: Partial<SavedDocument> = {}) =>
@@ -171,6 +405,17 @@ export function page(
   };
   for (const doc of documents) byState[doc.state] = (byState[doc.state] ?? 0) + 1;
   const passages = documents.reduce((sum, doc) => sum + doc.passages, 0);
+  // What the server counts: passages that have their meaning, and passages a document that can
+  // be found by words is still owed.
+  const embedded = documents.reduce((sum, doc) => sum + (doc.meaning?.embedded ?? 0), 0);
+  const owed = documents.reduce(
+    (sum, doc) =>
+      sum +
+      (doc.state === "searchable" || doc.state === "embedding"
+        ? doc.passages - (doc.meaning?.embedded ?? 0)
+        : 0),
+    0,
+  );
   return {
     documents,
     totals: {
@@ -179,6 +424,8 @@ export function page(
       bytes: documents.reduce((sum, doc) => sum + doc.size, 0),
       byState,
       passagesKept: passages,
+      embedded,
+      owed,
     },
     limits: {
       maxFileBytes: 50 * 1024 * 1024,
@@ -189,12 +436,7 @@ export function page(
         "Workbench reads PDF, Word (.docx), Markdown, text, CSV, HTML and code files, and sends PNG or JPEG images and WAV or MP3 audio to models that take them.",
       readTimeoutSeconds: 120,
     },
-    search: {
-      mode: "words",
-      words: true,
-      meaning: false,
-      headline: "Searching by words only.",
-    },
+    search: wordsOnly(),
     prefs: PREFS,
     installEnabled: true,
     ownerReadsChats: false,
@@ -222,7 +464,7 @@ export function chatDocuments(over: Partial<ChatDocuments> = {}): ChatDocuments 
     },
     chatDocuments: [],
     budget: { limit: 3000, window: 32768 },
-    search: { mode: "words", words: true, meaning: false, headline: "Searching by words only." },
+    search: wordsOnly(),
     ...over,
   };
 }
@@ -332,6 +574,7 @@ export function record(over: Partial<SearchRecord> = {}): SearchRecord {
     notes: [],
     cited: [1],
     ms: 4,
+    meaning: null,
     ...over,
   };
 }
@@ -351,6 +594,17 @@ export const nothing = (over: Partial<SearchRecord> = {}) =>
     ...over,
   });
 
+/** Why a passage `Test a question` found matched: by its words, unless said. */
+export const why = (over: Partial<TestedPassage["why"]> = {}): TestedPassage["why"] => ({
+  via: "words",
+  terms: [],
+  phrases: [],
+  inHeading: [],
+  ranks: { words: 1 },
+  similarity: null,
+  ...over,
+});
+
 /** A passage `Test a question` found. */
 export function hit(over: Partial<TestedPassage> = {}): TestedPassage {
   const found = passage();
@@ -369,7 +623,14 @@ export function hit(over: Partial<TestedPassage> = {}): TestedPassage {
     tokens: 290,
     chunkIds: [17],
     via: "words",
-    why: { via: "words", terms: found.terms, phrases: [], inHeading: [] },
+    why: {
+      via: "words",
+      terms: found.terms,
+      phrases: [],
+      inHeading: [],
+      ranks: { words: 1 },
+      similarity: null,
+    },
     ...over,
   };
 }
@@ -384,6 +645,7 @@ export function tested(over: Partial<TestedQuestion> = {}): TestedQuestion {
       phrases: [],
     },
     mode: "words",
+    meaning: meaningRun(),
     passages: [
       hit(),
       hit({
@@ -396,7 +658,14 @@ export function tested(over: Partial<TestedQuestion> = {}): TestedQuestion {
         snippet: "The code word is PLUMBAGO-77.",
         text: "The code word is PLUMBAGO-77.",
         tokens: 60,
-        why: { via: "words", terms: ["code", "word"], phrases: [], inHeading: [] },
+        why: {
+          via: "words",
+          terms: ["code", "word"],
+          phrases: [],
+          inHeading: [],
+          ranks: { words: 2 },
+          similarity: null,
+        },
       }),
     ],
     found: 2,

@@ -6,23 +6,34 @@
  * the real one refuses.
  */
 
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 
 import { ApiError, api, del, documentText, fileOf, post, put, upload } from "../lib/api";
 import { saveFile } from "../lib/memory";
-import { FIRST_POLL_MS, POLL_MS } from "../lib/savedDocuments";
-import type { DocumentsPrefs, SavedDocument, TestedQuestion } from "../lib/types";
+import { FIRST_POLL_MS, IDLE_POLL_MS, POLL_MS } from "../lib/savedDocuments";
+import type { DocumentsPrefs, Me, SavedDocument, SearchFacts, TestedQuestion } from "../lib/types";
 import {
+  adding,
   broken,
+  byMeaning,
+  limited,
   markdown,
+  meaningOf,
+  noSearchModel,
   page,
+  paused,
   prefs,
   queued,
   reading,
   saved,
   scanned,
+  searchFor,
   tested,
+  waiting,
+  withMeaning,
   word,
+  wordsOnly,
+  wordsOnlyDoc,
 } from "../test-saved";
 import { Documents } from "./Documents";
 
@@ -48,8 +59,11 @@ interface Server {
   prefs: DocumentsPrefs;
   installEnabled: boolean;
   ownerReadsChats: boolean;
-  headline: string;
+  /** Set where a test says a headline of its own; else the one the state of the search has. */
+  headline: string | null;
   meaning: boolean;
+  /** More of the header than the two above: its code, detail, actions, model, adding, rebuild. */
+  search: Partial<SearchFacts>;
   /** While set, every read of the documents is refused with it. */
   refusing: ApiError | null;
   tested: TestedQuestion;
@@ -58,25 +72,33 @@ interface Server {
   /** Ids it cannot remove. */
   stuck: Set<string>;
   rebuilt: { documents: number; left: number };
+  /** While set, a request to add meaning again is refused with it. */
+  meaningRefused: ApiError | null;
   /** How a document moves on each time the list is read. */
   advance: (docs: SavedDocument[]) => SavedDocument[];
 }
 
 let server: Server;
 let reads: number;
+/** What was asked of the test: its body, as the page sent it. */
+let tries: Record<string, unknown>[];
+/** How many times meaning was asked to be added again. */
+let meaningRebuilds: number;
 
 const fresh = (over: Partial<Server> = {}): Server => ({
   docs: [],
   prefs: prefs(),
   installEnabled: true,
   ownerReadsChats: false,
-  headline: "Searching by words only.",
+  headline: null,
   meaning: false,
+  search: {},
   refusing: null,
   tested: tested(),
   gone: new Set(),
   stuck: new Set(),
   rebuilt: { documents: 2, left: 0 },
+  meaningRefused: null,
   advance: (docs) => docs,
   ...over,
 });
@@ -87,10 +109,9 @@ const seen = () =>
     ownerReadsChats: server.ownerReadsChats,
     prefs: server.prefs,
     search: {
-      mode: server.meaning ? "meaning and words" : "words",
-      words: true,
-      meaning: server.meaning,
-      headline: server.headline,
+      ...(server.meaning ? byMeaning() : wordsOnly()),
+      ...(server.headline ? { headline: server.headline } : {}),
+      ...server.search,
     },
   });
 
@@ -129,8 +150,34 @@ function listen() {
       );
       return server.rebuilt;
     }
+    if (path === "/api/documents/meaning/rebuild") {
+      meaningRebuilds += 1;
+      if (server.meaningRefused) throw server.meaningRefused;
+      // Every document is owed all of its meaning, and found by its words while it is added.
+      const owed = server.docs.reduce((sum, d) => sum + (d.searchable ? d.passages : 0), 0);
+      server.docs = server.docs.map((d) =>
+        d.searchable
+          ? {
+              ...d,
+              state: "searchable",
+              embedded: 0,
+              meaning: meaningOf({
+                embedded: 0,
+                total: d.passages,
+                state: "adding",
+                message: `Ready for words. Adding meaning: 0 of ${d.passages} passages.`,
+              }),
+            }
+          : d,
+      );
+      server.meaning = true;
+      server.search = {};
+      server.headline = "Searching by meaning and words.";
+      return { passages: owed, search: byMeaning() };
+    }
     if (path === "/api/documents/test") {
       asked.push(String(body?.question));
+      tries.push(body ?? {});
       return server.tested;
     }
     const again = /^\/api\/documents\/([^/]+)\/reread$/.exec(path);
@@ -177,6 +224,8 @@ beforeEach(() => {
   server = fresh();
   reads = 0;
   asked = [];
+  tries = [];
+  meaningRebuilds = 0;
   listen();
 });
 afterEach(() => vi.useRealTimers());
@@ -186,12 +235,12 @@ const wait = (ms: number) =>
     await vi.advanceTimersByTimeAsync(ms);
   });
 
-/** The screen, opened, and the first read let in. */
-async function opened(over: Partial<Server> = {}) {
+/** The screen, opened, and the first read let in. `me` is who is reading, where it is known. */
+async function opened(over: Partial<Server> = {}, me?: Pick<Me, "owner" | "consoleUrl">) {
   server = fresh(over);
   const onClose = vi.fn();
   const onAsk = vi.fn();
-  const view = render(<Documents onClose={onClose} onAsk={onAsk} />);
+  const view = render(<Documents onClose={onClose} onAsk={onAsk} me={me} />);
   await wait(0);
   return { ...view, onClose, onAsk };
 }
@@ -413,14 +462,19 @@ describe("watching documents being read", () => {
     expect(status("a.md")).toHaveTextContent("Ready");
     expect(within(row("a.md")).getByTestId("saved-document-meta")).toHaveTextContent("3 passages");
     const done = reads;
-    await wait(60_000);
+    // Nothing is going on: only the half-minute look at the search model is left.
+    await wait(IDLE_POLL_MS - 1);
     expect(reads).toBe(done);
+    await wait(1);
+    expect(reads).toBe(done + 1);
   });
 
-  it("does not ask again while every document has stopped", async () => {
+  it("asks only for the half-minute look while every document has stopped", async () => {
     await opened({ docs: [saved(), scanned(), broken()] });
-    await wait(60_000);
+    await wait(IDLE_POLL_MS - 1);
     expect(reads).toBe(1);
+    await wait(1);
+    expect(reads).toBe(2);
   });
 });
 
@@ -892,5 +946,376 @@ describe("Test a question, on the screen", () => {
     await wait(0);
     expect(asked).toEqual(["What is the code word?"]);
     expect(screen.getByTestId("documents-test-result")).toHaveAttribute("data-status", "found");
+  });
+});
+
+// --- search by meaning (MR5) ---
+
+const OWNER = { owner: true, consoleUrl: "http://nas:8279/" };
+const PERSON = { owner: false, consoleUrl: null };
+
+describe("how the screen says it is searched", () => {
+  it("says meaning and words, the search model in use and where it runs, and says what the files are searched for", async () => {
+    await opened({
+      docs: [withMeaning()],
+      meaning: true,
+      headline: "Searching by meaning and words.",
+    });
+    expect(screen.getByTestId("documents-search-headline")).toHaveTextContent(
+      "Searching by meaning and words.",
+    );
+    expect(screen.getByTestId("documents-search-model")).toHaveTextContent(
+      "In use: Qwen3-Embedding-0.6B-Q8_0 (automatic)",
+    );
+    expect(screen.getByTestId("documents-search-where")).toHaveTextContent(
+      "runs on your own machines",
+    );
+    expect(screen.getByTestId("documents-intro")).toHaveTextContent(
+      "searched for the words in your question and for what it means",
+    );
+    expect(screen.queryByTestId("documents-search-help")).toBeNull();
+  });
+
+  it("says the words-only help only while the mode is words, and not once meaning is in use", async () => {
+    await opened({ docs: [saved()] });
+    expect(screen.getByTestId("documents-search")).toHaveTextContent(
+      "“costs” does not find “cost”",
+    );
+    cleanup();
+    await opened({ docs: [withMeaning()], meaning: true });
+    expect(screen.getByTestId("documents-search")).not.toHaveTextContent(
+      "“costs” does not find “cost”",
+    );
+    cleanup();
+    // A search that is paused is by words, and says so, whatever the model that is running.
+    await opened({ docs: [withMeaning()], search: paused() });
+    expect(screen.getByTestId("documents-search")).toHaveTextContent(
+      "“costs” does not find “cost”",
+    );
+  });
+
+  it("says what an empty list is for, as it is searched", async () => {
+    await opened({ meaning: true });
+    expect(screen.getByTestId("documents-empty")).toHaveTextContent("or say what it asks");
+    cleanup();
+    await opened({});
+    expect(screen.getByTestId("documents-empty")).not.toHaveTextContent("or say what it asks");
+  });
+
+  it("says no search model is set up, and links the owner to the Library in Eugene's console", async () => {
+    await opened({ docs: [wordsOnlyDoc()], search: noSearchModel() }, OWNER);
+    expect(screen.getByTestId("documents-search-headline")).toHaveTextContent(
+      "Searching by words only. No search model is running.",
+    );
+    const link = screen.getByTestId("documents-get-search-model");
+    expect(link).toHaveAttribute("href", "http://nas:8279/library/");
+    expect(link).toHaveAccessibleName("Get a search model");
+  });
+
+  it("tells a person who is not the owner to ask the owner, and gives them no link", async () => {
+    await opened({ docs: [wordsOnlyDoc()], search: noSearchModel() }, PERSON);
+    expect(screen.queryByTestId("documents-get-search-model")).toBeNull();
+    expect(screen.getByTestId("documents-ask-owner")).toHaveTextContent(
+      "Ask the owner of this Workbench to set one up in Eugene's console.",
+    );
+  });
+
+  it("is a live look: it says a search model that stopped, at the next look, with nothing else changed", async () => {
+    await opened({ docs: [withMeaning()], meaning: true });
+    expect(screen.getByTestId("documents-search-headline")).toHaveTextContent(
+      "Searching by meaning and words.",
+    );
+    server.meaning = false;
+    server.search = searchFor("not_running");
+    await wait(IDLE_POLL_MS);
+    expect(screen.getByTestId("documents-search-headline")).toHaveTextContent(
+      "Searching by words only. No search model is running.",
+    );
+    expect(screen.getByTestId("documents-search-detail")).toHaveTextContent(
+      "The search model Qwen3-Embedding-0.6B-Q8_0 is not running. Start it in Eugene's console under Backends.",
+    );
+    expect(screen.queryByTestId("documents-search-model")).toBeNull();
+    // And back.
+    server.search = {};
+    server.meaning = true;
+    await wait(IDLE_POLL_MS);
+    expect(screen.getByTestId("documents-search-headline")).toHaveTextContent(
+      "Searching by meaning and words.",
+    );
+  });
+
+  it("says nothing of a search at all where the owner has turned documents off", async () => {
+    await opened({ installEnabled: false, docs: [saved()], search: noSearchModel() }, OWNER);
+    expect(screen.queryByTestId("documents-search")).toBeNull();
+  });
+});
+
+describe("a search that is paused", () => {
+  it("offers Rebuild search with its passages and time, and adds meaning again when it is pressed", async () => {
+    await opened({
+      docs: [withMeaning(), withMeaning({ id: "d9", name: "b.pdf" })],
+      search: paused(),
+    });
+    expect(screen.getByTestId("documents-meaning-rebuild-words")).toHaveTextContent(
+      "Rebuild search adds meaning again to 3,000 passages with nomic-embed-text-v1.5, which takes about 12 minutes.",
+    );
+    fireEvent.click(screen.getByTestId("documents-meaning-rebuild"));
+    await wait(0);
+    expect(meaningRebuilds).toBe(1);
+    expect(vi.mocked(post)).toHaveBeenCalledWith("/api/documents/meaning/rebuild");
+    // It says what it is doing, and the documents are found by words and say how it is going.
+    expect(screen.getByTestId("documents-meaning-rebuilt")).toHaveTextContent(
+      "Adding meaning again to 10 passages",
+    );
+    expect(screen.getByTestId("documents-search-headline")).toHaveTextContent(
+      "Searching by meaning and words.",
+    );
+    expect(status("harbour-survey.pdf")).toHaveTextContent(
+      "Ready for words. Adding meaning: 0 of 5 passages.",
+    );
+    expect(screen.queryByTestId("documents-meaning-rebuild")).toBeNull();
+  });
+
+  it("is held while it is asked, so it is not asked for twice", async () => {
+    await opened({ docs: [withMeaning()], search: paused() });
+    let finish: () => void = () => undefined;
+    vi.mocked(post).mockReturnValueOnce(
+      new Promise(
+        (resolve) => (finish = () => resolve({ passages: 5, search: byMeaning() })),
+      ) as never,
+    );
+    fireEvent.click(screen.getByTestId("documents-meaning-rebuild"));
+    expect(screen.getByTestId("documents-meaning-rebuild")).toBeDisabled();
+    await act(async () => finish());
+    await wait(0);
+  });
+
+  it("says why when it was refused, in the server's words, and stays as it was", async () => {
+    await opened({
+      docs: [withMeaning()],
+      search: paused(),
+      meaningRefused: refuse("The owner of this Workbench has turned off documents.", 403),
+    });
+    fireEvent.click(screen.getByTestId("documents-meaning-rebuild"));
+    await wait(0);
+    expect(screen.getByTestId("documents-problem")).toHaveTextContent(
+      "The owner of this Workbench has turned off documents.",
+    );
+    expect(screen.queryByTestId("documents-meaning-rebuilt")).toBeNull();
+    expect(screen.getByTestId("documents-meaning-rebuild")).toBeEnabled();
+  });
+
+  it("stops saying meaning is being added again once none is owed", async () => {
+    // Each read adds meaning to two more passages, until they all have it.
+    const step = (docs: SavedDocument[]): SavedDocument[] =>
+      docs.map((d) => {
+        if (d.meaning?.state !== "adding") return d;
+        const embedded = Math.min(d.passages, d.embedded + 2);
+        return embedded >= d.passages
+          ? withMeaning({
+              ...d,
+              state: "ready",
+              embedded,
+              meaning: meaningOf({ embedded, total: d.passages }),
+            })
+          : {
+              ...d,
+              embedded,
+              meaning: meaningOf({
+                embedded,
+                total: d.passages,
+                state: "adding",
+                message: `Ready for words. Adding meaning: ${embedded} of ${d.passages} passages.`,
+              }),
+            };
+      });
+    await opened({ docs: [withMeaning()], search: paused(), advance: step });
+    fireEvent.click(screen.getByTestId("documents-meaning-rebuild"));
+    await wait(0);
+    expect(screen.getByTestId("documents-meaning-rebuilt")).toBeInTheDocument();
+    // One look at a time: the screen draws what it read before it asks again.
+    await wait(FIRST_POLL_MS);
+    await wait(POLL_MS);
+    expect(screen.getByTestId("documents-meaning-rebuilt")).toBeInTheDocument();
+    await wait(POLL_MS);
+    expect(status("harbour-survey.pdf")).toHaveTextContent(/^Ready$/);
+    expect(screen.queryByTestId("documents-meaning-rebuilt")).toBeNull();
+    // It does not come back for a document that is added later and is given its meaning.
+    server.docs = [...server.docs, adding({ id: "d9", name: "later.pdf", embedded: 0 })];
+    await wait(IDLE_POLL_MS);
+    expect(screen.queryByTestId("documents-meaning-rebuilt")).toBeNull();
+  });
+});
+
+describe("each document's meaning", () => {
+  it("is said on its row: being added, waiting for the search model, held back by the key's limit, found by words only", async () => {
+    await opened({
+      docs: [
+        adding({ id: "a", name: "adding.pdf" }),
+        waiting({ id: "w", name: "waiting.pdf" }),
+        limited({ id: "l", name: "limited.pdf" }),
+        wordsOnlyDoc({ id: "o", name: "words.pdf" }),
+        withMeaning({ id: "r", name: "ready.pdf" }),
+      ],
+      meaning: true,
+    });
+    expect(status("adding.pdf")).toHaveTextContent(
+      "Ready for words. Adding meaning: 2 of 5 passages, about 14 minutes left.",
+    );
+    expect(status("waiting.pdf")).toHaveTextContent(
+      "Ready for words. Meaning is waiting: the search model qwen3-embedding is not running.",
+    );
+    expect(status("limited.pdf")).toHaveTextContent(
+      "Adding meaning to your documents is slow right now",
+    );
+    expect(status("words.pdf")).toHaveTextContent(
+      "Ready for words only: no search model was running when it was read.",
+    );
+    expect(status("ready.pdf")).toHaveTextContent(/^Ready$/);
+    // Waiting has a clock, being added has the check that says words are ready; neither is a failure.
+    expect(within(status("waiting.pdf")).queryByRole("alert")).toBeNull();
+    expect(status("waiting.pdf")).not.toHaveClass("notice--error");
+    expect(row("adding.pdf")).toHaveAttribute("data-state", "embedding");
+  });
+
+  it("notes each passage the search model refused, in the server's words, and counts what has its meaning", async () => {
+    const note =
+      "The search model refused one passage (1,631 characters; it said: input is too large): skipped harbour-survey.pdf, page 4.";
+    await opened({
+      docs: [
+        saved({
+          embedded: 5,
+          meaning: meaningOf({ embedded: 5, total: 5, refused: 1, notes: [note] }),
+          notes: ["Page 2 has no text (it may be a picture)."],
+        }),
+      ],
+      meaning: true,
+    });
+    expect(status("harbour-survey.pdf")).toHaveTextContent(
+      "Ready. Meaning was added to 4 of 5 passages; 1 passage is found by words only.",
+    );
+    const notes = within(row("harbour-survey.pdf")).getByTestId("saved-document-notes");
+    expect(notes).toHaveTextContent("Page 2 has no text (it may be a picture).");
+    expect(notes).toHaveTextContent(note);
+  });
+
+  it("is not said of a document that was skipped or could not be read", async () => {
+    await opened({ docs: [scanned(), broken()], meaning: true });
+    expect(status("scan.pdf")).toHaveTextContent(/^Skipped:/);
+    expect(status("broken.pdf")).toHaveTextContent(/^Failed:/);
+  });
+
+  it("is totalled at the foot: how many passages have it, and how many are still to do", async () => {
+    await opened({ docs: [adding(), withMeaning({ id: "d9", name: "b.pdf" })], meaning: true });
+    expect(screen.getByTestId("documents-totals")).toHaveTextContent("2 documents · 10 passages");
+    expect(screen.getByTestId("documents-meaning-totals")).toHaveTextContent(
+      "Meaning is added to 7 of 10 passages; 3 are still to do.",
+    );
+  });
+
+  it("is not totalled while no passage has it and none is owed it: the header says words only", async () => {
+    await opened({ docs: [saved(), wordsOnlyDoc({ id: "d9", name: "b.pdf" })] });
+    expect(screen.queryByTestId("documents-meaning-totals")).toBeNull();
+  });
+});
+
+describe("watching meaning being added", () => {
+  // Each read adds meaning to two more passages of every document that is having it added.
+  const step = (docs: SavedDocument[]): SavedDocument[] =>
+    docs.map((d) => {
+      if (d.meaning?.state !== "adding") return d;
+      const embedded = Math.min(d.passages, d.embedded + 2);
+      return embedded >= d.passages
+        ? withMeaning({
+            ...d,
+            state: "ready",
+            embedded,
+            meaning: meaningOf({ embedded, total: d.passages }),
+          })
+        : adding({
+            ...d,
+            embedded,
+            meaning: meaningOf({
+              embedded,
+              total: d.passages,
+              state: "adding",
+              message: `Ready for words. Adding meaning: ${embedded} of ${d.passages} passages.`,
+            }),
+          });
+    });
+
+  it("asks again by itself and shows each count go up, then Ready, and then asks only each half minute", async () => {
+    await opened({ docs: [adding({ embedded: 0 })], meaning: true, advance: step });
+    expect(status("harbour-survey.pdf")).toHaveTextContent("Adding meaning: 2 of 5 passages");
+    await wait(FIRST_POLL_MS);
+    expect(status("harbour-survey.pdf")).toHaveTextContent("Adding meaning: 2 of 5 passages");
+    await wait(POLL_MS);
+    expect(status("harbour-survey.pdf")).toHaveTextContent("Adding meaning: 4 of 5 passages");
+    await wait(POLL_MS);
+    expect(status("harbour-survey.pdf")).toHaveTextContent(/^Ready$/);
+    expect(screen.getByTestId("documents-meaning-totals")).toHaveTextContent(
+      "Meaning is added to every passage.",
+    );
+    const done = reads;
+    await wait(IDLE_POLL_MS - 1);
+    expect(reads).toBe(done);
+    await wait(1);
+    expect(reads).toBe(done + 1);
+  });
+
+  it("goes on asking while meaning waits for the search model, every few seconds, and shows it going on when it is back", async () => {
+    server = fresh({ docs: [waiting()], search: searchFor("not_running"), advance: step });
+    render(<Documents onClose={vi.fn()} onAsk={vi.fn()} />);
+    await wait(0);
+    expect(status("harbour-survey.pdf")).toHaveTextContent("Meaning is waiting");
+    const before = reads;
+    await wait(4999);
+    expect(reads).toBe(before);
+    // The search model is back: the next look says so and meaning is added.
+    server.search = {};
+    server.meaning = true;
+    server.docs = [adding({ embedded: 0 })];
+    await wait(1);
+    expect(reads).toBe(before + 1);
+    expect(screen.getByTestId("documents-search-headline")).toHaveTextContent(
+      "Searching by meaning and words.",
+    );
+    expect(status("harbour-survey.pdf")).toHaveTextContent("Adding meaning");
+  });
+});
+
+describe("Test a question, on the screen, with a search model", () => {
+  it("offers to try one way at a time, and asks the server for the way that was chosen", async () => {
+    await opened({ docs: [withMeaning()], meaning: true });
+    fireEvent.click(screen.getByTestId("documents-test-ways-toggle"));
+    fireEvent.click(screen.getByTestId("documents-test-way-meaning"));
+    fireEvent.change(screen.getByTestId("documents-test-question"), {
+      target: { value: "boats" },
+    });
+    fireEvent.click(screen.getByTestId("documents-test-ask"));
+    await wait(0);
+    expect(tries).toEqual([{ question: "boats", ways: ["meaning"] }]);
+  });
+
+  it("asks both ways, as a chat does, without naming any, when none is chosen", async () => {
+    await opened({ docs: [withMeaning()], meaning: true });
+    fireEvent.change(screen.getByTestId("documents-test-question"), {
+      target: { value: "boats" },
+    });
+    fireEvent.click(screen.getByTestId("documents-test-ask"));
+    await wait(0);
+    expect(tries).toEqual([{ question: "boats" }]);
+  });
+
+  it("does not offer one way at a time where no search model has been set up: there is no second way to try", async () => {
+    await opened({ docs: [wordsOnlyDoc()], search: noSearchModel() });
+    expect(screen.queryByTestId("documents-test-ways")).toBeNull();
+    cleanup();
+    await opened({ docs: [wordsOnlyDoc()] });
+    expect(screen.queryByTestId("documents-test-ways")).toBeNull();
+    cleanup();
+    // But it is offered for a search model that is stopped, which is when a person wants to know.
+    await opened({ docs: [withMeaning()], search: searchFor("not_running") });
+    expect(screen.getByTestId("documents-test-ways")).toBeInTheDocument();
   });
 });

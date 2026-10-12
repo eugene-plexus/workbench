@@ -10,6 +10,7 @@
  * so a number on the screen is the number the server counted.
  */
 
+import { foundByWords, meaningRow, unavailableWords } from "./documentMeaning";
 import { count } from "./documents";
 import { type ChipTone, setByWords } from "./memory";
 import type {
@@ -18,6 +19,7 @@ import type {
   DocumentsPrefs,
   ExternalChoice,
   HiddenPassage,
+  MeaningRun,
   PassageSource,
   SavedDocument,
   SavedState,
@@ -37,11 +39,40 @@ const FINISHED: readonly SavedState[] = ["ready", "skipped", "failed"];
  * document that can be found by words but is owed more work is one of these too. */
 export const isPending = (doc: SavedDocument): boolean => !FINISHED.includes(doc.state);
 
+/** A document that is waiting to be read, or being read. */
+export const isBeingRead = (doc: SavedDocument): boolean =>
+  doc.state === "queued" || doc.state === "reading";
+
 /** The first read of the list comes soon, because most files are read in a moment. */
 export const FIRST_POLL_MS = 500;
 export const POLL_MS = 1000;
 /** After a read that failed, a pause before the next. */
 export const RETRY_MS = 3000;
+/** While meaning waits for the search model or for the key's limit to ease, which the
+ * server looks at again every few seconds itself. */
+export const WAITING_POLL_MS = 5000;
+/** When nothing is going on: the header is a live look at the search model, so it is read
+ * again each half minute for as long as the screen is open (design 4.2). */
+export const IDLE_POLL_MS = 30_000;
+
+/** What the screen is waiting on, which sets how soon it asks again: documents being read
+ * or being given their meaning (`busy`), meaning that waits for the search model or for the
+ * key's limit (`waiting`), or nothing (`idle`). */
+export type Watching = "busy" | "waiting" | "idle";
+
+export function watching(page: DocumentsPage): Watching {
+  const docs = page.documents;
+  if (docs.some(isBeingRead)) return "busy";
+  const held = (doc: SavedDocument) =>
+    doc.meaning?.state === "waiting" || doc.meaning?.state === "limited";
+  const owing = docs.filter(isPending);
+  const header = page.search.adding?.state;
+  // Passages read while no search model ran are taken up as soon as one is running.
+  const takenUp = page.search.meaning && docs.some((doc) => doc.meaning?.state === "words_only");
+  if (owing.some((doc) => !held(doc)) || header === "working" || takenUp) return "busy";
+  if (owing.length > 0 || header === "waiting" || header === "limited") return "waiting";
+  return "idle";
+}
 
 export type Tone = "quiet" | "busy" | "ok" | "warn" | "error";
 
@@ -78,15 +109,22 @@ export function stateWords(doc: SavedDocument): StateWords {
         tone: "busy",
         label: doc.pages != null ? `Reading… ${count(doc.pages, "page")}` : "Reading…",
       };
-    case "ready":
-      return { state, tone: "ok", label: "Ready" };
+    case "ready": {
+      // Ready, and what is true of its meaning when that is more than "Ready".
+      const more = meaningRow(doc);
+      return { state, tone: "ok", label: more ? more.label : "Ready" };
+    }
     case "skipped":
       return { state, tone: "warn", label: endedWords(doc) };
     case "failed":
       return { state, tone: "error", label: endedWords(doc) };
-    default:
-      // Found by words, and owed more work before it is ready.
-      return { state, tone: "ok", label: "Ready for words" };
+    default: {
+      // Found by words, and owed its meaning before it is ready: the server says how that is going.
+      const more = meaningRow(doc);
+      return more
+        ? { state, tone: more.tone, label: more.label }
+        : { state, tone: "ok", label: "Ready for words" };
+    }
   }
 }
 
@@ -155,10 +193,6 @@ export function capsWords(page: Pick<DocumentsPage, "limits" | "totals">): strin
 
 export const OWNER_OFF = "The owner of this Workbench has turned off documents.";
 export const OWNER_OFF_EFFECT = "No document is searched, and no file can be added.";
-
-/** What the screen is, in one line. */
-export const INTRO =
-  "Your own files, searched for the words in your question. Only you can see them.";
 
 /** What words only means, said so it does not promise more: for as long as the
  * server says it is not searching by meaning. */
@@ -388,6 +422,9 @@ export function testedWords(result: TestedQuestion): string {
       return searched.waiting > 0
         ? `None of your documents can be searched yet: ${count(searched.waiting, "document")} ${searched.waiting === 1 ? "is" : "are"} still being read.`
         : "You have no documents that can be searched yet.";
+    case "unavailable":
+      // None of the ways the person asked for could run: said, never "nothing matched".
+      return unavailableWords(result.meaning);
   }
 }
 
@@ -565,11 +602,10 @@ export function sentWords(passages: number, documents: number): string {
   return `Sent to the model: ${count(passages, "passage")} from ${count(documents, "document")}`;
 }
 
-/** How the passages were found, when the record says. Nothing for a way it does not know. */
-export function modeWords(mode: string): string | null {
-  if (mode === "words") return "Found by words only.";
-  if (mode === "meaning and words") return "Found by meaning and words.";
-  return null;
+/** How the passages were found, when the record says, and by which search model when
+ * meaning ran. Nothing for a way it does not know. */
+export function modeWords(mode: string, meaning: MeaningRun | null = null): string | null {
+  return foundByWords(mode, meaning);
 }
 
 /** What did not fit: matched, and left out for want of room. */

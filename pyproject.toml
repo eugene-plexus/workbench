@@ -120,6 +120,7 @@ ignore = []
 "scripts/check-library-sabotage.py" = ["E501"]
 "scripts/check-library-page-sabotage.py" = ["E501"]
 "scripts/check-meaning-sabotage.py" = ["E501"]
+"scripts/check-meaning-page-sabotage.py" = ["E501"]
 "scripts/mr5-meaning-acceptance.py" = ["E501"]
 
 # -----------------------------------------------------------------------------

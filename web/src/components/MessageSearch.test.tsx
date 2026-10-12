@@ -11,10 +11,20 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 
 import { post } from "../lib/api";
 import { chatMarkdown } from "../lib/conveniences";
-import type { ChatDetail, Message, Progress, Source } from "../lib/types";
+import type { ChatDetail, Message, Progress, SearchCode, Source } from "../lib/types";
 import { workingWords } from "../lib/words";
 import { source } from "../test-documents";
-import { hidden, nothing, passage, record, second } from "../test-saved";
+import {
+  CODES,
+  hidden,
+  meaningRun,
+  nothing,
+  passage,
+  ranByMeaning,
+  record,
+  searchFor,
+  second,
+} from "../test-saved";
 import { MessageView } from "./MessageView";
 
 vi.mock("../lib/api", async (importOriginal) => ({
@@ -189,8 +199,12 @@ describe("the passages that were sent", () => {
   it("name the row that opens it, with the number, the file and the page, so a screen reader can tell them apart", () => {
     show(used());
     const toggles = screen.getAllByTestId("passage-toggle");
-    expect(toggles[0]).toHaveAccessibleName("[1] harbour-survey.pdf, page 4, cited in the answer");
-    expect(toggles[1]).toHaveAccessibleName("[2] quarterly-report.docx, Conclusion");
+    expect(toggles[0]).toHaveAccessibleName(
+      "[1] harbour-survey.pdf, page 4, found by words, cited in the answer",
+    );
+    expect(toggles[1]).toHaveAccessibleName(
+      "[2] quarterly-report.docx, Conclusion, found by words",
+    );
   });
 
   it("say a passage came from a file attached to this chat", () => {
@@ -616,5 +630,240 @@ describe("a chat exported", () => {
     expect(text).toContain("A page: https://example.org/a");
     expect(text).toContain("Sent to the model: report.pdf, pages 1 to 3 of 3");
     expect(text).toContain("Passage sent to the model: harbour-survey.pdf, page 4");
+  });
+});
+
+// --- search by meaning (MR5) ---
+
+/** A passage that only meaning found: none of the person's words are in it. */
+const byMeaning = (over: Partial<ReturnType<typeof passage>> = {}) =>
+  passage({
+    doc_id: "d7",
+    name: "harbour-office.md",
+    type: "markdown",
+    rank: 2,
+    via: "meaning",
+    page_start: null,
+    page_end: null,
+    heading: "Arrivals",
+    snippet: "The harbour master keeps the vessel registry and the logbook of every ship.",
+    chunk_ids: [41],
+    terms: [],
+    phrases: [],
+    cited: false,
+    ...over,
+  });
+
+describe("how each passage was found", () => {
+  const found = () =>
+    message({
+      sources: [
+        passage(),
+        byMeaning(),
+        passage({ rank: 3, via: "both", doc_id: "d4", name: "report.docx", cited: false }),
+      ],
+      retrieval: record({
+        mode: "meaning and words",
+        meaning: ranByMeaning(),
+        passages: 3,
+        documents: 3,
+      }),
+    });
+
+  it("is said on each row, short: found by words, found by meaning, found by both", () => {
+    show(found());
+    const rows = screen.getAllByTestId("passage-source");
+    expect(rows.map((r) => within(r).getByTestId("passage-via").textContent?.trim())).toEqual([
+      "· found by words",
+      "· found by meaning",
+      "· found by both",
+    ]);
+    expect(rows.map((r) => r.getAttribute("data-via"))).toEqual(["words", "meaning", "both"]);
+  });
+
+  it("is in the row's name too, so a screen reader says it, with the number, the file and whether it was cited", () => {
+    show(found());
+    const toggles = screen.getAllByTestId("passage-toggle");
+    expect(toggles[0]).toHaveAccessibleName(
+      "[1] harbour-survey.pdf, page 4, found by words, cited in the answer",
+    );
+    expect(toggles[1]).toHaveAccessibleName("[2] harbour-office.md, Arrivals, found by meaning");
+    expect(toggles[2]).toHaveAccessibleName("[3] report.docx, page 4, found by both");
+  });
+
+  it("says in full, once the row is open, that a passage found by meaning has none of the person's words", () => {
+    show(found());
+    const meaning = screen.getAllByTestId("passage-source")[1]!;
+    fireEvent.click(within(meaning).getByTestId("passage-toggle"));
+    expect(within(meaning).getByTestId("passage-found")).toHaveTextContent(
+      "Found by meaning: none of your words are in it",
+    );
+    expect(within(meaning).queryByTestId("passage-matched")).toBeNull();
+    expect(meaning.querySelectorAll("mark")).toHaveLength(0);
+  });
+
+  it("says both ways, with the words it has, for a passage found by both", () => {
+    show(found());
+    const both = screen.getAllByTestId("passage-source")[2]!;
+    expect(within(both).getByTestId("passage-found")).toHaveTextContent(
+      "Found by both words and meaning",
+    );
+    expect(within(both).getByTestId("passage-matched")).toHaveTextContent("Matched: code, word");
+  });
+
+  it("says nothing more of a passage found by words: its words are what it matched", () => {
+    show(found());
+    const words = screen.getAllByTestId("passage-source")[0]!;
+    expect(within(words).queryByTestId("passage-found")).toBeNull();
+    expect(within(words).getByTestId("passage-matched")).toBeInTheDocument();
+  });
+
+  it("says which way found it for a passage that meaning found and that has some of the words", () => {
+    show(
+      message({
+        sources: [byMeaning({ rank: 1, terms: ["code"] })],
+        retrieval: record({ mode: "meaning and words", meaning: ranByMeaning(), passages: 1 }),
+      }),
+    );
+    fireEvent.click(screen.getByTestId("passage-toggle"));
+    expect(screen.getByTestId("passage-found")).toHaveTextContent(/^Found by meaning$/);
+    expect(screen.getByTestId("passage-matched")).toHaveTextContent("Matched: code");
+  });
+
+  it("says nothing the owner is not to read: a passage in someone else's chat is a document, and how it was found is not told", () => {
+    show(
+      message({
+        sources: [hidden({ via: "meaning" })],
+        retrieval: record({ mode: "meaning and words", passages: 1, searched: null, budget: null }),
+      }),
+      { readOnly: true },
+    );
+    expect(screen.queryByTestId("passage-via")).toBeNull();
+    expect(screen.getByTestId("redacted-passage")).toHaveTextContent("a document");
+  });
+});
+
+describe("how the passages were found, said once, with the search model", () => {
+  it("says meaning and words, and which search model, when meaning ran", () => {
+    show(
+      message({
+        sources: [passage(), byMeaning()],
+        retrieval: record({ mode: "meaning and words", meaning: ranByMeaning() }),
+      }),
+    );
+    expect(screen.getByTestId("passage-facts")).toHaveTextContent(
+      "Found by meaning and words, with the search model Qwen3-Embedding-0.6B-Q8_0.",
+    );
+  });
+
+  it("says words only, with no search model, when meaning did not run", () => {
+    show(used({ retrieval: record({ mode: "words", meaning: meaningRun() }) }));
+    const facts = screen.getByTestId("passage-facts");
+    expect(facts).toHaveTextContent("Found by words only.");
+    expect(facts).not.toHaveTextContent("search model");
+  });
+});
+
+describe("a note about meaning, for each code the server says", () => {
+  // What an answer keeps when meaning could not run for it: the server's own sentence, under the
+  // code `meaning_<code>`, with the answer searched by words only.
+  const said = (code: SearchCode) => {
+    const facts = searchFor(code);
+    // A paused search and an unreadable one say their headline; the others say their detail.
+    return ["changed", "dimension", "damaged"].includes(code)
+      ? facts.headline
+      : (facts.detail as string);
+  };
+  const OFF = CODES.filter((code) => code !== "ok" && code !== "no_gateway");
+
+  it.each([...OFF, "unusable"] as const)(
+    "meaning_%s is shown in its own words, beside how it was found",
+    (code) => {
+      const note =
+        code === "unusable"
+          ? "Searching by words only: the search model m gave numbers Workbench cannot use (not a number)."
+          : said(code);
+      show(
+        used({
+          retrieval: record({
+            mode: "words",
+            meaning: meaningRun({ code, message: note, quiet: false }),
+            notes: [
+              { code: "still_reading", message: "1 of your documents is still being read." },
+              { code: `meaning_${code}`, message: note },
+            ],
+          }),
+        }),
+      );
+      const shown = screen.getAllByTestId("passage-meaning-note");
+      // Only the note about meaning has its own mark: the other notes are as they were.
+      expect(shown).toHaveLength(1);
+      expect(shown[0]).toHaveTextContent(note);
+      expect(shown[0]).toHaveAttribute("data-code", `meaning_${code}`);
+      expect(screen.getByTestId("passage-facts")).toHaveTextContent("Found by words only.");
+      expect(screen.getByTestId("passage-facts")).toHaveTextContent(
+        "1 of your documents is still being read.",
+      );
+    },
+  );
+
+  it("is also said under a search that was not run for another reason, beside that reason", () => {
+    show(
+      message({
+        retrieval: record({
+          status: "skipped",
+          code: "chat_full",
+          message: "Documents were not used: this chat already fills about 7,900 tokens.",
+          passages: 0,
+          documents: 0,
+          cited: [],
+          notes: [
+            {
+              code: "meaning_not_running",
+              message: said("not_running"),
+            },
+          ],
+        }),
+      }),
+    );
+    const notice = screen.getByTestId("search-skipped");
+    expect(notice).toHaveTextContent("Documents were not used");
+    expect(within(notice).getByTestId("search-meaning-note")).toHaveTextContent(
+      "the search model Qwen3-Embedding-0.6B-Q8_0 is not running.",
+    );
+  });
+});
+
+describe("nothing matched, by words and meaning", () => {
+  it("says how it was searched", () => {
+    show(message({ retrieval: nothing({ mode: "meaning and words", meaning: ranByMeaning() }) }));
+    expect(screen.getByTestId("search-nothing-mode")).toHaveTextContent(
+      "Searched by meaning and words.",
+    );
+  });
+
+  it("says words only for a search that was by words only, and nothing for one that was none", () => {
+    const view = show(message({ retrieval: nothing({ mode: "words" }) }));
+    expect(screen.getByTestId("search-nothing-mode")).toHaveTextContent("Searched by words only.");
+    view.unmount();
+    show(message({ retrieval: nothing({ mode: "none" }) }));
+    expect(screen.queryByTestId("search-nothing-mode")).toBeNull();
+  });
+
+  it("says, in the server's words, that it was by words only because meaning could not run", () => {
+    const why =
+      "Searching by words only: the search model m is not running. Start it in Eugene's console under Backends.";
+    show(
+      message({
+        retrieval: nothing({
+          mode: "words",
+          message: `Nothing in your documents matched. ${why}`,
+          meaning: meaningRun({ code: "not_running", message: why, quiet: false }),
+        }),
+      }),
+    );
+    expect(screen.getByTestId("search-nothing")).toHaveTextContent(
+      "Nothing in your documents matched. Searching by words only: the search model m is not running.",
+    );
   });
 });

@@ -3,7 +3,8 @@
  * every control on a screen has a name a screen reader says and a `data-testid`
  * a check can find it by. Each screen is drawn in each state it has, and every
  * control on it is held to both: a control added later with neither fails there,
- * by name, so nobody has to remember to look. Read only by tests.
+ * by name, so nobody has to remember to look. A link that opens a new tab is held to
+ * one more thing, `rel="noopener"` (MR5: the link to Eugene's console). Read only by tests.
  */
 
 import { getRoles, within } from "@testing-library/react";
@@ -70,9 +71,20 @@ export function lacking(controls: HTMLElement[], scope: HTMLElement): string[] {
   });
 }
 
+/** Links that open another page in a new tab and do not say `noopener` (or `noreferrer`, which
+ * implies it): the page they open could reach back to this one (`window.opener`). A link out of
+ * Workbench, to Eugene's console for one, is held to it as every control is held to a name. */
+export function unsafeLinks(root: Element): string[] {
+  return [...root.querySelectorAll<HTMLElement>('a[target="_blank"]')]
+    .filter((el) => !/(^|\s)(noopener|noreferrer)(\s|$)/.test(el.getAttribute("rel") ?? ""))
+    .map((el) => `${look(el)} opens a new tab and has no rel="noopener"`);
+}
+
 /** Everything wrong with every control on what is drawn: nothing, when it is right. */
-export const wrong = (view: { container: HTMLElement }) =>
-  lacking(controlsIn(view.container), view.container);
+export const wrong = (view: { container: HTMLElement }) => [
+  ...lacking(controlsIn(view.container), view.container),
+  ...unsafeLinks(view.container),
+];
 
 /** What a screen drawn in some state must be: at least `atLeast` controls on it (a
  * gate that finds none has checked nothing), and every one of them with a name and a
@@ -80,7 +92,7 @@ export const wrong = (view: { container: HTMLElement }) =>
 export function everyControlIsNamed(view: { container: HTMLElement }, atLeast = 1): void {
   const found = controlsIn(view.container);
   expect(found.length, "controls on the screen").toBeGreaterThanOrEqual(atLeast);
-  const problems = lacking(found, view.container);
+  const problems = [...lacking(found, view.container), ...unsafeLinks(view.container)];
   // The message names each control, so a failure says which one.
   expect(problems, problems.join("; ")).toEqual([]);
 }

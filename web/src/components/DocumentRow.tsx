@@ -1,8 +1,12 @@
 /**
  * One of the person's documents on the Documents screen: its name, what it is (type,
  * size, pages or lines, how many passages, the day it was added), where it stands
- * in the words of the design, and what can be done with it: open the file as it was
- * added, show the text Workbench searches, read it again, remove it.
+ * in the words of the design (and, once it can be found by words, how much of its
+ * meaning is added: the server's own sentence, "Ready for words. Adding meaning: 1,240
+ * of 3,000 passages, about 14 minutes left.", or why it waits, or that it is found by
+ * words only, with a note for each passage the search model would not take), and what
+ * can be done with it: open the file as it was added, show the text Workbench
+ * searches, read it again, remove it.
  *
  * Removing is real: the server deletes its copy, what it read from it and every entry
  * for it in the search, and cannot bring them back, so the row asks first and says
@@ -51,6 +55,8 @@ export function DocumentRow({
   const back = useRef(false);
   const words = stateWords(doc);
   const meta = docMeta(doc);
+  // What the reader noticed in the file, and the passages the search model would not take.
+  const notes = [...doc.notes, ...(doc.meaning?.notes ?? [])];
   const added = addedWords(doc.addedAt);
   const text = useDocumentText({
     id: doc.id,
@@ -144,13 +150,15 @@ export function DocumentRow({
           {words.label}
         </p>
       )}
-      {doc.notes.length > 0 && !ended && (
+      {notes.length > 0 && !ended && (
         <ul
           data-testid="saved-document-notes"
           className="list-disc space-y-0.5 pl-5 text-xs text-muted"
         >
-          {doc.notes.map((note) => (
-            <li key={note}>{note}</li>
+          {notes.map((note) => (
+            <li key={note} className="wrap-anywhere">
+              {note}
+            </li>
           ))}
         </ul>
       )}

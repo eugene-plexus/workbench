@@ -13,6 +13,7 @@
 
 import { ChevronRight, CircleCheck, FileSearch, FileText, Info, TriangleAlert } from "lucide-react";
 
+import { isMeaningNote, searchedByWords, viaTag, viaWords } from "../lib/documentMeaning";
 import type { HiddenPassage, PassageSource, SearchRecord } from "../lib/types";
 import {
   canRebuild,
@@ -32,13 +33,13 @@ function Passage({ source }: { source: PassageSource }) {
   const matched = matchedWords(source.terms, source.phrases);
   const cited = source.cited === true;
   return (
-    <li data-testid="passage-source" data-cited={cited ? "true" : "false"}>
+    <li data-testid="passage-source" data-cited={cited ? "true" : "false"} data-via={source.via}>
       <details className="group/p">
         <summary
           data-testid="passage-toggle"
-          // Its name is the number, the file and where in it, and whether the answer
-          // cites it: said the same wherever the pieces of the row are laid out.
-          aria-label={`[${source.rank}] ${passageTitle(source)}${cited ? ", cited in the answer" : ""}`}
+          // Its name is the number, the file and where in it, how it was found, and whether
+          // the answer cites it: said the same wherever the pieces of the row are laid out.
+          aria-label={`[${source.rank}] ${passageTitle(source)}, ${viaTag(source.via)}${cited ? ", cited in the answer" : ""}`}
           className="disclosure flex list-none items-start gap-1.5 rounded-plexus pl-1 pr-2 hover:bg-hover [&::-webkit-details-marker]:hidden"
         >
           <ChevronRight
@@ -57,6 +58,10 @@ function Passage({ source }: { source: PassageSource }) {
                 · a file of this chat
               </span>
             )}
+            <span className="text-muted" data-testid="passage-via">
+              {" "}
+              · <span className="whitespace-nowrap">{viaTag(source.via)}</span>
+            </span>
           </span>
           {cited && (
             <span
@@ -73,6 +78,11 @@ function Passage({ source }: { source: PassageSource }) {
           <p dir="auto" data-testid="passage-snippet" className="text-muted wrap-anywhere">
             <Marked text={source.snippet} words={[...source.terms, ...source.phrases]} />
           </p>
+          {source.via !== "words" && (
+            <p data-testid="passage-found" className="text-xs text-muted wrap-anywhere">
+              {viaWords(source.via, matched !== null)}
+            </p>
+          )}
           {matched && (
             <p data-testid="passage-matched" className="text-xs text-muted wrap-anywhere">
               Matched: {matched}
@@ -96,7 +106,7 @@ export function PassageList({
   const hidden = passages.length - shown.length;
   const documents = new Set(shown.map((p) => p.doc_id)).size;
   const searched = record ? searchedFor(record.terms, record.phrases) : null;
-  const how = record ? modeWords(record.mode) : null;
+  const how = record ? modeWords(record.mode, record.meaning) : null;
   const left = record ? leftOutWords(record.didNotFit) : null;
   return (
     <div data-testid="passage-sources">
@@ -145,7 +155,12 @@ export function PassageList({
           {how && <li>{how}</li>}
           {left && <li data-testid="passage-left-out">{left}</li>}
           {record?.notes.map((note, at) => (
-            <li key={`${note.code}:${at}`} className="wrap-anywhere">
+            <li
+              key={`${note.code}:${at}`}
+              data-testid={isMeaningNote(note.code) ? "passage-meaning-note" : undefined}
+              data-code={note.code}
+              className="wrap-anywhere"
+            >
               {note.message}
             </li>
           ))}
@@ -158,6 +173,7 @@ export function PassageList({
 /** Nothing in the documents matched: a normal result, said quietly. */
 export function NothingMatched({ record }: { record: SearchRecord }) {
   const searched = searchedFor(record.terms, record.phrases);
+  const how = searchedByWords(record.mode, false);
   return (
     <div data-testid="search-nothing">
       <p className="flex items-start gap-1.5 text-muted">
@@ -165,6 +181,11 @@ export function NothingMatched({ record }: { record: SearchRecord }) {
         {ranWords(record)}
       </p>
       {searched && <p className="ml-5 mt-0.5 text-xs text-muted wrap-anywhere">{searched}</p>}
+      {how && (
+        <p data-testid="search-nothing-mode" className="ml-5 mt-0.5 text-xs text-muted">
+          {how}
+        </p>
+      )}
     </div>
   );
 }
@@ -189,6 +210,18 @@ export function SearchNotice({
       <div>
         <span className="wrap-anywhere">{ranWords(record)}</span>
         {hint && <span className="mt-1 block text-muted">{hint}</span>}
+        {record.notes
+          .filter((note) => isMeaningNote(note.code))
+          .map((note, at) => (
+            <span
+              key={`${note.code}:${at}`}
+              data-testid="search-meaning-note"
+              data-code={note.code}
+              className="mt-1 block text-muted wrap-anywhere"
+            >
+              {note.message}
+            </span>
+          ))}
         {onOpenDocuments && (canRebuild(record) || record.code === "no_documents") && (
           <div className="mt-2">
             <button

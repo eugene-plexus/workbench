@@ -2,10 +2,12 @@
  * Documents in a chat: a chip in its header that says what the next message does
  * with the person's documents, and the drawer it opens. The drawer holds the chat's
  * own switch, "Documents only", and the choice to send passages to a model that
- * runs outside the person's machines, and says how much there is to search and,
- * when nothing would be, why. The words about a chat that sends nothing are the
- * server's own (`reason`, `hint`): the drawer says what the request does, and never
- * a stand-in. What was found for an answer is under that answer, not here.
+ * runs outside the person's machines, and says how much there is to search, how it
+ * is searched (by meaning and words, or by words only and why: the server's own
+ * headline) and, when nothing would be, why. The words about a chat that sends
+ * nothing are the server's own (`reason`, `hint`): the drawer says what the request
+ * does, and never a stand-in. What was found for an answer is under that answer, not
+ * here.
  *
  * Also the hint in the composer: a person who has documents to ask about and has
  * Documents off in this chat is told, once, quietly, and can turn it on there.
@@ -15,6 +17,7 @@ import { CircleAlert, Files, Info, TriangleAlert } from "lucide-react";
 import { type KeyboardEvent, useEffect, useId, useRef, useState } from "react";
 
 import { patch } from "../lib/api";
+import { addingWords, drawerSearchWords } from "../lib/documentMeaning";
 import { failureWords } from "../lib/memory";
 import {
   budgetWords,
@@ -30,6 +33,7 @@ import type {
   ChatDocuments,
   ChatDocumentsView,
   ChatSettings as Settings,
+  SearchFacts,
 } from "../lib/types";
 import { useKeepFocus } from "../lib/useKeepFocus";
 import { FOCUSABLE, useOverlay } from "./ChatSettings";
@@ -85,6 +89,29 @@ export function DocumentsChip({
 /** Where an outside model's name stands in a sentence. */
 function whoRuns(view: ChatDocuments): string {
   return view.model?.runsOn ?? "another service";
+}
+
+/** How the documents are searched, from the live look the chat's documents were read with: the
+ * server's headline, why when it is not by meaning and words, and how adding meaning is going.
+ * Mending a paused search is on the Documents screen, which the foot of the drawer leads to. */
+function SearchMode({ search }: { search: SearchFacts }) {
+  const { headline, more } = drawerSearchWords(search);
+  const adding = addingWords(search);
+  return (
+    <div data-testid="documents-search-mode" data-mode={search.mode} data-code={search.code}>
+      <p className="text-sm">{headline}</p>
+      {more.map((line) => (
+        <p key={line} className="help wrap-anywhere">
+          {line}
+        </p>
+      ))}
+      {adding && (
+        <p data-testid="documents-search-adding" className="help">
+          {adding}
+        </p>
+      )}
+    </div>
+  );
 }
 
 /** The drawer's one status: what the next message does with the documents. */
@@ -441,6 +468,7 @@ export function DocumentsDrawer({
                       <li key={line}>{line}</li>
                     ))}
                   </ul>
+                  <SearchMode search={own.search} />
                   {own.sending && <p className="help">{budgetWords(own.budget)}</p>}
                 </section>
               )}

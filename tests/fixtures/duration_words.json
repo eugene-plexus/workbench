@@ -1,0 +1,126 @@
+[
+ [
+  0,
+  "less than a minute"
+ ],
+ [
+  1,
+  "less than a minute"
+ ],
+ [
+  59,
+  "less than a minute"
+ ],
+ [
+  59.9,
+  "less than a minute"
+ ],
+ [
+  60,
+  "about 1 minute"
+ ],
+ [
+  89,
+  "about 1 minute"
+ ],
+ [
+  90,
+  "about 2 minutes"
+ ],
+ [
+  120,
+  "about 2 minutes"
+ ],
+ [
+  149.9,
+  "about 2 minutes"
+ ],
+ [
+  150,
+  "about 2 minutes"
+ ],
+ [
+  151,
+  "about 3 minutes"
+ ],
+ [
+  210,
+  "about 4 minutes"
+ ],
+ [
+  270,
+  "about 4 minutes"
+ ],
+ [
+  330,
+  "about 6 minutes"
+ ],
+ [
+  840,
+  "about 14 minutes"
+ ],
+ [
+  3000,
+  "about 50 minutes"
+ ],
+ [
+  3569,
+  "about 59 minutes"
+ ],
+ [
+  3570,
+  "about 1 hour"
+ ],
+ [
+  3599,
+  "about 1 hour"
+ ],
+ [
+  3600,
+  "about 1 hour"
+ ],
+ [
+  4500,
+  "about 1 hour"
+ ],
+ [
+  5400,
+  "about 1.5 hours"
+ ],
+ [
+  6300,
+  "about 2 hours"
+ ],
+ [
+  7200,
+  "about 2 hours"
+ ],
+ [
+  9000,
+  "about 2.5 hours"
+ ],
+ [
+  86400,
+  "about 24 hours"
+ ],
+ [
+  172799,
+  "about 48 hours"
+ ],
+ [
+  172800,
+  "about 2 days"
+ ],
+ [
+  216000,
+  "about 2 days"
+ ],
+ [
+  259200,
+  "about 3 days"
+ ],
+ [
+  400000,
+  "about 5 days"
+ ]
+]
