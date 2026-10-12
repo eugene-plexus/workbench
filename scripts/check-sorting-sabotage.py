@@ -437,6 +437,23 @@ CASES: list[Case] = [
         UNIT
         + "test_a_sorter_that_takes_over_twice_the_budget_is_given_up_on_and_that_is_remembered",
     ),
+    one(
+        "a sort that is given up on is blended into what the sorter did while it was well",
+        SORTING,
+        "                self._gave_up_on(model.id, tokens, limit)",
+        "                self._record(model.id, tokens, limit)",
+        UNIT + "test_a_sorter_that_stopped_answering_is_not_asked_again_by_the_next_questions",
+        UNIT + "test_a_sorter_that_was_given_up_on_is_measured_again_when_the_speed_is_old",
+    ),
+    one(
+        "a sort that is given up on is taken for a quick one",
+        SORTING,
+        "        speed.record(tokens, seconds, self._clock())\n        self._speeds[model] = speed",
+        "        speed.record(tokens, 0.001, self._clock())\n        self._speeds[model] = speed",
+        UNIT + "test_a_sorter_that_stopped_answering_is_not_asked_again_by_the_next_questions",
+        UNIT
+        + "test_a_sorter_that_takes_over_twice_the_budget_is_given_up_on_and_that_is_remembered",
+    ),
     # --- which sorter (call 3) ---------------------------------------------------------------
     one(
         "auto picks a sorter outside the machines",

@@ -679,6 +679,57 @@ async def test_a_sorter_that_takes_over_twice_the_budget_is_given_up_on_and_that
     )
 
 
+async def test_a_sorter_that_stopped_answering_is_not_asked_again_by_the_next_questions(
+    rig: Rig,
+) -> None:
+    """Measured live (MR6b acceptance): a sorter that had read well for a while stopped answering.
+    The sort that was given up on was blended into that history, what it left still priced the
+    next question inside Sort time, and that question waited twice Sort time again; the one after
+    it too, until the average had fallen far enough. The sort that was given up on is what is
+    known of the sorter now, so the next question is over Sort time and is not made to wait."""
+    work = sheets()
+    for _ in range(8):  # it has read well for a while: about 4,000 tokens a second
+        assert (await rig.sorting.sort(QUESTION, work)).report.sorted
+    rig.settings.sort_seconds = 0.5  # a usual sort, 0.1 s, is a fifth of it
+    rig.gateway.hang = True
+    gave_up = await rig.sorting.sort(QUESTION, work)  # given up on after a second
+    assert gave_up.report.code == "slow"
+    rig.gateway.hang = False
+    asked = len(rig.gateway.calls)
+    for _ in range(3):
+        next_ = await rig.sorting.sort(QUESTION, work)
+        assert next_.order is None and next_.report.code == "over_budget"
+        assert (next_.report.expected or 0) > 0.5
+    assert len(rig.gateway.calls) == asked, "a sorter that did not answer is not asked again"
+    stood = await rig.sorting.standing()
+    assert stood.code == "over_budget" and not stood.sorting, "and the screen says so"
+    assert stood.rate == pytest.approx(work_tokens(work) / 1.0), "at the speed of that sort"
+
+
+async def test_a_sorter_that_was_given_up_on_is_measured_again_when_the_speed_is_old(
+    rig: Rig,
+) -> None:
+    """Replacing what was measured with the sort that was given up on does not leave a sorter that
+    answers again off for ever: an old speed is measured again behind the next search."""
+    work = sheets()
+    for _ in range(4):
+        await rig.sorting.sort(QUESTION, work)
+    rig.settings.sort_seconds = 0.5
+    rig.gateway.hang = True
+    assert (await rig.sorting.sort(QUESTION, work)).report.code == "slow"
+    rig.gateway.hang = False
+    assert (await rig.sorting.sort(QUESTION, work)).report.code == "over_budget"
+    rig.clock.advance(sorting.RATE_MAX_AGE + 1)
+    await rig.sorting.sort(QUESTION, work)  # priced by the old speed, and measures again
+    await rig.settle()
+    assert (await rig.sorting.sort(QUESTION, work)).report.sorted, "it answers, and is used again"
+
+
+def work_tokens(work: Sequence[Sheet]) -> int:
+    """What a sort of these sheets is worth in tokens, as Workbench prices it."""
+    return sorting.sort_tokens(work, QUESTION)
+
+
 async def test_a_sorter_whose_answer_is_not_a_score_for_each_passage_is_not_believed(
     rig: Rig,
 ) -> None:

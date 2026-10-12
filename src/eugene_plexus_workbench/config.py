@@ -319,7 +319,9 @@ FIELDS = [
             "deliberately high) over how many tokens a second this sorter reads, measured from "
             "Workbench's own recent sorts and, before there is one, from a small test. Over "
             "this, the passages are left in the order they were found and the Documents screen "
-            "says why, with the numbers. A sort that takes more than twice this is given up on. "
+            "says why, with the numbers. A sort that takes more than twice this is given up on, "
+            "and the sorter is then not asked again until this is raised past what that sort "
+            "showed, or ten minutes have passed and its speed is measured again. "
             "On the processor it was measured on, sorting 18 passages took about 6 seconds, "
             "which is why the default does not sort there."
         ),

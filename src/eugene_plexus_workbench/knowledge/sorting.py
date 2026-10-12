@@ -32,8 +32,8 @@ running), refuse the request (a passage longer than it reads), take more than tw
 or answer with something that is not a score for each passage. The search goes on in the order it
 found, and what the sorter said is kept (`SortReport`), as a way of searching that cannot run is
 (`search.SignalUnavailable`): in words, beginning "Not sorted", naming what was observed. A sort
-that was given up on counts as a slow one, so the next question is not made to wait the same time
-again.
+that was given up on is what is known of the sorter now (it replaces what was measured, and is
+not blended into it), so the next question is not made to wait the same time again.
 
 What a person is told of the sorter (the header of the Documents screen, Test a question, the two
 settings) is read from a live look at the gateway and at what was measured, never from what was
@@ -796,7 +796,7 @@ class Sorting:
             if code == "slow":
                 # Given up on: it took at least this long, and the next question is not promised
                 # better than that (a rate that said "quick enough" has just been wrong).
-                self._record(model.id, tokens, limit)
+                self._gave_up_on(model.id, tokens, limit)
             self.forget()
             return Sorted(None, replace(report, code=code, message=words))
         took = self._clock() - started
@@ -805,6 +805,19 @@ class Sorting:
 
     def _record(self, model: str, tokens: int, seconds: float) -> None:
         self._speeds.setdefault(model, Speed()).record(tokens, seconds, self._clock())
+
+    def _gave_up_on(self, model: str, tokens: int, seconds: float) -> None:
+        """A sort that was given up on: the sorter did not read this many tokens in this many
+        seconds, and that is what is known of it now. It is not blended into what the sorter did
+        while it was well. Measured live (MR6b acceptance): blended, it left a speed that still
+        priced the next question inside Sort time, and that question waited twice Sort time
+        again, and the one after it, until the average had fallen far enough. What was measured
+        is replaced by it, so the next sort of that size is over Sort time and is not made; an
+        old speed is measured again behind the next search (`RATE_MAX_AGE`), so a sorter that
+        answers again is not left off for ever."""
+        speed = Speed()
+        speed.record(tokens, seconds, self._clock())
+        self._speeds[model] = speed
 
     # --- what is said of it ----------------------------------------------------
 
