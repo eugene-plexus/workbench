@@ -66,6 +66,7 @@ import hashlib
 import http.client
 import io
 import json
+import math
 import os
 import re
 import secrets
@@ -2948,7 +2949,9 @@ class Run:
                 )
             )
             order = engine_order(eng[0]) if len(eng) == 1 else None
-            chunk_order = [index.chunks_of(sent[k])[0] for k in order] if order is not None else []
+            chunk_order = (
+                [(index.chunks_of(sent[k]) or [-1])[0] for k in order] if order is not None else []
+            )
             got = [p["chunkIds"][0] for p in both["passages"]]
             orders.append(
                 (
@@ -3617,30 +3620,55 @@ class Run:
 
     def stage_hung(self) -> None:
         """The sorter does not end: it stops answering. A sort that takes more than twice Sort time is
-        given up on, said so, and the next question is not made to wait that long again."""
+        given up on, said so, and the next questions are not made to wait that long again.
+
+        The sorter has read well for a while first (eight sorts), and Sort time is a good deal more
+        than a usual sort takes, so that a give-up that is blended into that history, and not taken
+        for what is known of the sorter, leaves a speed that still prices the next question inside
+        Sort time: that is what makes the check tell the two apart on any processor."""
         ada, s = self.ada, self.stack
-        qs = list(range(min(6, len(self.questions))))
-        self.hybrid_of(qs)
-        budget = 15.0
-        self.settings(documentsSortModel=None, documentsSortSeconds=budget)
+        pool = list(range(min(8, len(self.questions))))
+        self.hybrid_of(pool)
+        self.settings(documentsSortModel=None, documentsSortSeconds=SORT_SECONDS)
         if not s.listed(SORTER, "rerank", "local"):
             s.restart_engine("sorter")
         until(lambda: (ada.sort() or {}).get("code") == "ok", 120, every=1.0)
-        self.sorting_again(qs[:3])
-        warm = self.ask(qs[0])
+        self.sorting_again(pool[:3])
+        history = {i: self.ask(i) for i in pool}
+        sized = {i: r["sort"]["tokens"] for i, r in history.items() if r["sort"]["used"]}
+        rate = (ada.sort() or {}).get("ratePerSecond") or 700.0
+        # The three questions with the fewest passages to sort, smallest first: the one that
+        # hangs is not the largest, so that the questions after it are not smaller than half of it.
+        ranked = sorted(sized, key=lambda i: sized[i])
+        picks = ranked[:3] if len(ranked) >= 3 else (ranked or pool[:3])
+        while len(picks) < 3:
+            picks.append(picks[-1] if picks else 0)
+        # Sort time: a usual sort of these questions takes a quarter of it or less.
+        usual = max(sized.get(i, 0) for i in picks) / rate
+        budget = float(max(15, 5 * math.ceil(4 * usual / 5)))
+        NUMBERS["hung"] = {
+            "usual_sort_seconds": round(usual, 1),
+            "sort_time": budget,
+            "history_sorts": len(sized),
+        }
+        warm_q, hung_q, later_q = picks
+        self.settings(documentsSortSeconds=budget)
+        until(lambda: (ada.sort() or {}).get("code") == "ok", 90, every=1.0)
+        warm = self.ask(warm_q)
         check(
             "hung.before",
-            f"with Sort time at {budget:g} s the sorter sorts, and a sort is expected to take "
-            "less than that",
-            warm["sort"]["used"] is True
+            f"with Sort time at {budget:g} s (a usual sort of these questions takes {usual:.1f} s) the "
+            "sorter sorts, and a sort is expected to take less than that",
+            len(sized) == len(pool)
+            and warm["sort"]["used"] is True
             and (warm["sort"]["expectedSeconds"] or 99) < budget
             and (warm["sort"]["seconds"] or 99) < budget,
-            warm["sort"],
+            (len(sized), warm["sort"]),
         )
         s.freeze_engine("sorter", True)
         try:
             started = time.perf_counter()
-            stuck = self.ask(qs[1])
+            stuck = self.ask(hung_q)
             waited = time.perf_counter() - started
             said = stuck["sort"]["message"] or ""
             check(
@@ -3656,14 +3684,14 @@ class Run:
                 and f"{2 * budget:g} s" in said
                 and f"Sort time, {budget:g} s" in said
                 and 2 * budget - 1 <= waited <= 2 * budget + 15
-                and order_of(stuck) == order_of(self.hybrid[qs[1]])
+                and order_of(stuck) == order_of(self.hybrid[hung_q])
                 and "sorted by" not in stuck["mode"],
                 (stuck["sort"], round(waited, 1)),
             )
             NUMBERS["hung_waited_seconds"] = round(waited, 1)
             door_mark = s.door_sorts.mark()
             followers = []
-            for k in (qs[2], qs[3]):
+            for k in (later_q, warm_q):
                 started = time.perf_counter()
                 found = self.ask(k)
                 followers.append((k, found, time.perf_counter() - started))
@@ -3698,13 +3726,14 @@ class Run:
         until(lambda: s.engine_ready("sorter", 1), 60, every=1.0)
         # Let go on, and Sort time raised past what the sort that was given up on showed (it did not
         # read this much in twice the old Sort time), the sorter is used again.
-        self.settings(documentsSortSeconds=60.0)
+        raised = min(120.0, 4 * budget)
+        self.settings(documentsSortSeconds=raised)
         until(lambda: (ada.sort() or {}).get("code") == "ok", 90, every=1.0)
-        back = self.ask(qs[3])
+        back = self.ask(hung_q)
         check(
             "hung.back",
             "let go on, and with Sort time raised past what the sort that was given up on showed "
-            "(60 s), the sorter sorts again",
+            f"({raised:g} s), the sorter sorts again",
             back["sort"]["used"] is True and back["sort"]["model"] == SORTER,
             back["sort"],
         )

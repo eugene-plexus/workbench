@@ -167,7 +167,7 @@ CASES = [
             )
         ],
         "hung",
-        6,
+        8,
         ["hung.not-again"],
     ),
     Case(
