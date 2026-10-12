@@ -317,7 +317,9 @@ describe("the search switch says why it is off (W6)", () => {
 
   it("names a model that cannot search, as Eugene's limit and not the model's", () => {
     const said = searchProblem(listing(true), model({ webSearch: false }));
-    expect(said).toMatch(/^Eugene cannot give .+ tools as it runs here, so it cannot search the web/);
+    expect(said).toMatch(
+      /^Eugene cannot give .+ tools as it runs here, so it cannot search the web/,
+    );
     expect(said).not.toMatch(/neither search nor use tools/);
   });
 
