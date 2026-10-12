@@ -142,14 +142,33 @@ export function addingWords(facts: SearchFacts): string | null {
   return adding.message;
 }
 
-/** What a chat's drawer says of how documents are searched: the server's headline, why in the
- * code's own words, and where the Rebuild is that mends a paused search. */
+/** The sentence that says how documents are searched: the server's headline, with the result
+ * sorter said in it while one is putting the best passages in order (`Searching by meaning and
+ * words, sorted by sorter-model.`). The server says it in the mode, which is what is read here.
+ * A headline that is not of the two plain ways (a search that is paused or damaged) is left as
+ * the server said it: the sorter has its own notice on the Documents screen. */
+export function searchHeadline(facts: SearchFacts): string {
+  const { how, sorter } = splitMode(facts.mode);
+  if (!sorter) return facts.headline;
+  const lead =
+    how === "meaning and words"
+      ? "Searching by meaning and words"
+      : how === "words"
+        ? "Searching by words only"
+        : null;
+  return lead && facts.headline.startsWith(`${lead}.`)
+    ? `${lead}, sorted by ${sorter}.${facts.headline.slice(lead.length + 1)}`
+    : facts.headline;
+}
+
+/** What a chat's drawer says of how documents are searched: the headline, why in the code's own
+ * words, and where the Rebuild is that mends a paused search. */
 export function drawerSearchWords(facts: SearchFacts): { headline: string; more: string[] } {
   const more: string[] = [];
   const detail = detailWords(facts);
   if (detail) more.push(detail);
   if (facts.actions.includes("rebuild")) more.push("Rebuild search is on the Documents screen.");
-  return { headline: facts.headline, more };
+  return { headline: searchHeadline(facts), more };
 }
 
 /** Where the search model in use runs, and what that means for the person's text. */
@@ -336,8 +355,14 @@ const ordinal = (n: number): string => {
 
 /** Where each way put a passage in its own list, and where the result sorter put it among the
  * best of both: `Words put it 3rd, meaning put it 1st (closeness 0.62), the sorter put it 2nd.`
- * Never one number made of two scales. */
-export function placesWords(places: Places, similarity: number | null): string | null {
+ * Never one number made of two scales. When the passages were sorted (`sorted`), a passage with
+ * no place by the sorter is one it was not given, which is said, so a passage that is listed
+ * with only a late place by one way is not left unexplained. */
+export function placesWords(
+  places: Places,
+  similarity: number | null,
+  sorted = false,
+): string | null {
   const said: string[] = [];
   if (places.words != null) said.push(`words put it ${ordinal(places.words)}`);
   if (places.meaning != null) {
@@ -346,14 +371,16 @@ export function placesWords(places: Places, similarity: number | null): string |
     );
   }
   if (places.sorter != null) said.push(`the sorter put it ${ordinal(places.sorter)}`);
-  return said.length > 0 ? `${capital(said.join(", "))}.` : null;
+  if (said.length === 0) return null;
+  const line = `${capital(said.join(", "))}.`;
+  return sorted && places.sorter == null ? `${line} The sorter was not given it.` : line;
 }
 
 /** What the server puts after a mode when a result sorter put the passages in order. */
 const SORTED_BY = ", sorted by ";
 
 /** A mode as the server says it, told apart: how documents were searched (`meaning and words`),
- * and the sorter that put what was found in order, when there was one (`Qwen3-Reranker`). A
+ * and the sorter that put what was found in order, when there was one (`sorter-model-q8`). A
  * way of searching is never named with a comma, so the first `, sorted by ` is the sorter's. */
 export function splitMode(mode: string): { how: string; sorter: string | null } {
   const at = mode.indexOf(SORTED_BY);

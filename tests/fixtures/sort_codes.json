@@ -1,0 +1,18 @@
+{
+ "off": "Not sorted: sorting is turned off (Result sorter is set to off).",
+ "none_set_up": "Not sorted: no result sorter is set up.",
+ "not_running": "Not sorted: the sorter Qwen3-Reranker-0.6B-Q8_0 is not running. Start it in Eugene's console under Backends.",
+ "not_listed": "Not sorted: Eugene lists no result sorter named rerank-x. Check the Result sorter setting in Eugene's console.",
+ "not_sorter": "Not sorted: gemma-3 is not a result sorter. Choose one in the Result sorter setting in Eugene's console.",
+ "outside": "Not sorted: rerank-v3 runs on Cohere, outside your machines, and the owner has not allowed sending the text of your documents there.",
+ "outside_only": "Not sorted: the only result sorters Eugene lists run outside your machines (rerank-v3), and Workbench does not send the text of your documents there unless the owner names one in Result sorter and allows it.",
+ "unreachable": "Not sorted: Eugene's gateway could not be reached.",
+ "key": "Not sorted: The gateway refused Workbench's key.",
+ "limited": "Not sorted: this Workbench's key is at its limit (too many requests), so the passages are in the order the search found them. The owner can raise the key's limits in Eugene's console.",
+ "slow": "Not sorted: Qwen3-Reranker-0.6B-Q8_0 did not answer within 6 s (twice Sort time, 3 s), so the passages are in the order the search found them.",
+ "unusable": "Not sorted: The sorter's answer held 0 scores for 5 passages. The passages are in the order the search found them.",
+ "refused": "Not sorted: the sorter Qwen3-Reranker-0.6B-Q8_0 refused the request (the input is too large), so the passages are in the order the search found them.",
+ "error": "Not sorted: the sorter Qwen3-Reranker-0.6B-Q8_0 failed (the engine stopped), so the passages are in the order the search found them.",
+ "over_budget": "Not sorted: Qwen3-Reranker-0.6B-Q8_0 sorts about 820 tokens a second here, so sorting the 18 passages a question usually finds (about 300 tokens each) would add about 7 s to each answer, and Sort time is 3 s. Raise Sort time in Workbench's settings (in Eugene's console) to sort anyway.",
+ "over_budget_question": "Not sorted: Qwen3-Reranker-0.6B-Q8_0 sorts about 820 tokens a second here, so sorting these 18 passages (5,760 tokens) would take about 7 s, and Sort time is 3 s. Raise Sort time in Workbench's settings (in Eugene's console) to sort anyway."
+}

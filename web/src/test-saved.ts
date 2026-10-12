@@ -25,6 +25,9 @@ import type {
   SearchFacts,
   SearchModelView,
   SearchRecord,
+  SortCode,
+  SortFacts,
+  SortRun,
   TestedPassage,
   TestedQuestion,
 } from "./lib/types";
@@ -166,7 +169,8 @@ export function addingView(over: Partial<AddingView> = {}): AddingView {
   };
 }
 
-/** A Workbench with no gateway to ask about a search model: words only, and nothing to say why. */
+/** A Workbench with no gateway to ask about a search model: words only, and nothing to say why.
+ * It has no gateway to ask about a result sorter either, which the server says as `sort: null`. */
 export function wordsOnly(over: Partial<SearchFacts> = {}): SearchFacts {
   return {
     mode: "words",
@@ -179,6 +183,7 @@ export function wordsOnly(over: Partial<SearchFacts> = {}): SearchFacts {
     model: null,
     adding: null,
     rebuild: null,
+    sort: null,
     ...over,
   };
 }
@@ -205,6 +210,8 @@ export const byMeaning = (over: Partial<SearchFacts> = {}): SearchFacts => ({
   model: modelView(),
   adding: addingView(),
   rebuild: null,
+  // A gateway to ask, and no result sorter set up: which is quiet, and says nothing on the screen.
+  sort: noSorter(),
   ...over,
 });
 
@@ -282,6 +289,210 @@ export const ranByMeaning = (over: Partial<MeaningRun> = {}) =>
     floor: 0.5,
     ...over,
   });
+
+// --- the result sorter (MR6b) ---
+
+/** What the server's own functions say for each code the sorter can come to, as the Documents screen
+ * and a tried question show it (`tests/fixtures/sort_codes.json`, which the server's tests hold to
+ * what it says: tests/test_sorting_page.py). `over_budget` is the screen's (a usual sort) and
+ * `over_budget_question` a tried question's (the passages that were found). */
+const SORT_SAYS = JSON.parse(
+  readFileSync(join(import.meta.dirname, "../../tests/fixtures/sort_codes.json"), "utf8"),
+) as Record<string, string>;
+
+/** The sorter as those sentences name it. */
+export const SORTER = "Qwen3-Reranker-0.6B-Q8_0";
+
+/** The sentence the server says for a code. */
+export function sortSays(code: string): string {
+  const said = SORT_SAYS[code];
+  if (!said) throw new Error(`the server says nothing for the code ${code}`);
+  return said;
+}
+
+/** The codes the Documents screen can be told of the sorter. */
+export const SORT_CODES: SortCode[] = [
+  "ok",
+  "measuring",
+  "over_budget",
+  "off",
+  "none_set_up",
+  "not_running",
+  "not_listed",
+  "not_sorter",
+  "outside",
+  "outside_only",
+  "limited",
+  "key",
+  "unreachable",
+  "slow",
+  "refused",
+  "unusable",
+  "error",
+];
+
+/** The codes a tried question can come to when its passages were not sorted. */
+export const SORT_RUN_CODES: SortCode[] = [
+  "over_budget",
+  "slow",
+  "not_running",
+  "refused",
+  "limited",
+  "key",
+  "unreachable",
+  "unusable",
+  "error",
+  "off",
+  "none_set_up",
+  "not_listed",
+  "not_sorter",
+  "outside",
+  "outside_only",
+  "nothing_to_sort",
+  "no_question",
+  "not_asked",
+  "none",
+];
+
+/** A sort of the usual size: what the Documents screen prices the sorter's speed by. */
+const USUAL = { passages: 18, passageTokens: 300, tokens: 5_760 };
+
+/** The sorter, as the Documents screen is told of it (`Standing.view`) while it is in use and a
+ * sort of the usual size is quick enough: automatic, on the install's own machines, measured by
+ * a quick test at about 4,100 tokens a second, so that a usual sort adds 1.4 s. */
+export function sortFacts(over: Partial<SortFacts> = {}): SortFacts {
+  return {
+    setting: "auto",
+    automatic: true,
+    sorting: true,
+    code: "ok",
+    message: null,
+    quiet: false,
+    model: SORTER,
+    named: null,
+    label: `In use: ${SORTER} (automatic)`,
+    locality: "local",
+    runsOn: null,
+    allowExternal: false,
+    outside: [],
+    budgetSeconds: 3,
+    ratePerSecond: 4_100,
+    rateFrom: "probe",
+    typical: { ...USUAL, seconds: 1.4 },
+    ...over,
+  };
+}
+
+/** No sorter set up: never in play, so quiet, and the screen says nothing of one. */
+export const noSorter = (over: Partial<SortFacts> = {}): SortFacts =>
+  sortFacts({
+    sorting: false,
+    code: "none_set_up",
+    message: sortSays("none_set_up"),
+    quiet: true,
+    model: null,
+    label: null,
+    locality: null,
+    ratePerSecond: null,
+    rateFrom: null,
+    typical: { ...USUAL, seconds: null },
+    ...over,
+  });
+
+/** What the Documents screen is told for a code, in the server's own words. */
+export function sortFor(code: SortCode, over: Partial<SortFacts> = {}): SortFacts {
+  switch (code) {
+    case "ok":
+      return sortFacts(over);
+    case "measuring":
+      // Chosen, and being measured: no sentence from the server, and nothing to price it by yet.
+      return sortFacts({
+        sorting: false,
+        code,
+        ratePerSecond: null,
+        rateFrom: null,
+        typical: { ...USUAL, seconds: null },
+        ...over,
+      });
+    case "over_budget":
+      // Measured at 820 tokens a second, so that a usual sort adds about 7 s: over Sort time, 3 s.
+      return sortFacts({
+        sorting: false,
+        code,
+        message: sortSays("over_budget"),
+        ratePerSecond: 820,
+        typical: { ...USUAL, seconds: 7.02 },
+        ...over,
+      });
+    default:
+      return noSorter({
+        code,
+        message: sortSays(code),
+        quiet: code === "off" || code === "none_set_up",
+        ...over,
+      });
+  }
+}
+
+/** What a tried question says of sorting when no sorter was in play: quiet, and no words. */
+export function sortRun(over: Partial<SortRun> = {}): SortRun {
+  return {
+    used: false,
+    code: "none_set_up",
+    message: sortSays("none_set_up"),
+    quiet: true,
+    model: null,
+    setting: "auto",
+    passages: 0,
+    tokens: null,
+    ratePerSecond: null,
+    expectedSeconds: null,
+    budgetSeconds: 3,
+    seconds: null,
+    ...over,
+  };
+}
+
+/** A question whose passages were put in a sorter's order: 18 of them, in 1.4 s. */
+export const sortedRun = (over: Partial<SortRun> = {}) =>
+  sortRun({
+    used: true,
+    code: null,
+    message: null,
+    quiet: false,
+    model: SORTER,
+    passages: 18,
+    tokens: 5_760,
+    ratePerSecond: 4_100,
+    expectedSeconds: 1.4,
+    seconds: 1.4,
+    ...over,
+  });
+
+/** What a tried question says for a code, in the server's own words: for the codes that were
+ * never in play it is quiet. */
+export function sortRunFor(code: SortCode, over: Partial<SortRun> = {}): SortRun {
+  if (code === "over_budget") {
+    return sortRun({
+      code,
+      message: sortSays("over_budget_question"),
+      quiet: false,
+      model: SORTER,
+      passages: 18,
+      tokens: 5_760,
+      ratePerSecond: 820,
+      expectedSeconds: 7.02,
+      ...over,
+    });
+  }
+  const never = ["off", "none_set_up", "nothing_to_sort", "no_question", "not_asked", "none"];
+  return sortRun({
+    code,
+    message: SORT_SAYS[code] ?? null,
+    quiet: never.includes(code),
+    ...over,
+  });
+}
 
 /** Waiting its turn to be read. */
 export const queued = (over: Partial<SavedDocument> = {}) =>
@@ -646,6 +857,7 @@ export function tested(over: Partial<TestedQuestion> = {}): TestedQuestion {
     },
     mode: "words",
     meaning: meaningRun(),
+    sort: sortRun(),
     passages: [
       hit(),
       hit({

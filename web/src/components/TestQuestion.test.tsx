@@ -14,6 +14,10 @@ import {
   noSearchModel,
   ranByMeaning,
   searchFor,
+  SORT_RUN_CODES,
+  sortedRun,
+  sortRunFor,
+  SORTER,
   tested,
   why,
 } from "../test-saved";
@@ -613,5 +617,191 @@ describe("how a tried question was searched", () => {
       passages: [],
     });
     expect(screen.queryByTestId("documents-test-mode")).toBeNull();
+  });
+});
+
+// --- the result sorter (MR6b) ---
+
+describe("how a tried question was sorted", () => {
+  /** Three passages: one the sorter put first, one second, and one it was not given. */
+  const passages = () => [
+    hit({
+      rank: 1,
+      via: "both",
+      why: why({
+        via: "both",
+        terms: ["code", "word"],
+        ranks: { words: 3, meaning: 1, sorter: 1 },
+        similarity: 0.71,
+      }),
+    }),
+    hit({
+      rank: 2,
+      docId: "d4",
+      name: "quarterly-report.docx",
+      pageStart: null,
+      pageEnd: null,
+      heading: "Conclusion",
+      snippet: "The code word is PLUMBAGO-77.",
+      text: "The code word is PLUMBAGO-77.",
+      why: why({ terms: ["code", "word"], ranks: { words: 1, sorter: 2 } }),
+    }),
+    hit({
+      rank: 3,
+      docId: "d9",
+      name: "later-notes.md",
+      pageStart: null,
+      pageEnd: null,
+      snippet: "A word about the lighthouse.",
+      text: "A word about the lighthouse.",
+      why: why({ terms: ["word"], ranks: { words: 14 } }),
+    }),
+  ];
+  const sorted = (over: Partial<TestedQuestion> = {}) =>
+    tested({
+      mode: `meaning and words, sorted by ${SORTER}` as never,
+      meaning: ranByMeaning(),
+      sort: sortedRun(),
+      passages: passages(),
+      ...over,
+    });
+  const places = () =>
+    hits().map((h) => within(h).getByTestId("documents-test-places").textContent);
+
+  it("says where the sorter put each passage, beside where words and meaning put it", async () => {
+    render(<TestQuestion />);
+    await tries("code word", sorted());
+    expect(places()).toEqual([
+      "Words put it 3rd, meaning put it 1st (closeness 0.71), the sorter put it 1st.",
+      "Words put it 1st, the sorter put it 2nd.",
+      "Words put it 14th. The sorter was not given it.",
+    ]);
+  });
+
+  it("says how it was searched, with the sorter, and keeps the mode where a check can read it", async () => {
+    render(<TestQuestion />);
+    await tries("code word", sorted());
+    expect(screen.getByTestId("documents-test-mode")).toHaveTextContent(
+      `Searched by meaning and words, sorted by ${SORTER}.`,
+    );
+    expect(screen.getByTestId("documents-test-mode")).not.toHaveTextContent("You chose");
+    expect(screen.getByTestId("documents-test-result")).toHaveAttribute(
+      "data-mode",
+      `meaning and words, sorted by ${SORTER}`,
+    );
+  });
+
+  it("says how many passages it put in order and how long that took, beside Sort time", async () => {
+    render(<TestQuestion />);
+    await tries("code word", sorted());
+    expect(screen.getByTestId("documents-test-sorted")).toHaveTextContent(
+      "The sorter put 18 passages in order in 1.4 s (Sort time is 3 s).",
+    );
+    expect(screen.queryByTestId("documents-test-sort")).toBeNull();
+  });
+
+  it("says a question was sorted the way it was chosen, when one way was named", async () => {
+    render(<TestQuestion />);
+    fireEvent.click(way("words"));
+    await tries("code word", sorted({ mode: `words, sorted by ${SORTER}` as never }));
+    expect(screen.getByTestId("documents-test-mode")).toHaveTextContent(
+      `Searched by words only, sorted by ${SORTER}. You chose this.`,
+    );
+  });
+
+  it("puts the sorter's line after how it was searched", async () => {
+    render(<TestQuestion />);
+    await tries("code word", sorted());
+    const mode = screen.getByTestId("documents-test-mode");
+    const sort = screen.getByTestId("documents-test-sorted");
+    expect(mode.compareDocumentPosition(sort) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  describe("passages that were not sorted", () => {
+    const slow = (over: Partial<TestedQuestion> = {}) =>
+      tested({
+        mode: "meaning and words",
+        meaning: ranByMeaning(),
+        sort: sortRunFor("over_budget"),
+        passages: passages().map((p) => ({
+          ...p,
+          why: { ...p.why, ranks: { ...p.why.ranks, sorter: undefined } },
+        })),
+        ...over,
+      });
+
+    it("says why, in the server's words, with the numbers of these passages", async () => {
+      render(<TestQuestion />);
+      await tries("code word", slow());
+      const reason = screen.getByTestId("documents-test-sort");
+      expect(reason).toHaveTextContent(
+        `Not sorted: ${SORTER} sorts about 820 tokens a second here, so sorting these 18 passages (5,760 tokens) would take about 7 s, and Sort time is 3 s. Raise Sort time in Workbench's settings (in Eugene's console) to sort anyway.`,
+      );
+      expect(reason).toHaveAttribute("data-code", "over_budget");
+      expect(screen.queryByTestId("documents-test-sorted")).toBeNull();
+    });
+
+    it("does not say they were sorted, and does not say a passage was not given to a sorter", async () => {
+      render(<TestQuestion />);
+      await tries("code word", slow());
+      expect(screen.getByTestId("documents-test-mode")).toHaveTextContent(
+        /^Searched by meaning and words\.$/,
+      );
+      expect(places()).toEqual([
+        "Words put it 3rd, meaning put it 1st (closeness 0.71).",
+        "Words put it 1st.",
+        "Words put it 14th.",
+      ]);
+    });
+
+    it.each(SORT_RUN_CODES)(
+      "%s: says what the server says, unless the sorter was never in play",
+      async (code) => {
+        render(<TestQuestion />);
+        await tries("code word", tested({ mode: "meaning and words", sort: sortRunFor(code) }));
+        const run = sortRunFor(code);
+        if (run.quiet) {
+          expect(screen.queryByTestId("documents-test-sort")).toBeNull();
+        } else {
+          expect(screen.getByTestId("documents-test-sort")).toHaveTextContent(run.message ?? "x");
+          expect(screen.getByTestId("documents-test-sort")).toHaveAttribute("data-code", code);
+        }
+        expect(screen.queryByTestId("documents-test-sorted")).toBeNull();
+      },
+    );
+  });
+
+  it("says nothing of a sorter that was never in play, and the question is as it was", async () => {
+    render(<TestQuestion />);
+    await tries("code word");
+    expect(screen.queryByTestId("documents-test-sort")).toBeNull();
+    expect(screen.queryByTestId("documents-test-sorted")).toBeNull();
+    expect(places()).toEqual(["Words put it 1st.", "Words put it 2nd."]);
+  });
+
+  it("is not stopped by an answer from a server before sorting, which has no word of one", async () => {
+    render(<TestQuestion />);
+    await tries("code word", tested({ sort: undefined }));
+    expect(screen.getByTestId("documents-test-result")).toBeInTheDocument();
+    expect(screen.queryByTestId("documents-test-sort")).toBeNull();
+    expect(screen.queryByTestId("documents-test-sorted")).toBeNull();
+  });
+
+  it("says nothing of sorting for a question none of whose ways could run", async () => {
+    render(<TestQuestion />);
+    await tries(
+      "code word",
+      tested({
+        status: "unavailable",
+        mode: "none",
+        passages: [],
+        sort: sortRunFor("over_budget"),
+      }),
+    );
+    expect(screen.getByTestId("documents-test-result")).toHaveAttribute(
+      "data-status",
+      "unavailable",
+    );
+    expect(screen.queryByTestId("documents-test-sort")).toBeNull();
   });
 });

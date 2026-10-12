@@ -1034,6 +1034,37 @@ export type SearchMode = "words" | "meaning" | "meaning and words" | "none";
  * Qwen3-Reranker`. Every other mode is one of `SearchMode`. */
 export type SortedMode = `${Exclude<SearchMode, "none">}, sorted by ${string}`;
 
+/** Every code the result sorter can say, on the Documents screen (`SortFacts.code`) and for a
+ * question (`SortRun.code`, which is null for a question that was sorted). `ok` and `measuring`
+ * are only the screen's: a sort of the usual size is quick enough, or the sorter has not been
+ * measured yet. The rest are why passages were not sorted: `off` and `none_set_up` (never in
+ * play), `not_running`, `not_listed`, `not_sorter`, `outside` and `outside_only` (which sorter),
+ * `over_budget` and `slow` (quick enough), `limited`, `key`, `unreachable`, `refused`, `unusable`
+ * and `error` (what the sorter or the gateway said), and the question's own: `nothing_to_sort`,
+ * `no_question`, `not_asked` and `none`. */
+export type SortCode =
+  | "ok"
+  | "measuring"
+  | "over_budget"
+  | "off"
+  | "none_set_up"
+  | "not_running"
+  | "not_listed"
+  | "not_sorter"
+  | "outside"
+  | "outside_only"
+  | "limited"
+  | "key"
+  | "unreachable"
+  | "slow"
+  | "refused"
+  | "unusable"
+  | "error"
+  | "nothing_to_sort"
+  | "no_question"
+  | "not_asked"
+  | "none";
+
 /** The result sorter right now (`sorting.Standing.view`, from a live look and what was
  * measured): which one, how fast it reads, the time a sort may add to an answer, and whether a
  * sort of the usual size is quick enough (`sorting`), or why not (`code` and `message`, in the
@@ -1044,7 +1075,7 @@ export interface SortFacts {
   setting: string;
   automatic: boolean;
   sorting: boolean;
-  code: string;
+  code: SortCode;
   message: string | null;
   quiet: boolean;
   model: string | null;
@@ -1209,7 +1240,7 @@ export interface MeaningRun {
  * that would take, and the Sort time allowed. `seconds` is how long a sort took. Never a score. */
 export interface SortRun {
   used: boolean;
-  code: string | null;
+  code: SortCode | null;
   message: string | null;
   quiet: boolean;
   model: string | null;

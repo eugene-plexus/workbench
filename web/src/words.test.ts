@@ -114,6 +114,10 @@ const DOCUMENT_FILES = [
   // made of underneath.
   "components/DocumentsSearch.tsx",
   "lib/documentMeaning.ts",
+  // The result sorter (MR6b): "result sorter", "sorted by", "Sort time", never what it is made of
+  // underneath.
+  "components/DocumentsSort.tsx",
+  "lib/documentSorting.ts",
   // Folders (MR7): "folder", "files", "ready", "being read", "left out", never what a file is
   // made into underneath.
   "components/AddFolder.tsx",
@@ -127,7 +131,8 @@ const DOCUMENT_FILES = [
   "lib/useFolderDetail.ts",
   "lib/useFolderFiles.ts",
 ];
-const NOT_ON_THE_DOCUMENT_PATH = /\b(RAG|vectors?|embeddings?|retrieval|retrieve[ds]?|chunks?)\b/i;
+const NOT_ON_THE_DOCUMENT_PATH =
+  /\b(RAG|vectors?|embeddings?|retrieval|retrieve[ds]?|chunks?|rerank\w*)\b/i;
 
 it("keeps how documents are read underneath off every screen about them", () => {
   const found: string[] = [];
@@ -147,6 +152,8 @@ it("can fail: it names each of those words, and lets the plain ones through", ()
     "an embedding",
     "vector search",
     "retrieval",
+    "a reranker",
+    "Reranking",
   ]) {
     expect(NOT_ON_THE_DOCUMENT_PATH.test(sample), sample).toBe(true);
   }
@@ -157,6 +164,8 @@ it("can fail: it names each of those words, and lets the plain ones through", ()
     "tokens",
     "window",
     "Show what Workbench read",
+    "Result sorter",
+    "sorted by",
   ]) {
     expect(NOT_ON_THE_DOCUMENT_PATH.test(sample), sample).toBe(false);
   }

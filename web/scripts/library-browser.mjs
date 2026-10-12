@@ -19,6 +19,20 @@
 // at a time) and in a chat's Sources; the drawer says how it is searched. Then the search
 // model stops, and the open screen names it by itself, and words search goes on. Pictures
 // of the screen and the Sources, dark and light, at 1440 and 390.
+//
+// A result sorter (MR6b): a long file is added so that a question has passages to sort, and
+// the owner lists a sorter that reads slowly. The Documents screen says nothing of a sorter
+// until there is one, then says it is being measured, and by itself, in seconds, why it does not
+// sort: the numbers it was measured at and Sort time, in the server's own sentence, and Test a
+// question says the same of the question it was asked, with no sorter's place on any passage and
+// the sorter asked nothing. Sort time is raised (the owner's setting, in Eugene's console): the
+// headline says "sorted by" the sorter, the notice says where it runs and how fast it reads, and
+// Test a question says how many passages were put in order, how long that took, and each
+// passage's place by the sorter beside its places by words and by meaning, in the sorter's order;
+// a chat's drawer says it, and Sources say what found each passage. Then the sorter stops and
+// the screen names it (the owner is linked to Backends, a person is told to ask), a question is
+// answered in the order the search found, and the sorter is asked nothing; and when it is turned
+// off the screen says nothing of one. Pictures, dark and light, at 1440 and 390.
 import { mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import assert from "node:assert/strict";
@@ -35,6 +49,7 @@ const PHONE = { width: 390, height: 844 };
 const WORD = cfg.word;
 const SAID = cfg.said;
 const MODEL = cfg.searchModel;
+const SORTER = cfg.sorter;
 const log = (line) => console.log(line);
 
 async function open(scheme, viewport, extra = {}, who = cfg) {
@@ -72,6 +87,37 @@ async function listModels(models, hold) {
     body: JSON.stringify({ models, ...(hold === undefined ? {} : { hold }) }),
   });
   assert.ok(response.ok, `the gateway's list of models: ${response.status}`);
+}
+
+/** The owner lists, slows, stops or removes a result sorter in Eugene's console: the gateway lists
+ * these from now on, and a sorter reads `rate` tokens a second (as Workbench counts them). */
+async function listSorters(sorters, rate) {
+  const response = await fetch(`${cfg.gateway}/__fake/sorters`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sorters, ...(rate === undefined ? {} : { rate }) }),
+  });
+  assert.ok(response.ok, `the gateway's list of sorters: ${response.status}`);
+}
+
+/** What the gateway's sorters were asked: the sorts of a question, and the small test of how fast
+ * one reads. */
+async function sorterCalls() {
+  const response = await fetch(`${cfg.gateway}/__fake/sorter-calls`);
+  assert.ok(response.ok, `the gateway's sorter calls: ${response.status}`);
+  return response.json();
+}
+
+/** The owner changes a setting of Workbench in Eugene's console (a null puts the default back). */
+async function setting(values) {
+  const response = await fetch(`${cfg.url}/v1/config`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json", authorization: `Bearer ${cfg.admin}` },
+    body: JSON.stringify(values),
+  });
+  assert.ok(response.ok, `the setting ${JSON.stringify(values)}: ${response.status}`);
+  const done = await response.json();
+  assert.deepEqual(done.rejected, [], `a setting was refused: ${JSON.stringify(done)}`);
 }
 
 const finished = (page) => page.locator('[data-testid=answer]:not([data-status="running"])');
@@ -161,6 +207,23 @@ async function tryQuestion(page, words, status = "found") {
 
 const hitOf = (page, name) =>
   page.getByTestId("documents-test-hit").filter({ hasText: name }).first();
+
+/** What each tried passage says of where each way put it, in the order they are listed. */
+const placesOf = (page) =>
+  page
+    .getByTestId("documents-test-hit")
+    .evaluateAll((hits) =>
+      hits.map(
+        (hit) => hit.querySelector("[data-testid=documents-test-places]")?.textContent ?? "",
+      ),
+    );
+
+/** Where the sorter put each passage that has a place by it, in the order they are listed. */
+const sorterPlaces = (said) =>
+  said
+    .map((words) => /the sorter put it (\d+)(?:st|nd|rd|th)/.exec(words)?.[1])
+    .filter(Boolean)
+    .map(Number);
 
 let chatUrl = "";
 let meaningUrl = "";
@@ -774,6 +837,364 @@ try {
   // And it is back: the next look says so.
   await listModels([{ id: MODEL, ready: true }]);
   log("PASS  a search model that stopped is named by the open screen, and words search goes on");
+
+  // --- a result sorter (MR6b): a long file, so that a question has passages enough to sort -----
+  await page.goto(`${cfg.url}/documents`);
+  await page
+    .getByTestId("documents-search-headline")
+    .filter({ hasText: "Searching by meaning and words." })
+    .waitFor();
+  await page.getByTestId("documents-input").setInputFiles(cfg.files["handbook.md"]);
+  await rows(page).nth(4).waitFor();
+  await allSay(page, /^Ready$/);
+  await page.getByTestId("documents-uploads-clear").click();
+  assert.equal(await rows(page, "ready").count(), 5);
+  // No sorter is set up: the screen says nothing of one, and a question is searched as it was.
+  assert.equal(
+    await page.getByTestId("documents-sort").count(),
+    0,
+    "no sorter, nothing said of one",
+  );
+  assert.match(
+    await page.getByTestId("documents-search-headline").textContent(),
+    /^Searching by meaning and words\.$/,
+  );
+  await tryQuestion(page, SAID.handbook);
+  assert.match(
+    await page.getByTestId("documents-test-mode").textContent(),
+    /^Searched by meaning and words\.$/,
+  );
+  assert.equal(await page.getByTestId("documents-test-sort").count(), 0);
+  assert.equal(await page.getByTestId("documents-test-sorted").count(), 0);
+  for (const words of await placesOf(page)) assert.doesNotMatch(words, /sorter/);
+  log("PASS  with no sorter set up, the screen and Test a question say nothing of one");
+
+  // The owner lists a sorter that reads about 1,500 tokens a second, and Sort time is a second:
+  // the screen is told it is being measured, and looks again by itself in seconds.
+  await setting({ documentsSortSeconds: 1 });
+  await listSorters([{ id: SORTER, ready: true }], 1500);
+  const listed = Date.now();
+  await page.goto(`${cfg.url}/documents`);
+  const sortBox = page.getByTestId("documents-sort");
+  await sortBox.and(page.locator("[data-code=measuring]")).waitFor();
+  assert.equal(
+    (await page.getByTestId("documents-sort-reason").textContent()).trim(),
+    `Measuring how fast ${SORTER} sorts, to tell whether it is quick enough.`,
+  );
+  assert.equal(
+    await page.getByTestId("documents-sort-model").count(),
+    0,
+    "a sorter that is being measured is not said to be in use",
+  );
+  await sortBox.and(page.locator("[data-code=over_budget]")).waitFor();
+  assert.ok(
+    Date.now() - listed < 20000,
+    "the screen looked again by itself in seconds, and not each half minute",
+  );
+  // Too slow for Sort time: the server's own sentence with the numbers it was decided by, and the
+  // speed on the screen is the speed it measured (to two figures).
+  const slowSaid = (await page.getByTestId("documents-sort-reason").textContent()).trim();
+  const slow = (await ask(context, "/api/documents")).search.sort;
+  assert.equal(slow.code, "over_budget");
+  assert.equal(slow.budgetSeconds, 1);
+  assert.ok(
+    slow.ratePerSecond > 500 && slow.ratePerSecond < 1600,
+    `measured at ${slow.ratePerSecond}`,
+  );
+  const slowWords = new RegExp(
+    `^Not sorted: ${SORTER} sorts about ([\\d,]+) tokens a second here, so sorting the 18 passages a question usually finds \\(about 300 tokens each\\) would add about ([\\d.]+) s to each answer, and Sort time is 1 s\\. Raise Sort time in Workbench's settings \\(in Eugene's console\\) to sort anyway\\.$`,
+  ).exec(slowSaid);
+  assert.ok(slowWords, slowSaid);
+  const shown = Number(slowWords[1].replaceAll(",", ""));
+  assert.ok(
+    Math.abs(shown - slow.ratePerSecond) <= slow.ratePerSecond * 0.06,
+    `the screen says ${shown} tokens a second and the server measured ${slow.ratePerSecond}`,
+  );
+  assert.match(
+    await page.getByTestId("documents-sort-speed-from").textContent(),
+    /^How fast it reads was measured by a quick test before any question was sorted\.$/,
+  );
+  // Not in use, not sorted, and not a fault: the headline and the notice say so.
+  assert.equal(await page.getByTestId("documents-sort-model").count(), 0);
+  assert.equal(
+    await page.getByTestId("documents-search").getAttribute("data-mode"),
+    "meaning and words",
+    "not sorted, so not said to be",
+  );
+  assert.match(
+    await page.getByTestId("documents-search-headline").textContent(),
+    /^Searching by meaning and words\.$/,
+  );
+  assert.equal(await sortBox.evaluate((el) => el.classList.contains("notice--warn")), false);
+  // A question: the same words with the numbers of its passages, the passages as the search found
+  // them, and the sorter asked nothing.
+  await tryQuestion(page, SAID.handbook);
+  const notSorted = page.getByTestId("documents-test-sort");
+  await notSorted.waitFor();
+  assert.match(
+    await notSorted.textContent(),
+    new RegExp(
+      `^Not sorted: ${SORTER} sorts about [\\d,]+ tokens a second here, so sorting these \\d+ passages \\([\\d,]+ tokens\\) would take about [\\d.]+ s, and Sort time is 1 s\\. Raise Sort time in Workbench's settings \\(in Eugene's console\\) to sort anyway\\.$`,
+    ),
+  );
+  assert.equal(await notSorted.getAttribute("data-code"), "over_budget");
+  assert.match(
+    await page.getByTestId("documents-test-mode").textContent(),
+    /^Searched by meaning and words\.$/,
+  );
+  assert.equal(await page.getByTestId("documents-test-sorted").count(), 0);
+  assert.ok((await page.getByTestId("documents-test-hit").count()) >= 3);
+  for (const words of await placesOf(page)) assert.doesNotMatch(words, /sorter/);
+  const slowCalls = await sorterCalls();
+  assert.equal(slowCalls.sorts, 0, "the sorter was asked nothing while it was too slow");
+  assert.ok(slowCalls.probes >= 1, "how fast it reads was measured by a quick test");
+  await tall(page);
+  await snap(page, "sort-over-budget-dark-desk");
+  await page.setViewportSize(DESK);
+  {
+    const phone = await open("dark", PHONE, { isMobile: true, hasTouch: true });
+    const view = phone.page;
+    await view.goto(`${cfg.url}/documents`);
+    await view
+      .getByTestId("documents-sort")
+      .and(view.locator("[data-code=over_budget]"))
+      .waitFor({ timeout: 30000 });
+    await tryQuestion(view, SAID.handbook);
+    await view.getByTestId("documents-test-sort").waitFor();
+    await tall(view);
+    await snap(view, "sort-over-budget-dark-phone");
+    assert.ok((await wider(view)) <= 1, "the screen with a sorter too slow is wider than a phone");
+    await phone.context.close();
+  }
+  log(
+    "PASS  a sorter too slow for Sort time is said so by itself, with the numbers, on the screen and for a question, and is asked nothing",
+  );
+
+  // Sort time is raised: the headline says the sorter, and the notice where it runs and how fast.
+  await setting({ documentsSortSeconds: 30 });
+  await page.goto(`${cfg.url}/documents`);
+  await page
+    .getByTestId("documents-search-headline")
+    .filter({ hasText: `Searching by meaning and words, sorted by ${SORTER}.` })
+    .waitFor();
+  assert.equal(
+    await page.getByTestId("documents-search").getAttribute("data-mode"),
+    `meaning and words, sorted by ${SORTER}`,
+  );
+  assert.equal(
+    (await page.getByTestId("documents-sort-model").textContent()).trim(),
+    `In use: ${SORTER} (automatic)`,
+  );
+  assert.equal(
+    (await page.getByTestId("documents-sort-where").textContent()).trim(),
+    "It runs on your own machines, so what is in your documents stays on them. Automatic means the first result sorter that is running on your own machines.",
+  );
+  assert.match(
+    await page.getByTestId("documents-sort-speed").textContent(),
+    new RegExp(
+      `^${SORTER} sorts about [\\d,]+ tokens a second here, so sorting the 18 passages a question usually finds \\(about 300 tokens each\\) adds about [\\d.]+ s to each answer, within Sort time \\(30 s\\)\\.$`,
+    ),
+  );
+  assert.match(
+    await page.getByTestId("documents-sort-speed-from").textContent(),
+    /^How fast it reads (was measured by a quick test before any question was sorted|is measured from the sorts Workbench has made)\.$/,
+  );
+  assert.equal(await page.getByTestId("documents-sort-reason").count(), 0);
+  assert.equal(await sortBox.evaluate((el) => el.classList.contains("notice--warn")), false);
+  // Test a question: how it was searched with the sorter, how many passages it put in order and how
+  // long that took, and each passage's place by it beside its places by words and by meaning, in its
+  // order.
+  await tryQuestion(page, SAID.handbook);
+  assert.match(
+    await page.getByTestId("documents-test-mode").textContent(),
+    new RegExp(`^Searched by meaning and words, sorted by ${SORTER}\\.$`),
+  );
+  assert.equal(
+    await page.getByTestId("documents-test-result").getAttribute("data-mode"),
+    `meaning and words, sorted by ${SORTER}`,
+  );
+  assert.match(
+    await page.getByTestId("documents-test-sorted").textContent(),
+    /^The sorter put \d+ passages in order in [\d.]+ s \(Sort time is 30 s\)\.$/,
+  );
+  assert.equal(await page.getByTestId("documents-test-sort").count(), 0);
+  const placed = await placesOf(page);
+  const byTheSorter = sorterPlaces(placed);
+  assert.ok(byTheSorter.length >= 3, `places by the sorter: ${JSON.stringify(placed)}`);
+  assert.equal(byTheSorter[0], 1, "the passage the sorter put first is the first listed");
+  assert.deepEqual(
+    [...byTheSorter].sort((a, b) => a - b),
+    byTheSorter,
+    "the passages are listed in the sorter's order",
+  );
+  for (const words of placed) {
+    assert.match(words, /\b(Words|Meaning|words|meaning) put it \d+(st|nd|rd|th)\b/);
+    // Where the sorter put it is a place, and never a score.
+    if (words.includes("the sorter put it")) {
+      assert.match(words, /the sorter put it \d+(st|nd|rd|th)\.$/, words);
+    }
+  }
+  assert.ok(
+    placed.some((words) =>
+      /(Words|words) put it .*(meaning put it .*the sorter put it)/.test(words),
+    ),
+    "a passage says where words, meaning and the sorter put it",
+  );
+  assert.equal((await sorterCalls()).sorts, 1, "the question was sorted once");
+  await tall(page);
+  await snap(page, "sort-sorted-dark-desk");
+  await page.setViewportSize(DESK);
+  log(
+    "PASS  with Sort time raised the screen says the sorter, where it runs and how fast it reads, and Test a question says each passage's place by it",
+  );
+
+  // Pictures, dark and light, at 1440 and 390.
+  for (const [scheme, size, extra] of [
+    ["dark", DESK, {}],
+    ["dark", PHONE, { isMobile: true, hasTouch: true }],
+    ["light", DESK, {}],
+    ["light", PHONE, { isMobile: true, hasTouch: true }],
+  ]) {
+    const where = `${scheme}-${size === DESK ? "desk" : "phone"}`;
+    const other = await open(scheme, size, extra);
+    const view = other.page;
+    await view.goto(`${cfg.url}/documents`);
+    await view.getByTestId("documents-sort-model").waitFor();
+    await tryQuestion(view, SAID.handbook);
+    await view.getByTestId("documents-test-sorted").waitFor();
+    await tall(view);
+    await snap(view, `sort-screen-${where}`);
+    assert.ok(
+      (await wider(view)) <= 1,
+      `${where}: the screen with a sorter is wider than the window`,
+    );
+    await other.context.close();
+  }
+  log("PASS  pictures of the screen with a sorter, dark and light, at 1440 and 390");
+
+  // A chat: the drawer says the sorter, and the answer says how its passages were found.
+  await page.getByTestId("new-chat").click();
+  await page.getByTestId("composer").waitFor();
+  await chipSays(page, "Documents off");
+  await page.getByTestId("documents-hint-on").click();
+  await chipSays(page, "Documents (5)");
+  await page.getByTestId("documents-chip").click();
+  const drawer3 = page.getByTestId("documents-drawer");
+  await drawer3.waitFor();
+  const sortedHow = drawer3.getByTestId("documents-search-mode");
+  assert.equal(
+    (await sortedHow.textContent()).trim(),
+    `Searching by meaning and words, sorted by ${SORTER}.`,
+  );
+  assert.equal(await sortedHow.getAttribute("data-mode"), `meaning and words, sorted by ${SORTER}`);
+  await page.getByTestId("documents-close").click();
+  await say(page, SAID.handbook);
+  const sortedAnswer = finished(page).last();
+  await sortedAnswer.getByTestId("passage-source").first().waitFor();
+  const sortedFacts = await sortedAnswer.getByTestId("passage-facts").textContent();
+  assert.ok(
+    sortedFacts.includes(
+      `Found by meaning and words, sorted by ${SORTER}, with the search model ${MODEL}.`,
+    ),
+    sortedFacts,
+  );
+  assert.doesNotMatch(
+    await sortedAnswer.getByTestId("sources").textContent(),
+    /Not sorted|The sorter put|the sorter put it/,
+    "under an answer, Sources say what was sent and how it was found, and nothing more of the sorter",
+  );
+  log("PASS  a chat's drawer and the answer's Sources say the passages were sorted, and by what");
+
+  // The sorter stops (the owner stops it in Eugene's console): the open screen names it by itself,
+  // the owner is linked to where it is started and a person is told to ask, and a question is
+  // answered in the order the search found, with the sorter asked nothing.
+  const before = (await sorterCalls()).sorts;
+  await listSorters([{ id: SORTER, ready: false }]);
+  await page.goto(`${cfg.url}/documents`);
+  await sortBox.and(page.locator("[data-code=not_running]")).waitFor();
+  assert.equal(
+    (await page.getByTestId("documents-sort-reason").textContent()).trim(),
+    `Not sorted: the sorter ${SORTER} is not running. Start it in Eugene's console under Backends.`,
+  );
+  assert.equal(await sortBox.evaluate((el) => el.classList.contains("notice--warn")), true);
+  assert.match(
+    await page.getByTestId("documents-search-headline").textContent(),
+    /^Searching by meaning and words\.$/,
+  );
+  assert.equal(await page.getByTestId("documents-sort-model").count(), 0);
+  assert.equal(await page.getByTestId("documents-sort-open-backends").count(), 0);
+  assert.match(
+    await page.getByTestId("documents-sort-ask-owner").textContent(),
+    /^Ask the owner of this Workbench to fix this in Eugene's console\.$/,
+  );
+  await tryQuestion(page, SAID.handbook);
+  assert.equal(
+    (await page.getByTestId("documents-test-sort").textContent()).trim(),
+    `Not sorted: the sorter ${SORTER} is not running. Start it in Eugene's console under Backends.`,
+  );
+  assert.match(
+    await page.getByTestId("documents-test-mode").textContent(),
+    /^Searched by meaning and words\.$/,
+  );
+  assert.ok((await page.getByTestId("documents-test-hit").count()) >= 3, "the passages are listed");
+  for (const words of await placesOf(page)) assert.doesNotMatch(words, /sorter/);
+  assert.equal((await sorterCalls()).sorts, before, "a sorter that is stopped is asked nothing");
+  await tall(page);
+  await snap(page, "sort-stopped-dark-desk");
+  await page.setViewportSize(DESK);
+  {
+    const boss = await open("dark", DESK, {}, cfg.owner);
+    await boss.page.goto(`${cfg.url}/documents`);
+    const backends = boss.page.getByTestId("documents-sort-open-backends");
+    await backends.waitFor();
+    const { consoleUrl } = await ask(boss.context, "/api/me", cfg.owner);
+    assert.equal(
+      await backends.getAttribute("href"),
+      `${consoleUrl.replace(/\/$/, "")}/inference/`,
+    );
+    assert.equal(await backends.getAttribute("target"), "_blank");
+    assert.equal(await backends.getAttribute("rel"), "noopener noreferrer");
+    assert.equal(await boss.page.getByTestId("documents-sort-ask-owner").count(), 0);
+    await boss.context.close();
+  }
+  log(
+    "PASS  a sorter that stopped is named by the open screen, the owner is linked to Backends, and the passages are listed as the search found them",
+  );
+
+  // It is back, and then turned off: the screen says it sorts again, and then says nothing of one.
+  await listSorters([{ id: SORTER, ready: true }]);
+  await page.goto(`${cfg.url}/documents`);
+  await page
+    .getByTestId("documents-search-headline")
+    .filter({ hasText: `sorted by ${SORTER}.` })
+    .waitFor();
+  await setting({ documentsSortModel: "off" });
+  await page.goto(`${cfg.url}/documents`);
+  await page
+    .getByTestId("documents-search-headline")
+    .filter({ hasText: /^Searching by meaning and words\.$/ })
+    .waitFor();
+  assert.equal(await page.getByTestId("documents-sort").count(), 0, "turned off, and nothing said");
+  await tryQuestion(page, SAID.handbook);
+  assert.match(
+    await page.getByTestId("documents-test-mode").textContent(),
+    /^Searched by meaning and words\.$/,
+  );
+  assert.equal(await page.getByTestId("documents-test-sort").count(), 0);
+  assert.equal(await page.getByTestId("documents-test-sorted").count(), 0);
+  assert.equal((await sorterCalls()).sorts, before, "a sorter that is off is asked nothing");
+  // The defaults are put back, and the sorter is gone, before the rest of the run.
+  await setting({ documentsSortModel: null, documentsSortSeconds: null });
+  await listSorters([]);
+  const handbookRow = row(page, "handbook.md");
+  await handbookRow.getByTestId("saved-document-remove").click();
+  await handbookRow.getByTestId("saved-document-remove-go").click();
+  await page.waitForFunction(
+    () => document.querySelectorAll("[data-testid=saved-document]").length === 4,
+  );
+  log(
+    "PASS  a sorter that is back is said to sort again, and one that is turned off is not said at all",
+  );
 
   // --- the harbour office's file is removed, with its meaning ------------------------------------
   await page.goto(`${cfg.url}/documents`);

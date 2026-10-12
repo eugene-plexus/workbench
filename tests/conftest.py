@@ -928,6 +928,31 @@ class FakeGateway:
                 self.embed_gate = None
             return {"listed": [m["id"] for m in self.search_models]}
 
+        @app.post("/__fake/sorters")
+        async def fake_sorters(request: Request) -> Any:
+            """A test's hand on the gateway while a browser drives Workbench (MR6b): which result
+            sorters it lists from now on, as `{"sorters": [{"id": ..., "ready": true}]}`, and how many
+            tokens a second they read (`rate`, as Workbench counts tokens; null answers at once). The
+            Chrome check lists, slows and stops a sorter through it, as the owner would in Eugene's
+            console."""
+            body = await request.json()
+            self.sorters = [
+                sorter_model(
+                    m["id"], locality=m.get("locality", "local"), ready=m.get("ready", True)
+                )
+                for m in body["sorters"]
+            ]
+            if "rate" in body:
+                self.rerank_rate = float(body["rate"]) if body["rate"] else None
+            return {"listed": [m["id"] for m in self.sorters]}
+
+        @app.get("/__fake/sorter-calls")
+        async def fake_sorter_calls() -> Any:
+            """What the sorters were asked, so a browser check can say that a sorter that was too
+            slow, stopped or off was asked nothing: the sorts of a question, and the small test of
+            how fast one reads."""
+            return {"sorts": len(self.sorts()), "probes": len(self.probes())}
+
         @app.post("/v1/embeddings")
         async def embeddings(request: Request) -> Any:
             body = await request.json()

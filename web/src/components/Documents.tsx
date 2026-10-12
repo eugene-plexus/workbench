@@ -8,8 +8,10 @@
  * How it is searched is said from a live look, in the server's own headline: by meaning
  * and words, or by words only and why, with what the person can do (Rebuild search, or get
  * a search model from Eugene's console), and each document says how much of its meaning is
- * added. The screen promises nothing more. Every setting shows the value in effect and
- * whose word it is. Where the owner of this Workbench has turned documents off, the
+ * added. Beside it, the result sorter that puts the best passages in order (MR6b) says which
+ * one is in use, how fast it reads and the time a sort may add (Sort time), or why passages are
+ * not sorted, with the numbers. The screen promises nothing more. Every setting shows the value
+ * in effect and whose word it is. Where the owner of this Workbench has turned documents off, the
  * screen says so and offers nothing that would keep a document; what a person already
  * has stays theirs to read and remove. A search that is damaged says so in the
  * server's words and offers to make it again from the person's own files.
@@ -58,6 +60,7 @@ import { AddDocuments } from "./AddDocuments";
 import { DocumentFolders } from "./DocumentFolders";
 import { DocumentRow } from "./DocumentRow";
 import { DocumentsSearch } from "./DocumentsSearch";
+import { DocumentsSort } from "./DocumentsSort";
 import { TestQuestion } from "./TestQuestion";
 
 type Working = <T>(work: () => Promise<T>) => Promise<T>;
@@ -353,6 +356,7 @@ export function Documents({
                 busy={busy}
                 onRebuild={() => void rebuildMeaning()}
               />
+              <DocumentsSort sort={data.search.sort} me={me} />
             </div>
             {data.ownerReadsChats && (
               <p data-testid="documents-owner-reads" className="notice notice--warn">

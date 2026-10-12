@@ -23,6 +23,7 @@ import {
   saved,
   scanned,
   second,
+  sortFor,
   tested,
   waiting,
   withMeaning,
@@ -932,6 +933,23 @@ describe("what the screen is waiting on", () => {
 
   it("is reading before it is anything else", () => {
     expect(states([queued(), waiting()], byMeaning({ code: "not_running" }))).toBe("busy");
+  });
+
+  it("is a result sorter being measured, which is asked about every few seconds, so what was measured is shown", () => {
+    expect(states([saved()], byMeaning({ sort: sortFor("measuring") }))).toBe("waiting");
+    // Not when it was measured, whatever it came to: those are the half-minute look.
+    for (const code of ["ok", "over_budget", "not_running", "off", "none_set_up"] as const) {
+      expect(states([saved()], byMeaning({ sort: sortFor(code) })), code).toBe("idle");
+    }
+    expect(states([saved()], byMeaning({ sort: null }))).toBe("idle");
+    expect(states([saved()], byMeaning({ sort: undefined }))).toBe("idle");
+    // A search by words with a sorter being measured is watched too.
+    expect(states([saved()], wordsOnly({ sort: sortFor("measuring") }))).toBe("waiting");
+  });
+
+  it("is reading, or meaning being added, before a sorter that is being measured", () => {
+    expect(states([queued()], byMeaning({ sort: sortFor("measuring") }))).toBe("busy");
+    expect(states([adding()], byMeaning({ sort: sortFor("measuring") }))).toBe("busy");
   });
 
   it("asks how often the design says: each half minute when there is nothing to watch, every five seconds when waiting", () => {

@@ -66,6 +66,12 @@ import {
   scanned,
   searchFor,
   second,
+  SORT_CODES,
+  sortedRun,
+  sortFacts,
+  sortFor,
+  sortRunFor,
+  SORTER,
   tested,
   waiting,
   why,
@@ -689,6 +695,82 @@ describe("the Documents screen, with search by meaning", () => {
       OWNER,
     );
     everyControlIsNamed(view, 5);
+  });
+});
+
+// --- the result sorter (MR6b) ---
+
+describe("the Documents screen, with a result sorter", () => {
+  it.each(SORT_CODES)("for the code %s, to the owner and to a person who is not", async (code) => {
+    const search = byMeaning({ sort: sortFor(code) });
+    const owner = await screenOf([withMeaning()], { search }, OWNER);
+    everyControlIsNamed(owner, 5);
+    owner.unmount();
+    const person = await screenOf([withMeaning()], { search }, PERSON);
+    everyControlIsNamed(person, 5);
+  });
+
+  it("with a sorter that is not running, the link to Backends is named and has an id", async () => {
+    const view = await screenOf(
+      [withMeaning()],
+      { search: byMeaning({ sort: sortFor("not_running") }) },
+      OWNER,
+    );
+    expect(screen.getByTestId("documents-sort-open-backends")).toHaveAccessibleName(
+      "Open Backends",
+    );
+    everyControlIsNamed(view, 5);
+  });
+
+  it("with a sorter that runs outside the machines", async () => {
+    const view = await screenOf(
+      [withMeaning()],
+      {
+        search: byMeaning({
+          mode: `meaning and words, sorted by ${SORTER}`,
+          sort: sortFacts({ locality: "external", runsOn: "Cohere", allowExternal: true }),
+        }),
+      },
+      OWNER,
+    );
+    expect(screen.getByTestId("documents-sort")).toHaveClass("notice--warn");
+    everyControlIsNamed(view, 5);
+  });
+});
+
+describe("Test a question, with a result sorter", () => {
+  it("with passages the sorter put in order, and with the reason they were not sorted", async () => {
+    for (const sort of [sortedRun(), sortRunFor("over_budget"), sortRunFor("not_running")]) {
+      vi.mocked(post).mockReset();
+      vi.mocked(post).mockResolvedValue(
+        tested({
+          mode: sort.used ? `meaning and words, sorted by ${SORTER}` : "meaning and words",
+          meaning: ranByMeaning(),
+          sort,
+          passages: [
+            hit({
+              via: "both",
+              why: why({
+                via: "both",
+                terms: ["code"],
+                ranks: { words: 2, meaning: 1, sorter: 1 },
+              }),
+            }),
+          ],
+        }),
+      );
+      const view = render(<TestQuestion search={byMeaning()} />);
+      fireEvent.change(screen.getByTestId("documents-test-question"), {
+        target: { value: "boats" },
+      });
+      fireEvent.click(screen.getByTestId("documents-test-ask"));
+      await settle();
+      expect(screen.getByTestId("documents-test-places")).toHaveTextContent(
+        "the sorter put it 1st",
+      );
+      everyControlIsNamed(view, 5);
+      view.unmount();
+    }
   });
 });
 

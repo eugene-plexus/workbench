@@ -51,6 +51,7 @@ import {
   placesWords,
   rebuildWords,
   searchedByWords,
+  searchHeadline,
   SEARCH_TONE,
   searchTone,
   splitMode,
@@ -665,4 +666,81 @@ describe("a chat's drawer", () => {
       expect(said.more.length > 0).toBe(facts.detail !== null || facts.actions.includes("rebuild"));
     },
   );
+});
+
+// --- the result sorter (MR6b) ---
+
+describe("how the documents are said to be searched, with a result sorter", () => {
+  const sortedBy = (mode: string, over: Partial<ReturnType<typeof byMeaning>> = {}) =>
+    ({ ...byMeaning(), mode, ...over }) as ReturnType<typeof byMeaning>;
+
+  it("says the sorter in the headline while it puts the best passages in order", () => {
+    expect(searchHeadline(sortedBy("meaning and words, sorted by Qwen3-Reranker"))).toBe(
+      "Searching by meaning and words, sorted by Qwen3-Reranker.",
+    );
+  });
+
+  it("is the server's own headline when nothing is sorted, for every code", () => {
+    for (const code of CODES) {
+      const facts = searchFor(code);
+      expect(searchHeadline(facts), code).toBe(facts.headline);
+    }
+  });
+
+  it("says it of a search by words too, and keeps the rest of the server's sentence", () => {
+    const words = (headline: string, mode = "words, sorted by sorter-model") =>
+      searchHeadline(wordsOnly({ headline, mode: mode as never }));
+    expect(words("Searching by words only. No search model is running.")).toBe(
+      "Searching by words only, sorted by sorter-model. No search model is running.",
+    );
+    expect(words("Searching by words only.")).toBe(
+      "Searching by words only, sorted by sorter-model.",
+    );
+  });
+
+  it("leaves a headline that is not of the two plain ways as the server said it", () => {
+    const facts = paused({ mode: "words, sorted by sorter-model" as never });
+    expect(searchHeadline(facts)).toBe(facts.headline);
+    expect(searchHeadline(facts)).not.toContain("sorted by");
+  });
+
+  it("takes the sorter's name as the server said it, a comma and all", () => {
+    expect(searchHeadline(sortedBy("meaning and words, sorted by one, sorted by two"))).toBe(
+      "Searching by meaning and words, sorted by one, sorted by two.",
+    );
+  });
+
+  it("is what a chat's drawer says, so the two screens never say it differently", () => {
+    const facts = sortedBy("meaning and words, sorted by Qwen3-Reranker");
+    expect(drawerSearchWords(facts)).toEqual({
+      headline: "Searching by meaning and words, sorted by Qwen3-Reranker.",
+      more: [],
+    });
+  });
+});
+
+describe("where the sorter put a passage, when the passages were sorted", () => {
+  it("says a passage the sorter was not given was not, so a late place by one way is explained", () => {
+    expect(placesWords({ words: 14 }, null, true)).toBe(
+      "Words put it 14th. The sorter was not given it.",
+    );
+    expect(placesWords({ words: 3, meaning: 12 }, 0.5, true)).toBe(
+      "Words put it 3rd, meaning put it 12th (closeness 0.50). The sorter was not given it.",
+    );
+  });
+
+  it("says nothing of it for a passage the sorter was given, which has its place", () => {
+    expect(placesWords({ words: 3, meaning: 1, sorter: 2 }, 0.62, true)).toBe(
+      "Words put it 3rd, meaning put it 1st (closeness 0.62), the sorter put it 2nd.",
+    );
+  });
+
+  it("says nothing of a sorter when the passages were not sorted: no place by it is no place", () => {
+    expect(placesWords({ words: 14 }, null, false)).toBe("Words put it 14th.");
+    expect(placesWords({ words: 14 }, null)).toBe("Words put it 14th.");
+  });
+
+  it("says nothing for a passage with no place at all, sorted or not", () => {
+    expect(placesWords({}, null, true)).toBeNull();
+  });
 });

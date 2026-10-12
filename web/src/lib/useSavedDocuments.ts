@@ -4,10 +4,10 @@
  * long as the screen is open, because the server sends no event for any of it. How soon
  * depends on what is going on (`watching`): each second while a document is being read
  * or given its meaning, every few seconds while meaning waits for the search model or
- * the key's limit, and each half minute when nothing is, because the header is a live
- * look at the search model and a person who started or stopped one is told so. A read
- * that is overtaken by a later one is dropped, so a slow answer never puts back what a
- * newer one replaced.
+ * the key's limit or a result sorter is being measured, and each half minute when nothing
+ * is, because the header is a live look at the search model and the sorter and a person who
+ * started or stopped one is told so. A read that is overtaken by a later one is dropped, so a
+ * slow answer never puts back what a newer one replaced.
  *
  * A read that fails keeps what is shown and says why beside it, except when the
  * server says the documents cannot be used (a damaged search): then nothing that

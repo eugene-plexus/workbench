@@ -126,6 +126,7 @@ ignore = []
 "scripts/check-folders-sabotage.py" = ["E501"]
 "scripts/check-folders-page-sabotage.py" = ["E501"]
 "scripts/check-sorting-sabotage.py" = ["E501"]
+"scripts/check-sorting-page-sabotage.py" = ["E501"]
 
 # -----------------------------------------------------------------------------
 # Mypy

@@ -1,9 +1,12 @@
-"""Saved documents in Chrome (MR4), and search by meaning (MR5): adding files in Documents,
-watching them be read, trying a question without a model, turning Documents on in a chat, and
-the Sources under the answer, against the real app; then a search model starts, as the owner
-would start one in Eugene's console, and the same screens say it: meaning and words, each
-document given its meaning, a passage found by what it says, and a search model that stops,
-named. Opt-in, like the other browser checks; set WORKBENCH_SHOTS to keep the pictures.
+"""Saved documents in Chrome (MR4), search by meaning (MR5) and a result sorter (MR6b): adding
+files in Documents, watching them be read, trying a question without a model, turning Documents
+on in a chat, and the Sources under the answer, against the real app; then a search model starts,
+as the owner would start one in Eugene's console, and the same screens say it: meaning and words,
+each document given its meaning, a passage found by what it says, and a search model that stops,
+named; then a result sorter is listed that reads slowly and the screens say why it does not sort,
+with the numbers, and when Sort time is raised say that it does, passage by passage, and when it
+stops or is turned off say what that comes to. Opt-in, like the other browser checks; set
+WORKBENCH_SHOTS to keep the pictures.
 
 The script (`web/scripts/library-browser.mjs`) is what a person does. This test is what
 the model was sent while they did it: the code word that is only on page 4 of the PDF
@@ -11,7 +14,9 @@ reached the model as a passage that names its file and page, Test a question ask
 model at all, a chat that answers only from the documents asked none when nothing
 matched, a file that was removed reached nobody afterwards, and what a question found by
 meaning is what the model was shown, beside the search model being asked for the passages
-of the files and for the question, and for nothing else."""
+of the files and for the question, and for nothing else; and the sorter was asked to put in
+order the passages of the one question it was quick enough for, each as its headings, a new
+line and its words, and for nothing else, and its speed was measured by a quick test."""
 
 import json
 import os
@@ -23,8 +28,10 @@ from typing import Any
 
 import pytest
 
+from eugene_plexus_workbench.knowledge import sorting
+
 from . import documents as docs
-from .conftest import MODEL, PNG, World
+from .conftest import ADMIN_TOKEN, MODEL, PNG, World
 from .meaning import (
     ARRIVALS,
     EMBEDDER,
@@ -34,6 +41,12 @@ from .meaning import (
     quick,  # noqa: F401
 )
 from .saved import ask, listing, md, settings, survey_pdf
+from .sorting import QUESTION as HANDBOOK_QUESTION
+from .sorting import (
+    SORTER,
+    quick_sorting,  # noqa: F401
+)
+from .test_sorting_api import long_handbook
 
 #: What the person says, in order. The script says them; this test finds the request each
 #: one made by its words.
@@ -42,6 +55,8 @@ SAID = {
     "nothing": "Tell me about the zebra giraffe okapi.",
     # None of its words is in any file, and it means what a passage of the harbour office says.
     "meaning": "Where is the paperwork for the ferry filed?",
+    # The words of every section of a long file: it has passages enough for a sorter to be worth asking.
+    "handbook": HANDBOOK_QUESTION,
 }
 
 
@@ -67,6 +82,7 @@ def test_saved_documents_in_chrome(
     world: World,
     tmp_path: Path,
     quick: None,  # noqa: F811
+    quick_sorting: None,  # noqa: F811
 ) -> None:
     root = Path(__file__).resolve().parents[1]
     assert world.settings.static_dir is not None
@@ -95,6 +111,10 @@ def test_saved_documents_in_chrome(
     (files / "picture.png").write_bytes(PNG)
     # A passage that says what the question asks, and has none of its words.
     (files / "harbour-office.md").write_bytes(md(ARRIVALS, title="Harbour office"))
+    # A long file (MR6b): six sections of about 320 tokens, each of which the words of a question
+    # find, so that there are passages enough for a sorter to be worth asking.
+    handbook_name, handbook = long_handbook()
+    (files / handbook_name).write_bytes(handbook)
 
     person = world.browser()
     person.sign_in("p-ada")
@@ -128,6 +148,8 @@ def test_saved_documents_in_chrome(
                 "owner": {"secret": owner.secret, "cookies": cookies(owner)},
                 "gateway": world.gateway.url,
                 "searchModel": EMBEDDER,
+                "sorter": SORTER,
+                "admin": ADMIN_TOKEN,
                 "word": docs.CODE_WORD,
                 "said": SAID,
                 "model": MODEL,
@@ -191,3 +213,26 @@ def test_saved_documents_in_chrome(
     # Nothing of the removed file is left on disk, in any file of the person's folder.
     kept = [p for p in (world.data / "knowledge").rglob("*") if p.is_file()]
     assert kept and not any(docs.CODE_WORD.encode() in p.read_bytes() for p in kept)
+    # 7. MR6b: how fast the sorter reads was measured by a quick test before it was asked anything;
+    #    and it was asked to put in order the passages of the one question it was quick enough
+    #    for (the screen's, its four pictures and the chat's), each as its headings, a new line and
+    #    its words, and nothing else: not while it was too slow, stopped, or off (the script says
+    #    so at each of those, from the gateway's own count).
+    requests = world.gateway.rerank_requests
+    assert requests and requests[0]["body"]["query"] == sorting.PROBE_QUESTION
+    assert world.gateway.probes(), "its speed was measured by a quick test"
+    sorts = world.gateway.sorts()
+    assert len(sorts) == 6, [s["query"] for s in sorts]
+    for body in sorts:
+        assert set(body) == {"model", "query", "documents"}, "Jina's body, and no more"
+        assert body["model"] == SORTER and SAID["handbook"] in body["query"]
+        assert len(body["documents"]) >= 6
+        for passage in body["documents"]:
+            if "harbour handbook" not in passage:
+                continue  # a passage with no heading (a PDF page) is its words and nothing else
+            heading, _, words = passage.partition("\n")
+            assert re.fullmatch(r"Handbook > Section \d", heading), passage[:60]
+            assert words.startswith("Section "), "its headings, a new line and then its words"
+    assert any(
+        passage.startswith("Handbook > Section ") for body in sorts for passage in body["documents"]
+    ), "a section of the long file is sent under its heading path"
