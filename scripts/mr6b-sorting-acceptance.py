@@ -3621,7 +3621,7 @@ class Run:
         ada, s = self.ada, self.stack
         qs = list(range(min(6, len(self.questions))))
         self.hybrid_of(qs)
-        budget = 10.0
+        budget = 15.0
         self.settings(documentsSortModel=None, documentsSortSeconds=budget)
         if not s.listed(SORTER, "rerank", "local"):
             s.restart_engine("sorter")
@@ -3661,20 +3661,27 @@ class Run:
                 (stuck["sort"], round(waited, 1)),
             )
             NUMBERS["hung_waited_seconds"] = round(waited, 1)
-            started = time.perf_counter()
-            again = self.ask(qs[2])
-            quick = time.perf_counter() - started
+            door_mark = s.door_sorts.mark()
+            followers = []
+            for k in (qs[2], qs[3]):
+                started = time.perf_counter()
+                found = self.ask(k)
+                followers.append((k, found, time.perf_counter() - started))
             check(
                 "hung.not-again",
-                "and the next question is not made to wait that long again: the sort that was given up "
-                "on counts as a slow one, so it is over Sort time, said with the numbers, and the "
-                "sorter is not asked",
-                again["sort"]["code"] == "over_budget"
-                and again["sort"]["used"] is False
-                and OVER_BUDGET.match(again["sort"]["message"] or "") is not None
-                and quick < 5
-                and order_of(again) == order_of(self.hybrid[qs[2]]),
-                (again["sort"], round(quick, 1)),
+                "and the next questions are not made to wait that long again: the sort that was given "
+                "up on is what is known of the sorter now, so each is over Sort time, said with the "
+                "numbers, answered at once from the hybrid order, and the sorter is not asked",
+                all(
+                    found["sort"]["code"] == "over_budget"
+                    and found["sort"]["used"] is False
+                    and OVER_BUDGET.match(found["sort"]["message"] or "") is not None
+                    and took < 5
+                    and order_of(found) == order_of(self.hybrid[k])
+                    for k, found, took in followers
+                )
+                and not s.door_sorts.since(door_mark),
+                [(f["sort"], round(t, 1)) for _, f, t in followers],
             )
             shown = ada.sort() or {}
             check(
@@ -3689,13 +3696,15 @@ class Run:
         finally:
             s.freeze_engine("sorter", False)
         until(lambda: s.engine_ready("sorter", 1), 60, every=1.0)
-        # Raised again, the sorter that was slow for a moment is used again.
-        self.settings(documentsSortSeconds=SORT_SECONDS)
+        # Let go on, and Sort time raised past what the sort that was given up on showed (it did not
+        # read this much in twice the old Sort time), the sorter is used again.
+        self.settings(documentsSortSeconds=60.0)
         until(lambda: (ada.sort() or {}).get("code") == "ok", 90, every=1.0)
         back = self.ask(qs[3])
         check(
             "hung.back",
-            "let go on, and with Sort time raised, the sorter sorts again",
+            "let go on, and with Sort time raised past what the sort that was given up on showed "
+            "(60 s), the sorter sorts again",
             back["sort"]["used"] is True and back["sort"]["model"] == SORTER,
             back["sort"],
         )

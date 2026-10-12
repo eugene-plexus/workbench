@@ -8,11 +8,12 @@ come up, proves nothing and does not count as a caught defect. A control run of 
 an unbroken copy must pass every check first: a check that fails only when the run is broken in
 some other way is not a check.
 
-The five the design names, and two more:
+The five the design names, and three more:
   the heading path dropped; the union of the two ways replaced by the hybrid's first ten; the
   budget ignored; a failure failing the search; automatic choosing a sorter outside the machines;
-  and, besides, the sorter's order not applied, and the defect the acceptance itself found (a
-  gateway holding requests back for a moment taken for a sorter that is not running).
+  and, besides, the sorter's order not applied, and the two defects the acceptance itself found (a
+  gateway holding requests back for a moment taken for a sorter that is not running, and a sort
+  that was given up on blended into what the sorter did while it was well).
 
   python scripts/check-mr6b-acceptance-sabotage.py --reuse-data DIR [--labels heading,budget]
   python scripts/check-mr6b-acceptance-sabotage.py --anchors      # only that each anchor is unique
@@ -153,6 +154,21 @@ CASES = [
         "stopped",
         10,
         ["stop.holding"],
+    ),
+    Case(
+        "a sort that is given up on is blended into what the sorter did while it was well (the "
+        "weakness the acceptance found in a sorter that stops answering: the next question waits "
+        "twice Sort time again)",
+        [
+            (
+                SORTING,
+                "                self._gave_up_on(model.id, tokens, limit)",
+                "                self._record(model.id, tokens, limit)",
+            )
+        ],
+        "hung",
+        6,
+        ["hung.not-again"],
     ),
     Case(
         "the sorter's order is not applied (the passages stay as the search found them)",
