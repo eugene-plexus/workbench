@@ -315,10 +315,10 @@ describe("the search switch says why it is off (W6)", () => {
     expect(searchProblem(listing(false, reason), model())).toBe(reason);
   });
 
-  it("names a model that cannot search", () => {
-    expect(searchProblem(listing(true), model({ webSearch: false }))).toMatch(
-      /cannot search the web/,
-    );
+  it("names a model that cannot search, as Eugene's limit and not the model's", () => {
+    const said = searchProblem(listing(true), model({ webSearch: false }));
+    expect(said).toMatch(/^Eugene cannot give .+ tools as it runs here, so it cannot search the web/);
+    expect(said).not.toMatch(/neither search nor use tools/);
   });
 
   it("is on when both the install and the model allow it", () => {
