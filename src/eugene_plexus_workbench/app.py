@@ -35,7 +35,7 @@ from .node_folders import NodeFolders
 from .sessions import Sessions
 from .settings import Settings
 from .signin import Provider
-from .store import Store
+from .store import Store, public_cause
 from .tools import Tools
 
 log = logging.getLogger(__name__)
@@ -43,8 +43,14 @@ log = logging.getLogger(__name__)
 DATABASE = "workbench.sqlite3"
 
 
-def why_the_store_did_not_open(store: Store, exc: Exception) -> str:
-    """One message for the log, `/healthz` and the page: the observed cause, and the copy."""
+def why_the_store_did_not_open(store: Store, exc: Exception) -> tuple[str, str]:
+    """What the log says of a store that did not open, and what anyone who asks is told.
+
+    The log's is the whole account: the observed cause, every path, the copy. The other is for
+    `/healthz`, the API's answers and the page, which a visitor who is not signed in can open
+    (sign-in is down while the store is). It leads with the state and names the cause, and names
+    no directory: a file is named by its own name alone.
+    """
     # Workbench's own errors already say what is wrong and where; SQLite's say only what.
     cause = str(exc) if isinstance(exc, RuntimeError) else f"{type(exc).__name__}: {exc}"
     kept = (
@@ -52,7 +58,14 @@ def why_the_store_did_not_open(store: Store, exc: Exception) -> str:
         if store.backup is not None
         else ""
     )
-    return f"Workbench could not open its saved chats, so it is running without them: {cause}{kept}"
+    beside = (
+        f" A copy is kept beside it as {store.backup.name}." if store.backup is not None else ""
+    )
+    return (
+        f"Workbench could not open its saved chats ({store.path}), so it is running without "
+        f"them: {cause}{kept}",
+        f"Workbench could not open its chat store: {public_cause(exc)}.{beside}",
+    )
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -67,10 +80,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # Degraded, not dead. A store that cannot be opened (a migration that failed, a
             # newer Workbench's, one that is not a database) used to stop the whole process,
             # and the agent restarted it into the same stop. It stays up instead and says
-            # why, in its log, on /healthz and on every page (`web.Degraded`); the saved
-            # chats are not touched, and starting again retries.
-            why = why_the_store_did_not_open(store, exc)
-            log.error("%s", why)
+            # why: in its log in full, and on /healthz and on every page (`web.Degraded`)
+            # with no path in it, since anyone can ask; the saved chats are not touched,
+            # and starting again retries.
+            full, why = why_the_store_did_not_open(store, exc)
+            log.error("%s", full)
             app.state.degraded = why
             try:
                 yield
