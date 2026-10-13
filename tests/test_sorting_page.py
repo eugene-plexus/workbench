@@ -263,6 +263,7 @@ def test_a_question_that_was_not_sorted_says_why_in_a_code_the_page_knows(
     world.gateway.rerank_rate = 1500.0
     ada = start(world)
     keep(ada, *corpus(), long_handbook())
+    measured(ada)  # a question does not wait for the sorter's speed to be measured
     assert config(world, documentsSortSeconds=0.5).status_code == 200
     over = try_question(ada, QUESTION)
     block = sort_of(over)

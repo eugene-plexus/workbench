@@ -332,6 +332,7 @@ def test_a_sorter_too_slow_for_the_time_allowed_is_not_asked_and_the_page_is_tol
     world.gateway.rerank_rate = 1500.0  # tokens a second, as Workbench counts them
     ada = start(world)
     keep(ada, *corpus(), long_handbook())
+    measured(ada)  # the small request that measures it takes a third of a second at that speed
     assert config(world, documentsSortSeconds=0.5).status_code == 200
     found_order = texts(unsorted(ada, world))
     got = try_question(ada, QUESTION)
@@ -368,6 +369,7 @@ def test_a_raised_budget_sorts_the_same_question(
     world.gateway.rerank_rate = 1500.0
     ada = start(world)
     keep(ada, *corpus(), long_handbook())
+    measured(ada)
     assert config(world, documentsSortSeconds=0.5).status_code == 200
     assert sort_of(try_question(ada, QUESTION))["code"] == "over_budget"
     assert config(world, documentsSortSeconds=10).status_code == 200
@@ -464,6 +466,7 @@ def test_the_header_with_no_sorter_says_so_quietly_and_the_mode_is_as_it_was(
 def _failing(world: World, ada: Any) -> tuple[dict[str, Any], list[str]]:
     """The search as it is found with the sorter measured and sorting well, so that the next
     sort is the one that is made to fail."""
+    measured(ada)
     first = try_question(ada, QUESTION)
     assert sort_of(first)["used"] is True
     return first, texts(unsorted(ada, world))
@@ -809,6 +812,7 @@ def test_a_chat_whose_sorter_is_too_slow_is_sent_the_passages_as_found_and_says_
     world.gateway.rerank_rate = 1500.0
     ada = start(world)
     keep(ada, *corpus(), long_handbook())
+    measured(ada)
     assert config(world, documentsSortSeconds=0.5).status_code == 200
     answer = ask(ada, chat_on(ada), QUESTION)
     record = answer["retrieval"]
