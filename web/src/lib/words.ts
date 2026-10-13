@@ -160,9 +160,9 @@ export function lengthLimitNote(message: Pick<Message, "outputCap">): string {
     case "request":
       return `The answer reached this chat's “Longest answer (tokens)”, ${tokens}. Raise it in Chat settings, or ask it to continue.`;
     case "profile":
-      return `The answer reached the ${tokens}-token cap on this model's Library profile (Maximum output tokens). Change it there, or ask it to continue.`;
+      return `The answer reached the ${tokens}-token cap on this model's Library profile (Maximum output tokens, in the console). Change it there, or ask it to continue.`;
     case "install":
-      return `The answer reached the install's ${tokens}-token output cap (Default max output tokens, in the console's gateway settings). Clear it there, or ask it to continue.`;
+      return `The answer reached the install's ${tokens}-token output cap (Default max output tokens, in the console's gateway settings). Clear it there for no cap, or ask it to continue.`;
   }
 }
 

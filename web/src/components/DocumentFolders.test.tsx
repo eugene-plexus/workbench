@@ -108,7 +108,7 @@ describe("the section", () => {
     await show();
     expect(screen.getByRole("heading", { level: 2, name: "Folders" })).toBeInTheDocument();
     expect(text("folders-intro")).toBe(
-      "Add a folder the owner gave you. Workbench reads its files as your documents and keeps them in step, so a chat with Documents on can answer from them. It never changes, adds or deletes anything in the folder.",
+      "Add a folder the owner gave you. Workbench reads its files as your documents and keeps them in step, so a chat with Documents on can answer from them. Reading never changes, adds or deletes anything in the folder.",
     );
   });
 
@@ -734,7 +734,7 @@ describe("Add a folder", () => {
     expect(
       screen
         .getByTestId("folders-section")
-        .textContent?.split("never changes, adds or deletes anything in the folder."),
+        .textContent?.split("Reading never changes, adds or deletes anything in the folder."),
     ).toHaveLength(2);
   });
 

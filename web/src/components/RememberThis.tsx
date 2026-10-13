@@ -173,7 +173,8 @@ export function useRemember({
             />
             <p id={`${uid}-help`} data-testid="remember-help" className="help">
               A note is one line of at most {NOTE_LIMIT} characters, and this {noun} is{" "}
-              {editing.length.toLocaleString()}. Edit the box to what you want kept.
+              {editing.length.toLocaleString()}. The box starts as the first part of it; edit it to
+              what you want kept.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">

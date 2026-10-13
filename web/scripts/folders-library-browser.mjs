@@ -217,7 +217,7 @@ try {
   assert.equal(await text(section(page).getByRole("heading", { level: 2 })), "Folders");
   assert.match(
     await text(page.getByTestId("folders-intro")),
-    /^Add a folder the owner gave you\. .*It never changes, adds or deletes anything in the folder\.$/,
+    /^Add a folder the owner gave you\. .*Reading never changes, adds or deletes anything in the folder\.$/,
   );
   // The limits, said plainly, from the numbers in effect.
   const limits = await text(page.getByTestId("folders-limits"));
