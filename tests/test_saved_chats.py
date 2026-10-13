@@ -862,7 +862,8 @@ def test_the_new_settings_say_what_they_do_and_refuse_what_they_cannot_take(worl
     assert (passages["default"], passages["minimum"], passages["maximum"]) == (100000, 100, 1000000)
     external = fields["documentsExternalModels"]
     assert external["enumValues"] == ["never", "ask", "always"] and external["default"] == "ask"
-    assert "Never is different" in external["description"] and passages["category"] == "documents"
+    assert "no person can change that" in external["description"], "Never is the install's rule"
+    assert passages["category"] == "documents"
     assert "My documents" in fields["documentsEnabled"]["description"]
 
     def patch(**values: Any) -> dict[str, Any]:
