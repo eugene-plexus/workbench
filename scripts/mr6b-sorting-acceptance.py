@@ -2997,15 +2997,20 @@ class Run:
                     (got[:4], chunk_order[:4]),
                 )
             )
-            # One way alone: the sorter is given that way's best ten.
+            # One way named ("try one way at a time"): it is not sorted, so each way shows what it
+            # finds alone: the sorter is asked nothing, and the passages are in that way's own order.
             one: dict[str, bool] = {}
             for way, ids in (("words", w_ids), ("meaning", m_ids)):
                 e1 = s.engine_sorts["sorter"].mark()
                 found = bo.test(q, ways=[way], passages=10)
                 got_eng = [e for e in s.engine_sorts["sorter"].since(e1) if e["query"].strip() == q]
-                sent_one = got_eng[0]["docs"] if len(got_eng) == 1 else []
-                one[way] = found["sort"]["used"] is True and sorted(sent_one) == sorted(
-                    index.sent_of(c) for c in ids
+                alone = [c for p in found["passages"] for c in p["chunkIds"]]
+                one[way] = (
+                    found["sort"]["used"] is False
+                    and found["sort"]["code"] == "not_asked"
+                    and not got_eng
+                    and alone == ids
+                    and all("sorter" not in p["why"]["ranks"] for p in found["passages"])
                 )
             ways_one.append((q, one))
         NUMBERS["composition"] = setups
@@ -3041,8 +3046,9 @@ class Run:
         )
         check(
             "comp.one-way",
-            "a question asked of one way alone is still sorted, and the sorter is given that way's "
-            "best ten",
+            "a question that names one way is not sorted, so each way shows what it finds alone: the "
+            "sorter is asked nothing, the report says it was not asked, and the passages are in the "
+            "order that way found them, with no place by a sorter",
             all(v for _, one in ways_one for v in one.values()),
             ways_one,
         )
