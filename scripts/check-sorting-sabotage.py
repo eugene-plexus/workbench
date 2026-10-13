@@ -745,6 +745,8 @@ CASES: list[Case] = [
         "            due = old and typical_tokens() / rate > budget",
         UNIT
         + "test_a_speed_that_is_only_the_probes_is_measured_again_when_it_is_old_and_blended_in",
+        UNIT
+        + "test_a_speed_that_is_only_the_probes_is_measured_again_even_when_it_is_quick_enough",
     ),
     one(
         "a measurement made again replaces what the sorts measured",
@@ -791,8 +793,8 @@ CASES: list[Case] = [
     one(
         "a sort that is answered does not put the count right",
         SORTING,
-        "        self._strikes.pop(model, None)",
-        "        pass",
+        "            return\n        self._strikes.pop(model, None)",
+        "            return\n        pass",
         UNIT + "test_a_sorter_that_answers_the_probe_and_not_a_sort_is_asked_less_and_less",
         UNIT + "test_a_probe_that_answers_after_a_failure_clears_what_was_held_against_the_sorter",
     ),
@@ -1177,6 +1179,14 @@ CASES: list[Case] = [
         + "test_a_run_that_names_its_ways_is_not_sorted_so_each_way_shows_what_it_finds_alone",
         API
         + "test_a_question_that_names_its_way_is_not_sorted_so_each_way_shows_what_it_finds_alone",
+    ),
+    one(
+        "a sorter that was stopped and is started again is held to what failed before",
+        SORTING,
+        "        if model is not None:\n            self._failed.pop(model, None)\n            self._strikes.pop(model, None)",
+        "        if False:\n            self._failed.pop(model, None)\n            self._strikes.pop(model, None)",
+        UNIT
+        + "test_a_sorter_that_was_stopped_and_is_started_again_is_not_held_to_what_failed_before",
     ),
     # --- the worker's wait for a search model (the flaky test of issue #6, found in round two) -----------------
     one(

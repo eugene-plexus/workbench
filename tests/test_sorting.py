@@ -696,6 +696,25 @@ async def test_a_speed_that_is_only_the_probes_is_measured_again_when_it_is_old_
     assert (await rig.sorting.standing()).rate_from == "probe", "still all it comes from"
 
 
+async def test_a_speed_that_is_only_the_probes_is_measured_again_even_when_it_is_quick_enough(
+    rig: Rig,
+) -> None:
+    """The probe is two short passages and reads slower than a sort of the usual size does (1.8
+    times, on a graphics card), so a speed that is only the probe's is not trusted for ever just
+    because it prices a sort inside Sort time: it is measured again when it is old. (The rule
+    for a sorter that is over budget is another one, and is tested beside it.)"""
+    await warm(rig)  # the probe takes 0.1 s: a usual sort is well inside Sort time
+    assert (await rig.sorting.standing()).sorting
+    rig.clock.advance(sorting.RATE_MAX_AGE + 1)
+    still = await rig.sorting.standing()
+    assert still.sorting and still.rate_from == "probe", "priced by what was measured, for now"
+    await rig.settle()
+    assert len(rig.gateway.probes()) == 2, "and measured again behind that look"
+    await rig.sorting.standing()
+    await rig.settle()
+    assert len(rig.gateway.probes()) == 2, "once, not at every look"
+
+
 async def test_a_speed_from_real_sorts_that_is_quick_enough_is_left_alone_however_old_it_is(
     rig: Rig,
 ) -> None:
