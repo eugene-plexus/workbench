@@ -559,7 +559,7 @@ export function limitsWords(limits: FolderLimits): string[] {
 /** What the Folders section says first: what a folder is for, and that it is only ever read. */
 export const FOLDERS_INTRO =
   "Add a folder the owner gave you. Workbench reads its files as your documents and keeps them in step, so a chat with Documents on can answer from them.";
-export const READ_ONLY_WORDS = "It never changes, adds or deletes anything in the folder.";
+export const READ_ONLY_WORDS = "Reading never changes, adds or deletes anything in the folder.";
 
 /** What the Add card says beside its button: what adding does, and where to stop it reading what
  * should not be read. */

@@ -409,7 +409,7 @@ export function MemoryDrawer({
                   </label>
                   <p id={`${uid}-switch-help`} className="help">
                     Turn it off to send no notes in this chat. It takes effect with your next
-                    message.
+                    message, which may start a little slower.
                   </p>
                 </div>
               )}
