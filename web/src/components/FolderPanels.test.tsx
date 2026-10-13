@@ -535,7 +535,7 @@ describe("a file of a folder", () => {
       screen.getByRole("group", { name: "Leave out docs/harbour-notes.md?" }),
     ).toBeInTheDocument();
     expect(text("folder-file-leave-confirm")).toContain(
-      "Leave out docs/harbour-notes.md? Workbench deletes its copy of the file and the text it read from it, and adds /docs/harbour-notes.md to this folder's ignore list, so that it does not come back at the next check. The file in your folder is not touched.",
+      "Leave out docs/harbour-notes.md? Workbench deletes its copy and adds /docs/harbour-notes.md to this folder's ignore list, so it stays out. The file in your folder is not touched.",
     );
     expect(server.made("DELETE")).toEqual([]);
   });
@@ -705,7 +705,7 @@ describe("what was left out of a folder", () => {
     const items = within(section).getAllByTestId("folder-left-unlisted-item");
     expect(items[0]).toHaveTextContent("private");
     expect(items[0]).toHaveTextContent(
-      "Workbench could not look in it (permission denied). Its files are as they were at the last check, and it looks again at the next.",
+      "Workbench could not look in it (permission denied). Its files are as at the last check; it looks again at the next.",
     );
     expect(items[1]).toHaveTextContent("The folder itself");
   });
@@ -830,14 +830,14 @@ describe("the rules of a folder", () => {
       "Names that start with a dot, and files and folders Windows marks hidden. They are left out unless you turn this on.",
     );
     expect(screen.getByTestId("folder-rules-gitignore")).toHaveAccessibleDescription(
-      "A folder's own .gitignore files, at any depth. A project's build output is not what you mean to search, so this is on unless you turn it off.",
+      "A folder's own .gitignore files, at any depth. This is on unless you turn it off.",
     );
   });
 
   it("says what saving does before it is done", async () => {
     await openRules();
     expect(screen.getByTestId("folder-rules").textContent).toContain(
-      "Workbench checks the folder again at once. Files that are left out now leave your documents, and files that are not are read.",
+      "Workbench checks the folder again at once. Files now left out leave your documents; the others are read.",
     );
   });
 

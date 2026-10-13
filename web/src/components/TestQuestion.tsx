@@ -150,9 +150,8 @@ function Ways({
           </label>
         ))}
         <p id={`${uid}-help`} className="help">
-          A chat uses both ways together, and sets aside a passage that is not near enough in
-          meaning when no word matched. Choose one way to see what it finds by itself: here, nothing
-          is set aside.
+          A chat searches both ways and sets aside passages that match no word and are not close
+          enough in meaning. A single way sets nothing aside.
         </p>
       </fieldset>
     </details>
@@ -226,9 +225,8 @@ export function TestQuestion({ search }: { search?: SearchFacts }) {
         Test a question
       </h2>
       <p className="help">
-        Type what you would ask in a chat, and see which passages Workbench would send with it, how
-        each was found, and which of your words it has. No model is asked, and nothing leaves your
-        machines.
+        Type a question to see which passages Workbench would send with it, and how each was found.
+        No model is asked and nothing leaves your machines.
       </p>
       <form className="flex flex-col gap-3" onSubmit={(event) => void ask(event)}>
         <div className="field">

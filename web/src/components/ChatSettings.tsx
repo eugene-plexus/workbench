@@ -252,8 +252,8 @@ export function ChatSettings({
                 <option value="off">Off — allow intentional repetition</option>
               </select>
               <p id={`${uid}-repetition-help`} className="help">
-                Stop substantial repeated passages, or allow intentional repetition. Reasoning and
-                tool arguments are never stopped by this check. Time and length limits still apply.
+                Stops substantial repeated passages, or allows intentional repetition. Reasoning and
+                tool arguments are never stopped. Time and length limits still apply.
               </p>
             </div>
           </fieldset>

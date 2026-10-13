@@ -288,7 +288,7 @@ describe("what the owner sees of them", () => {
       "Sent to the model: 2 passages of the person's documents.",
     );
     expect(screen.getByTestId("passages-redacted")).toHaveTextContent(
-      "What a person keeps in their documents is private to them, even where you may read their chats.",
+      "A person's documents are private to them, even where you may read their chats.",
     );
     expect(screen.queryByTestId("passage-source")).toBeNull();
     expect(screen.queryByTestId("passage-snippet")).toBeNull();

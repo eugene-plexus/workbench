@@ -240,11 +240,11 @@ describe("opening the page", () => {
       "What Workbench remembers about you. Only you can see this page.",
     );
     expect(
-      screen.getByText(/Notes are short lines about you and how you like answers/),
+      screen.getByText(/Notes are short lines the model is given in your chats/),
     ).toBeInTheDocument();
     // What a chat does with a changed note is said once, where the person is looking at notes.
     expect(screen.getByText(/A chat keeps the notes it started with/)).toBeInTheDocument();
-    expect(screen.getByText(/A deleted note leaves every chat at once\./)).toBeInTheDocument();
+    expect(screen.getByText(/a deleted note leaves every chat at once\./)).toBeInTheDocument();
   });
 
   it("says that the owner can read chats, and an answer can quote a note, only when the owner can", async () => {
@@ -253,7 +253,7 @@ describe("opening the page", () => {
     const line = screen.getByTestId("memory-owner-reads");
     expect(line).toHaveClass("notice", "notice--warn");
     expect(line).toHaveTextContent(
-      "The owner of this Workbench can read your chats, and an answer in a chat can quote your notes. The owner cannot read this page.",
+      "The owner of this Workbench can read your chats, including any notes an answer quotes. The owner cannot read this page.",
     );
     unmount();
     server.ownerReadsChats = false;
@@ -350,7 +350,7 @@ describe("how much is used", () => {
     server.maxNotes = 2;
     await opened();
     expect(screen.getByTestId("memory-usage-limit")).toHaveTextContent(
-      "You have 2 notes, the limit. Delete some, or ask the owner to raise the limit in Eugene's console.",
+      "You have 2 notes, the limit. Delete some, or ask the owner to raise it.",
     );
   });
 
@@ -871,7 +871,9 @@ describe("a person with no notes", () => {
     expect(
       within(empty).getByRole("heading", { level: 3, name: "Nothing remembered yet" }),
     ).toBeInTheDocument();
-    expect(empty).toHaveTextContent("Type “Remember that …” in any chat, or add a note here.");
+    expect(empty).toHaveTextContent(
+      "Type “Remember that …” in any chat, or write one note a line below.",
+    );
     expect(about()).toHaveAccessibleDescription(/One note per line, at most 240 characters each/);
     expect(answers()).toHaveAccessibleDescription(/used in every chat/);
     expect(about()).toHaveAttribute("dir", "auto");
@@ -962,7 +964,7 @@ describe("the settings", () => {
     await opened();
     const use = screen.getByRole("switch", { name: "Use memory" });
     expect(use).toBeChecked();
-    expect(screen.getByTestId("memory-use-effective")).toHaveTextContent("Memory is on.");
+    expect(screen.getByTestId("memory-use-effective")).toHaveTextContent("Memory is on:");
     fireEvent.click(use);
     // It shows the choice at once, while the server catches up.
     expect(use).not.toBeChecked();
@@ -970,7 +972,7 @@ describe("the settings", () => {
     expect(put).toHaveBeenCalledExactlyOnceWith("/api/memory/prefs", { enabled: false });
     expect(use).not.toBeChecked();
     expect(screen.getByTestId("memory-use-effective")).toHaveTextContent(
-      "Memory is off because you turned it off. No model is given your notes, and Remember that … keeps nothing. Your notes stay saved here.",
+      "You turned memory off. No model is given your notes, and Remember that … keeps nothing. Your notes stay saved here.",
     );
     // The notes stay, and can still be read.
     expect(rows()).toHaveLength(1);
@@ -1168,7 +1170,9 @@ describe("export", () => {
   it("is named for the person's own copy, in a section of its own", async () => {
     await opened();
     expect(screen.getByRole("heading", { level: 2, name: "Export or delete" })).toBeInTheDocument();
-    expect(screen.getByText(/Your notes are yours\./)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Export your notes as a file, or delete them all\./),
+    ).toBeInTheDocument();
     expect(screen.getByTestId("memory-export-md")).toHaveClass("btn");
   });
 });
@@ -1190,7 +1194,7 @@ describe("delete all memory", () => {
     const ask = screen.getByRole("group", { name: "Delete all memory?" });
     expect(ask).toHaveClass("notice", "notice--error");
     expect(ask).toHaveTextContent(
-      "Delete all 2 notes? They leave this page and every chat's copy at once, and this cannot be undone.",
+      "Delete all 2 notes? They leave every chat at once. This cannot be undone.",
     );
     expect(within(ask).getByRole("textbox", { name: "Type DELETE to confirm" })).toHaveFocus();
     const [keep, go] = within(ask).getAllByRole("button");

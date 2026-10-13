@@ -215,13 +215,13 @@ describe("the search model in use", () => {
       "It runs on your own machines, so what is in your documents stays on them.",
     );
     expect(whereWords(modelView({ locality: "external", runsOn: "OpenAI" }))).toBe(
-      "It runs on OpenAI. The owner of this Workbench allowed the text of your documents and of your questions to be sent there.",
+      "It runs on OpenAI. The owner allowed the text of your documents and questions to be sent there.",
     );
     expect(whereWords(modelView({ locality: "external", runsOn: null }))).toContain(
       "It runs outside your machines.",
     );
     expect(whereWords(modelView({ locality: "unknown" }))).toBe(
-      "Eugene cannot say where it runs. The owner of this Workbench allowed models outside your machines, so the text of your documents and of your questions may leave them.",
+      "Eugene cannot say where it runs. The owner allowed models outside your machines, so the text of your documents and questions may leave them.",
     );
     expect(whereWords(modelView({ locality: null }))).toBeNull();
   });
@@ -349,9 +349,9 @@ describe("what the screen says it is", () => {
 
   it("says what an empty list is for, as it is searched", () => {
     expect(emptyWords(wordsOnly())).toBe(
-      "Add files above. Workbench reads each one, so a chat with Documents on can find the passages that have the words of your question.",
+      "Add files above. A chat with Documents on finds passages that match the words of your question.",
     );
-    expect(emptyWords(byMeaning())).toContain("or say what it asks.");
+    expect(emptyWords(byMeaning())).toContain("the words or the meaning of your question.");
   });
 });
 

@@ -361,8 +361,8 @@ export function Documents({
             {data.ownerReadsChats && (
               <p data-testid="documents-owner-reads" className="notice notice--warn">
                 <Eye size={16} aria-hidden />
-                The owner of this Workbench can read your chats, and an answer in a chat can quote
-                your documents. The owner cannot open this page or your files.
+                The owner of this Workbench can read your chats, including any passages an answer
+                quotes. The owner cannot open this page or your files.
               </p>
             )}
           </>
@@ -514,10 +514,9 @@ function Settings({
       <fieldset className="flex min-w-0 flex-col gap-2" aria-describedby={`${uid}-outside-help`}>
         <legend className="field-label mb-1">Models that run outside your machines</legend>
         <p id={`${uid}-outside-help`} className="help">
-          Some models run on another company&apos;s computers, through a cloud account added to
-          Eugene. The passages of your documents that match a question would leave your machines to
-          reach them. Files you attach to one chat are your own choice, so this does not hold them
-          back.
+          Some models run on another company&apos;s computers. Matching passages of your documents
+          would leave your machines to reach them. This does not hold back files you attach to a
+          chat.
         </p>
         {EXTERNAL_CHOICES.map((choice) => (
           <div key={choice.value}>

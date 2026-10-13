@@ -217,22 +217,17 @@ try {
   assert.equal(await text(section(page).getByRole("heading", { level: 2 })), "Folders");
   assert.match(
     await text(page.getByTestId("folders-intro")),
-    /^Point your documents at a folder the owner of this Workbench gave you\. .*Reading a folder for your documents never changes, adds or deletes anything in it\.$/,
+    /^Add a folder the owner gave you\. .*It never changes, adds or deletes anything in the folder\.$/,
   );
   // The limits, said plainly, from the numbers in effect.
   const limits = await text(page.getByTestId("folders-limits"));
   assert.match(
     limits,
-    /Workbench does not watch your folders\. It looks at each one again every \d+ minutes?, and whenever you choose Sync now, so a change can take that long to show\./,
+    /Folders are not watched: each is checked every \d+ minutes? and on Sync now, so a change can take that long to show\./,
   );
-  assert.match(
-    limits,
-    /A quick check compares each file's size and time with what Workbench read, so an edit that keeps both is missed\. Sync now with a deep check reads every file again and finds it\./,
-  );
-  assert.match(limits, /Folders on your job sites cannot be added yet\./);
+  assert.match(limits, /not job site folders yet\./);
   assert.match(limits, /The first read of a big folder takes a while\./);
-  assert.match(limits, /it takes up to 10,000 files and 2,048 MB, 12 folders deep,/);
-  assert.match(limits, /Workbench keeps its own copy of each file it reads/);
+  assert.match(limits, /takes up to 10,000 files and 2,048 MB, 12 folders deep;/);
   assert.match(limits, /The owner of this Workbench sets these limits\./);
   // The folder is offered by its name, and its place on the disk is not on the page at all.
   const options = await page.getByTestId("folders-add-select").locator("option").allTextContents();
@@ -542,7 +537,7 @@ try {
   const confirm = page.getByTestId("folder-remove-confirm");
   assert.match(
     await text(confirm),
-    /Workbench stops checking it, and takes the 5 files it has from it out of your documents: its copies and the text it read from them are deleted, so no chat can find them again\. The folder, the files in it and your access to it are never touched\. You can add it again\./,
+    /Workbench stops checking it and takes its 5 files out of your documents, so no chat can find them\. The folder and your access to it are not touched; you can add it again\./,
   );
   await confirm.getByTestId("folder-remove-keep").click();
   assert.equal(await card(page).count(), 1, "Keep it keeps it");
@@ -601,7 +596,7 @@ try {
   await page.waitForFunction(() => document.querySelectorAll("[data-testid=folder]").length === 0);
   assert.equal(
     await text(page.getByTestId("folders-add-none")),
-    "No folder has been given to you yet. The owner of this Workbench gives folders to people, in Toolbox · Tools. Ask them to give you one.",
+    "No folder has been given to you yet. Ask the owner of this Workbench to give you one.",
   );
   assert.equal(
     await page.getByTestId("folders-open-tools").count(),

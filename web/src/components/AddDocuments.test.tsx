@@ -111,7 +111,7 @@ describe("choosing files", () => {
     opened();
     expect(screen.getByRole("heading", { level: 3, name: "Add files" })).toBeInTheDocument();
     expect(dropping()).toHaveTextContent(
-      "Choose files, or drop them here. Workbench reads each one so a chat can find the passages that have the words of your question.",
+      "Choose files, or drop them here. Workbench reads each one so a chat can search it.",
     );
     expect(screen.getByTestId("documents-add")).toHaveAccessibleDescription(
       /Choose files, or drop them here\./,
@@ -263,14 +263,7 @@ describe("a file that is not added", () => {
     await finish(
       refusal("big.pdf", "big.pdf is larger than the 50 MiB Workbench reads of one file.", 413),
     );
-    await finish(
-      refusal(
-        "full.md",
-        "You already keep 100,000 passages, the most Workbench keeps for one person.",
-        409,
-      ),
-      1,
-    );
+    await finish(refusal("full.md", "You already keep 100,000 passages, the limit.", 409), 1);
     await finish(
       refusal(
         "disk.md",

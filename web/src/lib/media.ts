@@ -409,7 +409,7 @@ export function canRecord(): boolean {
 }
 
 export const RECORD_NEEDS_HTTPS =
-  "Recording needs this page opened over HTTPS, or on the computer Workbench runs on. You can still choose a recording to upload.";
+  "Recording needs this page on HTTPS, or on the computer Workbench runs on. You can still upload a recording.";
 
 /** A clip's own length, decoded by the browser; null when it cannot say. */
 export async function clipSeconds(file: Blob): Promise<number | null> {

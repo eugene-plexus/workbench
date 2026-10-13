@@ -97,8 +97,8 @@ export function LocalToolForm({ onAdded }: { onAdded: (server: ToolServer) => vo
         Add a local server (owner only)
       </h3>
       <p className="help">
-        Install the server and its dependencies on Workbench&apos;s machine first, where
-        Workbench&apos;s OS account can run them. Saving this form does not start it.
+        Install the server and its dependencies where Workbench&apos;s OS account can run them.
+        Saving this form does not start it.
       </p>
       <div className="notice notice--warn">
         <TriangleAlert size={16} aria-hidden />
@@ -175,8 +175,7 @@ export function LocalToolForm({ onAdded }: { onAdded: (server: ToolServer) => vo
           {...marked("environment")}
         />
         <p id={`${uid}-environment-help`} className="help">
-          For example, {'{"API_TOKEN":"your token"}'}. Stored values are never shown again. Each
-          server gets a working and cache folder inside Workbench&apos;s data directory.
+          For example, {'{"API_TOKEN":"your token"}'}. Stored values are never shown again.
         </p>
       </div>
       {problem && (

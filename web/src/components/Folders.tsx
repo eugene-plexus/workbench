@@ -57,8 +57,8 @@ export function Folders({ owner }: { owner: boolean }) {
     <section aria-label="Folder access" className="section">
       <h2 className="title-section">Folders · File tools</h2>
       <p className="help">
-        Choose a granted folder in a chat&apos;s settings. Each listing, read or write needs your
-        approval. File contents and results go to the selected model and stay in the chat.
+        Choose a granted folder in a chat&apos;s settings. You approve each listing, read and write.
+        What the tools return goes to the model and stays in the chat.
       </p>
       <p className="help">
         These grants apply to the built-in file tools. Owner-installed local programs still share
@@ -332,7 +332,7 @@ export function Folders({ owner }: { owner: boolean }) {
           </label>
           <p className="help">
             Lists and UTF-8 text files only (32 KiB / 16384 characters maximum; 8192 characters per
-            write). No links, deletion or program execution. Edits need the hash from a prior read.
+            write). No links, deletion or program execution.
           </p>
           <p className="notice notice--warn">
             <TriangleAlert size={16} aria-hidden />

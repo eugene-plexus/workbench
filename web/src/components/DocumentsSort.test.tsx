@@ -138,7 +138,7 @@ describe("passages that are sorted", () => {
       `${SORTER} sorts about 4,100 tokens a second here, so sorting the 18 passages a question usually finds (about 300 tokens each) adds about 1.4 s to each answer, within Sort time (3 s).`,
     );
     expect(said("documents-sort-speed-from")).toBe(
-      "How fast it reads comes mostly from quick tests Workbench ran on it, not from sorts of your questions.",
+      "That speed comes mostly from quick tests, not from sorts of your questions.",
     );
   });
 
@@ -147,7 +147,7 @@ describe("passages that are sorted", () => {
     expect(said("documents-sort-speed")).toContain("sorts about 5,300 tokens a second here");
     expect(said("documents-sort-speed")).toContain("within Sort time (6 s)");
     expect(said("documents-sort-speed-from")).toBe(
-      "How fast it reads comes mostly from the sorts Workbench has made.",
+      "That speed comes mostly from the sorts Workbench has made.",
     );
   });
 
@@ -163,7 +163,7 @@ describe("passages that are sorted", () => {
     );
     expect(box()).toHaveClass("notice--warn");
     expect(said("documents-sort-where")).toContain(
-      "It runs on Cohere. The owner of this Workbench allowed the best passages of your documents for each question, and the question, to be sent there.",
+      "It runs on Cohere. The owner allowed each question and its best passages to be sent there.",
     );
   });
 });
@@ -188,12 +188,12 @@ describe("passages that are not sorted because the sorter is too slow", () => {
   it("says where its speed came from, beside the sentence that says what it is", () => {
     const probe = shown(sortFor("over_budget"));
     expect(said("documents-sort-speed-from")).toBe(
-      "How fast it reads comes mostly from quick tests Workbench ran on it, not from sorts of your questions.",
+      "That speed comes mostly from quick tests, not from sorts of your questions.",
     );
     probe.unmount();
     shown(sortFor("over_budget", { rateFrom: "sorts" }));
     expect(said("documents-sort-speed-from")).toBe(
-      "How fast it reads comes mostly from the sorts Workbench has made.",
+      "That speed comes mostly from the sorts Workbench has made.",
     );
   });
 

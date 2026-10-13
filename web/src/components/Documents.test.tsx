@@ -303,7 +303,7 @@ describe("opening the screen", () => {
     const headline = screen.getByTestId("documents-search");
     expect(headline).toHaveTextContent("Searching by words only.");
     // It says what words only means and promises nothing more.
-    expect(headline).toHaveTextContent("it does not look for meaning");
+    expect(headline).toHaveTextContent("It does not look for meaning");
     expect(headline.textContent).not.toMatch(/\b(soon|later|will|coming|meaning and words)\b/i);
   });
 
@@ -311,7 +311,7 @@ describe("opening the screen", () => {
     await opened({ headline: "Searching by meaning and words.", meaning: true });
     const headline = screen.getByTestId("documents-search");
     expect(headline).toHaveTextContent("Searching by meaning and words.");
-    expect(headline).not.toHaveTextContent("it does not look for meaning");
+    expect(headline).not.toHaveTextContent("It does not look for meaning");
   });
 
   it("is empty at first: where to start, and nothing to test or ask yet", async () => {
@@ -657,7 +657,7 @@ describe("what the owner can read", () => {
   it("is said where the owner may read chats: an answer can quote a document, and the owner cannot open this page", async () => {
     await opened({ ownerReadsChats: true });
     expect(screen.getByTestId("documents-owner-reads")).toHaveTextContent(
-      "The owner of this Workbench can read your chats, and an answer in a chat can quote your documents. The owner cannot open this page or your files.",
+      "The owner of this Workbench can read your chats, including any passages an answer quotes. The owner cannot open this page or your files.",
     );
   });
 
@@ -674,7 +674,7 @@ describe("the settings", () => {
     expect(box).toHaveAttribute("role", "switch");
     expect(box).not.toBeChecked();
     expect(screen.getByTestId("documents-new-chats-effective")).toHaveTextContent(
-      "New chats start with Documents off. You can turn it on in any chat, with its Documents button.",
+      "New chats start with Documents off. Turn it on in any chat with its Documents button.",
     );
   });
 
@@ -779,7 +779,7 @@ describe("removing a document", () => {
     expect(ask).toHaveAttribute("role", "group");
     expect(ask).toHaveAccessibleName("Remove harbour-survey.pdf?");
     expect(ask).toHaveTextContent(
-      "Remove harbour-survey.pdf? Workbench deletes its copy of the file and the text it read from it, and no chat can find it again. This cannot be undone.",
+      "Remove harbour-survey.pdf? Workbench deletes its copy, so no chat can find it again. This cannot be undone.",
     );
     // The safe answer has the keyboard.
     expect(within(ask).getByTestId("saved-document-remove-keep")).toHaveFocus();
@@ -1020,10 +1020,14 @@ describe("how the screen says it is searched", () => {
 
   it("says what an empty list is for, as it is searched", async () => {
     await opened({ meaning: true });
-    expect(screen.getByTestId("documents-empty")).toHaveTextContent("or say what it asks");
+    expect(screen.getByTestId("documents-empty")).toHaveTextContent(
+      "the words or the meaning of your question",
+    );
     cleanup();
     await opened({});
-    expect(screen.getByTestId("documents-empty")).not.toHaveTextContent("or say what it asks");
+    expect(screen.getByTestId("documents-empty")).not.toHaveTextContent(
+      "or the meaning of your question",
+    );
   });
 
   it("says no search model is set up, and links the owner to the Library in Eugene's console", async () => {
@@ -1510,7 +1514,9 @@ describe("the Folders section, on the screen (MR7)", () => {
     );
     await wait(0);
     expect(screen.queryByTestId("folders-open-tools")).toBeNull();
-    expect(first("folders-add-none")).toHaveTextContent("Ask them to give you one.");
+    expect(first("folders-add-none")).toHaveTextContent(
+      "Ask the owner of this Workbench to give you one.",
+    );
   });
 
   it("says a folder with a problem in its section, and leaves the screen's own problems alone", async () => {

@@ -769,7 +769,7 @@ CASES: list[tuple[str, str, str, str, str, str]] = [
     (
         "memory turned off does not say who turned it off",
         PAGE,
-        "Memory is off because you turned it off. ",
+        "You turned memory off. ",
         "Memory is off. ",
         T_PAGE,
         "shows Use memory as it is in effect",

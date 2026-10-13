@@ -100,10 +100,9 @@ export function JobSites({ onClose, sub }: { onClose: () => void; sub?: string }
           </button>
         </header>
         <p className="help">
-          A job site is a machine of yours that Workbench can work on from anywhere: the folders you
-          choose, under your rules for what may run there without asking you. The machine connects
-          out to Eugene and nothing connects to it. Only you say who may use its folders and its
-          tools, you included, and the machine itself keeps that list.
+          A job site is a machine of yours that Workbench can work on from anywhere, in the folders
+          you choose and under your rules for what runs without asking. It connects out to Eugene;
+          nothing connects to it.
         </p>
         {loadProblem && (
           <div role="alert" className="notice notice--error">
@@ -202,17 +201,14 @@ export function JobSites({ onClose, sub }: { onClose: () => void; sub?: string }
             <div className="flex flex-col gap-3" data-testid="job-site-invite">
               <ol className="help list-decimal space-y-1 pl-5 marker:text-muted">
                 <li>
-                  The machine must already have Eugene installed and joined as a node; the command
-                  adds the job site there (a standalone install comes later).
+                  The machine needs Eugene installed and joined as a node first (a standalone
+                  install comes later).
                 </li>
                 <li>
                   Run one of these on the machine, within 15 minutes. The service install needs an
                   administrator (Windows) or root (Linux).
                 </li>
-                <li>
-                  It asks for your Eugene password there: that is how Eugene knows the machine is
-                  yours.
-                </li>
+                <li>It asks for your Eugene password there, to prove the machine is yours.</li>
               </ol>
               <h3 className="title-sub">Windows (PowerShell)</h3>
               <Command text={invite.commands.windows} label="the Windows command" />
@@ -424,8 +420,8 @@ export function Calls({
       {until ? (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm">
           <p className="min-w-0">
-            Your window is open until {clockTime(until)}: Workbench uses the tools your rules allow
-            there without asking for your signature each time.
+            Your window is open until {clockTime(until)}: the tools your rules allow there run
+            without your signature each time.
           </p>
           <button
             disabled={busy}
@@ -438,9 +434,8 @@ export function Calls({
         </div>
       ) : (
         <p className="help">
-          No window is open. The first time Workbench uses a tool your rules allow there, you sign
-          once for an hour of them. Anything your rules ask about, and every command, needs your
-          signature each time.
+          No window is open. One signature opens an hour of the tools your rules allow there.
+          Anything your rules ask about, and every command, needs your signature each time.
         </p>
       )}
       {commands.allowed ? (

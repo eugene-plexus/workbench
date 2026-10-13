@@ -108,7 +108,7 @@ describe("the section", () => {
     await show();
     expect(screen.getByRole("heading", { level: 2, name: "Folders" })).toBeInTheDocument();
     expect(text("folders-intro")).toBe(
-      "Point your documents at a folder the owner of this Workbench gave you. Workbench reads the files in it and keeps your documents in step with it, so a chat with Documents on can answer from them. Reading a folder for your documents never changes, adds or deletes anything in it.",
+      "Add a folder the owner gave you. Workbench reads its files as your documents and keeps them in step, so a chat with Documents on can answer from them. It never changes, adds or deletes anything in the folder.",
     );
   });
 
@@ -153,21 +153,14 @@ describe("the section", () => {
     server.page.limits = { ...LIMITS, syncMinutes: 5 };
     await show();
     expect(text("folders-limits")).toContain(
-      "Workbench does not watch your folders. It looks at each one again every 5 minutes, and whenever you choose Sync now, so a change can take that long to show.",
-    );
-  });
-
-  it("says plainly that a quick check misses an edit that keeps a file's size and time, and that a deep check finds it", async () => {
-    await show();
-    expect(text("folders-limits")).toContain(
-      "A quick check compares each file's size and time with what Workbench read, so an edit that keeps both is missed. Sync now with a deep check reads every file again and finds it.",
+      "Folders are not watched: each is checked every 5 minutes and on Sync now, so a change can take that long to show.",
     );
   });
 
   it("says plainly that folders on job sites cannot be added", async () => {
     await show();
     expect(text("folders-limits")).toContain(
-      "Only folders on the machine Workbench runs on can be added. Folders on your job sites cannot be added yet.",
+      "Only folders on the machine Workbench runs on can be added, not job site folders yet.",
     );
   });
 
@@ -175,11 +168,8 @@ describe("the section", () => {
     await show();
     const limits = text("folders-limits");
     expect(limits).toContain("The first read of a big folder takes a while.");
-    expect(limits).toContain(
-      "Workbench keeps its own copy of each file it reads, so a search never touches your folder.",
-    );
-    expect(limits).toContain("it takes up to 10,000 files and 2,048 MB, 12 folders deep,");
-    expect(limits).toContain("and a file may be up to 50 MiB.");
+    expect(limits).toContain("takes up to 10,000 files and 2,048 MB, 12 folders deep;");
+    expect(limits).toContain("a file may be up to 50 MiB.");
     expect(limits).toContain("keeps up to 100,000 passages for you");
     expect(limits).toContain("The owner of this Workbench sets these limits.");
   });
@@ -447,7 +437,7 @@ describe("a folder, by where it stands", () => {
     await show();
     expect(screen.getByTestId("folder-caps")).toHaveClass("notice--warn");
     expect(text("folder-caps")).toBe(
-      "This folder has more than the 10,000 files Workbench keeps for one folder, so the files that come last are left out.2 folders more than 12 folders deep are not looked at.",
+      "This folder has more than the 10,000 files Workbench keeps, so the last ones are left out.2 folders more than 12 folders deep are not looked at.",
     );
   });
 
@@ -581,7 +571,7 @@ describe("a deep check", () => {
     await show();
     expect(screen.getByTestId("folder-deep-details")).not.toHaveAttribute("open");
     expect(text("folder-deep-details")).toContain(
-      "A quick check compares each file's size and time with what Workbench read, so an edit that keeps both is missed. A deep check reads every file again and compares what is in it, so it finds that edit. It takes longer on a big folder.",
+      "A quick check misses an edit that keeps a file's size and time. A deep check reads every file again and finds it, but takes longer on a big folder.",
     );
     click("folder-deep");
     await settle();
@@ -615,7 +605,7 @@ describe("Remove folder", () => {
     click("folder-remove");
     expect(screen.getByRole("group", { name: "Remove Work notes?" })).toBeInTheDocument();
     expect(text("folder-remove-confirm")).toContain(
-      "Remove Work notes? Workbench stops checking it, and takes the 12 files it has from it out of your documents: its copies and the text it read from them are deleted, so no chat can find them again. The folder, the files in it and your access to it are never touched. You can add it again.",
+      "Remove Work notes? Workbench stops checking it and takes its 12 files out of your documents, so no chat can find them. The folder and your access to it are not touched; you can add it again.",
     );
     expect(server.made("DELETE")).toEqual([]);
   });
@@ -738,13 +728,13 @@ describe("Add a folder", () => {
     server.page = { ...server.page, grants: given };
     await show();
     expect(screen.getByTestId("folders-add-go")).toHaveAccessibleDescription(
-      "Workbench starts reading it at once. If it holds things that should not be read, choose what to leave out first.",
+      "Workbench starts reading it at once. To keep something out, choose what to leave out first.",
     );
     // The same sentence is not said twice on the screen.
     expect(
       screen
         .getByTestId("folders-section")
-        .textContent?.split("never changes, adds or deletes anything in it."),
+        .textContent?.split("never changes, adds or deletes anything in the folder."),
     ).toHaveLength(2);
   });
 
@@ -884,7 +874,7 @@ describe("Add a folder", () => {
     const opened = vi.fn();
     await show({ me: OWNER, onTools: opened });
     expect(text("folders-add-none")).toBe(
-      "No folder has been given to you yet. Give yourself one in Toolbox · Tools: under Folders · File tools, choose “Grant an existing folder” and pick your own name as the person. It will be here once it is granted.",
+      "No folder has been given to you yet. In Toolbox · Tools, under Folders · File tools, choose “Grant an existing folder” and pick your own name as the person.",
     );
     expect(screen.queryByTestId("folders-add-select")).toBeNull();
     fireEvent.click(screen.getByTestId("folders-open-tools"));
@@ -896,7 +886,7 @@ describe("Add a folder", () => {
     server.page = { ...server.page, grants: [] };
     await show({ me: PERSON, onTools: vi.fn() });
     expect(text("folders-add-none")).toBe(
-      "No folder has been given to you yet. The owner of this Workbench gives folders to people, in Toolbox · Tools. Ask them to give you one.",
+      "No folder has been given to you yet. Ask the owner of this Workbench to give you one.",
     );
     expect(screen.queryByTestId("folders-open-tools")).toBeNull();
   });
@@ -915,7 +905,7 @@ describe("Add a folder", () => {
     const opened = vi.fn();
     await show({ me: OWNER, onTools: opened });
     expect(text("folders-add-none")).toBe(
-      "Every folder you were given is added. To add another, give yourself one in Toolbox · Tools, under Folders · File tools.",
+      "Every folder you were given is added. To add another, give yourself one in Toolbox · Tools.",
     );
     expect(screen.queryByTestId("folders-add-go")).toBeNull();
     fireEvent.click(screen.getByTestId("folders-open-tools"));

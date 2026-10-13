@@ -25,7 +25,7 @@ it("tells a person who is not linked how to link, and what runs until then", () 
   expect(screen.getByText("Runs as DESK\\owner")).toBeInTheDocument();
   expect(
     screen.getByText(
-      "To work as yourself there, link your own account: on desk, open http://127.0.0.1:8079/link and sign in. Until then your calls run as the machine's owner, inside the folders shared with you.",
+      "Link your own account: on desk, open http://127.0.0.1:8079/link and sign in. Until then your calls run as the machine's owner, inside the folders shared with you.",
     ),
   ).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Remove my link" })).toBeNull();
@@ -103,7 +103,7 @@ it("sets how to link in a notice of its own, and the account it runs as apart fr
       onChanged={() => undefined}
     />,
   );
-  const how = screen.getByText(/^To work as yourself there/);
+  const how = screen.getByText(/^Link your own account/);
   expect(how).toHaveClass("notice");
   expect(screen.getByText("Runs as DESK\\owner")).not.toHaveClass("notice");
 });

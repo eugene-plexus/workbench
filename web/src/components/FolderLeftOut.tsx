@@ -134,8 +134,8 @@ export function FolderLeftOut({ folder, again }: { folder: DocumentFolder; again
                   {item.path || "The folder itself"}
                 </p>
                 <p className="text-xs text-muted wrap-anywhere">
-                  Workbench could not look in it ({item.cause}). Its files are as they were at the
-                  last check, and it looks again at the next.
+                  Workbench could not look in it ({item.cause}). Its files are as at the last check;
+                  it looks again at the next.
                 </p>
               </li>
             ))}

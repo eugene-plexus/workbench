@@ -308,9 +308,7 @@ def test_a_person_at_the_passage_limit_is_refused_more_files_at_once_with_the_nu
     assert full["state"] == "ready" and full["passages"] == 100
     more = add(ada, ("more.md", md("One more.")))
     assert more.status_code == 409, more.text
-    assert more.json()["detail"]["message"].startswith(
-        "You already keep 100 passages, the most Workbench keeps for one person."
-    )
+    assert more.json()["detail"]["message"].startswith("You already keep 100 passages, the limit.")
     assert [d["name"] for d in listing(ada)["documents"]] == ["full.md"], "nothing was kept"
 
 

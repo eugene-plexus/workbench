@@ -177,9 +177,9 @@ export function whereWords(model: SearchModelView): string | null {
     case "local":
       return "It runs on your own machines, so what is in your documents stays on them.";
     case "external":
-      return `It runs ${model.runsOn ? `on ${model.runsOn}` : "outside your machines"}. The owner of this Workbench allowed the text of your documents and of your questions to be sent there.`;
+      return `It runs ${model.runsOn ? `on ${model.runsOn}` : "outside your machines"}. The owner allowed the text of your documents and questions to be sent there.`;
     case "unknown":
-      return "Eugene cannot say where it runs. The owner of this Workbench allowed models outside your machines, so the text of your documents and of your questions may leave them.";
+      return "Eugene cannot say where it runs. The owner allowed models outside your machines, so the text of your documents and questions may leave them.";
     default:
       return null;
   }
@@ -244,8 +244,8 @@ export function introWords(facts: SearchFacts): string {
 /** What an empty list says to do, for how it searches now. */
 export function emptyWords(facts: SearchFacts): string {
   return facts.meaning
-    ? "Add files above. Workbench reads each one, so a chat with Documents on can find the passages that have the words of your question or say what it asks."
-    : "Add files above. Workbench reads each one, so a chat with Documents on can find the passages that have the words of your question.";
+    ? "Add files above. A chat with Documents on finds passages that match the words or the meaning of your question."
+    : "Add files above. A chat with Documents on finds passages that match the words of your question.";
 }
 
 // --- each document's meaning ---

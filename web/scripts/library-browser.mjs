@@ -246,7 +246,7 @@ try {
   // What words only finds, said so it promises no more.
   assert.match(
     await page.getByTestId("documents-search-help").textContent(),
-    /“costs” does not find “cost”, and it does not look for meaning\./,
+    /“costs” does not find “cost”\. It does not look for meaning\./,
   );
   // A person who is not the owner has no console to go to: they are told to ask the owner.
   assert.match(
@@ -805,7 +805,7 @@ try {
   assert.equal(await page.getByTestId("documents-search-model").count(), 0);
   assert.match(
     await page.getByTestId("documents-search-help").textContent(),
-    /it does not look for meaning/,
+    /It does not look for meaning/,
   );
   // What they have of meaning stays, and words are not in doubt.
   assert.equal(await rows(page, "ready").count(), 4);
@@ -912,7 +912,7 @@ try {
   );
   assert.match(
     await page.getByTestId("documents-sort-speed-from").textContent(),
-    /^How fast it reads was measured by a quick test before any question was sorted\.$/,
+    /^That speed comes mostly from quick tests, not from sorts of your questions\.$/,
   );
   // Not in use, not sorted, and not a fault: the headline and the notice say so.
   assert.equal(await page.getByTestId("documents-sort-model").count(), 0);
@@ -997,7 +997,7 @@ try {
   );
   assert.match(
     await page.getByTestId("documents-sort-speed-from").textContent(),
-    /^How fast it reads (was measured by a quick test before any question was sorted|is measured from the sorts Workbench has made)\.$/,
+    /^That speed comes mostly from (quick tests, not from sorts of your questions|the sorts Workbench has made)\.$/,
   );
   assert.equal(await page.getByTestId("documents-sort-reason").count(), 0);
   assert.equal(await sortBox.evaluate((el) => el.classList.contains("notice--warn")), false);

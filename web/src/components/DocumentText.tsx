@@ -109,7 +109,7 @@ export function useDocumentText({
         <>
           <p className="help mt-1">
             {saved
-              ? `All the text Workbench indexed from ${name}. A search looks in this text, and the passages sent to a model are cut from it.`
+              ? `All the text Workbench indexed from ${name}. Passages sent to a model come from it.`
               : `All the text Workbench read from ${name}. A model is given the part you chose, or all of it.`}
           </p>
           <ScrollText
