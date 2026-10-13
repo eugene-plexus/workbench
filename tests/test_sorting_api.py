@@ -734,7 +734,7 @@ def test_a_gateway_that_does_not_answer_its_list_of_models_holds_the_screen_once
     sorter_world(world)
     ada = start(world)
     keep(ada, *corpus())
-    monkeypatch.setattr(listing, "TIMEOUT", 0.4)
+    monkeypatch.setattr(listing, "TIMEOUT", 1.0)
     monkeypatch.setattr(listing, "TTL", 0.05)  # what was seen is old: the next screen looks again
     monkeypatch.setattr(listing, "ERROR_TTL", 5.0)  # and what it finds is kept for a moment
     time.sleep(0.1)
@@ -745,7 +745,7 @@ def test_a_gateway_that_does_not_answer_its_list_of_models_holds_the_screen_once
     elapsed = time.perf_counter() - started
     assert got.status_code == 200
     assert world.gateway.models_asked == asked + 1, "one look, shared by meaning and by sorting"
-    assert 0.3 < elapsed < 0.7, f"held for the one look, 0.4 s, and not for two ({elapsed:.2f} s)"
+    assert 0.9 < elapsed < 1.7, f"held for the one look, 1 s, and not for two ({elapsed:.2f} s)"
     head = got.json()["search"]
     assert head["code"] == "slow" and head["sort"]["code"] == "slow", "and both say what was seen"
     world.gateway.models_delay = 0.0
