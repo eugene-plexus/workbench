@@ -210,8 +210,8 @@ CASES = [
         ["budget.measuring-first"],
     ),
     Case(
-        "a sorter that did not answer is shown as a speed and told to have Sort time raised (the "
-        "review's third finding)",
+        "a sorter that did not answer is shown on the screen as a speed (the review's third "
+        "finding: the bound it showed was presented as how fast it reads)",
         [
             (
                 SORTING,
@@ -221,7 +221,9 @@ CASES = [
         ],
         "hung",
         8,
-        ["hung.not-again"],
+        # The screen is where a speed would be shown: a question's report carries a rate only for
+        # a sorter that was measured (over Sort time, or sorted), so `hung.not-again` cannot see it.
+        ["hung.screen"],
     ),
     Case(
         "a probe that is not answered in time is not learned from (the review's second finding: "
