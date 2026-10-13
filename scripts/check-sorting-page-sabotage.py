@@ -206,7 +206,7 @@ CASES: list[tuple[str, str, str, str, str, str]] = [
         'if (sort.rateFrom === "probe") {',
         'if (sort.rateFrom === "sorts") {',
         T_SORTING,
-        "says where the speed came from: a quick test, or the sorts Workbench has made",
+        "says what the speed mostly comes from: quick tests, or the sorts Workbench has made",
     ),
     # --- why passages are not sorted ---------------------------------------------------------
     (

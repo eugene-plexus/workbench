@@ -31,10 +31,13 @@ again, up to `RATE_MAX_AGE`. Over the budget the passages stay in the order the 
 and the report says why with the numbers: the rate, the tokens, the seconds expected and the
 seconds allowed.
 
-**When a speed is measured again.** Only when it is older than `RATE_MAX_AGE` and either the probe
-is all it comes from, or the sorter is over budget (and so is never asked a real sort that would
+**When a speed is measured again.** Only when it is older than `RATE_MAX_AGE` and either most of it
+comes from the probe, or the sorter is over budget (and so is never asked a real sort that would
 show it has recovered). The probe is blended in with the same decay as a sort, never put in place of
-what the sorts measured, and a speed from recent real sorts is left alone.
+what the sorts measured, and a speed from recent real sorts is left alone. What the speed is said to
+come from follows the same share (`Speed.source`): `probe` while the quick tests read more than half
+of the tokens behind it, `sorts` after, so a sorter that is only ever measured again by the probe
+ends by saying so.
 
 **A sorter that fails never fails a search.** It may be stopped, be held back by the gateway for a
 moment after it failed (a 503 that asks for a wait: said as that, and not as a sorter that is not
@@ -46,11 +49,13 @@ found, and what the sorter said is kept (`SortReport`), as a way of searching th
 **A sorter that did not answer in time** (a sort given up on at twice the budget, or a probe that
 was) is a state of its own (`GaveUp`), apart from the speed: a sorter that did not answer never
 read at any speed, so none is said, and it is told as what it is: "did not answer within N s the
-last time it was asked", and when it is asked again. What it showed (it did not read this many
-tokens in this many seconds) is kept only to price the next sort, so the next question is over
-Sort time at once and is not made to wait, and a sort that was given up on is not averaged into
-what the sorter did while it was well. It is asked again by the probe, behind a search, after
-10 s and then after longer each time it still does not answer.
+last time it was asked", and when it is asked again. A sorter that does not answer is stuck, not
+slow, so the size of a question says nothing about whether it would be answered: while the give-up
+stands no question is asked of it, whatever its size, and none is made to wait, unless Sort time
+has been raised so that twice it is longer than the wait that was given up on (`GaveUp.holds`). A
+sort that was given up on is not averaged into what the sorter did while it was well. It is asked
+again by the probe, behind a search, after 10 s and then after longer each time it still does not
+answer; one hang is one strike, however many questions were in the air when it happened.
 
 What a person is told of the sorter (the header of the Documents screen, Test a question, the two
 settings) is read from a live look at the gateway and at what was measured, never from what was
@@ -475,10 +480,10 @@ class Speed:
         self._decay = decay
         self._tokens = 0.0
         self._seconds = 0.0
-        #: When it was last measured (by the clock the caller keeps), and how many of the
-        #: measurements were sorts, and not the probe.
+        #: How many of those tokens the probe read, faded the same way as the rest.
+        self._probed = 0.0
+        #: When it was last measured, by the clock the caller keeps.
         self.at: float | None = None
-        self.sorts = 0
 
     def record(self, tokens: int, seconds: float, at: float, *, sort: bool = True) -> None:
         """One measurement: `tokens` read in `seconds`, by a real sort or (`sort=False`) by the
@@ -487,9 +492,8 @@ class Speed:
             return
         self._tokens = self._tokens * self._decay + tokens
         self._seconds = self._seconds * self._decay + max(seconds, MIN_SECONDS)
+        self._probed = self._probed * self._decay + (0 if sort else tokens)
         self.at = at
-        if sort:
-            self.sorts += 1
 
     def per_second(self) -> float | None:
         """Tokens a second, or None until something has been measured."""
@@ -499,27 +503,31 @@ class Speed:
 
     @property
     def source(self) -> str | None:
-        """`sorts` once a real sort has been measured, `probe` while it is only the probe's."""
+        """What the speed is mostly made of: `probe` while the probe read more than half of the
+        tokens behind it, `sorts` after (and at exactly half). A sorter that is over budget is asked
+        no sort, so it is measured again by the probe alone and the probe's share only grows: the
+        speed is then the probe's, and the screen must not go on saying it is the sorts'."""
         if self.at is None:
             return None
-        return "sorts" if self.sorts else "probe"
+        return "probe" if self._probed * 2 > self._tokens else "sorts"
 
 
 @dataclass(frozen=True)
 class GaveUp:
-    """The last time this sorter was asked it did not answer in time: it did not read `tokens` in
-    `seconds`. That is not a speed (it never read at one), so it is kept apart from the speed and
-    is told as what it is. It prices the next sort, and nothing else: a sort of that many tokens
-    would take longer than `seconds`, so it is over Sort time unless Sort time was raised past
-    that (`over`)."""
+    """The last time this sorter was asked it did not answer within `seconds`. That is not a speed
+    (it never read at one), so it is kept apart from the speed and is told as what it is. Nor does
+    it depend on what was asked: a sorter that does not answer is stuck, not slow, so a smaller
+    question would not be answered either, and would wait its whole limit to find that out. While
+    it stands, no question is asked of the sorter, whatever its size, unless Sort time was raised
+    so that the wait a question would be given, twice Sort time, is longer than the one that was
+    given up on."""
 
-    tokens: int
     seconds: float
 
-    def over(self, tokens: int, budget: float) -> bool:
-        """Whether `tokens` would take longer than `budget` at no more than the speed that sort
-        showed, which is at most `self.tokens` in `self.seconds`."""
-        return tokens * self.seconds > self.tokens * budget
+    def holds(self, budget: float) -> bool:
+        """Whether a question is still kept from the sorter at this Sort time: the wait it would
+        be given (twice `budget`) is no longer than the one that was given up on."""
+        return 2 * budget <= self.seconds
 
 
 @dataclass(frozen=True)
@@ -589,8 +597,9 @@ class Standing:
     message: str | None
     budget: float
     allow_external: bool
-    #: The tokens a second it was measured at, and `probe` or `sorts`, what that was measured
-    #: from. Both are None while it is only known that it did not answer: that is not a speed.
+    #: The tokens a second it was measured at, and what that is mostly made of: `probe` while the
+    #: quick tests read more than half of the tokens behind it, `sorts` after (`Speed.source`).
+    #: Both are None while it is only known that it did not answer: that is not a speed.
     rate: float | None = None
     rate_from: str | None = None
 
@@ -733,14 +742,11 @@ class Sorting:
         self._measure_if_due(model, budget)
         now = self._clock()
         failed = self._failed.get(model.id)
-        if (
-            failed is not None
-            and failed.gave_up is not None
-            and failed.gave_up.over(tokens, budget)
-        ):
-            # It did not answer the last time it was asked, and these passages would take longer
-            # than that. No speed is said (it never read at one), and no advice to raise Sort
-            # time: a longer wait for a sorter that does not answer helps nobody.
+        if failed is not None and failed.gave_up is not None and failed.gave_up.holds(budget):
+            # It did not answer the last time it was asked, and Sort time has not been raised
+            # past that: whatever the passages weigh, it is not asked (a sorter that does not
+            # answer is stuck, not slow). No speed is said (it never read at one), and no advice
+            # to raise Sort time: a longer wait for a sorter that does not answer helps nobody.
             return Verdict(failed.code, message=failed.words(model.id, now))
         rate = self.rate_of(model.id)
         if rate is None:
@@ -756,10 +762,11 @@ class Sorting:
     def _measure_if_due(self, model: SearchModel, budget: float) -> None:
         """Measure this sorter with the probe, behind whoever is asking, when it is time to: when
         nothing is known of its speed; when it did not answer and its wait is over; or when its
-        speed is old and is only the probe's, or the sorter is over budget, so that no sort that
-        would show it has recovered is ever asked of it. Not before its turn to be asked again
-        after a failure (and one at a time: `_measure_soon`). A speed from recent real sorts is
-        left alone, and a sorter that is quick enough is measured by the sorts it is asked."""
+        speed is old and is mostly the probe's (`Speed.source`), or the sorter is over budget, so
+        that no sort that would show it has recovered is ever asked of it. Not before its turn to
+        be asked again after a failure (and one at a time: `_measure_soon`). A speed from recent
+        real sorts is left alone, and a sorter that is quick enough is measured by the sorts it is
+        asked."""
         now = self._clock()
         failed = self._failed.get(model.id)
         if failed is not None and now < failed.retry_at():
@@ -821,7 +828,9 @@ class Sorting:
                 code,
                 exc_info=(type(exc), exc, exc.__traceback__) if error.kind == "internal" else None,
             )
-            self._remember(model.id, code, words, GaveUp(tokens, limit) if code == "slow" else None)
+            self._remember(
+                model.id, code, words, GaveUp(limit) if code == "slow" else None, began=started
+            )
             self.forget()
             return
         self._answered(model.id, probe=True)
@@ -842,16 +851,31 @@ class Sorting:
         )
 
     def _remember(
-        self, model: str, code: str, words: str, gave_up: GaveUp | None = None
+        self,
+        model: str,
+        code: str,
+        words: str,
+        gave_up: GaveUp | None = None,
+        *,
+        began: float | None = None,
     ) -> Failure:
         """Keep that a request of this sorter came to nothing: what was seen (`problem`'s code
         and words), and so when it is asked again, which is later each time it comes to nothing
-        again. A request that was given up on is a `GaveUp` (what it showed); a failure that is
-        not that leaves what was known of one before it."""
+        again. A request that was given up on is a `GaveUp`; a failure that is not that leaves
+        what was known of one before it.
+
+        **One strike per event, not per question.** `began` is when the request was begun, by the
+        clock. One that began before the failure that is on record was in the air with it, so it is
+        the same trouble, found out a moment later, and is not another strike: a sorter that
+        hangs while three people ask is still on its first strike, and is asked again after ten
+        seconds, not after forty. What it saw is kept all the same."""
         before = self._failed.get(model)
-        strikes = self._strikes.get(model, 0) + 1
-        self._strikes[model] = strikes
         kept = gave_up if gave_up is not None else (before.gave_up if before is not None else None)
+        if began is not None and before is not None and began < before.at:
+            strikes = before.tries
+        else:
+            strikes = self._strikes.get(model, 0) + 1
+            self._strikes[model] = strikes
         failure = Failure(code, words, self._clock(), strikes, kept)
         self._failed[model] = failure
         return failure
@@ -932,10 +956,12 @@ class Sorting:
             code, words = problem(self._error_of(exc, "the sort"), model.id, budget)
             log.warning("sorting the passages of a search failed (%s)", code)
             if code == "slow":
-                # Given up on: it did not read this many tokens in this many seconds, and that is
-                # all it is (`GaveUp`). This question says what it met (it waited, twice Sort
-                # time); the next are told what the sorter is now, and are not made to wait.
-                self._remember(model.id, code, words, GaveUp(tokens, limit))
+                # Given up on: it did not answer within this many seconds, and that is all it is
+                # (`GaveUp`). This question says what it met (it waited, twice Sort time); the
+                # next are told what the sorter is now, and are not made to wait. Questions that
+                # were in the air with this one met the same hang, and are not strikes of their
+                # own (`_remember`).
+                self._remember(model.id, code, words, GaveUp(limit), began=started)
             self.forget()
             return Sorted(None, replace(report, code=code, message=words))
         took = self._clock() - started

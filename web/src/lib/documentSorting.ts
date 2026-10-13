@@ -141,15 +141,18 @@ export function sortSpeedWords(sort: SortFacts): string | null {
   return `${sort.model} sorts ${rateWords(sort.ratePerSecond)} here, so sorting the ${count(typical.passages, "passage")} a question usually finds (about ${typical.passageTokens.toLocaleString()} tokens each) adds about ${secondsWords(typical.seconds)} to each answer, within Sort time (${secondsWords(sort.budgetSeconds)}).`;
 }
 
-/** Where the speed came from: a quick test of the sorter before any question was sorted, or the
- * sorts Workbench has made since. Null when there is no speed. */
+/** What the speed mostly comes from, as the server says it (`rateFrom`): quick tests of the
+ * sorter, while they read more than half of what the speed is made of (the first speed of a sorter
+ * is the quick test's alone, and a sorter that is too slow is asked no sorts, only measured again
+ * by quick tests, so its speed drifts to theirs), or the sorts Workbench has made. Null when there
+ * is no speed. */
 export function sortSpeedFromWords(sort: SortFacts): string | null {
   if (sort.ratePerSecond == null) return null;
   if (sort.rateFrom === "probe") {
-    return "How fast it reads was measured by a quick test before any question was sorted.";
+    return "How fast it reads comes mostly from quick tests Workbench ran on it, not from sorts of your questions.";
   }
   if (sort.rateFrom === "sorts") {
-    return "How fast it reads is measured from the sorts Workbench has made.";
+    return "How fast it reads comes mostly from the sorts Workbench has made.";
   }
   return null;
 }

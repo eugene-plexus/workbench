@@ -1094,7 +1094,9 @@ export interface SortFacts {
    * up on after twice this). */
   budgetSeconds: number;
   /** How fast it reads, as it was measured; null while nothing is measured and while it is only
-   * known that it did not answer (`slow`), which is not a speed. */
+   * known that it did not answer (`slow`), which is not a speed. `rateFrom` is what that mostly
+   * comes from: `probe` while quick tests of the sorter read more than half of what it is made of,
+   * `sorts` after. */
   ratePerSecond: number | null;
   rateFrom: "probe" | "sorts" | null;
   typical: { passages: number; passageTokens: number; tokens: number; seconds: number | null };

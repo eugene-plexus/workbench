@@ -26,7 +26,8 @@ before anything is compared with it.
   2. Eugene's design documents into My documents, with the sorter turned off, until every passage
      has its meaning (or the index of an earlier run, with --reuse-data)
   3. off: the hybrid order (and the words and the meaning alone) reproduces MR5's record; the screen
-     and Test a question say sorting is off, quietly, and the sorter is asked nothing
+     and Test a question say sorting is off, quietly, and the sorter is asked nothing; a question
+     that names one way is not sorted whatever the setting, and says it was not asked
   4. the default Sort time: the sorter is measured by a quick test, it is too slow for 3 s, the
      passages go in the hybrid order, and the screen, Test a question and the two settings say why
      with the rate and the seconds
@@ -46,14 +47,18 @@ before anything is compared with it.
 
 **Safe beside a live install**: every ambient EUGENE_PLEXUS_* variable is dropped, every port is
 chosen by the OS (never the live install's 8079-8083 or 8279-8283), the engines run on the CPU only
-(-ngl 0), every child is in a job object that ends with this process, and teardown is by pid. Never
-`pkill -f eugene_plexus_`: this box is a worker node.
+(-ngl 0; `--sorter-gpu` puts the result sorter's engine alone on the graphics card, for a
+measurement), every child is in a job object that ends with this process, and teardown is by pid.
+Never `pkill -f eugene_plexus_`: this box is a worker node.
 
 Run with the Workbench interpreter (it has httpx, fastapi, uvicorn, joserfc, numpy):
   EP_SCRATCH=DIR workbench/.venv/Scripts/python.exe workbench/scripts/mr6b-sorting-acceptance.py
   ... --reuse-data DIR        skip the import, using the index of an earlier run
   ... --stages budget,stopped only these stages (the stack, and the index, are always made)
   ... --questions 12          only the first twelve questions (the gate is then not judged)
+  ... --sorter-gpu            the sorter's engine on the graphics card (-ngl 99), the search model
+                              still on the processor: a measurement (with --stages gate), not a run
+                              of record
 
 **Where things are comes from the environment, and nothing here names a person's machine:**
   EP_SCRATCH       (required) the scratch root. The work directory and the snapshot are made under it,
@@ -1244,8 +1249,11 @@ class Stack:
     a sorter outside the machines, one gateway, a stand-in for the agent and for Eugene's sign-in,
     and Workbench. Things are started as a stage needs them."""
 
-    def __init__(self, work: Path) -> None:
+    def __init__(self, work: Path, *, sorter_gpu: bool = False) -> None:
         self.work = work
+        #: The result sorter's engine on the graphics card (-ngl 99), for a measurement (`--sorter-gpu`);
+        #: every other engine stays on the processor.
+        self.sorter_gpu = sorter_gpu
         self.logs = work / "logs"
         self.logs.mkdir(parents=True, exist_ok=True)
         self.data = work / "workbench-data"
@@ -1400,16 +1408,20 @@ class Stack:
                 THREADS, "-c", "4096", "-np", "4", "-b", "2048", "-ub", "2048",
             ]  # fmt: skip
         file = SORTER_FILE if kind == "sorter" else BGE_FILE
+        layers = "99" if kind == "sorter" and self.sorter_gpu else "0"
         return [
-            str(LLAMA), "-m", str(file), *host, "--reranking", "-ngl", "0", "-t", THREADS,
+            str(LLAMA), "-m", str(file), *host, "--reranking", "-ngl", layers, "-t", THREADS,
             "--ctx-size", "4096", "--parallel", "4", "--batch-size", "2048", "--ubatch-size",
             "2048",
         ]  # fmt: skip
 
     def start_engine(self, kind: str) -> subprocess.Popen[bytes]:
         self.engine_starts[kind] = self.engine_starts.get(kind, 0) + 1
+        # The processor only, with the graphics card hidden from the engine, except the one engine
+        # that was asked for on it.
+        env = self.base_env if kind == "sorter" and self.sorter_gpu else self.cpu_env
         proc = self.start(
-            self.engine_argv(kind), f"llama-{kind}-{self.engine_starts[kind]}.log", self.cpu_env
+            self.engine_argv(kind), f"llama-{kind}-{self.engine_starts[kind]}.log", env
         )
         self.engines[kind] = proc
         return proc
@@ -1654,7 +1666,7 @@ class Run:
         self.args = args
         self.stages = set(args.stages.split(",")) if args.stages else set(ALL_STAGES)
         self.work = work
-        self.stack = Stack(work)
+        self.stack = Stack(work, sorter_gpu=bool(getattr(args, "sorter_gpu", False)))
         self.questions: list[dict[str, Any]] = []
         self.total = 0
         self.design = work / "design"
@@ -1929,13 +1941,20 @@ class Run:
         s.start_engine("embed")
         s.start_engine("sorter")
         engines_up = {k: s.engine_ready(k) for k in ("embed", "sorter")}
+        where = "the graphics card" if s.sorter_gpu else "the processor"
         if not check(
             "stack.engines",
-            "the search model and the result sorter are loaded (CPU)",
+            f"the search model (the processor) and the result sorter ({where}) are loaded",
             all(engines_up.values()),
             engines_up,
         ):
             raise SystemExit(1)
+        if s.sorter_gpu:
+            note(
+                "the sorter's engine is on the graphics card (-ngl 99): a measurement, not a run "
+                "of record (the budget stage's claim, that the default Sort time does not sort, is "
+                "about the processor)"
+            )
         s.set_runtime("mr6b-sorter", "ready")
         s.start_driver("embed")
         s.start_driver("sorter")
@@ -2117,17 +2136,25 @@ class Run:
         )
         fields = self.schema()
         model_field, secs_field = fields["documentsSortModel"], fields["documentsSortSeconds"]
+        # With the sorter off the gateway is not asked which sorters it lists; the suggestions are
+        # auto, off, and the sorters of the last look at the gateway (search by meaning makes one
+        # beside every screen), so the list is what the gateway lists and nothing it does not.
+        listed_sorters = [
+            m for m, info in s.gateway_models().items() if "rerank" in (info.get("surfaces") or [])
+        ]
         check(
             "defaults.schema",
             "the two settings are in the config schema with their defaults and limits: Result sorter "
-            "defaults to auto and offers auto and off (with the sorter off the gateway is not asked "
-            "which sorters it lists); Sort time defaults to 3 s, from 0.5 to 120",
+            "defaults to auto and offers auto, off and the result sorters the gateway lists (with "
+            "the sorter off it is not asked, so these are from the last look at its models); Sort "
+            "time defaults to 3 s, from 0.5 to 120",
             model_field["default"] == "auto"
-            and model_field["suggestions"] == ["auto", "off"]
+            and model_field["suggestions"] == ["auto", "off", *listed_sorters]
+            and len(listed_sorters) >= 2
             and secs_field["default"] == 3.0
             and secs_field["minimum"] == 0.5
             and secs_field["maximum"] == 120.0,
-            (model_field.get("suggestions"), secs_field),
+            (model_field.get("suggestions"), listed_sorters, secs_field),
         )
         check(
             "off.settings-say-so",
@@ -2141,7 +2168,11 @@ class Run:
         # The questions, by the words alone, by meaning alone and both: MR5's own record.
         found: dict[str, list[list[dict[str, Any]]]] = {"words": [], "meaning": [], "both": []}
         walls: list[float] = []
-        reports = []
+        #: What a question that names no way says of the sorter, and what one that names a way does:
+        #: a named way is never sorted (each way shows what it finds alone), whatever the setting,
+        #: so it is not asked about the sorter at all (`not_asked`), and is not "off".
+        reports: list[dict[str, Any]] = []
+        one_way_reports: list[dict[str, Any]] = []
         for i in range(n):
             for label, ways in (("words", ["words"]), ("meaning", ["meaning"]), ("both", None)):
                 got = self.ask(i, **({"ways": ways} if ways else {}))
@@ -2149,7 +2180,9 @@ class Run:
                 if label == "both":
                     self.hybrid[i] = got
                     walls.append(got["wall"])
-                reports.append(got["sort"])
+                    reports.append(got["sort"])
+                else:
+                    one_way_reports.append(got["sort"])
         hits = {k: hits_at(v, self.questions, 5) for k, v in found.items()}
         mrr_each = {k: reciprocal_ranks(v, self.questions, 5) for k, v in found.items()}
         recall = {k: sum(v) / n for k, v in hits.items()}
@@ -2185,9 +2218,10 @@ class Run:
             )
         check(
             "off.reported",
-            "every question says the sorter is off, quietly, with no sorter named, and its mode "
-            "does not say one",
-            all(
+            "every question that names no way says the sorter is off, quietly, with no sorter "
+            "named, and its mode does not say one",
+            len(reports) == n
+            and all(
                 r["code"] == "off"
                 and r["quiet"] is True
                 and r["used"] is False
@@ -2195,7 +2229,28 @@ class Run:
                 for r in reports
             )
             and all("sorted by" not in self.hybrid[i]["mode"] for i in self.hybrid),
-            reports[:1],
+            next(
+                (r for r in reports if r["code"] != "off" or r["setting"] != "off"),
+                reports[:1],
+            ),
+        )
+        check(
+            "off.one-way-reported",
+            "and a question that names one way, by the words alone or by meaning alone, is not "
+            "sorted whatever the setting is, so it is not asked of the sorter at all: it says "
+            "`not_asked`, quietly, with no sorter named (and not that the sorter is off)",
+            len(one_way_reports) == 2 * n
+            and all(
+                r["code"] == "not_asked"
+                and r["quiet"] is True
+                and r["used"] is False
+                and r["model"] is None
+                for r in one_way_reports
+            ),
+            next(
+                (r for r in one_way_reports if r["code"] != "not_asked" or r["used"] is not False),
+                one_way_reports[:1],
+            ),
         )
         asked_door = s.door_sorts.since(0)
         engine_real = [e for e in s.engine_sorts["sorter"].since(0) if e["query"] != DRIVER_PROBE]
@@ -2441,6 +2496,9 @@ class Run:
         )
         head = cast("dict[str, Any]", head or ada.search())
         sort = head["sort"]
+        # The speed the quick test measured, before a question is sorted (the budget stage notes it
+        # too, when it ran).
+        NUMBERS.setdefault("probe_rate", sort.get("ratePerSecond"))
         check(
             "gate.screen",
             f"Sort time raised to {SORT_SECONDS:g} s, the screen says the passages are sorted: the "
@@ -2785,6 +2843,46 @@ class Run:
         )
         # --- the gate -------------------------------------------------------------------
         self.judge_gate(everything)
+        self.at_the_default(everything)
+
+    def at_the_default(self, everything: list[int]) -> None:
+        """Whether the Sort time that ships (3 s) sorts on this machine's hardware, as a person
+        would find it: the screen at the default, and every question asked at it. Said, not judged:
+        the budget stage claims the processor does not sort at the default, and a run with the sorter
+        on the graphics card (`--sorter-gpu`) is made to find out whether it does. Sort time is put
+        back to what the gate raised it to, for the stages after."""
+        ada = self.ada
+        n = len(everything)
+        self.settings(documentsSortSeconds=None)
+        try:
+            default = self.config()["documentsSortSeconds"]
+            sort = ada.search().get("sort") or {}
+            asked = [self.ask(i) for i in everything]
+        finally:
+            self.settings(documentsSortSeconds=SORT_SECONDS)
+        used = [a for a in asked if a["sort"]["used"]]
+        took = [a["sort"]["seconds"] for a in used if a["sort"]["seconds"] is not None]
+        codes: dict[str, int] = {}
+        for a in asked:
+            code = str(a["sort"]["code"])
+            codes[code] = codes.get(code, 0) + 1
+        NUMBERS["default_sort_time"] = {
+            "sort_time": default,
+            "screen_code": sort.get("code"),
+            "screen_rate": sort.get("ratePerSecond"),
+            "screen_usual_sort_seconds": (sort.get("typical") or {}).get("seconds"),
+            "questions_sorted": len(used),
+            "questions": n,
+            "not_sorted_by_code": {k: v for k, v in codes.items() if k != "None"},
+            "sort_seconds_median": round(statistics.median(took), 3) if took else None,
+            "sort_seconds_p90": round(percentile(took, 90), 3) if took else None,
+        }
+        note(
+            f"at the default Sort time ({default:g} s) the screen says `{sort.get('code')}`: a "
+            f"usual sort would take {NUMBERS['default_sort_time']['screen_usual_sort_seconds']} s "
+            f"at {sort.get('ratePerSecond')} tokens a second; {len(used)} of {n} questions were "
+            f"sorted ({NUMBERS['default_sort_time']['not_sorted_by_code']} were not)"
+        )
 
     def judge_gate(self, everything: list[int]) -> None:
         n = len(everything)
@@ -4087,6 +4185,12 @@ def main() -> int:
     )
     parser.add_argument("--snapshot", default="", help="where to keep the index after the import")
     parser.add_argument("--questions", type=int, default=0, help="only the first N questions")
+    parser.add_argument(
+        "--sorter-gpu",
+        action="store_true",
+        help="the result sorter's engine on the graphics card (-ngl 99), for a measurement; every "
+        "other engine stays on the processor",
+    )
     parser.add_argument(
         "--work", default="", help="the work directory (default: in the scratchpad)"
     )

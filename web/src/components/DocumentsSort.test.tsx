@@ -138,16 +138,16 @@ describe("passages that are sorted", () => {
       `${SORTER} sorts about 4,100 tokens a second here, so sorting the 18 passages a question usually finds (about 300 tokens each) adds about 1.4 s to each answer, within Sort time (3 s).`,
     );
     expect(said("documents-sort-speed-from")).toBe(
-      "How fast it reads was measured by a quick test before any question was sorted.",
+      "How fast it reads comes mostly from quick tests Workbench ran on it, not from sorts of your questions.",
     );
   });
 
-  it("says the speed is measured from its sorts once it has made some", () => {
+  it("says the speed comes mostly from its sorts once it has made enough of them", () => {
     shown(sortFacts({ rateFrom: "sorts", ratePerSecond: 5_300, budgetSeconds: 6 }));
     expect(said("documents-sort-speed")).toContain("sorts about 5,300 tokens a second here");
     expect(said("documents-sort-speed")).toContain("within Sort time (6 s)");
     expect(said("documents-sort-speed-from")).toBe(
-      "How fast it reads is measured from the sorts Workbench has made.",
+      "How fast it reads comes mostly from the sorts Workbench has made.",
     );
   });
 
@@ -188,12 +188,12 @@ describe("passages that are not sorted because the sorter is too slow", () => {
   it("says where its speed came from, beside the sentence that says what it is", () => {
     const probe = shown(sortFor("over_budget"));
     expect(said("documents-sort-speed-from")).toBe(
-      "How fast it reads was measured by a quick test before any question was sorted.",
+      "How fast it reads comes mostly from quick tests Workbench ran on it, not from sorts of your questions.",
     );
     probe.unmount();
     shown(sortFor("over_budget", { rateFrom: "sorts" }));
     expect(said("documents-sort-speed-from")).toBe(
-      "How fast it reads is measured from the sorts Workbench has made.",
+      "How fast it reads comes mostly from the sorts Workbench has made.",
     );
   });
 

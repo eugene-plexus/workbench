@@ -248,12 +248,15 @@ describe("what the speed comes to", () => {
     ).toBeNull();
   });
 
-  it("says where the speed came from: a quick test, or the sorts Workbench has made", () => {
+  it("says what the speed mostly comes from: quick tests, or the sorts Workbench has made", () => {
+    // Said as the server says it (`rateFrom`: the quick tests' share of what the speed is made of
+    // is more than half, or it is not). A sorter that is too slow is measured again by quick tests
+    // alone, so a speed that began as sorts ends as theirs, and the page must say so.
     expect(sortSpeedFromWords(sortFacts({ rateFrom: "probe" }))).toBe(
-      "How fast it reads was measured by a quick test before any question was sorted.",
+      "How fast it reads comes mostly from quick tests Workbench ran on it, not from sorts of your questions.",
     );
     expect(sortSpeedFromWords(sortFacts({ rateFrom: "sorts" }))).toBe(
-      "How fast it reads is measured from the sorts Workbench has made.",
+      "How fast it reads comes mostly from the sorts Workbench has made.",
     );
   });
 

@@ -13,6 +13,7 @@ import time
 from collections import deque
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
+from itertools import pairwise
 from typing import Any
 
 import pytest
@@ -144,7 +145,48 @@ def test_a_speed_is_tokens_over_seconds_with_the_older_measurements_counting_les
     # (1000 * 0.5 + 3000) / (2 * 0.5 + 1): a big sort says more than a small one, and the first
     # measurement has already faded to half.
     assert speed.per_second() == pytest.approx(3500 / 2.0) and speed.source == "sorts"
-    assert speed.at == 20.0 and speed.sorts == 1
+    assert speed.at == 20.0
+
+
+def test_a_speed_says_probe_while_the_quick_tests_read_more_than_half_of_the_tokens_behind_it() -> (
+    None
+):
+    """Measured by the review (MR6b round two): a sorter that was over budget was asked no sort, so
+    every ten minutes the quick test was blended in, the speed drifted to the quick test's, and the
+    page went on saying it was measured from the sorts because one sort had once been made. What a
+    speed is said to come from is the share of the tokens behind it that each read."""
+    speed = Speed(decay=0.5)
+    speed.record(1000, 1.0, at=1.0, sort=False)
+    assert speed.source == "probe", "all of it"
+    # One sort is not enough: 1,000 tokens of quick test have faded to 500 beside the 400 of the
+    # sort, and 500 of 900 is more than half.
+    speed.record(400, 1.0, at=2.0)
+    assert speed.source == "probe", "a sort has been made, and the quick test is still most of it"
+    speed.record(400, 1.0, at=3.0)  # 250 of 850: the quick test is under a third of it
+    assert speed.source == "sorts"
+    speed.record(600, 1.0, at=4.0, sort=False)  # measured again: 125 + 600 of 1,025
+    assert speed.source == "probe", "and a speed that is measured again by the quick test says so"
+    speed.record(5000, 1.0, at=5.0)
+    assert speed.source == "sorts"
+
+
+def test_a_speed_that_is_exactly_half_the_quick_tests_is_not_yet_said_to_be_theirs() -> None:
+    speed = Speed(decay=1.0)  # nothing fades, so the shares are the tokens
+    speed.record(500, 1.0, at=1.0)
+    speed.record(500, 1.0, at=2.0, sort=False)
+    assert speed.source == "sorts", "half is not more than half"
+    speed.record(1, 1.0, at=3.0, sort=False)
+    assert speed.source == "probe"
+
+
+def test_what_the_quick_tests_read_fades_as_the_rest_does() -> None:
+    """The share is of what the speed is made of now: a quick test long ago, behind many sorts, is
+    not still most of it."""
+    speed = Speed(decay=0.5)
+    speed.record(1000, 1.0, at=0.0, sort=False)
+    for n in range(1, 4):
+        speed.record(400, 1.0, at=float(n))
+    assert speed.source == "sorts", "125 of 825 once three sorts are behind it"
 
 
 def test_what_was_true_long_ago_fades_to_nothing() -> None:
@@ -324,7 +366,13 @@ class Gateway:
     ) -> Reranked:
         self.calls.append(Call(model, query, list(documents), seconds))
         if self.hang:
-            await asyncio.sleep(3600)
+            # It never answers. The caller gives up after the seconds it said it would wait, and
+            # by then that time has passed on the clock (once, however many are waiting together).
+            began = self.clock.now
+            try:
+                await asyncio.sleep(3600)
+            finally:
+                self.clock.now = max(self.clock.now, began + seconds)
         if self.errors:
             raise self.errors.popleft()
         probing = query == sorting.PROBE_QUESTION
@@ -532,7 +580,11 @@ async def test_a_sorter_that_was_stopped_and_is_started_again_is_not_held_to_wha
     assert again.code == "measuring", "measured at once, not after the wait the old failure left"
     await rig.settle()
     assert (await rig.sorting.standing()).code == "ok"
-    # A sorter that was given up on is let go of the same way: one that is started again is not hung.
+    # A sorter that was given up on is let go of the same way: one that is started again is not
+    # hung. Only questions are asked from here (a screen lets go of it too, and would hide a
+    # question that did not), and Sort time is left as it is: raising it would let a sorter in
+    # whatever was remembered of it, and the question would be sorted for that reason (MR6b round
+    # two's review: the mutant that left out `_forget_trouble` in `sort` lived behind that line).
     rig.settings.sort_seconds = 0.5
     rig.gateway.hang = True
     await rig.sorting.sort(QUESTION, sheets())
@@ -543,7 +595,6 @@ async def test_a_sorter_that_was_stopped_and_is_started_again_is_not_held_to_wha
     assert (await rig.sorting.sort(QUESTION, sheets())).report.code == "not_running"
     rig.sorting.forget()
     rig.gateway.listing = [sorter_model(SORTER)]
-    rig.settings.sort_seconds = 3.0
     assert (await rig.sorting.sort(QUESTION, sheets())).report.sorted
 
 
@@ -759,6 +810,37 @@ async def test_a_sorter_over_budget_on_what_real_sorts_measured_is_measured_agai
     assert rig.sorting.rate_of(SORTER) == pytest.approx(expected.per_second())
     stood = await rig.sorting.standing()
     assert stood.rate_from == "sorts", "the sorts are most of it, and the screen says so"
+
+
+async def test_a_sorter_that_only_the_quick_test_measures_again_ends_up_said_to_read_as_it_does(
+    rig: Rig,
+) -> None:
+    """Measured by the review (MR6b round two): three real sorts gave 1,809 tokens a second; Sort
+    time was lowered so that the sorter was over budget, and after 130 minutes of being measured
+    again every ten minutes by the quick test alone the speed was the quick test's, 1,046 tokens a
+    second, and the page went on saying it was measured from the sorts. The quick test reads slower
+    than a sort, so the speed drifts to it: it is said to come from it once it is most of it."""
+    rig.gateway.seconds = 0.2  # a sort of 420 tokens: about 2,100 tokens a second
+    rig.gateway.probe_seconds = 0.5  # the quick test: about 1,000 tokens a second
+    await warm(rig)
+    for _ in range(3):
+        assert (await rig.sorting.sort(QUESTION, sheets())).report.sorted
+    assert (await rig.sorting.standing()).rate_from == "sorts"
+    rig.settings.sort_seconds = 0.5  # a usual sort is 5,760 tokens: about 3 s here, so over budget
+    said: list[str | None] = []
+    for _ in range(10):  # every ten minutes, behind a look: the quick test, and no sort
+        rig.clock.advance(sorting.RATE_MAX_AGE + 1)
+        await rig.sorting.standing()
+        await rig.settle()
+        stood = await rig.sorting.standing()
+        assert stood.code == "over_budget"
+        said.append(stood.rate_from)
+    assert said[0] == "sorts", "one quick test among three sorts"
+    assert said[-1] == "probe", "and ten quick tests after them are the speed, and it is said so"
+    assert sum(a != b for a, b in pairwise(said)) == 1, "it flips, once"
+    assert rig.sorting.rate_of(SORTER) == pytest.approx(rig.probe_tokens / 0.5, rel=0.05)
+    # Said by the screen's own view of it, the API's `rateFrom`.
+    assert (await rig.sorting.standing()).view()["rateFrom"] == "probe"
 
 
 async def test_an_old_speed_is_not_measured_again_at_every_look_while_the_sorter_does_not_answer(
@@ -1182,13 +1264,157 @@ async def test_raising_sort_time_past_what_a_given_up_sort_showed_lets_the_sorte
     await warm(rig)
     rig.settings.sort_seconds = 0.5
     rig.gateway.hang = True
-    assert (await rig.sorting.sort(QUESTION, work)).report.code == "slow"  # not read in 1 s
+    assert (await rig.sorting.sort(QUESTION, work)).report.code == "slow"  # no answer in 1 s
     rig.gateway.hang = False
     assert (await rig.sorting.sort(QUESTION, work)).report.code == "slow"
-    rig.settings.sort_seconds = 2.5  # 420 tokens at no more than 420 a second is 1 s: within it
+    rig.settings.sort_seconds = 2.5  # a wait of 5 s is longer than the 1 s that was given up on
     found = await rig.sorting.sort(QUESTION, work)
     assert found.report.sorted and found.report.budget == 2.5
     assert rig.gateway.sorts()[-1].seconds == pytest.approx(5.0), "given twice the new Sort time"
+
+
+async def test_while_a_give_up_stands_no_question_is_asked_whatever_its_size(rig: Rig) -> None:
+    """MR6b round two's review: a sorter that hung on 18 passages was still asked by a question under
+    half the size, which waited twice Sort time again, and each hang lowered the bar. A sorter that
+    does not answer is stuck, not slow: the size of a question says nothing about whether it would
+    be answered, so Sort time alone decides (twice it, against the wait that was given up on)."""
+    await warm(rig)
+    rig.settings.sort_seconds = 0.5
+    rig.gateway.hang = True
+    assert (await rig.sorting.sort(QUESTION, sheets(12))).report.code == "slow"  # 1 s given up on
+    rig.gateway.hang = False
+    asked = len(rig.gateway.calls)
+    for count in (18, 12, 6, 3, 1):
+        began = time.perf_counter()
+        found = await rig.sorting.sort(QUESTION, sheets(count))
+        assert time.perf_counter() - began < 0.5, f"{count} passages: not made to wait"
+        assert found.order is None and found.report.code == "slow", count
+        assert found.report.rate is None and found.report.expected is None, "not a speed"
+        assert "did not answer within 1 s the last time it was asked" in (
+            found.report.message or ""
+        )
+    assert len(rig.gateway.calls) == asked, "none of them, small or large, was asked of the sorter"
+    stood = await rig.sorting.standing()
+    assert stood.code == "slow" and not stood.sorting, "and the screen says it too"
+    # Twice this Sort time (0.5 s) is the 1 s that was given up on, which is not longer than it.
+    # Raised so that twice it is longer, the sorter is let in at once, whatever the size.
+    rig.settings.sort_seconds = 0.51
+    found = await rig.sorting.sort(QUESTION, sheets(1))
+    assert found.report.sorted, "a smaller question is let in the moment Sort time allows it"
+    assert rig.gateway.sorts()[-1].seconds == pytest.approx(1.02)
+    assert len(rig.gateway.calls) == asked + 1
+
+
+async def test_a_lowered_sort_time_does_not_let_a_sorter_that_hung_in(rig: Rig) -> None:
+    await warm(rig)
+    rig.settings.sort_seconds = 0.5
+    rig.gateway.hang = True
+    assert (await rig.sorting.sort(QUESTION, sheets())).report.code == "slow"
+    rig.gateway.hang = False
+    rig.settings.sort_seconds = 0.5 / 2  # a shorter wait is no reason to ask it again
+    found = await rig.sorting.sort(QUESTION, sheets(1))
+    assert found.order is None and found.report.code == "slow"
+
+
+async def test_a_give_up_is_carried_through_a_failure_that_comes_after_it(rig: Rig) -> None:
+    """A sorter that read well, hung, and met the gateway's wait (a 503 that asks for one) when its
+    turn to be asked again came: that is a later failure, and the hang is not forgotten because of
+    it. The next question is told what the gateway said, not that the sorter did not answer, and is
+    not asked (MR6b round two review, the mutant that lost the give-up here waited 0.61 s of a
+    0.6 s limit again)."""
+    await warm(rig)
+    rig.settings.sort_seconds = 0.5
+    rig.gateway.hang = True
+    assert (await rig.sorting.sort(QUESTION, sheets())).report.code == "slow"
+    rig.gateway.hang = False
+    rig.gateway.errors.append(HubError("x", status=503, words=COOLING_DOWN, retry_after=1.0))
+    rig.clock.advance(sorting.MEASURE_RETRY + 1)
+    held = await rig.sorting.sort(QUESTION, sheets())  # its turn: the quick test is made behind it
+    assert held.report.code == "slow", "this question is told what stood when it was asked"
+    await rig.settle()  # the quick test meets the gateway's wait
+    asked = len(rig.gateway.calls)
+    began = time.perf_counter()
+    found = await rig.sorting.sort(QUESTION, sheets())
+    assert time.perf_counter() - began < 0.5, "and is not made to wait"
+    assert found.order is None and found.report.code == "error"
+    assert found.report.message == (
+        "Not sorted: Eugene's gateway asked Workbench to wait 1 s before asking the sorter "
+        f"reranker-a again ({COOLING_DOWN}), so the passages are in the order the search found "
+        "them."
+    ), "the gateway's words, and not 'did not answer' (the code is what the last failure was)"
+    assert len(rig.gateway.calls) == asked, "it was not asked"
+    stood = await rig.sorting.standing()
+    assert stood.code == "error" and stood.message == found.report.message
+    # And when the gateway lets the quick test through and the sorter answers, it is used again.
+    rig.clock.advance(60.0)
+    await rig.sorting.standing()
+    await rig.settle()
+    assert (await rig.sorting.sort(QUESTION, sheets())).report.sorted
+
+
+async def test_questions_in_the_air_together_when_a_sorter_hangs_are_one_strike_and_not_one_each(
+    rig: Rig,
+) -> None:
+    """Measured by the review (MR6b round two), Sort time 0.3 s and a sorter that hangs: one
+    question left the sorter alone for 10 s, two for 20 s, three for 40 s, five for 160 s and eight
+    for 600 s. The setting says ten seconds, and twice as long each time it still does not answer:
+    one hang is one strike, however many people were asking."""
+    await warm(rig)
+    rig.settings.sort_seconds = 0.05
+    rig.gateway.hang = True
+    work = sheets(1)  # 105 tokens: 0.02 s at the speed it was measured at, within Sort time
+    together = await asyncio.gather(*(rig.sorting.sort(QUESTION, work) for _ in range(5)))
+    assert [t.report.code for t in together] == ["slow"] * 5, "each waited, as it was meant to"
+    assert len(rig.gateway.sorts()) == 5
+    failed = rig.sorting._failed[SORTER]
+    assert failed.tries == 1 and rig.sorting._strikes[SORTER] == 1
+    assert failed.retry_at() - failed.at == pytest.approx(10.0), "ten seconds, as it says"
+    assert failed.gave_up is not None and failed.gave_up.seconds == pytest.approx(0.1)
+
+
+async def test_a_hang_that_begins_after_the_last_one_is_another_strike(rig: Rig) -> None:
+    await warm(rig)
+    rig.settings.sort_seconds = 0.05
+    rig.gateway.hang = True
+    work = sheets(1)
+    assert (await rig.sorting.sort(QUESTION, work)).report.code == "slow"  # waited 0.1 s
+    assert rig.sorting._failed[SORTER].tries == 1
+    rig.settings.sort_seconds = 0.06  # twice that is longer than the 0.1 s: let in at once
+    assert (await rig.sorting.sort(QUESTION, work)).report.code == "slow"
+    failed = rig.sorting._failed[SORTER]
+    assert failed.tries == 2 and rig.sorting._strikes[SORTER] == 2
+    assert failed.retry_at() - failed.at == pytest.approx(20.0), "and twice as long, as it says"
+
+
+async def test_a_quick_test_and_a_question_in_the_air_together_when_a_sorter_hangs_are_one_strike(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sorting, "PROBE_MIN_LIMIT", 0.3)
+    await warm(rig)  # the speed is the quick test's
+    rig.clock.advance(
+        sorting.RATE_MAX_AGE + 1
+    )  # old: it is measured again, behind the next question
+    rig.settings.sort_seconds = 0.1  # the question's limit is 0.2 s, and the quick test's 0.3 s
+    rig.gateway.hang = True
+    found = await rig.sorting.sort(QUESTION, sheets(2))  # asked; the quick test is made behind it
+    assert found.report.code == "slow"
+    await rig.settle()  # the quick test is given up on later than the question was
+    assert len(rig.gateway.probes()) == 2 and len(rig.gateway.sorts()) == 1
+    failed = rig.sorting._failed[SORTER]
+    assert failed.tries == 1 and rig.sorting._strikes[SORTER] == 1, "the same hang, found twice"
+    assert failed.gave_up is not None and failed.gave_up.seconds == pytest.approx(0.3)
+
+
+async def test_a_failed_quick_test_makes_the_next_look_at_the_gateway_a_fresh_one(rig: Rig) -> None:
+    """A sorter that failed may have been stopped or changed: the gateway's list is looked at
+    again, not trusted for the ten seconds a look is kept (the review's mutant (e): a failed sort
+    forgot the look, and a failed quick test did not, and no test saw it)."""
+    rig.gateway.errors.append(HubError("x", status=503, words="Loading model"))
+    await warm(rig)  # the quick test fails
+    looked = rig.gateway.models_asked
+    stood = await rig.sorting.standing()  # no clock has moved: a look that was kept would be used
+    assert stood.code == "not_running"
+    assert rig.gateway.models_asked == looked + 1, "the look was made again"
 
 
 async def test_a_sorter_whose_answer_is_not_a_score_for_each_passage_is_not_believed(

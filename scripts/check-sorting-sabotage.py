@@ -475,7 +475,7 @@ CASES: list[Case] = [
     one(
         "a sort that is given up on is blended into what the sorter did while it was well",
         SORTING,
-        "                self._remember(model.id, code, words, GaveUp(tokens, limit))",
+        "                self._remember(model.id, code, words, GaveUp(limit), began=started)",
         "                self._record(model.id, tokens, limit)",
         UNIT + "test_a_sorter_that_stopped_answering_is_not_asked_again_by_the_next_questions",
         UNIT + "test_a_sorter_that_takes_over_twice_the_budget_is_given_up_on_and_said_as_that",
@@ -483,8 +483,8 @@ CASES: list[Case] = [
     one(
         "a sort that is given up on is taken for a quick one",
         SORTING,
-        "                self._remember(model.id, code, words, GaveUp(tokens, limit))",
-        "                self._remember(model.id, code, words, GaveUp(tokens, 0.001))",
+        "                self._remember(model.id, code, words, GaveUp(limit), began=started)",
+        "                self._remember(model.id, code, words, GaveUp(0.001), began=started)",
         UNIT + "test_a_sorter_that_stopped_answering_is_not_asked_again_by_the_next_questions",
         UNIT
         + "test_a_sorter_that_did_not_answer_is_told_when_it_is_asked_again_as_that_time_comes",
@@ -686,8 +686,8 @@ CASES: list[Case] = [
     one(
         "a probe that is not answered in time is not learned from",
         SORTING,
-        '            self._remember(model.id, code, words, GaveUp(tokens, limit) if code == "slow" else None)',
-        "            self._remember(model.id, code, words)",
+        '            self._remember(\n                model.id, code, words, GaveUp(limit) if code == "slow" else None, began=started\n            )',
+        "            self._remember(model.id, code, words, began=started)",
         UNIT + "test_a_probe_that_is_not_answered_in_time_is_learned_from_as_a_sort_given_up_on_is",
     ),
     one(
@@ -1007,8 +1007,8 @@ CASES: list[Case] = [
     one(
         "a sorter that did not answer is shown as a speed",
         SORTING,
-        "            # time: a longer wait for a sorter that does not answer helps nobody.\n            return Verdict(failed.code, message=failed.words(model.id, now))",
-        '            # time: a longer wait for a sorter that does not answer helps nobody.\n            return Verdict(\n                failed.code,\n                failed.gave_up.tokens / failed.gave_up.seconds,\n                "sorts",\n                message=failed.words(model.id, now),\n            )',
+        "            # to raise Sort time: a longer wait for a sorter that does not answer helps nobody.\n            return Verdict(failed.code, message=failed.words(model.id, now))",
+        '            # to raise Sort time: a longer wait for a sorter that does not answer helps nobody.\n            return Verdict(\n                failed.code,\n                1000.0 / failed.gave_up.seconds,\n                "sorts",\n                message=failed.words(model.id, now),\n            )',
         UNIT + "test_a_sorter_that_stopped_answering_is_not_asked_again_by_the_next_questions",
         API
         + "test_a_sorter_that_takes_over_twice_the_budget_is_given_up_on_and_the_search_is_whole",
@@ -1033,20 +1033,44 @@ CASES: list[Case] = [
         + "test_a_sorter_that_did_not_answer_is_told_when_it_is_asked_again_as_that_time_comes",
     ),
     one(
-        "what a sorter showed when it did not answer is not used to price the next sort",
+        "a sorter that did not answer is asked again by the next question",
         SORTING,
-        "            and failed.gave_up.over(tokens, budget)",
-        "            and False",
+        "        if failed is not None and failed.gave_up is not None and failed.gave_up.holds(budget):",
+        "        if failed is not None and failed.gave_up is not None and False:",
         UNIT + "test_a_sorter_that_stopped_answering_is_not_asked_again_by_the_next_questions",
+        UNIT + "test_while_a_give_up_stands_no_question_is_asked_whatever_its_size",
         API
         + "test_a_sorter_that_takes_over_twice_the_budget_is_given_up_on_and_the_search_is_whole",
     ),
     one(
-        "what a sorter showed when it did not answer keeps it out for ever",
+        "a give-up keeps a sorter out for ever, whatever Sort time is",
         SORTING,
-        "        return tokens * self.seconds > self.tokens * budget",
+        "        return 2 * budget <= self.seconds",
         "        return True",
         UNIT + "test_raising_sort_time_past_what_a_given_up_sort_showed_lets_the_sorter_in_at_once",
+        UNIT + "test_while_a_give_up_stands_no_question_is_asked_whatever_its_size",
+    ),
+    # --- MR6b round three, item 2a: while a give-up stands, Sort time decides, and not the size ---
+    one(
+        "a question smaller than the one that hung is asked while the give-up stands",
+        SORTING,
+        "        if failed is not None and failed.gave_up is not None and failed.gave_up.holds(budget):",
+        "        if (\n            failed is not None\n            and failed.gave_up is not None\n            and failed.gave_up.holds(budget)\n            and tokens >= typical_tokens()\n        ):",
+        UNIT + "test_while_a_give_up_stands_no_question_is_asked_whatever_its_size",
+    ),
+    one(
+        "a give-up lets a question in at exactly twice Sort time",
+        SORTING,
+        "        return 2 * budget <= self.seconds",
+        "        return 2 * budget < self.seconds",
+        UNIT + "test_while_a_give_up_stands_no_question_is_asked_whatever_its_size",
+    ),
+    one(
+        "a give-up lets a sorter in when Sort time is lowered",
+        SORTING,
+        "        return 2 * budget <= self.seconds",
+        "        return 2 * budget == self.seconds",
+        UNIT + "test_a_lowered_sort_time_does_not_let_a_sorter_that_hung_in",
     ),
     # --- what the gateway said and the door said (round two, item 10) -----------------------------------------------
     one(
@@ -1224,6 +1248,114 @@ CASES: list[Case] = [
         "            elif (block := self._blocked.get(sub)) is not None and not block.no_model:",
         "            elif (block := self._blocked.get(sub)) is not None:",
         WORKER + "test_the_header_does_not_say_a_search_model_is_not_there_when_one_is_running",
+    ),
+    # --- MR6b round three, item 2b: what the speed is said to come from is its share --------------------------
+    one(
+        "a speed with a sort in it is said to be the sorts'",
+        SORTING,
+        '        return "probe" if self._probed * 2 > self._tokens else "sorts"',
+        '        return "probe" if self._probed >= self._tokens else "sorts"',
+        UNIT
+        + "test_a_speed_says_probe_while_the_quick_tests_read_more_than_half_of_the_tokens_behind_it",
+        UNIT
+        + "test_a_sorter_that_only_the_quick_test_measures_again_ends_up_said_to_read_as_it_does",
+    ),
+    one(
+        "a speed that is exactly half the quick test's is said to be theirs",
+        SORTING,
+        '        return "probe" if self._probed * 2 > self._tokens else "sorts"',
+        '        return "probe" if self._probed * 2 >= self._tokens else "sorts"',
+        UNIT + "test_a_speed_that_is_exactly_half_the_quick_tests_is_not_yet_said_to_be_theirs",
+    ),
+    one(
+        "what the quick tests read does not fade",
+        SORTING,
+        "        self._probed = self._probed * self._decay + (0 if sort else tokens)",
+        "        self._probed = self._probed + (0 if sort else tokens)",
+        UNIT + "test_what_the_quick_tests_read_fades_as_the_rest_does",
+        UNIT
+        + "test_a_speed_says_probe_while_the_quick_tests_read_more_than_half_of_the_tokens_behind_it",
+    ),
+    one(
+        "a sort is counted among what the quick tests read",
+        SORTING,
+        "        self._probed = self._probed * self._decay + (0 if sort else tokens)",
+        "        self._probed = self._probed * self._decay + tokens",
+        UNIT
+        + "test_a_speed_says_probe_while_the_quick_tests_read_more_than_half_of_the_tokens_behind_it",
+        UNIT + "test_what_the_quick_tests_read_fades_as_the_rest_does",
+    ),
+    # --- item 2c: one strike per hang event ---------------------------------------------------------------------
+    one(
+        "every question in the air when a sorter hangs is a strike of its own",
+        SORTING,
+        "        if began is not None and before is not None and began < before.at:",
+        "        if False:",
+        UNIT
+        + "test_questions_in_the_air_together_when_a_sorter_hangs_are_one_strike_and_not_one_each",
+        UNIT
+        + "test_a_quick_test_and_a_question_in_the_air_together_when_a_sorter_hangs_are_one_strike",
+    ),
+    one(
+        "a hang that begins after the last one is not another strike",
+        SORTING,
+        "        if began is not None and before is not None and began < before.at:",
+        "        if began is not None and before is not None:",
+        UNIT + "test_a_hang_that_begins_after_the_last_one_is_another_strike",
+    ),
+    one(
+        "a question that hung is not told when it began",
+        SORTING,
+        "                self._remember(model.id, code, words, GaveUp(limit), began=started)",
+        "                self._remember(model.id, code, words, GaveUp(limit))",
+        UNIT
+        + "test_questions_in_the_air_together_when_a_sorter_hangs_are_one_strike_and_not_one_each",
+    ),
+    one(
+        "a quick test that hung is not told when it began",
+        SORTING,
+        '            self._remember(\n                model.id, code, words, GaveUp(limit) if code == "slow" else None, began=started\n            )',
+        '            self._remember(model.id, code, words, GaveUp(limit) if code == "slow" else None)',
+        UNIT
+        + "test_a_quick_test_and_a_question_in_the_air_together_when_a_sorter_hangs_are_one_strike",
+    ),
+    # --- item 2d: the survivors of the review's mutants (a) to (e) ------------------------------------------------
+    one(
+        "a give-up is not carried through a failure that comes after it",
+        SORTING,
+        "        kept = gave_up if gave_up is not None else (before.gave_up if before is not None else None)",
+        "        kept = gave_up",
+        UNIT + "test_a_give_up_is_carried_through_a_failure_that_comes_after_it",
+    ),
+    one(
+        "a question that finds the sorter stopped leaves what failed before it",
+        SORTING,
+        "        if model is None:\n            self._forget_trouble(choice.named)\n            return Sorted(",
+        "        if model is None:\n            return Sorted(",
+        UNIT
+        + "test_a_sorter_that_was_stopped_and_is_started_again_is_not_held_to_what_failed_before",
+    ),
+    one(
+        "a failure that is not a give-up is told as one",
+        SORTING,
+        '        if self.code == "slow" and self.gave_up is not None:',
+        "        if self.gave_up is not None:",
+        UNIT + "test_a_give_up_is_carried_through_a_failure_that_comes_after_it",
+    ),
+    one(
+        "a search model that is back is held to the failures of its absence",
+        MEANING,
+        "        self._until.pop(sub, None)\n        self._failures.pop(sub, None)\n        return True",
+        "        self._until.pop(sub, None)\n        return True",
+        WORKER
+        + "test_a_model_that_is_back_is_not_held_to_the_failures_of_its_absence_the_moment_it_is_seen",
+    ),
+    one(
+        "a failed quick test leaves the look at the gateway as it was",
+        SORTING,
+        "            self.forget()\n            return\n        self._answered(model.id, probe=True)",
+        "            return\n        self._answered(model.id, probe=True)",
+        UNIT + "test_a_failed_quick_test_makes_the_next_look_at_the_gateway_a_fresh_one",
     ),
 ]
 

@@ -45,6 +45,7 @@ SCRATCH = Path(os.environ["EP_SCRATCH"]).resolve()
 PKG = "eugene_plexus_workbench/"
 SEARCH = PKG + "knowledge/search.py"
 SORTING = PKG + "knowledge/sorting.py"
+CONFIG = PKG + "config.py"
 
 #: What a run must have got through for a failure in it to be the break's: the stack came up,
 #: Workbench is the copy, and the index is the person's.
@@ -160,7 +161,7 @@ CASES = [
         [
             (
                 SORTING,
-                "                self._remember(model.id, code, words, GaveUp(tokens, limit))",
+                "                self._remember(model.id, code, words, GaveUp(limit), began=started)",
                 "                self._record(model.id, tokens, limit)",
             )
         ],
@@ -215,8 +216,8 @@ CASES = [
         [
             (
                 SORTING,
-                "            # time: a longer wait for a sorter that does not answer helps nobody.\n            return Verdict(failed.code, message=failed.words(model.id, now))",
-                '            # time: a longer wait for a sorter that does not answer helps nobody.\n            return Verdict(\n                failed.code,\n                failed.gave_up.tokens / failed.gave_up.seconds,\n                "sorts",\n                message=failed.words(model.id, now),\n            )',
+                "            # to raise Sort time: a longer wait for a sorter that does not answer helps nobody.\n            return Verdict(failed.code, message=failed.words(model.id, now))",
+                '            # to raise Sort time: a longer wait for a sorter that does not answer helps nobody.\n            return Verdict(\n                failed.code,\n                1000.0 / failed.gave_up.seconds,\n                "sorts",\n                message=failed.words(model.id, now),\n            )',
             )
         ],
         "hung",
@@ -231,13 +232,40 @@ CASES = [
         [
             (
                 SORTING,
-                '            self._remember(model.id, code, words, GaveUp(tokens, limit) if code == "slow" else None)',
-                "            self._remember(model.id, code, words)",
+                '            self._remember(\n                model.id, code, words, GaveUp(limit) if code == "slow" else None, began=started\n            )',
+                "            self._remember(model.id, code, words, began=started)",
             )
         ],
         "named",
         6,
         ["named.probe-learned"],
+    ),
+    # --- round three (the sorter-off stage's two checks that were stale and were put right) -----------------
+    Case(
+        "a question that names one way is sorted (it is said `off`, and not `not_asked`)",
+        [
+            (
+                SEARCH,
+                "        if self.sorter is not None and ways is None:",
+                "        if self.sorter is not None:",
+            )
+        ],
+        "off",
+        6,
+        ["off.one-way-reported"],
+    ),
+    Case(
+        "the Result sorter setting offers none of the sorters the gateway lists",
+        [
+            (
+                CONFIG,
+                '                f.model_copy(update={"suggestions": [AUTO, OFF, *view.ids], "status": view.model})',
+                '                f.model_copy(update={"suggestions": [AUTO, OFF], "status": view.model})',
+            )
+        ],
+        "off",
+        6,
+        ["defaults.schema"],
     ),
 ]
 

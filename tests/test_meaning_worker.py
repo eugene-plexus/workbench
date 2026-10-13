@@ -552,6 +552,32 @@ async def test_a_wait_for_a_search_model_ends_when_one_is_listed_and_does_not_ou
     assert world.meaning._failures.get(ADA) is None, "a model that was away is not a failure"
 
 
+async def test_a_model_that_is_back_is_not_held_to_the_failures_of_its_absence_the_moment_it_is_seen(
+    world: World,
+) -> None:
+    """Asserted straight after `_model_is_back`, and not after the batch that follows it, which
+    clears the count as well and so hid a count that was left behind (MR6b round two's review): a
+    search model that was away is not a failure, and the next real failure must wait 5 s, not the
+    10 s or 20 s that the count of its absence would make it."""
+    world.gateway.listing = []
+    await world.add("doc00001", 4)
+    await world.meaning._cycle()  # no search model: a wait, and the first failure counted
+    assert world.meaning._failures[ADA] == 1 and world.meaning._blocked[ADA].no_model
+    assert ADA in world.meaning._until
+    world.gateway.listing = [search_model(EMBED)]
+    world.meaning.listing.forget()
+    assert await world.meaning._model_is_back(ADA) is True
+    assert ADA not in world.meaning._failures, "what it had counted is not held against it"
+    assert ADA not in world.meaning._until, "and the wait is over"
+    # Not back while there is still none: nothing is ended and nothing is forgotten.
+    world.gateway.listing = []
+    world.meaning.listing.forget()
+    world.meaning._failures[ADA] = 2
+    world.meaning._until[ADA] = world.clock() + 30.0
+    assert await world.meaning._model_is_back(ADA) is False
+    assert world.meaning._failures[ADA] == 2 and ADA in world.meaning._until
+
+
 async def test_a_wait_that_a_failed_request_set_is_not_ended_by_the_model_being_listed(
     world: World,
 ) -> None:
