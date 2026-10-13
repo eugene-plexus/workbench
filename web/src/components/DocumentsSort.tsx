@@ -1,7 +1,8 @@
 /**
  * How the best passages of a question are sorted, under how the documents are searched, at the
  * top of the Documents screen (MR6b): which result sorter is in use and where it runs, how fast
- * it reads and what a sort adds to an answer beside Sort time, the most it may; or why passages
+ * it reads and what a sort adds to an answer beside Sort time (what a sort may be expected to
+ * take; one that is asked is given up on after twice it); or why passages
  * are not sorted, in the server's own words with the numbers it was decided by ("Not sorted:
  * the sorter sorts about 820 tokens a second here, so ... would add about 7 s to each answer,
  * and Sort time is 3 s"), and what the person can do about it. A person who is not the owner is

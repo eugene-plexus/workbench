@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from eugene_plexus_workbench.knowledge import sorting
+from eugene_plexus_workbench.knowledge import listing, sorting
 
 from .conftest import World, sorter_model
 from .meaning import ARRIVALS, FEES, KITCHEN, LEDGER, ODD, config, ready_world, try_question
@@ -25,8 +25,8 @@ PASSAGES = (ARRIVALS, LEDGER, KITCHEN, FEES, ODD)
 def quick_sorting(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Short memories, so a test that changes what the gateway lists, or what failed, is
     noticed at once."""
-    monkeypatch.setattr(sorting, "PROBE_TTL", 0.05)
-    monkeypatch.setattr(sorting, "PROBE_ERROR_TTL", 0.02)
+    monkeypatch.setattr(listing, "TTL", 0.05)
+    monkeypatch.setattr(listing, "ERROR_TTL", 0.02)
     monkeypatch.setattr(sorting, "MEASURE_RETRY", 0.05)
     yield
 

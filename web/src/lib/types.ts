@@ -1035,13 +1035,16 @@ export type SearchMode = "words" | "meaning" | "meaning and words" | "none";
 export type SortedMode = `${Exclude<SearchMode, "none">}, sorted by ${string}`;
 
 /** Every code the result sorter can say, on the Documents screen (`SortFacts.code`) and for a
- * question (`SortRun.code`, which is null for a question that was sorted). `ok` and `measuring`
- * are only the screen's: a sort of the usual size is quick enough, or the sorter has not been
- * measured yet. The rest are why passages were not sorted: `off` and `none_set_up` (never in
- * play), `not_running`, `not_listed`, `not_sorter`, `outside` and `outside_only` (which sorter),
- * `over_budget` and `slow` (quick enough), `limited`, `key`, `unreachable`, `refused`, `unusable`
- * and `error` (what the sorter or the gateway said), and the question's own: `nothing_to_sort`,
- * `no_question`, `not_asked` and `none`. */
+ * question (`SortRun.code`, which is null for a question that was sorted). `ok` is only the
+ * screen's: a sort of the usual size is quick enough. `measuring` is why a question was not
+ * sorted while the sorter's speed was not known yet (it is measured behind the question, which
+ * never waits for it), and the screen's while that lasts. The rest are why passages were not
+ * sorted: `off` and `none_set_up` (never in play), `not_running`, `not_listed`, `not_sorter`,
+ * `outside` and `outside_only` (which sorter), `over_budget` (too slow for Sort time: a measured
+ * speed) and `slow` (it did not answer in time, which is not a speed: no `ratePerSecond`),
+ * `limited`, `key`, `unreachable`, `refused`, `unusable` and `error` (what the sorter or the
+ * gateway said), and the question's own: `nothing_to_sort`, `no_question`, `not_asked` (also a
+ * question that named its way, which is not sorted) and `none`. */
 export type SortCode =
   | "ok"
   | "measuring"
@@ -1080,13 +1083,18 @@ export interface SortFacts {
   quiet: boolean;
   model: string | null;
   named: string | null;
+  /** "In use: X (automatic)", said only while a sort of the usual size is made (`sorting`): a
+   * sorter that is chosen and not in use has none. */
   label: string | null;
   locality: "local" | "external" | "unknown" | null;
   runsOn: string | null;
   allowExternal: boolean;
   outside: string[];
-  /** The Sort time setting: the most a sort may add to an answer. */
+  /** The Sort time setting: how long a sort may be expected to take (one that is asked is given
+   * up on after twice this). */
   budgetSeconds: number;
+  /** How fast it reads, as it was measured; null while nothing is measured and while it is only
+   * known that it did not answer (`slow`), which is not a speed. */
   ratePerSecond: number | null;
   rateFrom: "probe" | "sorts" | null;
   typical: { passages: number; passageTokens: number; tokens: number; seconds: number | null };

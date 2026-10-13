@@ -205,6 +205,21 @@ def _embedded(response: httpx.Response, count: int, seconds: float) -> Embedded:
     )
 
 
+def _score(value: object) -> float | None:
+    """A relevance score as a number a sorter's order can be made from, or None when it is not:
+    anything but an integer or a real number, a boolean, one that is not finite (`NaN`, `Infinity`,
+    or `1e999`, which JSON lets through), and an integer too large to be a float at all (a score of
+    four hundred digits makes `math.isfinite` raise `OverflowError`, which is not a `HubError` and
+    so was not an unusable answer but a failure in Workbench itself)."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def _reranked(response: httpx.Response, count: int, seconds: float) -> Reranked:
     """The gateway's answer to a rerank request, checked: a score for each of the `count`
     passages sent, each once, each a finite number. A reply that is not that is said as what
@@ -231,19 +246,17 @@ def _reranked(response: httpx.Response, count: int, seconds: float) -> Reranked:
     seen: set[int] = set()
     for item in results:
         index = item.get("index") if isinstance(item, dict) else None
-        score = item.get("relevance_score") if isinstance(item, dict) else None
+        score = _score(item.get("relevance_score")) if isinstance(item, dict) else None
         if (
             not isinstance(index, int)
             or isinstance(index, bool)
             or not 0 <= index < count
             or index in seen
-            or not isinstance(score, int | float)
-            or isinstance(score, bool)
-            or not math.isfinite(score)
+            or score is None
         ):
             raise bad("a score was missing, repeated or not a number")
         seen.add(index)
-        scores[index] = float(score)
+        scores[index] = score
     usage = answer.get("usage")
     tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
     model = answer.get("model")

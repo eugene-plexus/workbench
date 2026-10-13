@@ -143,6 +143,7 @@ def codes_said() -> set[str]:
     said = set(re.findall(r'Choice\(\s*(?:None|[^,]+),\s*"(\w+)"', choosing))
     said |= set(re.findall(r'return\s*\(?\s*"(\w+)",', choosing))
     said |= set(re.findall(r'stand\(\s*"(\w+)"', choosing))
+    said |= set(re.findall(r'Verdict\(\s*"(\w+)"', choosing))
     said |= set(re.findall(r'code="(\w+)"', choosing))
     said |= set(re.findall(r'code="(\w+)"', search))
     said |= set(re.findall(r'code="\w+" if \w+ else "(\w+)"', search))
@@ -197,7 +198,8 @@ def test_the_header_has_the_fields_the_page_reads_in_each_state_the_sorter_can_b
     world.gateway.rerank_delay = 1.0
     seen = until(lambda: (s := search_of(ada)["sort"])["code"] != "none_set_up" and s)
     assert seen["code"] == "measuring" and seen["message"] is None and seen["quiet"] is False
-    assert seen["model"] == SORTER and seen["label"] == f"In use: {SORTER} (automatic)"
+    assert seen["model"] == SORTER, "the sorter that is chosen"
+    assert seen["label"] is None, "and not said to be in use while nothing is sorted"
     assert seen["ratePerSecond"] is None and seen["rateFrom"] is None and seen["sorting"] is False
     assert seen["typical"]["seconds"] is None
     # Measured, and too slow for the time allowed (a second for two passages): the server's own
@@ -208,6 +210,7 @@ def test_the_header_has_the_fields_the_page_reads_in_each_state_the_sorter_can_b
     assert over["message"].startswith(f"Not sorted: {SORTER} sorts about ")
     assert over["rateFrom"] in literals("SortFacts", "rateFrom") | {None}
     assert over["rateFrom"] == "probe" and over["locality"] in literals("SortFacts", "locality")
+    assert over["label"] is None, "chosen, and too slow: not in use"
     # Raised, it is quick enough: nothing to explain, and the label is true.
     assert config(world, documentsSortSeconds=120).status_code == 200
     ok = until(lambda: (s := search_of(ada)["sort"])["code"] == "ok" and s)

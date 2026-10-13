@@ -411,6 +411,16 @@ def choose(
 # --------------------------------------------------------------------------- #
 
 
+def seconds_words(seconds: float) -> str:
+    """A time of seconds as a person reads it: `7 s`, `6.9 s`, `0.45 s`; never more figures than
+    it has. (The Documents screen says it the same way: tests/fixtures/sort_words.json.)"""
+    places = 0 if seconds >= 10 else 1 if seconds >= 1 else 2
+    text = f"{seconds:.{places}f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return f"{text} s"
+
+
 def duration_words(seconds: float) -> str:
     """A time a person reads, rounded the way a person says it: `less than a minute`,
     `about 14 minutes`, `about 2 hours`."""

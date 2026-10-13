@@ -130,7 +130,8 @@ export function rateWords(rate: number): string {
 
 /** What the sorter in use costs, from the numbers it was measured at: how fast it reads, what a
  * sort of the usual size (the 18 passages a question usually finds) adds to an answer, and Sort
- * time, the most a sort may add. Null where there is no sorter in use, or nothing measured yet.
+ * time, how long a sort may be expected to take. Null where there is no sorter in use, or nothing
+ * measured yet.
  * A sorter that is too slow says this in the server's own sentence, which is not said twice. It
  * says what a usual sort costs: a question whose passages are longer may cost more, and says so
  * for itself in Test a question. */
@@ -176,7 +177,7 @@ export function sortNote(run: SortRun | null | undefined): string | null {
 }
 
 /** What a sort did, for a question whose passages were sorted: how many it put in order and how
- * long that took (Sort time is the most it may). Null when they were not. */
+ * long that took (and Sort time, what a sort may be expected to take). Null when they were not. */
 export function sortedWords(run: SortRun | null | undefined): string | null {
   if (!run?.used) return null;
   const took = run.seconds != null ? ` in ${secondsWords(run.seconds)}` : "";

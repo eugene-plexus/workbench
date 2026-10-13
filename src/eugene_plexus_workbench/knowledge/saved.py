@@ -51,6 +51,7 @@ from .index import (
     folder_source,
 )
 from .ingest import ChatOwners, Ingest, Owed, Reconciled
+from .listing import Listing
 from .meaning import Gateway as MeaningGateway
 from .meaning import Meaning
 from .meaning import Settings as MeaningSettings
@@ -128,8 +129,11 @@ class SavedDocuments:
         self.meaning: Meaning | None = None
         self.sorting: Sorting | None = None
         if gateway is not None and settings is not None:
-            self.meaning = Meaning(self.indexes, gateway, settings)
-            self.sorting = Sorting(gateway, settings)
+            # One look at the gateway's list of models for both: a gateway that does not answer
+            # holds a screen once, not once for each of them.
+            listing = Listing(gateway)
+            self.meaning = Meaning(self.indexes, gateway, settings, listing=listing)
+            self.sorting = Sorting(gateway, settings, listing=listing)
             owed = owed or self.meaning.owed
             retriever = retriever or Retriever(
                 [WordSignal(), self.meaning.signal], sorter=self.sorting

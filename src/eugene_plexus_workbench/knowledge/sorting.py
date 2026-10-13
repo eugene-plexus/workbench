@@ -3,11 +3,13 @@
 A result sorter (a reranker) reads a question and a passage together and says how well the
 passage answers it. The search by words and by meaning finds passages by looking at each side
 alone, so what a sorter adds is a second look at the best of them. Measured on MR5's 60
-questions and 2,810 passages: the best 10 of each way, each sent as its headings, a new line
-and its words, raised recall@5 from 0.600 to 0.750 (Qwen3-Reranker), and the same sorter given
-the words alone changed nothing. This module is the sorter's side of that: which one, whether it
-is quick enough, the request, and what is told of it. `search.Retriever` chooses the passages to
-send and puts them in the order that comes back.
+questions and 2,810 passages (written from the headings, which favours scoring that sees them,
+so the gain is in-sample, and a live run on real questions is owed): the best 10 of each way,
+each sent as its headings, a new line and its words, raised recall@5 from 0.600 to 0.750
+(Qwen3-Reranker), while the same sorter given the words alone gained +0.050 on the same
+passages, with an interval of -0.067 to +0.167 that does not exclude no gain at all. This module
+is the sorter's side of that: which one, whether it is quick enough, the request, and what is told
+of it. `search.Retriever` chooses the passages to send and puts them in the order that comes back.
 
 **Which sorter** (`choose`, the install's `documentsSortModel`): `auto`, `off`, or the id of one
 model. `auto` is the first model the gateway lists to Workbench's own key with the `rerank` surface
@@ -20,25 +22,41 @@ allowance as an outside search model, `documentsExternalEmbedding`: MR5 call 1).
 runs only when the time it is expected to take is within what the owner allows: the tokens to be
 read (each passage's own count, `Hit.tokens_est`, and the question once for each passage) over how
 many tokens a second this sorter reads. That rate is measured, never assumed: **a decaying average
-of Workbench's own recent sorts** (`Speed`), and, before there is any, **a two-passage probe**, made
-when the sorter first appears. A rate that is older than `RATE_MAX_AGE` is used as it stands and
-measured again behind the search, so a sorter that was slow for a moment is not left off for ever.
-Over the budget the passages stay in the order the search found them, and the report says why
-with the numbers: the rate, the tokens, the seconds expected and the seconds allowed.
+of Workbench's own recent sorts** (`Speed`), and, before there is any, **a two-passage probe**.
+**A search never waits for a measurement**: with no speed known, the question is answered in the
+order the search found (`measuring`) and the probe is made behind it, one at a time, with a limit
+of its own (twice Sort time, and never under `PROBE_MIN_LIMIT`). A probe that fails is remembered
+(`Failure`) and made again after `MEASURE_RETRY` seconds, and after twice as long each time it fails
+again, up to `RATE_MAX_AGE`. Over the budget the passages stay in the order the search found them,
+and the report says why with the numbers: the rate, the tokens, the seconds expected and the
+seconds allowed.
+
+**When a speed is measured again.** Only when it is older than `RATE_MAX_AGE` and either the probe
+is all it comes from, or the sorter is over budget (and so is never asked a real sort that would
+show it has recovered). The probe is blended in with the same decay as a sort, never put in place of
+what the sorts measured, and a speed from recent real sorts is left alone.
 
 **A sorter that fails never fails a search.** It may be stopped, be held back by the gateway for a
 moment after it failed (a 503 that asks for a wait: said as that, and not as a sorter that is not
 running), refuse the request (a passage longer than it reads), take more than twice the budget,
 or answer with something that is not a score for each passage. The search goes on in the order it
 found, and what the sorter said is kept (`SortReport`), as a way of searching that cannot run is
-(`search.SignalUnavailable`): in words, beginning "Not sorted", naming what was observed. A sort
-that was given up on is what is known of the sorter now (it replaces what was measured, and is
-not blended into it), so the next question is not made to wait the same time again.
+(`search.SignalUnavailable`): in words, beginning "Not sorted", naming what was observed.
+
+**A sorter that did not answer in time** (a sort given up on at twice the budget, or a probe that
+was) is a state of its own (`GaveUp`), apart from the speed: a sorter that did not answer never
+read at any speed, so none is said, and it is told as what it is: "did not answer within N s the
+last time it was asked", and when it is asked again. What it showed (it did not read this many
+tokens in this many seconds) is kept only to price the next sort, so the next question is over
+Sort time at once and is not made to wait, and a sort that was given up on is not averaged into
+what the sorter did while it was well. It is asked again by the probe, behind a search, after
+10 s and then after longer each time it still does not answer.
 
 What a person is told of the sorter (the header of the Documents screen, Test a question, the two
 settings) is read from a live look at the gateway and at what was measured, never from what was
-true when something last ran. A sorter's scores are 0 to 1, of a scale that means nothing beside
-another sorter's, and are never shown: Workbench shows the place it gave a passage.
+true when something last ran, and is one judgement (`Sorting._judge`) however it is asked: the
+settings and the screen cannot disagree. A sorter's scores are 0 to 1, of a scale that means
+nothing beside another sorter's, and are never shown: Workbench shows the place it gave a passage.
 
 Logs say counts, timings and causes: never a document's name or its words.
 """
@@ -58,8 +76,9 @@ from .. import token_count
 from .._generated.models import ConfigFieldStatus, ConfigFieldStatusLevel
 from ..hub import HubError, Reranked
 from . import embedders
-from .embedders import SearchModel
-from .meaning import Probe, engine_words
+from .embedders import SearchModel, duration_words, seconds_words
+from .listing import Listing, Probe, probe_of
+from .meaning import engine_words, too_long
 from .search import Sheet, Sorted, SortReport
 
 log = logging.getLogger(__name__)
@@ -69,17 +88,20 @@ SURFACE = "rerank"
 AUTO = "auto"
 OFF = "off"
 
-#: How long a look at the gateway's list of models is kept, a failed one, and the most it may take.
-PROBE_TTL = 10.0
-PROBE_ERROR_TTL = 3.0
-PROBE_TIMEOUT = 8.0
 #: How much of what was measured before is kept when another sort is measured: each older
 #: measurement counts this much less than the next one. Three sorts hold two thirds of the speed.
 DECAY = 0.7
-#: A measurement older than this (seconds) is used as it stands and measured again.
+#: A speed older than this (seconds) is measured again, when the probe is all it comes from or the
+#: sorter is over budget; and the most a sorter that could not be measured is left before it is
+#: asked again.
 RATE_MAX_AGE = 600.0
-#: A sorter that could not be measured is asked again no sooner than this.
+#: A sorter that could not be measured, or did not answer in time, is asked again no sooner than
+#: this, and no sooner than twice as long each time that fails again (never over `RATE_MAX_AGE`).
 MEASURE_RETRY = 10.0
+#: The probe's own limit is twice Sort time and never less than this: a sorter that was just
+#: started may need seconds to answer its first request, and the probe is made behind a search, so
+#: nobody waits for it.
+PROBE_MIN_LIMIT = 10.0
 #: A sort that took no time at all still took this long: the speed is never infinite.
 MIN_SECONDS = 0.001
 
@@ -156,15 +178,6 @@ SettingsReader = Callable[[], Awaitable[Settings]]
 # --------------------------------------------------------------------------- #
 
 
-def seconds_words(seconds: float) -> str:
-    """A time as a person reads it: `7 s`, `6.9 s`, `0.45 s`; never more figures than it has."""
-    places = 0 if seconds >= 10 else 1 if seconds >= 1 else 2
-    text = f"{seconds:.{places}f}"
-    if "." in text:
-        text = text.rstrip("0").rstrip(".")
-    return f"{text} s"
-
-
 def rate_words(rate: float) -> str:
     """A speed as a person reads it, to two figures: `about 820 tokens a second`."""
     if rate >= 100:
@@ -192,6 +205,37 @@ def typical_words(model: str, rate: float, expected: float, budget: float) -> st
         f"about {seconds_words(expected)} to each answer, and Sort time is "
         f"{seconds_words(budget)}. {RAISE_IT}"
     )
+
+
+def measuring_words(model: str) -> str:
+    """Why a question was not sorted while the sorter's speed is not known yet: the passages are
+    in the order the search found them and the speed is being measured, behind this question."""
+    return f"{NOT_SORTED}how fast {model} sorts is being measured now, {LEFT}."
+
+
+def again_words(retry_in: float) -> str:
+    """When a sorter that did not answer is asked again: `after 8 s`, `after about 9 minutes`."""
+    if retry_in <= 0:
+        return "Workbench is asking it again now."
+    wait = seconds_words(retry_in) if retry_in < 60 else duration_words(retry_in)
+    return f"Workbench asks it again after {wait}."
+
+
+def gave_up_words(model: str, seconds: float, retry_in: float) -> str:
+    """A sorter that did not answer within `seconds` the last time it was asked, as what it is:
+    no speed (it never read at one), what was seen, what the passages are in meanwhile, and when
+    it is asked again. It does not advise raising Sort time: a sorter that is not answering is
+    not helped by a longer wait for it, and each later hang would cost more."""
+    return (
+        f"{NOT_SORTED}{model} did not answer within {seconds_words(seconds)} the last time it "
+        f"was asked, {LEFT}. {again_words(retry_in)}"
+    )
+
+
+def reason_of(message: str | None) -> str:
+    """A reason as a clause, for a sentence that gives it: `the sorter X is not running. Start ...`
+    out of `Not sorted: the sorter X is not running. Start ...`."""
+    return (message or "").removeprefix(NOT_SORTED)
 
 
 def sort_tokens(sheets: Sequence[Sheet], question: str) -> int:
@@ -236,6 +280,8 @@ def problem(exc: HubError, model: str, budget: float) -> tuple[str, str]:
             "unusable",
             f"{NOT_SORTED}{exc.message} The passages are in the order the search found them.",
         )
+    if exc.kind == "internal":
+        return "error", f"{NOT_SORTED}{exc.message}, {LEFT}. See Workbench's log."
     if exc.status == 503 and exc.retry_after is not None:
         # The gateway is holding requests back for a moment and says for how long: a backend
         # that failed is cooling down, or its recovery is being tried (measured, MR6b acceptance:
@@ -247,15 +293,30 @@ def problem(exc: HubError, model: str, budget: float) -> tuple[str, str]:
             f"{seconds_words(exc.retry_after)} before asking the sorter {model} again ({said}), "
             f"{LEFT}."
         )
-    if exc.status in (503, 404):
+    if exc.status == 503:
         return "not_running", (
             f"{NOT_SORTED}the sorter {model} is not running. Start it in Eugene's console "
             "under Backends."
         )
-    if exc.status == 400:
-        return "refused", (
-            f"{NOT_SORTED}the sorter {model} refused the request ({engine_words(exc)}), {LEFT}."
+    if exc.status == 404:
+        # The gateway does not serve this model (it listed it a moment ago, or a stale list
+        # did): said in its own words. Whether it is stopped, removed or renamed is not
+        # something a 404 says, so it is not said.
+        return "not_listed", (
+            f"{NOT_SORTED}Eugene's gateway answered that it has no sorter {model} to ask "
+            f"({said}), {LEFT}."
         )
+    if exc.status == 400 or too_long(exc):
+        spoke = engine_words(exc)
+        if too_long(exc) or spoke != said.strip():
+            # The sorter's own engine refused it (a passage longer than it reads), and the
+            # gateway passed its words on.
+            return "refused", (
+                f"{NOT_SORTED}the sorter {model} refused the request ({spoke}), {LEFT}."
+            )
+        # A 400 that is not the engine's is the door's own: said as the gateway's, and not as
+        # the sorter's (`documents[3]: ...`, a question the door will not take).
+        return "refused", f"{NOT_SORTED}Eugene's gateway refused the request ({said}), {LEFT}."
     return "error", f"{NOT_SORTED}the sorter {model} failed ({engine_words(exc)}), {LEFT}."
 
 
@@ -399,20 +460,6 @@ def choose(
     return Choice(found, "ok", setting, outside=outside)
 
 
-@dataclass(frozen=True)
-class Resolved:
-    """Which sorter is in use now, or why none."""
-
-    choice: Choice
-    #: The look at the gateway's list of models it was chosen from; None when the sorter is off,
-    #: which asks the gateway nothing.
-    probe: Probe | None = None
-
-    @property
-    def model(self) -> SearchModel | None:
-        return self.choice.model
-
-
 # --------------------------------------------------------------------------- #
 # how fast a sorter reads
 # --------------------------------------------------------------------------- #
@@ -434,8 +481,8 @@ class Speed:
         self.sorts = 0
 
     def record(self, tokens: int, seconds: float, at: float, *, sort: bool = True) -> None:
-        """One measurement: `tokens` read in `seconds`. A sort given up on is one too: it took at
-        least as long as it was given, and the next question must not be promised better."""
+        """One measurement: `tokens` read in `seconds`, by a real sort or (`sort=False`) by the
+        probe. A sort that was given up on is not one: it read nothing in that time (`GaveUp`)."""
         if tokens <= 0:
             return
         self._tokens = self._tokens * self._decay + tokens
@@ -459,12 +506,68 @@ class Speed:
 
 
 @dataclass(frozen=True)
+class GaveUp:
+    """The last time this sorter was asked it did not answer in time: it did not read `tokens` in
+    `seconds`. That is not a speed (it never read at one), so it is kept apart from the speed and
+    is told as what it is. It prices the next sort, and nothing else: a sort of that many tokens
+    would take longer than `seconds`, so it is over Sort time unless Sort time was raised past
+    that (`over`)."""
+
+    tokens: int
+    seconds: float
+
+    def over(self, tokens: int, budget: float) -> bool:
+        """Whether `tokens` would take longer than `budget` at no more than the speed that sort
+        showed, which is at most `self.tokens` in `self.seconds`."""
+        return tokens * self.seconds > self.tokens * budget
+
+
+@dataclass(frozen=True)
 class Failure:
-    """Why a sorter could not be measured, and when it was found out."""
+    """Why a sorter could not be measured, or did not answer in time, and when it was found out:
+    what is said of it until it is asked again. `tries` is how many times in a row it has not
+    come to anything, which makes the wait before it is asked again longer each time."""
 
     code: str
     message: str
     at: float
+    tries: int = 1
+    #: Set when it did not answer in time, and kept (and carried over to a failure that came
+    #: after it) until a sort or the probe is answered.
+    gave_up: GaveUp | None = None
+
+    def retry_at(self) -> float:
+        """When it is asked again: `MEASURE_RETRY` seconds after, and twice as long each time it
+        fails again, never over `RATE_MAX_AGE`."""
+        wait = MEASURE_RETRY * 2.0 ** min(self.tries - 1, 30)
+        return self.at + min(wait, RATE_MAX_AGE)
+
+    def words(self, model: str, now: float) -> str:
+        """What is told of it, at `now`: a sorter that did not answer says when it is asked
+        again, and the rest say what was seen."""
+        if self.code == "slow" and self.gave_up is not None:
+            return gave_up_words(model, self.gave_up.seconds, self.retry_at() - now)
+        return self.message
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """What is to be done with some passages at one sorter now, from what is known of it."""
+
+    #: `ok` (quick enough: ask it), `over_budget`, `measuring` (its speed is not known yet),
+    #: or why it is not asked: `slow` (it did not answer the last time it was asked) or the
+    #: code of the failure that stands (`problem`'s).
+    code: str
+    #: Tokens a second it reads at, from what it was measured, and what that came from (`probe`
+    #: or `sorts`); None until there is a measurement, and while it is only known that it did not
+    #: answer.
+    rate: float | None = None
+    rate_from: str | None = None
+    #: The seconds these passages are expected to take at that rate.
+    expected: float | None = None
+    #: In words, for a state whose sentence does not depend on the passages (a failure; a sorter
+    #: that did not answer).
+    message: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -480,13 +583,15 @@ class Standing:
 
     choice: Choice
     #: `ok` (a sort of the usual size is quick enough), `over_budget`, `measuring` (the sorter has
-    #: not been measured yet), or why no sorter is in use (`Choice.code`, or `problem`'s).
+    #: not been measured yet), `slow` (it did not answer the last time it was asked), or why no
+    #: sorter is in use (`Choice.code`, or `problem`'s).
     code: str
     message: str | None
     budget: float
     allow_external: bool
+    #: The tokens a second it was measured at, and `probe` or `sorts`, what that was measured
+    #: from. Both are None while it is only known that it did not answer: that is not a speed.
     rate: float | None = None
-    #: `probe` or `sorts`: what the rate was measured from.
     rate_from: str | None = None
 
     @property
@@ -515,9 +620,11 @@ class Standing:
             "quiet": self.code in QUIET_CODES,
             "model": self.model,
             "named": self.choice.named,
+            # Said only while it is true: a sorter that is chosen and not in use (too slow, still
+            # being measured, stopped) has no "In use" sentence, in this API as on the screen.
             "label": (
                 f"In use: {found.id}" + (" (automatic)" if self.choice.automatic else "")
-                if found is not None
+                if found is not None and self.sorting
                 else None
             ),
             "locality": found.locality if found is not None else None,
@@ -561,15 +668,19 @@ class Sorting:
         settings: SettingsReader,
         *,
         clock: Callable[[], float] = time.perf_counter,
+        listing: Listing | None = None,
     ) -> None:
         self.gateway = gateway
         self._settings = settings
         self._clock = clock
-        self._probe: Probe | None = None
-        self._probe_lock = asyncio.Lock()
-        #: How fast each sorter reads, and why one could not be measured, by its id.
+        #: The gateway's list of models: one look, shared with search by meaning (`listing.py`).
+        self.listing = listing if listing is not None else Listing(gateway, clock=clock)
+        #: How fast each sorter reads, by its id; why it could not be measured, or did not answer
+        #: in time (and when it is asked again); and how many times in a row it has not come to
+        #: anything, which a sort that is answered puts right.
         self._speeds: dict[str, Speed] = {}
         self._failed: dict[str, Failure] = {}
+        self._strikes: dict[str, int] = {}
         self._measuring: dict[str, asyncio.Task[None]] = {}
         #: The sorts begun, for the tests: how many passages each was sent.
         self.asked: deque[int] = deque(maxlen=1000)
@@ -584,68 +695,27 @@ class Sorting:
     # --- the gateway: which sorters there are ----------------------------------
 
     async def probe(self) -> Probe:
-        """The gateway's models, as a look at them: cached for `PROBE_TTL` seconds (a failed look
-        for a few), so a screen that asks every second asks the gateway once in ten."""
-
-        def good(found: Probe | None) -> bool:
-            if found is None:
-                return False
-            return self._clock() - found.at < (PROBE_ERROR_TTL if found.error else PROBE_TTL)
-
-        if self._probe is not None and good(self._probe):
-            return self._probe
-        async with self._probe_lock:
-            if self._probe is not None and good(self._probe):
-                return self._probe
-            try:
-                listing = await asyncio.wait_for(self.gateway.models(), PROBE_TIMEOUT)
-                models, listed = embedders.models_with(listing, SURFACE)
-            except HubError as exc:
-                found = Probe(self._clock(), error=exc)
-            except TimeoutError:
-                found = Probe(
-                    self._clock(),
-                    error=HubError(
-                        f"Eugene's gateway did not list its models within {PROBE_TIMEOUT:.0f} "
-                        "seconds.",
-                        status=504,
-                        kind="timeout",
-                    ),
-                )
-            except (ValueError, AttributeError, TypeError):
-                # Not JSON, or not a list of models: said as what it is, and never a failure.
-                found = Probe(
-                    self._clock(),
-                    error=HubError(
-                        "Eugene's gateway answered the list of its models with something "
-                        "Workbench cannot read.",
-                        status=502,
-                        kind="unusable",
-                    ),
-                )
-            else:
-                found = Probe(self._clock(), tuple(models), frozenset(listed))
-            self._probe = found
-            return found
+        """The gateway's models, as a look at them: the one look that is kept and shared with
+        search by meaning (`listing.Listing`, ten seconds, and a failed look for a few); of it,
+        the result sorters."""
+        return await self.listing.probe(SURFACE)
 
     def forget(self) -> None:
         """The last look at the gateway is not trusted any more (a sort just failed)."""
-        self._probe = None
+        self.listing.forget()
 
-    async def resolve(self) -> Resolved:
+    async def resolve(self, settings: Settings | None = None) -> Choice:
         """The sorter in use now (`choose`), from a live look at the gateway. A sorter that is off
         asks the gateway nothing."""
-        settings = await self._settings()
+        settings = settings or await self._settings()
         setting = (settings.sort_model or AUTO).strip() or AUTO
         if setting.casefold() == OFF:
-            return Resolved(choose([], (), setting, False))
+            return choose([], (), setting, False)
         probe = await self.probe()
         if probe.error is not None:
             code, words = listing_problem(probe.error)
-            return Resolved(Choice(None, code, setting, None, (), words), probe)
-        return Resolved(
-            choose(probe.models, probe.listed, setting, settings.external_embedding), probe
-        )
+            return Choice(None, code, setting, None, (), words)
+        return choose(probe.models, probe.listed, setting, settings.external_embedding)
 
     # --- how fast it reads ---------------------------------------------------
 
@@ -654,24 +724,61 @@ class Sorting:
         speed = self._speeds.get(model)
         return speed.per_second() if speed is not None else None
 
-    def _stale(self, model: str) -> bool:
-        speed = self._speeds.get(model)
-        return (
-            speed is not None and speed.at is not None and self._clock() - speed.at > RATE_MAX_AGE
-        )
-
-    def _refresh(self, model: SearchModel, budget: float) -> None:
-        """A speed that is old is measured again behind whoever asked: not while the last try
-        failed a moment ago, or a sorter that does not answer would be asked at every look."""
+    def _judge(self, model: SearchModel, tokens: int, budget: float) -> Verdict:
+        """What to do with `tokens` of passages at this sorter now: from how fast it is known to
+        read, and whether it did not answer the last time it was asked. The one judgement behind
+        a question, the Documents screen and the two settings, so that they cannot disagree.
+        Never waits: a speed that is not known is measured behind whoever asks (`measuring`), and
+        one that is old is measured again behind them."""
+        self._measure_if_due(model, budget)
+        now = self._clock()
         failed = self._failed.get(model.id)
-        if failed is not None and self._clock() - failed.at < MEASURE_RETRY:
+        if (
+            failed is not None
+            and failed.gave_up is not None
+            and failed.gave_up.over(tokens, budget)
+        ):
+            # It did not answer the last time it was asked, and these passages would take longer
+            # than that. No speed is said (it never read at one), and no advice to raise Sort
+            # time: a longer wait for a sorter that does not answer helps nobody.
+            return Verdict(failed.code, message=failed.words(model.id, now))
+        rate = self.rate_of(model.id)
+        if rate is None:
+            if failed is not None and now < failed.retry_at():
+                return Verdict(failed.code, message=failed.words(model.id, now))
+            return Verdict("measuring")
+        source = self._speeds[model.id].source
+        expected = tokens / rate
+        if expected > budget:
+            return Verdict("over_budget", rate, source, expected)
+        return Verdict("ok", rate, source, expected)
+
+    def _measure_if_due(self, model: SearchModel, budget: float) -> None:
+        """Measure this sorter with the probe, behind whoever is asking, when it is time to: when
+        nothing is known of its speed; when it did not answer and its wait is over; or when its
+        speed is old and is only the probe's, or the sorter is over budget, so that no sort that
+        would show it has recovered is ever asked of it. Not before its turn to be asked again
+        after a failure (and one at a time: `_measure_soon`). A speed from recent real sorts is
+        left alone, and a sorter that is quick enough is measured by the sorts it is asked."""
+        now = self._clock()
+        failed = self._failed.get(model.id)
+        if failed is not None and now < failed.retry_at():
             return
-        if self._stale(model.id):
+        speed = self._speeds.get(model.id)
+        rate = speed.per_second() if speed is not None else None
+        if speed is None or rate is None or (failed is not None and failed.gave_up is not None):
+            due = True
+        else:
+            assert speed.at is not None  # it has a rate, so it was measured
+            old = now - speed.at > RATE_MAX_AGE
+            due = old and (speed.source == "probe" or typical_tokens() / rate > budget)
+        if due:
             self._measure_soon(model, budget)
 
     def _measure_soon(self, model: SearchModel, budget: float) -> asyncio.Task[None]:
-        """Measure this sorter with the probe, one at a time: the task that is doing it, or a new
-        one. A search waits for it (it has nothing to price a sort with); a screen does not."""
+        """Measure this sorter with the probe, one at a time: the task that is doing it, or a
+        new one. Nobody waits for it: a search is answered in the order it found, and a screen
+        says `measuring`, until the numbers are there."""
         running = self._measuring.get(model.id)
         if running is not None and not running.done():
             return running
@@ -683,15 +790,17 @@ class Sorting:
     def _measured_done(self, key: str, done: asyncio.Task[None]) -> None:
         if self._measuring.get(key) is done:
             del self._measuring[key]
-        if not done.cancelled() and (exc := done.exception()) is not None:
-            log.warning("measuring a result sorter failed in Workbench itself: %r", exc)
 
     async def _measure(self, model: SearchModel, budget: float) -> None:
-        """The probe: two passages, and how long the sorter took. What is kept is the sorter's
-        own answer or its failure, never a guess. A measurement made again (the old one is stale)
-        replaces what was measured, for what was measured a while ago says nothing of now."""
+        """The probe: two passages, and how long the sorter took, with a limit of its own (twice
+        Sort time, and never under `PROBE_MIN_LIMIT`). What is kept is the sorter's own answer,
+        blended into what is known with the same decay as a sort, or why there was none: any
+        failure at all is kept, and the sorter is asked again later and later, never at every
+        look. A probe that was not answered in time is learned from as a sort that was given up
+        on is (`GaveUp`), so that the next question is not made to wait for it."""
         sheets = probe_sheets()
-        limit = 2 * budget
+        tokens = sort_tokens(sheets, PROBE_QUESTION)
+        limit = max(2 * budget, PROBE_MIN_LIMIT)
         started = self._clock()
         try:
             await asyncio.wait_for(
@@ -700,59 +809,86 @@ class Sorting:
                 ),
                 limit,
             )
-        except (TimeoutError, HubError) as exc:
-            code, words = problem(self._error_of(exc, "the probe took too long"), model.id, budget)
-            log.warning("measuring how fast a result sorter reads failed (%s)", code)
-            self._failed[model.id] = Failure(code, words, self._clock())
+            now = self._clock()
+            self._speeds.setdefault(model.id, Speed()).record(
+                tokens, now - started, now, sort=False
+            )
+        except Exception as exc:  # whatever it was, it is kept: never asked again at every look
+            error = self._error_of(exc, "measuring how fast the sorter reads")
+            code, words = problem(error, model.id, budget)
+            log.warning(
+                "measuring how fast a result sorter reads failed (%s)",
+                code,
+                exc_info=(type(exc), exc, exc.__traceback__) if error.kind == "internal" else None,
+            )
+            self._remember(model.id, code, words, GaveUp(tokens, limit) if code == "slow" else None)
             self.forget()
             return
-        now = self._clock()
-        speed = Speed()
-        speed.record(sort_tokens(sheets, PROBE_QUESTION), now - started, now, sort=False)
-        self._speeds[model.id] = speed
-        self._failed.pop(model.id, None)
+        self._answered(model.id, probe=True)
 
     @staticmethod
-    def _error_of(exc: TimeoutError | HubError, what: str) -> HubError:
-        """A request that was given up on (ours) is a timeout, said as the gateway's own is."""
+    def _error_of(exc: Exception, doing: str) -> HubError:
+        """What went wrong, as a `HubError`: a request that was given up on (ours) is a timeout,
+        said as the gateway's own is, and anything else that is not the gateway's is a failure in
+        Workbench itself."""
         if isinstance(exc, HubError):
             return exc
-        return HubError(what, status=504, kind="timeout")
-
-    async def _priced(
-        self, model: SearchModel, budget: float
-    ) -> tuple[float | None, Failure | None]:
-        """The tokens a second this sorter reads at, measuring it first when it never was (a search
-        has nothing to price a sort with otherwise), or the failure that stopped that."""
-        rate = self.rate_of(model.id)
-        if rate is not None:
-            self._refresh(model, budget)  # used as it stands; measured again behind it when old
-            return rate, None
-        failed = self._failed.get(model.id)
-        if failed is not None and self._clock() - failed.at < MEASURE_RETRY:
-            return None, failed
-        await asyncio.wait({self._measure_soon(model, budget)})
-        rate = self.rate_of(model.id)
-        if rate is not None:
-            return rate, None
-        return None, self._failed.get(model.id) or Failure(
-            "error",
-            f"{NOT_SORTED}how fast {model.id} sorts could not be measured, {LEFT}.",
-            self._clock(),
+        if isinstance(exc, TimeoutError):
+            return HubError(f"{doing} took too long", status=504, kind="timeout")
+        return HubError(
+            f"{doing} failed in Workbench itself ({type(exc).__name__})",
+            status=500,
+            kind="internal",
         )
+
+    def _remember(
+        self, model: str, code: str, words: str, gave_up: GaveUp | None = None
+    ) -> Failure:
+        """Keep that a request of this sorter came to nothing: what was seen (`problem`'s code
+        and words), and so when it is asked again, which is later each time it comes to nothing
+        again. A request that was given up on is a `GaveUp` (what it showed); a failure that is
+        not that leaves what was known of one before it."""
+        before = self._failed.get(model)
+        strikes = self._strikes.get(model, 0) + 1
+        self._strikes[model] = strikes
+        kept = gave_up if gave_up is not None else (before.gave_up if before is not None else None)
+        failure = Failure(code, words, self._clock(), strikes, kept)
+        self._failed[model] = failure
+        return failure
+
+    def _answered(self, model: str, *, probe: bool) -> None:
+        """The sorter answered (a sort, or the probe), so nothing is held against it. Except the
+        count of times in a row it did not answer a sort: the probe is two short passages, and a
+        sorter that answers it and still does not answer a sort is asked less and less, not
+        again every ten seconds. A sort that is answered puts it right."""
+        failed = self._failed.pop(model, None)
+        if probe and failed is not None and failed.gave_up is not None:
+            return
+        self._strikes.pop(model, None)
+
+    def _forget_trouble(self, model: str | None) -> None:
+        """A sorter that is not running has no trouble of its own: what failed, or did not answer,
+        before it stopped is not what is known of it when it is started again (a person who started
+        it would be told, for the rest of that wait, that it is not running, or that it did not
+        answer). What it read at is kept: that is how fast it reads, whoever stopped it."""
+        if model is not None:
+            self._failed.pop(model, None)
+            self._strikes.pop(model, None)
 
     # --- the sort ------------------------------------------------------------
 
     async def sort(self, query: str, sheets: Sequence[Sheet]) -> Sorted:
         """Put these passages in the order that answers `query` best, if there is a sorter to do
         it and it is quick enough. What was decided, and why, is the report; the order is None
-        when the passages were not sorted. A sorter that fails is a report, never an exception."""
+        when the passages were not sorted. A sorter that fails is a report, never an exception,
+        and a search never waits for a measurement."""
         settings = await self._settings()
         budget = float(settings.sort_seconds)
-        choice = (await self.resolve()).choice
+        choice = await self.resolve(settings)
         report = SortReport(setting=choice.setting, passages=len(sheets), budget=budget)
         model = choice.model
         if model is None:
+            self._forget_trouble(choice.named)
             return Sorted(
                 None,
                 replace(
@@ -765,23 +901,25 @@ class Sorting:
             )
         tokens = sort_tokens(sheets, query)
         report = replace(report, model=model.id, tokens=tokens)
-        rate, failed = await self._priced(model, budget)
-        if rate is None:
-            assert failed is not None
-            return Sorted(None, replace(report, code=failed.code, message=failed.message))
-        expected = tokens / rate
-        report = replace(report, rate=rate, expected=expected)
-        if expected > budget:
+        verdict = self._judge(model, tokens, budget)
+        if verdict.code == "over_budget":
+            assert verdict.rate is not None and verdict.expected is not None
             return Sorted(
                 None,
                 replace(
                     report,
+                    rate=verdict.rate,
+                    expected=verdict.expected,
                     code="over_budget",
                     message=over_budget_words(
-                        model.id, rate, len(sheets), tokens, expected, budget
+                        model.id, verdict.rate, len(sheets), tokens, verdict.expected, budget
                     ),
                 ),
             )
+        if verdict.code != "ok":
+            message = measuring_words(model.id) if verdict.code == "measuring" else verdict.message
+            return Sorted(None, replace(report, code=verdict.code, message=message))
+        report = replace(report, rate=verdict.rate, expected=verdict.expected)
         limit = 2 * budget
         started = self._clock()
         self.asked.append(len(sheets))
@@ -791,12 +929,13 @@ class Sorting:
                 limit,
             )
         except (TimeoutError, HubError) as exc:
-            code, words = problem(self._error_of(exc, "the sort took too long"), model.id, budget)
+            code, words = problem(self._error_of(exc, "the sort"), model.id, budget)
             log.warning("sorting the passages of a search failed (%s)", code)
             if code == "slow":
-                # Given up on: it took at least this long, and the next question is not promised
-                # better than that (a rate that said "quick enough" has just been wrong).
-                self._gave_up_on(model.id, tokens, limit)
+                # Given up on: it did not read this many tokens in this many seconds, and that is
+                # all it is (`GaveUp`). This question says what it met (it waited, twice Sort
+                # time); the next are told what the sorter is now, and are not made to wait.
+                self._remember(model.id, code, words, GaveUp(tokens, limit))
             self.forget()
             return Sorted(None, replace(report, code=code, message=words))
         took = self._clock() - started
@@ -805,67 +944,74 @@ class Sorting:
 
     def _record(self, model: str, tokens: int, seconds: float) -> None:
         self._speeds.setdefault(model, Speed()).record(tokens, seconds, self._clock())
-
-    def _gave_up_on(self, model: str, tokens: int, seconds: float) -> None:
-        """A sort that was given up on: the sorter did not read this many tokens in this many
-        seconds, and that is what is known of it now. It is not blended into what the sorter did
-        while it was well. Measured live (MR6b acceptance): blended, it left a speed that still
-        priced the next question inside Sort time, and that question waited twice Sort time
-        again, and the one after it, until the average had fallen far enough. What was measured
-        is replaced by it, so the next sort of that size is over Sort time and is not made; an
-        old speed is measured again behind the next search (`RATE_MAX_AGE`), so a sorter that
-        answers again is not left off for ever."""
-        speed = Speed()
-        speed.record(tokens, seconds, self._clock())
-        self._speeds[model] = speed
+        self._answered(model, probe=False)
 
     # --- what is said of it ----------------------------------------------------
 
     async def standing(self) -> Standing:
         """How passages are sorted now, from a live look (the gateway's models, ten seconds old at
-        most) and what was measured. A sorter that has not been measured is measured behind this
-        look, which never waits for it: it says `measuring` until the numbers are there."""
+        most) and what was measured: the same judgement a question is given (`_judge`), for a sort
+        of the usual size. A sorter that has not been measured is measured behind this look,
+        which never waits for it: it says `measuring` until the numbers are there.
+
+        **Why this is read on the Documents screen's own request (`GET /api/documents`) and not
+        computed in the background and kept** (MR6b review, item 7): the only call it waits on is
+        the look at the gateway's models, which search by meaning's status makes in the same
+        request and which is shared (`listing.Listing`: kept ten seconds, a failed one three, at
+        most eight to wait), so a gateway that does not answer holds the screen once; the rest is
+        arithmetic on what is in memory, and the probe, the one slow thing, is already made behind
+        the look. A standing kept in the background would be as old as its last refresh, and a
+        setting (Sort time, the Result sorter) is in effect at once and must be said to be, so it
+        would have to be worked out again at every look anyway. Settings are read once here, where
+        they were twice."""
         settings = await self._settings()
         budget = float(settings.sort_seconds)
-        choice = (await self.resolve()).choice
+        choice = await self.resolve(settings)
         allow = settings.external_embedding
-
-        def stand(code: str, message: str | None, **more: Any) -> Standing:
-            return Standing(choice, code, message, budget, allow, **more)
-
         model = choice.model
         if model is None:
-            return stand(choice.code, choice.message)
-        rate = self.rate_of(model.id)
-        if rate is None:
-            failed = self._failed.get(model.id)
-            if failed is not None and self._clock() - failed.at < MEASURE_RETRY:
-                return stand(failed.code, failed.message)
-            self._measure_soon(model, budget)
-            return stand("measuring", None)
-        self._refresh(model, budget)
-        source = self._speeds[model.id].source
-        expected = typical_tokens() / rate
-        if expected > budget:
-            return stand(
-                "over_budget",
-                typical_words(model.id, rate, expected, budget),
-                rate=rate,
-                rate_from=source,
-            )
-        return stand("ok", None, rate=rate, rate_from=source)
+            self._forget_trouble(choice.named)
+            return Standing(choice, choice.code, choice.message, budget, allow)
+        verdict = self._judge(model, typical_tokens(), budget)
+        message = verdict.message
+        if verdict.code == "over_budget":
+            assert verdict.rate is not None and verdict.expected is not None
+            message = typical_words(model.id, verdict.rate, verdict.expected, budget)
+        return Standing(
+            choice,
+            verdict.code,
+            message,
+            budget,
+            allow,
+            rate=verdict.rate,
+            rate_from=verdict.rate_from,
+        )
 
     async def fields(self) -> Fields:
-        """What the two settings come to now (settings never lie): which sorter the first is, or
-        why none; and what the second does with the sorter's speed."""
+        """What the two settings come to now (settings never lie): which sorter the first is and
+        whether it is sorting, or why none; and what the second does with the sorter's speed. Both
+        are read from the standing the Documents screen is told, so a setting and the screen say
+        one thing."""
         standing = await self.standing()
-        probe = await self.probe() if standing.choice.code != "off" else self._probe
+        if standing.choice.code == OFF:
+            # Off asks the gateway nothing: the models are those of the last look, if there was one.
+            last = self.listing.last
+            probe = probe_of(last, SURFACE) if last is not None else None
+        else:
+            probe = await self.probe()
         ids = [m.id for m in probe.models] if probe is not None else []
         info, warning = ConfigFieldStatusLevel.info, ConfigFieldStatusLevel.warning
         choice, found = standing.choice, standing.choice.model
-        if found is not None:
-            tail = " (automatic)" if choice.automatic else ""
+        tail = " (automatic)" if choice.automatic else ""
+        if found is not None and standing.sorting:
             model = ConfigFieldStatus(level=info, text=f"In use: {found.id}{tail}.")
+        elif found is not None:
+            # Chosen, and not in use: the setting says what the screen says, with its reason.
+            said = measuring_words(found.id) if standing.code == "measuring" else standing.message
+            model = ConfigFieldStatus(
+                level=info if standing.code in ("measuring", "over_budget") else warning,
+                text=f"Chosen: {found.id}{tail}, not sorting now: {reason_of(said)}",
+            )
         elif choice.code == "off":
             model = ConfigFieldStatus(
                 level=info, text="Off: passages are left in the order the search found them."
@@ -885,12 +1031,11 @@ class Sorting:
                 text=f"Measuring how fast {found.id} sorts, to tell whether it is quick enough.",
             )
         elif standing.rate is None:
-            seconds = ConfigFieldStatus(
-                level=warning,
-                text=standing.message or f"{NOT_SORTED}how fast {found.id} sorts is not known.",
-            )
+            # No speed: it did not answer, or could not be asked. Said as that, and not as a speed.
+            assert standing.message is not None
+            seconds = ConfigFieldStatus(level=warning, text=standing.message)
         else:
-            verdict = (
+            verdict_words = (
                 "within this, so passages are sorted"
                 if standing.sorting
                 else "over this, so passages are not sorted"
@@ -900,7 +1045,7 @@ class Sorting:
                 text=(
                     f"{found.id} sorts {rate_words(standing.rate)} here: {TYPICAL_PASSAGES} "
                     f"passages of about {TYPICAL_PASSAGE_TOKENS} tokens take about "
-                    f"{seconds_words(standing.expected or 0.0)}, {verdict}."
+                    f"{seconds_words(standing.expected or 0.0)}, {verdict_words}."
                 ),
             )
         return Fields(ids, model, seconds)

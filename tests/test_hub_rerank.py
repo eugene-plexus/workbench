@@ -145,6 +145,34 @@ async def test_a_score_that_is_not_a_finite_number_is_not_believed(
 
 
 @pytest.mark.parametrize(
+    "literal",
+    [
+        "1" + "0" * 400,  # an integer too large to be a float: `math.isfinite` raised OverflowError
+        "-" + "9" * 400,
+        "1e999",  # JSON lets it through, and Python reads it as infinity
+        "-1e999",
+    ],
+)
+async def test_a_score_too_large_to_be_a_number_is_an_unusable_answer_and_not_a_failure_in_workbench(
+    tmp_path: Path, literal: str
+) -> None:
+    """A score of four hundred digits is not a `HubError` when it reaches `math.isfinite`, it is an
+    `OverflowError`: a failure in Workbench itself that was neither said as the gateway's answer
+    being unusable nor kept as a reason, and which a sorter's probe did not catch at all."""
+    content = f'{{"results": [{{"index": 0, "relevance_score": {literal}}}]}}'.encode()
+    hub = hub_over(
+        tmp_path,
+        lambda r: httpx.Response(
+            200, content=content, headers={"content-type": "application/json"}
+        ),
+    )
+    with pytest.raises(HubError, match="not a number") as caught:
+        await hub.rerank("sorter", "q", ["a"])
+    assert caught.value.kind == "unusable"
+    await hub.aclose()
+
+
+@pytest.mark.parametrize(
     "usage", [{"prompt_tokens": "many"}, {"prompt_tokens": True}, "none", None, {}]
 )
 async def test_a_tokens_count_that_is_not_a_number_is_left_out_not_believed(

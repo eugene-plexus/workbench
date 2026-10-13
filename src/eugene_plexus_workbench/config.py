@@ -34,6 +34,7 @@ effect at once, and `null` puts one back to its default.
 from __future__ import annotations
 
 import hmac
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -49,6 +50,8 @@ from ._generated.models import (
     ConfigValueType,
 )
 from .store import Store
+
+log = logging.getLogger(__name__)
 
 OWNER_READS_CHATS = "ownerReadsChats"
 MEMORY_ENABLED = "memoryEnabled"
@@ -311,19 +314,25 @@ FIELDS = [
     ),
     ConfigField(
         key=DOCUMENTS_SORT_SECONDS,
-        label="Sort time (seconds)",
+        label="Sort time (seconds; a sort is given up on after twice this)",
         description=(
-            "The most a sort may add to an answer (default 3). Before sorting, Workbench works "
-            "out how long it would take: the tokens to read (each passage, and the question "
-            "once for each passage; tokens are counted as characters divided by three, "
-            "deliberately high) over how many tokens a second this sorter reads, measured from "
-            "Workbench's own recent sorts and, before there is one, from a small test. Over "
-            "this, the passages are left in the order they were found and the Documents screen "
-            "says why, with the numbers. A sort that takes more than twice this is given up on, "
-            "and the sorter is then not asked again until this is raised past what that sort "
-            "showed, or ten minutes have passed and its speed is measured again. "
-            "On the processor it was measured on, sorting 18 passages took about 6 seconds, "
-            "which is why the default does not sort there."
+            "How long a sort may be expected to take before Workbench leaves it out (default 3 "
+            "seconds); one that is asked is given up on after twice this. Before sorting, "
+            "Workbench works out how long it would take: the tokens to read (each passage, and "
+            "the question once for each passage; tokens are counted as characters divided by "
+            "three, deliberately high) over how many tokens a second this sorter reads, "
+            "measured from Workbench's own recent sorts and, before there is one, from a small "
+            "test made in the background (a question asked before that is answered with the "
+            "passages in the order they were found, and never waits for it). "
+            "Over this, the passages are left in the order they were found and the Documents "
+            "screen says why, with the numbers. A sort that is asked and takes more than twice "
+            "this is given up on, so one answer can wait that long. The sorter is then left "
+            "alone and the Documents screen says that it did not answer and when it is asked "
+            "again: by a small test, never by a question, after ten seconds and after twice as "
+            "long each time it still does not answer, up to ten minutes. It is used again once "
+            "it answers. As measured here, sorting 18 passages took about 7 seconds on a "
+            "12-thread processor and about 0.5 seconds on an RTX 5090, which is why the default "
+            "of 3 seconds sorts on the graphics card and not on that processor."
         ),
         category="documents",
         valueType=ConfigValueType.number,
@@ -589,7 +598,10 @@ async def _fields(request: Request) -> list[ConfigField]:
         try:
             suggestions, status_ = await meaning.setting_view()
         except Exception:  # a settings page never fails because a gateway did
-            pass
+            log.warning(
+                "the search model setting could not say what it comes to; it is left as it is",
+                exc_info=True,
+            )
         else:
             shown = [
                 f.model_copy(update={"suggestions": [AUTO, *suggestions], "status": status_})
@@ -600,8 +612,12 @@ async def _fields(request: Request) -> list[ConfigField]:
     if sorting is not None:
         try:
             view = await sorting.fields()
-        except Exception:
-            pass
+        except Exception:  # nor because of a sorter
+            log.warning(
+                "the result sorter settings could not say what they come to; they are left as "
+                "they are",
+                exc_info=True,
+            )
         else:
             shown = [
                 f.model_copy(update={"suggestions": [AUTO, OFF, *view.ids], "status": view.model})

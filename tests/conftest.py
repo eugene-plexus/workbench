@@ -628,6 +628,10 @@ class FakeGateway:
     #: The one model every gateway of these tests lists that only embeds, and says nothing of
     #: where it runs (so Workbench cannot place it); search by meaning's tests do without it.
     embedder_listed: bool = True
+    #: How many times the list of models was asked for, and how long each answer is held back
+    #: (a gateway that does not answer its list: the shared look, MR6b).
+    models_asked: int = 0
+    models_delay: float = 0.0
     #: Search models listed (`search_model`), whole; `/v1/embeddings` answers for each that is
     #: ready, with the stand-in meaning of `fake_embedding`.
     search_models: list[dict[str, Any]] = field(default_factory=list)
@@ -692,6 +696,9 @@ class FakeGateway:
 
         @app.get("/v1/models")
         async def models(request: Request) -> Any:
+            self.models_asked += 1
+            if self.models_delay:
+                await asyncio.sleep(self.models_delay)
             if request.headers.get("authorization") != f"Bearer {APP_KEY}":
                 return JSONResponse({"error": {"message": "invalid key"}}, status_code=401)
             return {

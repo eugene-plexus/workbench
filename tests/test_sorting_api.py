@@ -17,6 +17,8 @@ from typing import Any
 import httpx
 import pytest
 
+from eugene_plexus_workbench.knowledge import listing, sorting
+
 from .conftest import ADMIN_TOKEN, World, search_model, sorter_model
 from .meaning import (
     ARRIVALS,
@@ -197,6 +199,7 @@ def test_with_the_sorter_off_the_search_is_as_it_was_and_the_gateway_is_not_aske
     assert places(got)[0].get("sorter") is None
     on = config(world, documentsSortModel="auto")
     assert on.status_code == 200
+    measured(ada)  # the screen is looked at, and the sorter is measured behind the look
     assert try_question(ada, QUESTION)["mode"] == f"meaning and words, sorted by {SORTER}"
 
 
@@ -215,6 +218,7 @@ def test_a_named_sorter_is_the_one_asked_and_auto_goes_back_to_the_first(
     assert sort_of(got)["model"] == "second-sorter" and sort_of(got)["setting"] == "second-sorter"
     assert {r["body"]["model"] for r in world.gateway.rerank_requests} == {"second-sorter"}
     assert config(world, documentsSortModel=None).status_code == 200
+    measured(ada)
     again = try_question(ada, QUESTION)
     assert again["mode"] == f"meaning and words, sorted by {SORTER}"
     assert sort_of(again)["setting"] == "auto"
@@ -284,7 +288,7 @@ def test_auto_leaves_a_stopped_sorter_alone_and_a_local_one_beside_it_is_the_one
     )
     assert world.gateway.rerank_requests == []
     world.gateway.sorters.append(sorter_model("running"))
-    time.sleep(0.1)
+    measured(ada)
     got = try_question(ada, QUESTION)
     assert got["mode"] == "meaning and words, sorted by running"
     assert {r["body"]["model"] for r in world.gateway.rerank_requests} == {"running"}
@@ -308,6 +312,7 @@ def test_a_named_sorter_outside_the_machines_is_sent_passages_only_when_the_owne
     )
     assert world.gateway.rerank_requests == []
     assert config(world, documentsExternalEmbedding=True).status_code == 200
+    measured(ada)
     allowed = try_question(ada, QUESTION)
     assert allowed["mode"] == "meaning and words, sorted by cloud"
     assert world.gateway.sorts(), "named, and allowed: it was sent the passages"
@@ -474,8 +479,14 @@ def _failing(world: World, ada: Any) -> tuple[dict[str, Any], list[str]]:
         ),
         (
             (404, {"error": {"message": "No reachable driver serves 'mr6b-sorter'."}}, {}),
-            "not_running",
-            "the sorter mr6b-sorter is not running",
+            "not_listed",
+            "answered that it has no sorter mr6b-sorter to ask (No reachable driver serves "
+            "'mr6b-sorter'.)",
+        ),
+        (
+            (400, {"error": {"message": "documents[3]: must not be empty"}}, {}),
+            "refused",
+            "Eugene's gateway refused the request (documents[3]: must not be empty)",
         ),
         (
             (
@@ -602,7 +613,9 @@ def test_a_sorter_that_takes_over_twice_the_budget_is_given_up_on_and_the_search
     world: World,
     quick: None,  # noqa: F811
     quick_sorting: None,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(sorting, "MEASURE_RETRY", 60.0)  # not asked again within this test
     sorter_world(world)
     ada = start(world)
     keep(ada, *corpus())
@@ -625,7 +638,117 @@ def test_a_sorter_that_takes_over_twice_the_budget_is_given_up_on_and_the_search
         f"Not sorted: {SORTER} did not answer within 1 s (twice Sort time, 0.5 s), so the "
         "passages are in the order the search found them."
     )
+    # The questions after it are not made to wait for it again, and say what happened: no speed (it
+    # never read at one), no advice to raise Sort time, and when it is asked again.
     world.gateway.rerank_delay = 0.0
+    asked = len(world.gateway.rerank_requests)
+    started = time.perf_counter()
+    later = try_question(ada, QUESTION)
+    assert time.perf_counter() - started < waited / 2, "not made to wait for the sorter again"
+    after = sort_of(later)
+    assert after["code"] == "slow" and after["used"] is False and texts(later) == found_order
+    assert after["ratePerSecond"] is None and after["expectedSeconds"] is None
+    assert after["message"].startswith(
+        f"Not sorted: {SORTER} did not answer within 1 s the last time it was asked, so the "
+        "passages are in the order the search found them. Workbench asks it again after "
+    )
+    assert "Raise Sort time" not in after["message"]
+    assert len(world.gateway.rerank_requests) == asked, "and the sorter was asked nothing more"
+    head = search_of(ada)["sort"]
+    assert head["code"] == "slow" and head["sorting"] is False and head["label"] is None
+    assert head["ratePerSecond"] is None and head["rateFrom"] is None
+    assert head["message"].startswith(f"Not sorted: {SORTER} did not answer within 1 s the last ")
+    assert head["typical"]["seconds"] is None
+    model = schema(world)["documentsSortModel"]["status"]
+    assert model["level"] == "warning"
+    assert model["text"].startswith(f"Chosen: {SORTER} (automatic), not sorting now: {SORTER} did ")
+    seconds = schema(world)["documentsSortSeconds"]["status"]
+    assert seconds["level"] == "warning" and "tokens a second" not in seconds["text"]
+    assert seconds["text"].startswith(f"Not sorted: {SORTER} did not answer within 1 s ")
+
+
+def test_a_question_asked_before_the_sorter_is_measured_is_answered_at_once_and_the_next_is_sorted(
+    world: World,
+    quick: None,  # noqa: F811
+    quick_sorting: None,  # noqa: F811
+) -> None:
+    """A search never waits for a measurement: with no speed known the passages are in the order
+    the search found them, the report says the speed is being measured, and the small request that
+    measures it is made behind the question."""
+    sorter_world(world)
+    assert config(world, documentsSortModel="off").status_code == 200
+    ada = start(world)
+    keep(ada, *corpus())
+    assert config(world, documentsSortModel="auto").status_code == 200
+    world.gateway.rerank_delay = 3.0  # the small request takes its time
+    started = time.perf_counter()
+    first = try_question(ada, QUESTION)
+    assert time.perf_counter() - started < 1.5, "the question did not wait for the measurement"
+    block = sort_of(first)
+    assert first["status"] == "found" and first["mode"] == "meaning and words"
+    assert block["used"] is False and block["code"] == "measuring" and block["quiet"] is False
+    assert block["message"] == (
+        f"Not sorted: how fast {SORTER} sorts is being measured now, so the passages are in the "
+        "order the search found them."
+    )
+    assert block["ratePerSecond"] is None and block["expectedSeconds"] is None
+    assert world.gateway.sorts() == [], "no sort was asked of it"
+    measured(ada)
+    world.gateway.rerank_delay = 0.0
+    second = try_question(ada, QUESTION)
+    assert second["mode"] == f"meaning and words, sorted by {SORTER}"
+    assert len(world.gateway.probes()) == 1 and len(world.gateway.sorts()) == 1
+
+
+def test_a_question_that_names_its_way_is_not_sorted_so_each_way_shows_what_it_finds_alone(
+    world: World,
+    quick: None,  # noqa: F811
+    quick_sorting: None,  # noqa: F811
+) -> None:
+    sorter_world(world)
+    ada = start(world)
+    keep(ada, *corpus())
+    measured(ada)
+    both = try_question(ada, QUESTION)
+    assert both["mode"] == f"meaning and words, sorted by {SORTER}"
+    asked = len(world.gateway.sorts())
+    for way in ("words", "meaning"):
+        alone = try_question(ada, QUESTION, ways=[way])
+        block = sort_of(alone)
+        assert alone["mode"] == way and block["used"] is False and block["code"] == "not_asked"
+        assert all("sorter" not in r for r in places(alone)), (
+            "no place by a sorter that was not used"
+        )
+        # In the order that way found them: what it finds alone, as with no sorter at all.
+        assert texts(alone) == texts(unsorted(ada, world, ways=[way]))
+    assert len(world.gateway.sorts()) == asked, "neither way was sent to the sorter"
+
+
+def test_a_gateway_that_does_not_answer_its_list_of_models_holds_the_screen_once_and_not_twice(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Documents screen asked search by meaning and sorting for the gateway's list of models,
+    each with a copy of the look of its own, so a list that never came held `GET /api/documents`
+    for the 8 seconds a look may take twice (MR6b review). They share one look now."""
+    sorter_world(world)
+    ada = start(world)
+    keep(ada, *corpus())
+    monkeypatch.setattr(listing, "TIMEOUT", 0.4)
+    monkeypatch.setattr(listing, "TTL", 0.05)  # what was seen is old: the next screen looks again
+    monkeypatch.setattr(listing, "ERROR_TTL", 5.0)  # and what it finds is kept for a moment
+    time.sleep(0.1)
+    world.gateway.models_delay = 5.0
+    asked = world.gateway.models_asked
+    started = time.perf_counter()
+    got = ada.get("/api/documents")
+    elapsed = time.perf_counter() - started
+    assert got.status_code == 200
+    assert world.gateway.models_asked == asked + 1, "one look, shared by meaning and by sorting"
+    assert 0.3 < elapsed < 0.7, f"held for the one look, 0.4 s, and not for two ({elapsed:.2f} s)"
+    head = got.json()["search"]
+    assert head["code"] == "slow" and head["sort"]["code"] == "slow", "and both say what was seen"
+    world.gateway.models_delay = 0.0
 
 
 # --------------------------------------------------------------------------- #
@@ -743,7 +866,7 @@ def test_one_passage_found_is_not_sent_to_a_sorter_and_says_nothing_of_one(
     sorter_world(world)
     ada = start(world)
     keep(ada, ("alone.md", md("The quillwort basin is drained on the first of the month.")))
-    got = try_question(ada, "when is the quillwort basin drained?", ways=["words"])
+    got = try_question(ada, "when is the quillwort basin drained?")
     assert got["status"] == "found" and len(got["passages"]) == 1
     block = sort_of(got)
     assert block["used"] is False and block["code"] == "nothing_to_sort" and block["quiet"] is True
@@ -786,7 +909,8 @@ def test_the_two_settings_are_in_the_config_with_their_defaults_and_say_what_the
     assert model["valueType"] == "string" and model["default"] == "auto"
     assert model["suggestions"] == ["auto", "off", SORTER, "second-sorter"]
     assert model["status"] == {"level": "info", "text": f"In use: {SORTER} (automatic)."}
-    assert seconds["label"] == "Sort time (seconds)" and seconds["category"] == "documents"
+    assert seconds["label"] == "Sort time (seconds; a sort is given up on after twice this)"
+    assert seconds["category"] == "documents"
     assert seconds["valueType"] == "number" and seconds["default"] == 3
     assert (seconds["minimum"], seconds["maximum"]) == (0.5, 120.0)
     assert "twice this" in seconds["description"], "a sort that takes more is given up on"
@@ -794,6 +918,7 @@ def test_the_two_settings_are_in_the_config_with_their_defaults_and_say_what_the
     assert again["level"] == "info" and again["text"].startswith(f"{SORTER} sorts about ")
     assert again["text"].endswith("within this, so passages are sorted.")
     assert config(world, documentsSortModel="second-sorter").status_code == 200
+    measured(ada)
     assert schema(world)["documentsSortModel"]["status"]["text"] == "In use: second-sorter."
     assert config(world, documentsSortModel="off").status_code == 200
     off = schema(world)
@@ -820,7 +945,16 @@ def test_the_budget_setting_says_when_the_sorter_is_too_slow_for_it(
     assert over["text"].startswith(f"{SORTER} sorts about ")
     assert "18 passages of about 300 tokens take about " in over["text"]
     assert over["text"].endswith("over this, so passages are not sorted.")
-    assert search_of(ada)["sort"]["sorting"] is False
+    head = search_of(ada)["sort"]
+    assert head["sorting"] is False and head["code"] == "over_budget"
+    # The setting beside it says what the screen says. The review found it saying "In use: X
+    # (automatic)." here, with the Sort time setting and the screen saying nothing was sorted.
+    model = schema(world)["documentsSortModel"]["status"]
+    assert model["level"] == "info" and "In use" not in model["text"]
+    assert model["text"].startswith(
+        f"Chosen: {SORTER} (automatic), not sorting now: {SORTER} sorts about "
+    )
+    assert head["label"] is None, "and the screen's own label does not say it either"
 
 
 def test_the_settings_take_what_they_can_and_refuse_what_they_cannot(world: World) -> None:
@@ -886,6 +1020,7 @@ def test_a_screen_is_not_stopped_by_a_sorter_that_cannot_be_looked_at(
     quick: None,  # noqa: F811
     quick_sorting: None,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     from eugene_plexus_workbench.knowledge.sorting import Sorting
 
@@ -905,9 +1040,15 @@ def test_a_screen_is_not_stopped_by_a_sorter_that_cannot_be_looked_at(
         and head["headline"] == "Searching by meaning and words."
     )
     assert ada.get(f"/api/chats/{ada.new_chat()}/documents").status_code == 200
-    fields = schema(world)
+    with caplog.at_level("WARNING"):
+        fields = schema(world)
     assert "status" not in fields["documentsSortModel"], "the settings page does not fail either"
     assert fields["documentsSortSeconds"]["default"] == 3
+    # What was caught is said in the log, with where it was: nothing is swallowed without a word.
+    said = [r for r in caplog.records if r.name == "eugene_plexus_workbench.config"]
+    assert any("result sorter settings could not say" in r.getMessage() for r in said), caplog.text
+    assert all(r.exc_info is not None for r in said)
+    assert any("RuntimeError" in repr(r.exc_info) for r in said)
 
 
 def test_the_pages_types_name_the_mode_a_sorted_search_has() -> None:

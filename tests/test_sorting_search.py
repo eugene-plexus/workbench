@@ -456,20 +456,31 @@ async def test_one_passage_has_no_order_to_be_put_in_and_the_sorter_is_not_asked
     assert not got.sort.sorted and got.mode == "words"
 
 
-async def test_a_run_that_names_its_ways_sorts_what_those_ways_found() -> None:
+async def test_a_run_that_names_its_ways_is_not_sorted_so_each_way_shows_what_it_finds_alone() -> (
+    None
+):
+    """ "Try one way at a time" is to see what each way finds by itself. A sorter's order over it
+    would be the sorter's, not the way's (the review found a words-only run come back as "words,
+    sorted by the-sorter" in the sorter's order), so a run that names its ways is not sorted."""
     sorter = Sorter()
-    got = await run(
+    for way, found in (("words", [1, 2, 3]), ("meaning", [4, 5])):
+        got = await run(
+            Fixed("words", [hit(1), hit(2), hit(3)]),
+            Fixed("meaning", [hit(4), hit(5)], similarity=True),
+            sorter=sorter,
+            ways=[way],
+        )
+        assert got.mode == way and chunks(got) == found, "in the order that way found them"
+        assert got.sort is None and "sorter" not in got.reports and got.ways == (way,)
+        assert all("sorter" not in dict(p.ranks) for p in got.passages)
+    assert sorter.asked == [], "the sorter was not asked anything"
+    # With no ways named, the same signals are sorted (the sorter reverses what it is given).
+    every = await run(
         Fixed("words", [hit(1), hit(2), hit(3)]),
-        Fixed("meaning", [hit(4)], similarity=True),
+        Fixed("meaning", [hit(4), hit(5)], similarity=True),
         sorter=sorter,
-        ways=["words"],
     )
-    assert sorted(s.text for s in sorter.asked[0][1]) == [
-        "a passage 1",
-        "a passage 2",
-        "a passage 3",
-    ]
-    assert got.mode == "words, sorted by the-sorter" and chunks(got) == [3, 2, 1]
+    assert every.mode == "meaning and words, sorted by the-sorter" and len(sorter.asked) == 1
 
 
 def test_the_mode_of_a_search_that_was_not_sorted_is_its_own() -> None:

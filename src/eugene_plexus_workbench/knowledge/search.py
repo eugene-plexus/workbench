@@ -26,7 +26,8 @@ it between `fuse` and `select` when it has a `Sorter` (`sorting.Sorting`). **A s
 or should not run never fails a search**: its passages stay in the fused order, and the
 `SortReport` says why, in the sorter's own words. Which sorter, and whether it is quick enough,
 are `sorting.py`'s to decide; this module asks, and applies the answer. A sorter's score is never
-shown, only the place it gave.
+shown, only the place it gave. A run that names its ways (Test a question, "try one way at a time")
+is not sorted, so that each way shows what it finds alone.
 
 **The one evidence rule** (design 4.4, item 7): there is no score threshold, and a
 passage is never left out for a low score. But a signal whose scores are similarities
@@ -625,7 +626,8 @@ class Retrieval:
     ways: tuple[str, ...] = ("words",)
     reports: dict[str, Report] = field(default_factory=dict)
     #: What sorting came to: whether it sorted and, when not, why, with the numbers it was
-    #: decided by. None when this Workbench has no sorter, or nothing was found to sort.
+    #: decided by. None when this Workbench has no sorter, nothing was found to sort, or the run
+    #: named its ways (those are shown as each found them).
     sort: SortReport | None = None
 
 
@@ -671,8 +673,10 @@ class Retriever:
         """Search `scopes` of one person's index for `query`. `question` is what the
         person asked (a file it names is not held to `per_document`); `budget` is the
         tokens the passages may take, and `overhead` what each one's tags cost. `ways`
-        names the ways of searching to use (Test a question, to see what each finds); none
-        means all, and then the evidence rule applies.
+        names the ways of searching to use (Test a question, to see what each finds alone);
+        none means all, and then the evidence rule applies and the passages are sorted (when a
+        sorter runs). **A run that names its ways is not sorted**: what each way finds alone is
+        shown as it found it, in its own order, so a person can tell the way from the sorter.
 
         Raises what a search raises (`IndexUnavailable`, an `sqlite3` error): a search
         that could not run is never an empty result. A way of searching that says it
@@ -699,7 +703,7 @@ class Retriever:
         if not candidates:
             return Retrieval(query, mode=mode_of(ran), ways=ran, reports=reports)
         sort: SortReport | None = None
-        if self.sorter is not None:
+        if self.sorter is not None and ways is None:
             candidates, sort = await self._sort(query, question, candidates, found)
             # Said among the reports, beside each way's: the sorter ran when it sorted, and when
             # it did not, `code` and `message` say why, in its own words.
