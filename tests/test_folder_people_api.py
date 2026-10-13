@@ -373,7 +373,8 @@ def test_the_installs_folder_settings_are_in_the_console_with_what_unset_means(
         field = by_key[key]
         assert field["category"] == "documents" and field["valueType"] == "integer"
         assert (field["default"], field["minimum"], field["maximum"]) == (default, low, high)
-        assert field["label"] and "default" in field["description"]
+        # The default is the schema's own field, asserted above; the help does not repeat it.
+        assert field["label"] and field["description"]
         assert now[key] == default, "the value in effect is shown, not a stand-in"
     assert "Documents" in schema["categories"].values()
 

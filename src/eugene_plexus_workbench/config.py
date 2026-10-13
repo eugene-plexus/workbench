@@ -97,13 +97,14 @@ FIELDS = [
         key=OWNER_READS_CHATS,
         label="The owner may read people's chats and media",
         description=(
-            "When on, the owner of this install can read, but not change, the chats and media "
-            "(images and other results in their bins) of every person given Workbench, "
-            "including those made before it was turned on, and each person sees a line above "
-            "their chats saying so. When off, Workbench refuses reads of anyone else's chats "
-            "and media. Local servers run with Workbench's file access, so use only programs "
-            "trusted with everyone's data. This never covers a person's memory notes: nobody "
-            "can read another person's notes, whatever this is set to."
+            "Lets the owner of this install read, but not change, the chats and "
+            "media of everyone given Workbench.\n\n"
+            "That includes chats and media made before it was turned on, and each "
+            "person sees a line above their chats saying so. Media means images and "
+            "other results in their bins. Off, Workbench refuses reads of anyone "
+            "else's chats and media. Local servers run with Workbench's file access, "
+            "so use only programs trusted with everyone's data. This never covers a "
+            "person's memory notes: nobody can read another person's notes."
         ),
         category="people",
         valueType=ConfigValueType.boolean,
@@ -113,12 +114,12 @@ FIELDS = [
         key=MEMORY_ENABLED,
         label="People can keep notes for Workbench to remember",
         description=(
-            "When on (the default), each person can keep short notes about themselves on the "
-            'Memory page or by writing "remember that ..." in a chat, and a chat sends them '
-            "to its model so it can use them. When off, Workbench keeps no new notes and "
-            "sends none to any model; people can still read, export and delete the notes they "
-            "already have. Each person can also turn memory off for themselves, and for one "
-            "chat at a time."
+            "Lets each person keep short notes about themselves that a chat sends "
+            "to its model.\n\n"
+            'People add notes on the Memory page or by writing "remember that ..." in '
+            "a chat. Off, Workbench keeps no new notes and sends none to any model; "
+            "people can still read, export and delete the notes they have. Each person "
+            "can also turn memory off for themselves, and for one chat at a time."
         ),
         category="memory",
         valueType=ConfigValueType.boolean,
@@ -128,11 +129,11 @@ FIELDS = [
         key=MEMORY_MAX_NOTES,
         label="Most notes one person can keep",
         description=(
-            "How many notes each person can keep (default 300). At the limit a person is told "
-            "so and keeps no new note until they delete one. Lowering it deletes nothing. "
-            "Each note is at most 240 characters, and a chat sends only as many as fit its "
-            "model's window (8% of it, at most 1,000 tokens), so a long list costs a chat "
-            "nothing it cannot afford."
+            "How many notes each person can keep.\n\n"
+            "At the limit a person is told so and keeps no new note until they delete "
+            "one; lowering it deletes nothing. Each note is at most 240 characters, "
+            "and a chat sends only as many as fit in 8% of its model's window, at most "
+            "1,000 tokens."
         ),
         category="memory",
         valueType=ConfigValueType.integer,
@@ -144,13 +145,16 @@ FIELDS = [
         key=MEMORY_EXTERNAL_MODELS,
         label="Send notes to models that run outside your machines",
         description=(
-            "What a chat does with a person's notes when its model runs on a cloud account or "
-            "anywhere Eugene cannot confirm is this install's own machines. Ask (the default): "
-            "the notes are held back until the person chooses to send them for that chat. "
-            "Always: they are sent without asking. Each person can choose Never, Ask or Always "
-            "for themselves, and this is what a person who has not chosen gets. Never is "
-            "different: it is this install's rule, notes are never sent to such a model, and "
-            "no person can change that."
+            "What a chat does with a person's notes when its model runs outside "
+            "this install's own machines.\n\n"
+            "Outside means a cloud account, or anywhere Eugene cannot confirm is "
+            "one of them.\n\n"
+            "- **Ask**: notes are held back until the person chooses to send them "
+            "for that chat.\n"
+            "- **Always**: notes are sent without asking.\n"
+            "- **Never**: notes are never sent, and no person can change that.\n\n"
+            "With Ask or Always, each person can choose for themselves; this is what a "
+            "person who has not chosen gets."
         ),
         category="memory",
         valueType=ConfigValueType.enum,
@@ -162,15 +166,16 @@ FIELDS = [
         key=DOCUMENTS_ENABLED,
         label="Workbench reads documents",
         description=(
-            "When on (the default), a PDF, Word, Markdown, text, CSV, HTML or code file "
-            "attached to a chat is read by Workbench, in a process of its own, and its text "
-            "goes to the chat's model, so any model can answer from it; and each person can "
-            "keep documents in My documents, which Workbench reads and searches for the "
-            "chats that have Documents turned on. When off, Workbench reads no file: only "
-            "images and audio, and PDFs to models that take them as files, are attached, as "
-            "before, and no saved document is added or searched (people can still read and "
-            "remove the ones they have). Turning it off does not stop a file already read "
-            "from being replayed in the chat it was sent in."
+            "Lets Workbench read files that people attach to chats or keep in My "
+            "documents.\n\n"
+            "- **On**: a PDF, Word, Markdown, text, CSV, HTML or code file attached "
+            "to a chat is read and its text goes to the chat's model. People can "
+            "also keep documents in My documents, which chats with Documents turned "
+            "on search.\n"
+            "- **Off**: no file is read. Only images and audio, and PDFs for models "
+            "that take them as files, are attached, and no saved document is added or "
+            "searched; people can still read and remove theirs. Files already read "
+            "stay in the chat they were sent in."
         ),
         category="documents",
         valueType=ConfigValueType.boolean,
@@ -195,11 +200,11 @@ FIELDS = [
         key=DOCUMENTS_WHOLE_UP_TO_TOKENS,
         label="Longest file read whole without asking (tokens)",
         description=(
-            "A file is read whole, with no question, up to this many tokens (default 6,000) "
-            "or a quarter of the model's window, whichever is less. A longer one is read only "
-            "when the person chooses to read it all, which Workbench allows up to 70% of what "
-            "remains of the window, or the first part of it. Tokens are counted as characters "
-            "divided by three, deliberately high."
+            "Files up to this many tokens are read whole, without asking.\n\n"
+            "The limit is also capped at a quarter of the model's window. A longer "
+            "file is read only when the person chooses to read it all, up to 70% of "
+            "what remains of the window, or just its first part. Tokens are counted as "
+            "characters divided by three, deliberately high."
         ),
         category="documents",
         valueType=ConfigValueType.integer,
@@ -211,11 +216,12 @@ FIELDS = [
         key=DOCUMENTS_MAX_PASSAGES,
         label="Most passages one person can keep",
         description=(
-            "How many passages (about 300 tokens each; a page of text is two or three) the "
-            "documents one person keeps may come to, in My documents and in the files they "
-            "search in chats together (default 100,000). A file that would take a person past "
-            "it is skipped, and says so; a person who is at the limit is told so and removes "
-            "a document to add another. Lowering it deletes nothing."
+            "The most passages one person's documents may come to, in My documents "
+            "and in chats together.\n\n"
+            "A passage is about 300 tokens; a page of text is two or three. A file "
+            "that would take a person past the limit is skipped, and says so; a person "
+            "at the limit is told and removes a document to add another. Lowering it "
+            "deletes nothing."
         ),
         category="documents",
         valueType=ConfigValueType.integer,
@@ -227,14 +233,17 @@ FIELDS = [
         key=DOCUMENTS_EXTERNAL_MODELS,
         label="Send passages of saved documents to models that run outside your machines",
         description=(
-            "What a chat does with the passages found in a person's saved documents when its "
-            "model runs on a cloud account or anywhere Eugene cannot confirm is this install's "
-            "own machines. Ask (the default): the passages are held back until the person "
-            "chooses to send them for that chat. Always: they are sent without asking. Each "
-            "person can choose Never, Ask or Always for themselves, and this is what a person "
-            "who has not chosen gets. Never is different: it is this install's rule, passages "
-            "are never sent to such a model, and no person can change that. A file a person "
-            "attaches to a chat is their own act and is not held back by this."
+            "What a chat does with passages from a person's saved documents when "
+            "its model runs outside this install's own machines.\n\n"
+            "Outside means a cloud account, or anywhere Eugene cannot confirm is "
+            "one of them.\n\n"
+            "- **Ask**: passages are held back until the person chooses to send them "
+            "for that chat.\n"
+            "- **Always**: passages are sent without asking.\n"
+            "- **Never**: passages are never sent, and no person can change that.\n\n"
+            "With Ask or Always, each person can choose for themselves; this is what a "
+            "person who has not chosen gets. A file a person attaches to a chat is "
+            "their own act and is not held back."
         ),
         category="documents",
         valueType=ConfigValueType.enum,
@@ -246,15 +255,15 @@ FIELDS = [
         key=DOCUMENTS_EMBEDDING_MODEL,
         label="Search model for My documents",
         description=(
-            "The model that finds a passage by what it says, and not only by its words. "
-            "Automatic (the default) uses the first search model that runs on this install's "
-            "own machines and is running now, and keeps the one a person's search was built "
-            "with while it is running. Name one to choose it. A model that runs outside your "
-            "machines is used only if you name it here and also allow it below: automatic "
-            "never picks one. Changing the model changes nobody's search by itself: a person "
-            "whose search was built with another model sees search by meaning paused, and "
-            "chooses Rebuild, which adds meaning again with the new one. While no search model "
-            "is running, documents are searched by words only."
+            "The model that finds a passage by what it says, not only by its "
+            "words.\n\n"
+            "**Automatic** uses the first search model running on this install's "
+            "own machines, and keeps the one a person's search was built with "
+            "while it is running. A model outside your machines is used only if "
+            "you name it here and also allow it below.\n\n"
+            "A person whose search was built with another model sees search by meaning "
+            "paused until they choose Rebuild. With no search model running, documents "
+            "are searched by words only."
         ),
         category="documents",
         valueType=ConfigValueType.string,
@@ -264,14 +273,14 @@ FIELDS = [
         key=DOCUMENTS_EXTERNAL_EMBEDDING,
         label="Send the text of documents to a search model or result sorter outside your machines",
         description=(
-            "Off (the default): the text of the passages in people's documents, and the "
-            "questions they ask, go only to a search model or result sorter that runs on this "
-            "install's own machines. On: if the search model named above runs outside them (a "
-            "cloud account), Workbench sends that account the text of every passage of "
-            "everyone's documents and every question they ask; and if the result sorter named "
-            "below runs outside them, it sends that account the best passages of every question "
-            "and the question itself. Either way it leaves your machines. Turn it on only where "
-            "that is acceptable for everything people keep here."
+            "Lets Workbench send people's document text and questions to a search "
+            "model or result sorter outside your machines.\n\n"
+            "Off, they go only to ones that run on this install's own machines. On, a "
+            "search model outside them (a cloud account) receives the text of every "
+            "passage of everyone's documents and every question, and a result sorter "
+            "outside them receives the best passages of every question and the "
+            "question itself. Turn it on only where that is acceptable for everything "
+            "people keep here."
         ),
         category="documents",
         valueType=ConfigValueType.boolean,
@@ -281,10 +290,11 @@ FIELDS = [
         key=DOCUMENTS_EMBED_PER_MINUTE,
         label="Most requests a minute for adding meaning to documents",
         description=(
-            "While Workbench adds meaning to documents it sends the search model one request "
-            "at a time, 16 passages each, and at most this many a minute (default 30). That "
-            "is half of what a new key allows (60 a minute and 2 at once), so a chat never "
-            "waits behind an import. Raise it only after raising the key's own limits in "
+            "The most requests a minute Workbench sends the search model while it "
+            "adds meaning to documents.\n\n"
+            "Requests go one at a time, 16 passages each. The default is half of what "
+            "a new key allows (60 a minute and 2 at once), so a chat never waits "
+            "behind an import. Raise it only after raising the key's own limits in "
             "Eugene's console, or adding meaning will be refused as over the limit."
         ),
         category="documents",
@@ -297,16 +307,13 @@ FIELDS = [
         key=DOCUMENTS_SORT_MODEL,
         label="Result sorter for My documents",
         description=(
-            "The model that reads the best passages of a search beside the question and puts "
-            "them in the order that answers it best, so that the few sent to a chat are the "
-            "right few. Automatic (the default) uses the first result sorter that runs on this "
-            "install's own machines and is running now. Off leaves the passages in the order "
-            "the search found them. Name one to choose it. A sorter that runs outside your "
-            "machines is used only if you name it here and also allow it with the setting for "
-            "sending the text of documents outside your machines: automatic never picks one, "
-            "because the text of what people keep would leave. A sorter that is stopped, too "
-            "slow or fails never stops a search: the passages go in the order they were found "
-            "and Test a question says why."
+            "The model that puts a search's best passages in the order that "
+            "answers the question best.\n\n"
+            "**Automatic** uses the first result sorter running on this install's own "
+            "machines. **Off** keeps the order the search found. A sorter outside your "
+            "machines is used only if you name it here and also allow sending document "
+            "text outside them. If the sorter is stopped, too slow or fails, the "
+            "passages keep the order they were found and Test a question says why."
         ),
         category="documents",
         valueType=ConfigValueType.string,
@@ -316,27 +323,14 @@ FIELDS = [
         key=DOCUMENTS_SORT_SECONDS,
         label="Sort time (seconds; a sort is given up on after twice this)",
         description=(
-            "How long a sort may be expected to take before Workbench leaves it out (default 3 "
-            "seconds); one that is asked is given up on after twice this. Before sorting, "
-            "Workbench works out how long it would take: the tokens to read (each passage, and "
-            "the question once for each passage; tokens are counted as characters divided by "
-            "three, deliberately high) over how many tokens a second this sorter reads, "
-            "measured from Workbench's own recent sorts and, before there is one, from a small "
-            "test made in the background (a question asked before that is answered with the "
-            "passages in the order they were found, and never waits for it). "
-            "Over this, the passages are left in the order they were found and the Documents "
-            "screen says why, with the numbers. A sort that is asked and takes more than twice "
-            "this is given up on, so one answer can wait that long. The sorter is then left "
-            "alone, whatever the size of the question, and the Documents screen says that it "
-            "did not answer and when it is asked again: by a small test, never by a question, "
-            "after ten seconds and after twice as long each time it still does not answer, up "
-            "to ten minutes (questions that were waiting together when it stopped answering "
-            "count as one try). Raising this setting so that twice it is longer than the wait "
-            "that was given up on asks it again at once. It is used again once it answers. As "
-            "measured through Workbench with Qwen3-Reranker-0.6B, sorting 18 passages took "
-            "about 7 seconds on a 12-thread processor and about 0.6 seconds on an RTX 5090 "
-            "(the median of 60 questions on each), which is why the default of 3 seconds sorts "
-            "on the graphics card and not on that processor."
+            "How long a sort may be expected to take before Workbench leaves it "
+            "out.\n\n"
+            "Workbench estimates it from the passages' tokens and the sorter's recent "
+            "speed. Over this, passages stay in the order the search found them, and "
+            "the Documents screen says why. A sort that takes more than twice this is "
+            "given up on, and the sorter is retried by a small test, never by a "
+            "question. Raise it for a sorter on a processor: 18 passages took about 7 "
+            "seconds on a 12-thread one, 0.6 on an RTX 5090."
         ),
         category="documents",
         valueType=ConfigValueType.number,
@@ -348,13 +342,14 @@ FIELDS = [
         key=DOCUMENTS_FOLDER_SYNC_MINUTES,
         label="How often Workbench looks at people's folders (minutes)",
         description=(
-            "A person can point their documents at a folder the owner has granted them. "
-            "Workbench looks at each such folder this often (default 10 minutes): it adds new "
-            "files, reads again a file that was edited (and keeps what it had if the words are "
-            "the same), and takes out a file that was deleted, so an answer is never more than "
-            "this many minutes behind the folder. Each person can also choose Sync now. A "
-            "shorter time finds edits sooner and reads the disk more often. Workbench only "
-            "reads a folder: it never changes anything in it."
+            "How often Workbench looks at the folders people have pointed their "
+            "documents at.\n\n"
+            "Each look adds new files, reads an edited file again (keeping what it had "
+            "if the words are the same) and takes out a deleted one, so an answer is "
+            "never more than this many minutes behind the folder. Each person can also "
+            "choose Sync now. A shorter time finds edits sooner and reads the disk "
+            "more often. Workbench only reads a folder; it never changes anything in "
+            "it."
         ),
         category="documents",
         valueType=ConfigValueType.integer,
@@ -366,12 +361,12 @@ FIELDS = [
         key=DOCUMENTS_FOLDER_MAX_FILES,
         label="Most files Workbench keeps from one folder",
         description=(
-            "The most files one folder in a person's documents may give (default 10,000), "
-            "counting the files that are not ignored. Files are taken in name order, the ones "
-            "nearest the top first; the rest are left out, and the person is told. Lowering it "
-            "removes the extra files at the next look. A small file is read in a fraction of a "
-            "second and a long PDF takes longer, so a big folder is searchable by degrees, and "
-            "the Documents screen says how far it has got."
+            "The most files Workbench takes from one folder in a person's "
+            "documents, not counting ignored files.\n\n"
+            "Files are taken in name order, nearest the top first; the rest are left "
+            "out, and the person is told. Lowering it removes the extra files at the "
+            "next look. A big folder becomes searchable by degrees, and the Documents "
+            "screen says how far it has got."
         ),
         category="documents",
         valueType=ConfigValueType.integer,
@@ -383,11 +378,12 @@ FIELDS = [
         key=DOCUMENTS_FOLDER_MAX_MB,
         label="Most megabytes Workbench copies from one folder",
         description=(
-            "Workbench keeps its own copy of each file it reads from a folder, so the most it "
-            "copies from one folder is limited (default 2,048 MB). A file that would take the "
-            "folder past it is skipped, and says so. This counts only the files Workbench reads, "
-            "not pictures or other files it skips. The most it reads of one file is the setting "
-            "for the largest file above."
+            "The most megabytes Workbench copies from one folder, because it keeps "
+            "its own copy of each file it reads.\n\n"
+            "A file that would take the folder past the limit is skipped, and says so. "
+            "This counts only the files Workbench reads, not pictures or other files "
+            "it skips. The most it reads of one file is the largest-file setting "
+            "above."
         ),
         category="documents",
         valueType=ConfigValueType.integer,
