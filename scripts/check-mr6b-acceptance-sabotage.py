@@ -15,11 +15,13 @@ The five the design names, and three more:
   gateway holding requests back for a moment taken for a sorter that is not running, and a sort
   that was given up on blended into what the sorter did while it was well).
 
-  python scripts/check-mr6b-acceptance-sabotage.py --reuse-data DIR [--labels heading,budget]
+  EP_SCRATCH=DIR python scripts/check-mr6b-acceptance-sabotage.py --reuse-data DIR [--labels heading]
   python scripts/check-mr6b-acceptance-sabotage.py --anchors      # only that each anchor is unique
 
-`DIR` holds the index the run of record imported (the acceptance writes it after its import).
-Run it with the Workbench interpreter, and with every ambient EUGENE_PLEXUS_* variable cleared.
+`EP_SCRATCH` is the scratch root (required; the copies and the runs are made under it, and the
+acceptance refuses any work directory that is not). `--reuse-data DIR` holds the index the run of
+record imported (the acceptance writes it after its import). Run it with the Workbench interpreter,
+and with every ambient EUGENE_PLEXUS_* variable cleared.
 """
 
 from __future__ import annotations
@@ -37,13 +39,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
 ACCEPTANCE = ROOT / "scripts" / "mr6b-sorting-acceptance.py"
-SCRATCH = Path(
-    os.environ.get(
-        "EP_SCRATCH",
-        "C:/Users/troyc/AppData/Local/Temp/claude/d--py-eugene-plexus-specs/"
-        "8fdf4703-5901-4dea-a989-c9fe897eef3c/scratchpad",
-    )
-)
+if not os.environ.get("EP_SCRATCH"):
+    raise SystemExit("EP_SCRATCH is not set: name the scratch directory this run may work in.")
+SCRATCH = Path(os.environ["EP_SCRATCH"]).resolve()
 PKG = "eugene_plexus_workbench/"
 SEARCH = PKG + "knowledge/search.py"
 SORTING = PKG + "knowledge/sorting.py"
@@ -102,8 +100,8 @@ CASES = [
         [
             (
                 SORTING,
-                "        report = replace(report, rate=rate, expected=expected)\n        if expected > budget:",
-                "        report = replace(report, rate=rate, expected=expected)\n        if False:",
+                '        expected = tokens / rate\n        if expected > budget:\n            return Verdict("over_budget", rate, source, expected)',
+                '        expected = tokens / rate\n        if False:\n            return Verdict("over_budget", rate, source, expected)',
             )
         ],
         "budget",
@@ -115,8 +113,8 @@ CASES = [
         [
             (
                 SORTING,
-                '        except (TimeoutError, HubError) as exc:\n            code, words = problem(self._error_of(exc, "the sort took too long"), model.id, budget)',
-                '        except TimeoutError as exc:\n            code, words = problem(self._error_of(exc, "the sort took too long"), model.id, budget)',
+                '        except (TimeoutError, HubError) as exc:\n            code, words = problem(self._error_of(exc, "the sort"), model.id, budget)',
+                '        except TimeoutError as exc:\n            code, words = problem(self._error_of(exc, "the sort"), model.id, budget)',
             ),
             (
                 SEARCH,
@@ -162,7 +160,7 @@ CASES = [
         [
             (
                 SORTING,
-                "                self._gave_up_on(model.id, tokens, limit)",
+                "                self._remember(model.id, code, words, GaveUp(tokens, limit))",
                 "                self._record(model.id, tokens, limit)",
             )
         ],
@@ -183,12 +181,68 @@ CASES = [
         6,
         ["comp.order", "gate.places", "gate.order-applied"],
     ),
+    # --- round two (the review of the run of record) -----------------------------------------------------
+    Case(
+        'the Result sorter setting says "In use" of a sorter that is too slow to sort (the review\'s '
+        "first finding: the setting and the screen disagreed)",
+        [
+            (
+                SORTING,
+                '        if found is not None and standing.sorting:\n            model = ConfigFieldStatus(level=info, text=f"In use: {found.id}{tail}.")',
+                '        if found is not None:\n            model = ConfigFieldStatus(level=info, text=f"In use: {found.id}{tail}.")',
+            )
+        ],
+        "budget",
+        3,
+        ["budget.settings-say-so"],
+    ),
+    Case(
+        "a question waits for the sorter to be measured (the review's second finding)",
+        [
+            (
+                SORTING,
+                '        verdict = self._judge(model, tokens, budget)\n        if verdict.code == "over_budget":',
+                '        verdict = self._judge(model, tokens, budget)\n        if verdict.code == "measuring":\n            await asyncio.wait(list(self._measuring.values()))\n            verdict = self._judge(model, tokens, budget)\n        if verdict.code == "over_budget":',
+            )
+        ],
+        "budget",
+        3,
+        ["budget.measuring-first"],
+    ),
+    Case(
+        "a sorter that did not answer is shown as a speed and told to have Sort time raised (the "
+        "review's third finding)",
+        [
+            (
+                SORTING,
+                "            # time: a longer wait for a sorter that does not answer helps nobody.\n            return Verdict(failed.code, message=failed.words(model.id, now))",
+                '            # time: a longer wait for a sorter that does not answer helps nobody.\n            return Verdict(\n                failed.code,\n                failed.gave_up.tokens / failed.gave_up.seconds,\n                "sorts",\n                message=failed.words(model.id, now),\n            )',
+            )
+        ],
+        "hung",
+        8,
+        ["hung.not-again"],
+    ),
+    Case(
+        "a probe that is not answered in time is not learned from (the review's second finding: "
+        "a sorter that never answers its first request)",
+        [
+            (
+                SORTING,
+                '            self._remember(model.id, code, words, GaveUp(tokens, limit) if code == "slow" else None)',
+                "            self._remember(model.id, code, words)",
+            )
+        ],
+        "named",
+        6,
+        ["named.probe-learned"],
+    ),
 ]
 
 ENV = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUTF8": "1"}
 for key in [k for k in ENV if k.startswith("EUGENE_PLEXUS_")]:
     del ENV[key]
-ENV.setdefault("WORKBENCH_PLAYWRIGHT", "D:/py/eugene-plexus/ui/node_modules/playwright")
+ENV.setdefault("WORKBENCH_PLAYWRIGHT", str(ROOT.parent / "ui" / "node_modules" / "playwright"))
 
 LINE = re.compile(r"^\s+(PASS|FAIL)\s+\[([\w.\-]+)\]")
 

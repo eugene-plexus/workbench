@@ -30,11 +30,15 @@ SAVED = SRC + "knowledge/saved.py"
 SAVED_API = SRC + "saved_api.py"
 HUB = SRC + "hub.py"
 CONFIG = SRC + "config.py"
+MEANING = SRC + "knowledge/meaning.py"
+LISTING = SRC + "knowledge/listing.py"
 
 UNIT = "tests/test_sorting.py::"
 FOUND = "tests/test_sorting_search.py::"
 HUB_T = "tests/test_hub_rerank.py::"
 API = "tests/test_sorting_api.py::"
+LIST = "tests/test_listing.py::"
+WORKER = "tests/test_meaning_worker.py::"
 CHATS = "tests/test_chats.py::test_settings_are_changed_only_with_the_agents_admin_token"
 
 #: (label, [(file, before, after), ...], [check, ...])
@@ -288,8 +292,8 @@ CASES: list[Case] = [
     one(
         "a failure of the gateway raises",
         SORTING,
-        '        except (TimeoutError, HubError) as exc:\n            code, words = problem(self._error_of(exc, "the sort took too long"), model.id, budget)',
-        '        except TimeoutError as exc:\n            code, words = problem(self._error_of(exc, "the sort took too long"), model.id, budget)',
+        '        except (TimeoutError, HubError) as exc:\n            code, words = problem(self._error_of(exc, "the sort"), model.id, budget)',
+        '        except TimeoutError as exc:\n            code, words = problem(self._error_of(exc, "the sort"), model.id, budget)',
         UNIT
         + "test_a_sorter_that_fails_is_a_report_in_its_own_words_and_the_passages_are_left_as_found",
         UNIT + "test_a_sorter_whose_answer_is_not_a_score_for_each_passage_is_not_believed",
@@ -298,15 +302,32 @@ CASES: list[Case] = [
     one(
         "a probe that fails raises",
         SORTING,
-        '        except (TimeoutError, HubError) as exc:\n            code, words = problem(self._error_of(exc, "the probe took too long"), model.id, budget)',
-        '        except TimeoutError as exc:\n            code, words = problem(self._error_of(exc, "the probe took too long"), model.id, budget)',
-        UNIT + "test_a_sorter_that_is_stopped_when_it_is_first_asked_is_said_and_asked_again_soon",
+        "        except Exception as exc:  # whatever it was, it is kept: never asked again at every look",
+        "        except TimeoutError as exc:  # whatever it was, it is kept: never asked again at every look",
+        UNIT
+        + "test_a_sorter_that_is_stopped_when_it_is_first_looked_at_is_said_and_asked_again_soon",
         UNIT + "test_the_standing_of_a_sorter_that_cannot_be_measured_names_what_was_seen",
+    ),
+    one(
+        "a probe that fails inside Workbench is not kept",
+        SORTING,
+        "        except Exception as exc:  # whatever it was, it is kept: never asked again at every look",
+        "        except (TimeoutError, HubError) as exc:  # whatever it was, it is kept: never asked again at every look",
+        UNIT
+        + "test_a_probe_that_fails_inside_workbench_is_kept_like_any_other_and_not_asked_at_every_look",
+    ),
+    one(
+        "a probe that fails inside Workbench is not logged with where it was",
+        SORTING,
+        '            exc_info=(type(exc), exc, exc.__traceback__) if error.kind == "internal" else None,',
+        "            exc_info=None,",
+        UNIT
+        + "test_a_probe_that_fails_inside_workbench_is_kept_like_any_other_and_not_asked_at_every_look",
     ),
     one(
         "a sorter that is stopped is not said to be",
         SORTING,
-        '    if exc.status in (503, 404):\n        return "not_running", (',
+        '    if exc.status == 503:\n        return "not_running", (',
         '    if exc.status in ():\n        return "not_running", (',
         UNIT
         + "test_a_sorter_that_fails_is_a_report_in_its_own_words_and_the_passages_are_left_as_found",
@@ -348,8 +369,8 @@ CASES: list[Case] = [
     one(
         "a refusal does not say what the sorter said",
         SORTING,
-        '            f"{NOT_SORTED}the sorter {model} refused the request ({engine_words(exc)}), {LEFT}."',
-        '            f"{NOT_SORTED}the sorter {model} refused the request, {LEFT}."',
+        'f"{NOT_SORTED}the sorter {model} refused the request ({spoke}), {LEFT}."',
+        'f"{NOT_SORTED}the sorter {model} refused the request, {LEFT}."',
         UNIT
         + "test_a_sorter_that_fails_is_a_report_in_its_own_words_and_the_passages_are_left_as_found",
         API + "test_a_sorter_that_fails_leaves_the_search_whole_and_says_what_it_said",
@@ -365,23 +386,37 @@ CASES: list[Case] = [
     one(
         "a score that is not a number is believed",
         HUB,
-        "            or not isinstance(score, int | float)\n            or isinstance(score, bool)\n            or not math.isfinite(score)",
-        "            or isinstance(score, bool)",
+        "    if isinstance(value, bool) or not isinstance(value, int | float):\n        return None\n    try:\n        number = float(value)",
+        "    try:\n        number = float(value)",
         HUB_T + "test_an_answer_that_is_not_a_score_for_each_passage_is_said_as_what_it_is",
+    ),
+    one(
+        "a score that is not finite is believed",
+        HUB,
+        "    return number if math.isfinite(number) else None",
+        "    return number",
         HUB_T + "test_a_score_that_is_not_a_finite_number_is_not_believed",
+    ),
+    one(
+        "a score too large to be a number is a failure in Workbench",
+        HUB,
+        "    except (OverflowError, ValueError):\n        return None",
+        "    except ValueError:\n        return None",
+        HUB_T
+        + "test_a_score_too_large_to_be_a_number_is_an_unusable_answer_and_not_a_failure_in_workbench",
     ),
     one(
         "a repeated passage in the answer is believed",
         HUB,
-        "            or index in seen\n            or not isinstance(score, int | float)\n",
-        "            or not isinstance(score, int | float)\n",
+        "            or index in seen\n            or score is None\n",
+        "            or score is None\n",
         HUB_T + "test_an_answer_that_is_not_a_score_for_each_passage_is_said_as_what_it_is",
     ),
     one(
         "a score goes with the place it was listed at",
         HUB,
-        "        scores[index] = float(score)",
-        "        scores[len(seen) - 1] = float(score)",
+        "        scores[index] = score",
+        "        scores[len(seen) - 1] = score",
         HUB_T
         + "test_each_score_goes_with_the_passage_it_is_for_whatever_order_the_answer_lists_them_in",
     ),
@@ -424,35 +459,35 @@ CASES: list[Case] = [
         SORTING,
         "        limit = 2 * budget\n        started = self._clock()\n        self.asked.append(len(sheets))",
         "        limit = budget\n        started = self._clock()\n        self.asked.append(len(sheets))",
-        UNIT
-        + "test_a_sorter_that_takes_over_twice_the_budget_is_given_up_on_and_that_is_remembered",
+        UNIT + "test_a_sorter_that_takes_over_twice_the_budget_is_given_up_on_and_said_as_that",
         API
         + "test_a_sorter_that_takes_over_twice_the_budget_is_given_up_on_and_the_search_is_whole",
     ),
     one(
-        "a sort that is given up on is not remembered as slow",
+        "a sort that is given up on is not remembered as a sorter that did not answer",
         SORTING,
         '            if code == "slow":',
         "            if False:",
-        UNIT
-        + "test_a_sorter_that_takes_over_twice_the_budget_is_given_up_on_and_that_is_remembered",
+        UNIT + "test_a_sorter_that_stopped_answering_is_not_asked_again_by_the_next_questions",
+        API
+        + "test_a_sorter_that_takes_over_twice_the_budget_is_given_up_on_and_the_search_is_whole",
     ),
     one(
         "a sort that is given up on is blended into what the sorter did while it was well",
         SORTING,
-        "                self._gave_up_on(model.id, tokens, limit)",
+        "                self._remember(model.id, code, words, GaveUp(tokens, limit))",
         "                self._record(model.id, tokens, limit)",
         UNIT + "test_a_sorter_that_stopped_answering_is_not_asked_again_by_the_next_questions",
-        UNIT + "test_a_sorter_that_was_given_up_on_is_measured_again_when_the_speed_is_old",
+        UNIT + "test_a_sorter_that_takes_over_twice_the_budget_is_given_up_on_and_said_as_that",
     ),
     one(
         "a sort that is given up on is taken for a quick one",
         SORTING,
-        "        speed.record(tokens, seconds, self._clock())\n        self._speeds[model] = speed",
-        "        speed.record(tokens, 0.001, self._clock())\n        self._speeds[model] = speed",
+        "                self._remember(model.id, code, words, GaveUp(tokens, limit))",
+        "                self._remember(model.id, code, words, GaveUp(tokens, 0.001))",
         UNIT + "test_a_sorter_that_stopped_answering_is_not_asked_again_by_the_next_questions",
         UNIT
-        + "test_a_sorter_that_takes_over_twice_the_budget_is_given_up_on_and_that_is_remembered",
+        + "test_a_sorter_that_did_not_answer_is_told_when_it_is_asked_again_as_that_time_comes",
     ),
     # --- which sorter (call 3) ---------------------------------------------------------------
     one(
@@ -519,8 +554,8 @@ CASES: list[Case] = [
     one(
         "off asks the gateway",
         SORTING,
-        "        if setting.casefold() == OFF:\n            return Resolved(choose([], (), setting, False))",
-        "        if False:\n            return Resolved(choose([], (), setting, False))",
+        "        if setting.casefold() == OFF:\n            return choose([], (), setting, False)",
+        "        if False:\n            return choose([], (), setting, False)",
         UNIT + "test_a_sorter_that_is_off_asks_the_gateway_nothing_and_is_quiet",
     ),
     one(
@@ -536,8 +571,8 @@ CASES: list[Case] = [
     one(
         "the budget is ignored",
         SORTING,
-        "        report = replace(report, rate=rate, expected=expected)\n        if expected > budget:",
-        "        report = replace(report, rate=rate, expected=expected)\n        if False:",
+        '        expected = tokens / rate\n        if expected > budget:\n            return Verdict("over_budget", rate, source, expected)',
+        '        expected = tokens / rate\n        if False:\n            return Verdict("over_budget", rate, source, expected)',
         UNIT
         + "test_a_sort_that_would_take_longer_than_the_budget_is_not_made_and_says_why_with_the_numbers",
         UNIT + "test_the_same_sort_is_made_when_the_budget_allows_it_and_not_when_it_does_not",
@@ -548,15 +583,15 @@ CASES: list[Case] = [
     one(
         "a sort that takes exactly the budget is refused",
         SORTING,
-        "        report = replace(report, rate=rate, expected=expected)\n        if expected > budget:",
-        "        report = replace(report, rate=rate, expected=expected)\n        if expected >= budget:",
+        "        expected = tokens / rate\n        if expected > budget:",
+        "        expected = tokens / rate\n        if expected >= budget:",
         UNIT + "test_a_sort_that_takes_exactly_the_budget_is_made",
     ),
     one(
         "the time is not tokens over the speed",
         SORTING,
-        "        expected = tokens / rate\n        report = replace(report, rate=rate, expected=expected)",
-        "        expected = tokens * rate\n        report = replace(report, rate=rate, expected=expected)",
+        "        expected = tokens / rate\n        if expected > budget:\n            return Verdict",
+        "        expected = tokens * rate\n        if expected > budget:\n            return Verdict",
         UNIT + "test_what_the_probe_measured_prices_the_first_sort_by_tokens_over_that_rate",
         UNIT
         + "test_a_sort_that_would_take_longer_than_the_budget_is_not_made_and_says_why_with_the_numbers",
@@ -601,17 +636,18 @@ CASES: list[Case] = [
     one(
         "the probe is one passage",
         SORTING,
-        "        sheets = probe_sheets()\n        limit = 2 * budget",
-        "        sheets = probe_sheets()[:1]\n        limit = 2 * budget",
+        "        sheets = probe_sheets()\n        tokens = sort_tokens(sheets, PROBE_QUESTION)",
+        "        sheets = probe_sheets()[:1]\n        tokens = sort_tokens(sheets, PROBE_QUESTION)",
         UNIT
-        + "test_a_sorter_that_has_never_read_is_measured_with_two_passages_when_it_is_first_asked",
+        + "test_a_question_asked_of_a_sorter_never_measured_is_answered_at_once_and_it_is_measured_behind",
     ),
     one(
         "the probe is made for every sort",
         SORTING,
-        "        rate = self.rate_of(model.id)\n        if rate is not None:\n            self._refresh(model, budget)",
-        "        rate = self.rate_of(model.id)\n        if False and rate is not None:\n            self._refresh(model, budget)",
+        '            due = old and (speed.source == "probe" or typical_tokens() / rate > budget)',
+        "            due = True",
         UNIT + "test_the_probe_is_not_made_again_while_the_speed_is_known_and_recent",
+        UNIT + "test_a_speed_from_real_sorts_that_is_quick_enough_is_left_alone_however_old_it_is",
     ),
     one(
         "two questions at once each measure the sorter",
@@ -621,14 +657,38 @@ CASES: list[Case] = [
         UNIT + "test_two_questions_asked_at_once_of_a_sorter_not_yet_measured_measure_it_once",
     ),
     one(
-        "a sorter that was never measured is sorted with, unpriced",
+        "a question waits for the sorter to be measured",
         SORTING,
-        "        await asyncio.wait({self._measure_soon(model, budget)})\n        rate = self.rate_of(model.id)",
-        "        self._measure_soon(model, budget)\n        rate = self.rate_of(model.id)",
+        '        verdict = self._judge(model, tokens, budget)\n        if verdict.code == "over_budget":',
+        '        verdict = self._judge(model, tokens, budget)\n        if verdict.code == "measuring":\n            await asyncio.wait(list(self._measuring.values()))\n            verdict = self._judge(model, tokens, budget)\n        if verdict.code == "over_budget":',
+        UNIT + "test_a_question_is_not_made_to_wait_for_a_sorter_that_does_not_answer",
         UNIT
-        + "test_a_sorter_that_has_never_read_is_measured_with_two_passages_when_it_is_first_asked",
+        + "test_a_question_asked_of_a_sorter_never_measured_is_answered_at_once_and_it_is_measured_behind",
         API
-        + "test_a_sorter_too_slow_for_the_time_allowed_is_not_asked_and_the_page_is_told_why_with_the_numbers",
+        + "test_a_question_asked_before_the_sorter_is_measured_is_answered_at_once_and_the_next_is_sorted",
+    ),
+    one(
+        "a probe is not given a limit of its own",
+        SORTING,
+        "        limit = max(2 * budget, PROBE_MIN_LIMIT)",
+        "        limit = 2 * budget",
+        UNIT + "test_the_probe_is_given_twice_sort_time_and_never_less_than_ten_seconds",
+        UNIT
+        + "test_a_question_asked_of_a_sorter_never_measured_is_answered_at_once_and_it_is_measured_behind",
+    ),
+    one(
+        "a probe is given ten seconds whatever Sort time is",
+        SORTING,
+        "        limit = max(2 * budget, PROBE_MIN_LIMIT)",
+        "        limit = PROBE_MIN_LIMIT",
+        UNIT + "test_the_probe_is_given_twice_sort_time_and_never_less_than_ten_seconds",
+    ),
+    one(
+        "a probe that is not answered in time is not learned from",
+        SORTING,
+        '            self._remember(model.id, code, words, GaveUp(tokens, limit) if code == "slow" else None)',
+        "            self._remember(model.id, code, words)",
+        UNIT + "test_a_probe_that_is_not_answered_in_time_is_learned_from_as_a_sort_given_up_on_is",
     ),
     one(
         "the speed ignores the sorts after the probe",
@@ -656,41 +716,127 @@ CASES: list[Case] = [
     one(
         "a speed that is old is never measured again",
         SORTING,
-        "            speed is not None and speed.at is not None and self._clock() - speed.at > RATE_MAX_AGE",
-        "            False",
-        UNIT + "test_a_speed_that_is_old_is_used_as_it_stands_and_measured_again_behind_the_search",
-        UNIT + "test_a_sorter_that_was_slow_for_a_while_is_not_left_off_for_ever",
+        "            old = now - speed.at > RATE_MAX_AGE",
+        "            old = False",
+        UNIT
+        + "test_a_speed_that_is_only_the_probes_is_measured_again_when_it_is_old_and_blended_in",
+        UNIT
+        + "test_a_sorter_over_budget_on_what_real_sorts_measured_is_measured_again_when_old_and_blended",
     ),
     one(
-        "a measurement made again does not replace the old",
+        "a speed from real sorts that is quick enough is measured again",
         SORTING,
-        "        self._speeds[model.id] = speed\n        self._failed.pop(model.id, None)",
-        "        self._speeds.setdefault(model.id, speed)\n        self._failed.pop(model.id, None)",
-        UNIT + "test_a_speed_that_is_old_is_used_as_it_stands_and_measured_again_behind_the_search",
+        '            due = old and (speed.source == "probe" or typical_tokens() / rate > budget)',
+        "            due = old",
+        UNIT + "test_a_speed_from_real_sorts_that_is_quick_enough_is_left_alone_however_old_it_is",
+    ),
+    one(
+        "a sorter that is over budget is never measured again",
+        SORTING,
+        '            due = old and (speed.source == "probe" or typical_tokens() / rate > budget)',
+        '            due = old and speed.source == "probe"',
+        UNIT
+        + "test_a_sorter_over_budget_on_what_real_sorts_measured_is_measured_again_when_old_and_blended",
+    ),
+    one(
+        "a speed that is only the probe's is never measured again",
+        SORTING,
+        '            due = old and (speed.source == "probe" or typical_tokens() / rate > budget)',
+        "            due = old and typical_tokens() / rate > budget",
+        UNIT
+        + "test_a_speed_that_is_only_the_probes_is_measured_again_when_it_is_old_and_blended_in",
+    ),
+    one(
+        "a measurement made again replaces what the sorts measured",
+        SORTING,
+        "            self._speeds.setdefault(model.id, Speed()).record(\n                tokens, now - started, now, sort=False\n            )",
+        "            fresh = Speed()\n            fresh.record(tokens, now - started, now, sort=False)\n            self._speeds[model.id] = fresh",
+        UNIT
+        + "test_a_speed_that_is_only_the_probes_is_measured_again_when_it_is_old_and_blended_in",
+        UNIT
+        + "test_a_sorter_over_budget_on_what_real_sorts_measured_is_measured_again_when_old_and_blended",
     ),
     one(
         "a sorter that could not be measured is asked at once again",
         SORTING,
-        "        if failed is not None and self._clock() - failed.at < MEASURE_RETRY:\n            return None, failed",
-        "        if False:\n            return None, failed",
-        UNIT + "test_a_sorter_that_is_stopped_when_it_is_first_asked_is_said_and_asked_again_soon",
+        "        if failed is not None and now < failed.retry_at():\n            return\n",
+        "        if False:\n            return\n",
+        UNIT + "test_the_wait_before_a_sorter_that_could_not_be_measured_is_asked_again_doubles",
+        UNIT
+        + "test_a_sorter_that_is_stopped_when_it_is_first_looked_at_is_said_and_asked_again_soon",
+    ),
+    one(
+        "a sorter that could not be measured is asked again in the same time each time",
+        SORTING,
+        "        wait = MEASURE_RETRY * 2.0 ** min(self.tries - 1, 30)",
+        "        wait = MEASURE_RETRY",
+        UNIT + "test_the_wait_before_a_sorter_that_could_not_be_measured_is_asked_again_doubles",
+        UNIT + "test_a_sorter_that_answers_the_probe_and_not_a_sort_is_asked_less_and_less",
+    ),
+    one(
+        "the wait before a sorter is asked again has no end",
+        SORTING,
+        "        return self.at + min(wait, RATE_MAX_AGE)",
+        "        return self.at + wait",
+        UNIT + "test_the_wait_before_a_sorter_that_could_not_be_measured_is_asked_again_doubles",
+    ),
+    one(
+        "the times a sorter did not come to anything are not counted",
+        SORTING,
+        "        strikes = self._strikes.get(model, 0) + 1",
+        "        strikes = 1",
+        UNIT + "test_the_wait_before_a_sorter_that_could_not_be_measured_is_asked_again_doubles",
+        UNIT + "test_a_sorter_that_answers_the_probe_and_not_a_sort_is_asked_less_and_less",
+    ),
+    one(
+        "a sort that is answered does not put the count right",
+        SORTING,
+        "        self._strikes.pop(model, None)",
+        "        pass",
+        UNIT + "test_a_sorter_that_answers_the_probe_and_not_a_sort_is_asked_less_and_less",
+        UNIT + "test_a_probe_that_answers_after_a_failure_clears_what_was_held_against_the_sorter",
+    ),
+    one(
+        "the probe's answer puts the count of unanswered sorts right",
+        SORTING,
+        "        if probe and failed is not None and failed.gave_up is not None:\n            return",
+        "        if False:\n            return",
+        UNIT + "test_a_sorter_that_answers_the_probe_and_not_a_sort_is_asked_less_and_less",
+    ),
+    one(
+        "a sorter that answered is still held against",
+        SORTING,
+        "        failed = self._failed.pop(model, None)",
+        "        failed = self._failed.get(model)",
+        UNIT + "test_a_probe_that_answers_after_a_failure_clears_what_was_held_against_the_sorter",
+        UNIT
+        + "test_a_sorter_that_was_given_up_on_is_asked_again_by_the_probe_and_used_when_it_answers",
     ),
     # --- what the screens say ----------------------------------------------------------------
     one(
         "a screen waits for the sorter to be measured",
         SORTING,
-        '            self._measure_soon(model, budget)\n            return stand("measuring", None)',
-        '            await asyncio.wait({self._measure_soon(model, budget)})\n            return stand("measuring", None)',
+        "        verdict = self._judge(model, typical_tokens(), budget)\n        message = verdict.message",
+        '        verdict = self._judge(model, typical_tokens(), budget)\n        if verdict.code == "measuring":\n            await asyncio.wait(list(self._measuring.values()))\n            verdict = self._judge(model, typical_tokens(), budget)\n        message = verdict.message',
         UNIT + "test_the_standing_does_not_wait_for_a_measurement_and_says_so_until_it_is_made",
     ),
     one(
         "the header says a usual sort is quick enough when it is not",
         SORTING,
-        "        expected = typical_tokens() / rate\n        if expected > budget:",
-        "        expected = typical_tokens() / rate\n        if False:",
+        "        verdict = self._judge(model, typical_tokens(), budget)\n        message = verdict.message",
+        "        verdict = self._judge(model, 1, budget)\n        message = verdict.message",
         UNIT + "test_a_sorter_too_slow_for_a_sort_of_the_usual_size_is_said_with_the_numbers",
         API + "test_the_screen_says_the_same_thing_before_any_question_is_asked",
         API + "test_the_budget_setting_says_when_the_sorter_is_too_slow_for_it",
+    ),
+    one(
+        "the screen and a question are not judged alike",
+        SORTING,
+        "        self._measure_if_due(model, budget)\n        now = self._clock()",
+        "        now = self._clock()",
+        UNIT + "test_the_standing_does_not_wait_for_a_measurement_and_says_so_until_it_is_made",
+        UNIT
+        + "test_a_question_asked_of_a_sorter_never_measured_is_answered_at_once_and_it_is_measured_behind",
     ),
     one(
         "a usual sort is of a different size from the one said",
@@ -812,6 +958,262 @@ CASES: list[Case] = [
         "",
         CHATS,
         API + "test_the_settings_take_what_they_can_and_refuse_what_they_cannot",
+    ),
+    # --- settings never lie: the setting says what the screen says (round two, item 1) ------------------
+    one(
+        "the sorter setting says in use of a sorter that is not sorting",
+        SORTING,
+        '        if found is not None and standing.sorting:\n            model = ConfigFieldStatus(level=info, text=f"In use: {found.id}{tail}.")',
+        '        if found is not None:\n            model = ConfigFieldStatus(level=info, text=f"In use: {found.id}{tail}.")',
+        UNIT + "test_the_result_sorter_setting_says_in_use_only_while_the_sorter_is_sorting",
+        UNIT + "test_the_two_settings_say_what_they_come_to_now",
+        API + "test_the_budget_setting_says_when_the_sorter_is_too_slow_for_it",
+    ),
+    one(
+        "the sorter setting does not say why nothing is sorted",
+        SORTING,
+        '                text=f"Chosen: {found.id}{tail}, not sorting now: {reason_of(said)}",',
+        '                text=f"Chosen: {found.id}{tail}.",',
+        UNIT + "test_the_result_sorter_setting_says_in_use_only_while_the_sorter_is_sorting",
+        UNIT + "test_the_two_settings_say_what_they_come_to_now",
+    ),
+    one(
+        "the sorter setting says a failure as quietly as a sorter that is too slow",
+        SORTING,
+        '                level=info if standing.code in ("measuring", "over_budget") else warning,',
+        "                level=info,",
+        UNIT + "test_the_result_sorter_setting_says_in_use_only_while_the_sorter_is_sorting",
+    ),
+    one(
+        "the screen's label says in use of a sorter that is not sorting",
+        SORTING,
+        "                if found is not None and self.sorting\n                else None",
+        "                if found is not None\n                else None",
+        UNIT + "test_the_result_sorter_setting_says_in_use_only_while_the_sorter_is_sorting",
+        UNIT + "test_a_sorter_that_stopped_answering_is_not_asked_again_by_the_next_questions",
+        "tests/test_sorting_page.py::test_the_header_has_the_fields_the_page_reads_in_each_state_the_sorter_can_be_in",
+    ),
+    one(
+        "the sort time setting says a speed when there is none",
+        SORTING,
+        "        elif standing.rate is None:\n            # No speed: it did not answer, or could not be asked. Said as that, and not as a speed.",
+        "        elif False:\n            # No speed: it did not answer, or could not be asked. Said as that, and not as a speed.",
+        UNIT + "test_the_sort_time_setting_says_what_was_seen_when_there_is_no_speed_to_say",
+        UNIT + "test_a_standing_made_by_hand_with_no_speed_is_still_said_in_the_settings_words",
+    ),
+    # --- a sorter that did not answer is its own state, apart from the speed (round two, item 3) --------------
+    one(
+        "a sorter that did not answer is shown as a speed",
+        SORTING,
+        "            # time: a longer wait for a sorter that does not answer helps nobody.\n            return Verdict(failed.code, message=failed.words(model.id, now))",
+        '            # time: a longer wait for a sorter that does not answer helps nobody.\n            return Verdict(\n                failed.code,\n                failed.gave_up.tokens / failed.gave_up.seconds,\n                "sorts",\n                message=failed.words(model.id, now),\n            )',
+        UNIT + "test_a_sorter_that_stopped_answering_is_not_asked_again_by_the_next_questions",
+        API
+        + "test_a_sorter_that_takes_over_twice_the_budget_is_given_up_on_and_the_search_is_whole",
+    ),
+    one(
+        "a sorter that did not answer is told to have Sort time raised",
+        SORTING,
+        '        f"was asked, {LEFT}. {again_words(retry_in)}"',
+        '        f"was asked, {LEFT}. {again_words(retry_in)} {RAISE_IT}"',
+        UNIT
+        + "test_a_sorter_that_did_not_answer_is_said_with_what_was_seen_and_when_it_is_asked_again",
+        UNIT + "test_a_sorter_that_stopped_answering_is_not_asked_again_by_the_next_questions",
+    ),
+    one(
+        "a sorter that did not answer is not told when it is asked again",
+        SORTING,
+        '        f"was asked, {LEFT}. {again_words(retry_in)}"',
+        '        f"was asked, {LEFT}."',
+        UNIT
+        + "test_a_sorter_that_did_not_answer_is_said_with_what_was_seen_and_when_it_is_asked_again",
+        UNIT
+        + "test_a_sorter_that_did_not_answer_is_told_when_it_is_asked_again_as_that_time_comes",
+    ),
+    one(
+        "what a sorter showed when it did not answer is not used to price the next sort",
+        SORTING,
+        "            and failed.gave_up.over(tokens, budget)",
+        "            and False",
+        UNIT + "test_a_sorter_that_stopped_answering_is_not_asked_again_by_the_next_questions",
+        API
+        + "test_a_sorter_that_takes_over_twice_the_budget_is_given_up_on_and_the_search_is_whole",
+    ),
+    one(
+        "what a sorter showed when it did not answer keeps it out for ever",
+        SORTING,
+        "        return tokens * self.seconds > self.tokens * budget",
+        "        return True",
+        UNIT + "test_raising_sort_time_past_what_a_given_up_sort_showed_lets_the_sorter_in_at_once",
+    ),
+    # --- what the gateway said and the door said (round two, item 10) -----------------------------------------------
+    one(
+        "a 404 is said to be a sorter that is stopped",
+        SORTING,
+        '    if exc.status == 503:\n        return "not_running", (',
+        '    if exc.status in (503, 404):\n        return "not_running", (',
+        UNIT
+        + "test_a_404_is_said_in_the_gateways_words_and_is_not_said_to_be_a_sorter_that_is_stopped",
+        API + "test_a_sorter_that_fails_leaves_the_search_whole_and_says_what_it_said",
+    ),
+    one(
+        "a 404 is not said in the gateway's words",
+        SORTING,
+        "    if exc.status == 404:\n        # The gateway does not serve this model",
+        "    if False:\n        # The gateway does not serve this model",
+        UNIT
+        + "test_a_404_is_said_in_the_gateways_words_and_is_not_said_to_be_a_sorter_that_is_stopped",
+        API + "test_a_sorter_that_fails_leaves_the_search_whole_and_says_what_it_said",
+    ),
+    one(
+        "a 400 of the door's own is said to be the sorter's refusal",
+        SORTING,
+        "        if too_long(exc) or spoke != said.strip():",
+        "        if True:",
+        UNIT + "test_a_400_that_is_the_gateways_own_is_not_said_to_be_the_sorters_refusal",
+        API + "test_a_sorter_that_fails_leaves_the_search_whole_and_says_what_it_said",
+    ),
+    one(
+        "a failure inside Workbench is not said as that",
+        SORTING,
+        '    if exc.kind == "internal":\n        return "error", f"{NOT_SORTED}{exc.message}, {LEFT}. See Workbench\'s log."',
+        '    if False:\n        return "error", f"{NOT_SORTED}{exc.message}, {LEFT}. See Workbench\'s log."',
+        UNIT + "test_a_failure_in_workbench_itself_is_said_as_that_with_its_name",
+        UNIT
+        + "test_a_probe_that_fails_inside_workbench_is_kept_like_any_other_and_not_asked_at_every_look",
+    ),
+    one(
+        "the settings page swallows what a sorter's settings fail with",
+        CONFIG,
+        '            log.warning(\n                "the result sorter settings could not say what they come to; they are left as "\n                "they are",\n                exc_info=True,\n            )',
+        "            pass",
+        API + "test_a_screen_is_not_stopped_by_a_sorter_that_cannot_be_looked_at",
+    ),
+    one(
+        "a 503 that asks for a wait is said to be a search model that is stopped",
+        MEANING,
+        "    if exc.status == 503 and exc.retry_after is not None:",
+        "    if False:",
+        WORKER
+        + "test_a_503_that_asks_for_a_wait_is_the_gateway_holding_requests_back_and_not_a_stopped_model",
+        WORKER
+        + "test_a_worker_held_back_by_the_gateway_says_so_and_does_not_say_the_model_is_stopped",
+    ),
+    # --- the gateway's list of models (round two, items 6 and 7) -------------------------------------------------------
+    one(
+        "a key at its limit is not said when the list of models is asked for",
+        SORTING,
+        '    if exc.status == 429:\n        return "limited", (\n            f"{NOT_SORTED}this Workbench\'s key is at its limit ({said}), so Workbench could not "',
+        '    if False:\n        return "limited", (\n            f"{NOT_SORTED}this Workbench\'s key is at its limit ({said}), so Workbench could not "',
+        UNIT + "test_a_list_of_models_that_could_not_be_had_is_said_as_why",
+        UNIT + "test_a_key_at_its_limit_cannot_look_for_a_sorter_and_says_so",
+    ),
+    one(
+        "a list of models that failed is said without the gateway's words",
+        SORTING,
+        '    return "error", f"{NOT_SORTED}Eugene\'s gateway could not list its models ({said})."',
+        '    return "error", f"{NOT_SORTED}Eugene\'s gateway could not list its models."',
+        UNIT + "test_a_list_of_models_that_could_not_be_had_is_said_as_why",
+        UNIT + "test_a_gateway_with_a_failure_of_its_own_listing_models_is_said_as_that",
+    ),
+    one(
+        "a list of models that is not answered in time raises",
+        LISTING,
+        "        except TimeoutError:\n            return Look(",
+        "        except KeyError:\n            return Look(",
+        LIST
+        + "test_a_gateway_that_does_not_answer_is_a_look_that_says_so_after_the_time_a_look_may_take",
+        UNIT
+        + "test_a_gateway_that_does_not_list_its_models_in_time_is_a_report_in_the_gateways_words",
+    ),
+    one(
+        "search by meaning and sorting each look at the list of models",
+        SAVED,
+        "            self.meaning = Meaning(self.indexes, gateway, settings, listing=listing)",
+        "            self.meaning = Meaning(self.indexes, gateway, settings)",
+        API
+        + "test_a_gateway_that_does_not_answer_its_list_of_models_holds_the_screen_once_and_not_twice",
+    ),
+    one(
+        "askers that come together each make a look",
+        LISTING,
+        "            if current is not None and (\n                (fresh and current is not kept) or (not fresh and self._good(current))\n            ):\n                return current",
+        "            if False:\n                return current",
+        LIST + "test_askers_that_come_together_make_one_look_between_them",
+    ),
+    one(
+        "a look is kept for no time",
+        LISTING,
+        "TTL = 10.0",
+        "TTL = 0.0",
+        LIST + "test_a_look_is_kept_for_ten_seconds_and_a_failed_one_for_three",
+        UNIT
+        + "test_what_the_gateway_lists_is_looked_at_once_in_ten_seconds_and_again_after_a_failure",
+    ),
+    one(
+        "what a sorter's failure forgot is kept",
+        LISTING,
+        "        self._last = None\n\n    def _good",
+        "        pass\n\n    def _good",
+        LIST + "test_a_look_that_is_asked_for_fresh_is_made_again_and_forgotten_is_made_again",
+        UNIT
+        + "test_what_the_gateway_lists_is_looked_at_once_in_ten_seconds_and_again_after_a_failure",
+    ),
+    one(
+        "the Sort time label says it is the most a sort may add",
+        CONFIG,
+        '        label="Sort time (seconds; a sort is given up on after twice this)",',
+        '        label="Sort time (seconds)",',
+        API
+        + "test_the_two_settings_are_in_the_config_with_their_defaults_and_say_what_they_come_to",
+    ),
+    # --- try one way at a time (round two, item 9) -----------------------------------------------------------------------
+    one(
+        "a run that names its ways is sorted",
+        SEARCH,
+        "        if self.sorter is not None and ways is None:",
+        "        if self.sorter is not None:",
+        FOUND
+        + "test_a_run_that_names_its_ways_is_not_sorted_so_each_way_shows_what_it_finds_alone",
+        API
+        + "test_a_question_that_names_its_way_is_not_sorted_so_each_way_shows_what_it_finds_alone",
+    ),
+    # --- the worker's wait for a search model (the flaky test of issue #6, found in round two) -----------------
+    one(
+        "a wait for a search model outlives the model that is back",
+        MEANING,
+        "            if wait > 0 and await self._model_is_back(sub):",
+        "            if False:",
+        WORKER + "test_a_wait_for_a_search_model_ends_when_one_is_listed_and_does_not_outlive_it",
+    ),
+    one(
+        "a look does not wake a worker that is waiting out a block",
+        MEANING,
+        "                self._wake.set()  # waiting out a block: a look is a reason to see if it is over",
+        "                pass",
+        WORKER + "test_a_wait_for_a_search_model_ends_when_one_is_listed_and_does_not_outlive_it",
+        WORKER + "test_a_wait_that_a_failed_request_set_is_not_ended_by_the_model_being_listed",
+    ),
+    one(
+        "a wait that a failed request set is ended by the model being listed",
+        MEANING,
+        "        if block is None or not block.no_model:",
+        "        if block is None:",
+        WORKER + "test_a_wait_that_a_failed_request_set_is_not_ended_by_the_model_being_listed",
+    ),
+    one(
+        "a request in the air is taken for a wait for the search model",
+        MEANING,
+        "            # search model that was answering.) A request that fails sets its own block.\n            self._blocked.pop(sub, None)",
+        "            # search model that was answering.) A request that fails sets its own block.\n            pass",
+        WORKER + "test_a_request_that_is_held_up_is_work_and_not_a_wait_for_the_search_model",
+    ),
+    one(
+        "the header says a search model is not there when one is running",
+        MEANING,
+        "            elif (block := self._blocked.get(sub)) is not None and not block.no_model:",
+        "            elif (block := self._blocked.get(sub)) is not None:",
+        WORKER + "test_the_header_does_not_say_a_search_model_is_not_there_when_one_is_running",
     ),
 ]
 

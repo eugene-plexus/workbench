@@ -50,11 +50,20 @@ chosen by the OS (never the live install's 8079-8083 or 8279-8283), the engines 
 `pkill -f eugene_plexus_`: this box is a worker node.
 
 Run with the Workbench interpreter (it has httpx, fastapi, uvicorn, joserfc, numpy):
-  workbench/.venv/Scripts/python.exe workbench/scripts/mr6b-sorting-acceptance.py
+  EP_SCRATCH=DIR workbench/.venv/Scripts/python.exe workbench/scripts/mr6b-sorting-acceptance.py
   ... --reuse-data DIR        skip the import, using the index of an earlier run
   ... --stages budget,stopped only these stages (the stack, and the index, are always made)
   ... --questions 12          only the first twelve questions (the gate is then not judged)
-  EP_WORKBENCH=DIR            Workbench from another tree (the sabotage runs use a broken copy)
+
+**Where things are comes from the environment, and nothing here names a person's machine:**
+  EP_SCRATCH       (required) the scratch root. The work directory and the snapshot are made under it,
+                   and a --work or --snapshot that is not under it is refused before anything is
+                   deleted: a run deletes and makes again the directory it works in.
+  EP_ROOT          the folder holding the sibling repos (default: the folder above this repo)
+  EP_LLAMA_SERVER  llama-server (default: ~/.eugene-plexus/engines/llama_cpp/b10948/llama-server.exe)
+  EP_MODELS_DIR    the GGUFs (default: ~/.eugene-plexus/acceptance-models); EP_MODEL_FILE,
+                   EP_QWEN_EMBED, EP_QWEN_RERANK and EP_BGE_RERANK name a file each
+  EP_WORKBENCH=DIR Workbench from another tree (the sabotage runs use a broken copy)
 """
 
 from __future__ import annotations
@@ -98,8 +107,8 @@ from joserfc.jwk import RSAKey
 
 T0 = time.perf_counter()
 
-ROOT = Path(os.environ.get("EP_ROOT", "D:/py/eugene-plexus"))
 HERE = Path(__file__).resolve().parent.parent
+ROOT = Path(os.environ.get("EP_ROOT", str(HERE.parent)))
 #: The Workbench repo this script lives in (its page, its questions), and the source under test:
 #: the same, or a copy with something broken in it.
 REPO = HERE if (HERE / "src" / "eugene_plexus_workbench").is_dir() else ROOT / "workbench"
@@ -109,21 +118,33 @@ WB_PY = Path(
 )
 GW_PY = ROOT / "gateway" / ".venv" / "Scripts" / "python.exe"
 DRV_PY = ROOT / "inference-driver" / ".venv" / "Scripts" / "python.exe"
-SCRATCH = Path(
-    os.environ.get(
-        "EP_SCRATCH",
-        "C:/Users/troyc/AppData/Local/Temp/claude/d--py-eugene-plexus-specs/"
-        "8fdf4703-5901-4dea-a989-c9fe897eef3c/scratchpad",
-    )
-)
-TEMP = Path(os.environ.get("TEMP", "C:/Users/troyc/AppData/Local/Temp"))
+if not os.environ.get("EP_SCRATCH"):
+    raise SystemExit("EP_SCRATCH is not set: name the scratch directory this run may work in.")
+SCRATCH = Path(os.environ["EP_SCRATCH"]).resolve()
 LLAMA = Path(
     os.environ.get(
-        "EP_LLAMA_SERVER", "C:/Users/troyc/.eugene-plexus/engines/llama_cpp/b10948/llama-server.exe"
+        "EP_LLAMA_SERVER",
+        str(
+            Path.home() / ".eugene-plexus" / "engines" / "llama_cpp" / "b10948" / "llama-server.exe"
+        ),
     )
 )
-HOME_MODELS = Path("C:/Users/troyc/.eugene-plexus/acceptance-models")
-GGUF = SCRATCH / "rag" / "dl" / "gguf"
+HOME_MODELS = Path(
+    os.environ.get("EP_MODELS_DIR", str(Path.home() / ".eugene-plexus" / "acceptance-models"))
+)
+
+
+def under_scratch(given: str | Path, what: str) -> Path:
+    """`given`, resolved, when it is a place under the scratch root and not the root itself;
+    otherwise the run ends here, before anything is deleted (`shutil.rmtree` on a directory a
+    person named wrongly, `--work C:/` or `--snapshot ~`, is not a thing a script may do)."""
+    path = Path(given).resolve()
+    if SCRATCH not in path.parents:
+        raise SystemExit(
+            f"{what} {path} is not under the scratch root {SCRATCH} (EP_SCRATCH): refused, and "
+            "nothing was deleted."
+        )
+    return path
 
 
 def model_file(env: str, *candidates: Path) -> Path:
@@ -133,26 +154,10 @@ def model_file(env: str, *candidates: Path) -> Path:
     return next((c for c in candidates if c.exists()), candidates[0])
 
 
-CHAT_FILE = model_file(
-    "EP_MODEL_FILE",
-    TEMP / "ep-s9-model" / "Qwen3-0.6B-Q4_K_M.gguf",
-    HOME_MODELS / "Qwen3-0.6B-Q4_K_M.gguf",
-)
-EMBED_FILE = model_file(
-    "EP_QWEN_EMBED",
-    HOME_MODELS / "Qwen3-Embedding-0.6B-Q8_0.gguf",
-    GGUF / "Qwen3-Embedding-0.6B-Q8_0.gguf",
-)
-SORTER_FILE = model_file(
-    "EP_QWEN_RERANK",
-    HOME_MODELS / "qwen3-reranker-0.6b-q8_0.gguf",
-    GGUF / "qwen3-reranker-0.6b-q8_0.gguf",
-)
-BGE_FILE = model_file(
-    "EP_BGE_RERANK",
-    HOME_MODELS / "bge-reranker-v2-m3-Q8_0.gguf",
-    GGUF / "bge-reranker-v2-m3-Q8_0.gguf",
-)
+CHAT_FILE = model_file("EP_MODEL_FILE", HOME_MODELS / "Qwen3-0.6B-Q4_K_M.gguf")
+EMBED_FILE = model_file("EP_QWEN_EMBED", HOME_MODELS / "Qwen3-Embedding-0.6B-Q8_0.gguf")
+SORTER_FILE = model_file("EP_QWEN_RERANK", HOME_MODELS / "qwen3-reranker-0.6b-q8_0.gguf")
+BGE_FILE = model_file("EP_BGE_RERANK", HOME_MODELS / "bge-reranker-v2-m3-Q8_0.gguf")
 #: The 76 design documents of the run of record are the ones in specs at this commit.
 SPECS_PIN = "c5f725d"
 QUESTIONS = Path(
@@ -2066,10 +2071,8 @@ class Run:
         self.index = IndexFile(person_dir / "index.sqlite3")
         if not self.reused:
             # What a later run may use instead of the import: the index, written whole.
-            snap = (
-                Path(self.args.snapshot)
-                if self.args.snapshot
-                else SCRATCH / "mr6b" / "index-snapshot"
+            snap = under_scratch(
+                self.args.snapshot or SCRATCH / "mr6b" / "index-snapshot", "the snapshot"
             )
             if snap.exists():
                 shutil.rmtree(snap)
@@ -2234,6 +2237,29 @@ class Run:
             values["documentsSortModel"] == "auto" and values["documentsSortSeconds"] == 3.0,
             values,
         )
+        # A question asked before the sorter's speed is known is never made to wait for it: it is
+        # answered at once in the hybrid order, the reason says the speed is being measured, and
+        # the small request that measures it is made behind the question.
+        started = time.perf_counter()
+        early = self.ask(few[0])
+        early_took = time.perf_counter() - started
+        said = early["sort"]
+        check(
+            "budget.measuring-first",
+            "a question asked before the sorter has been measured is answered at once from the "
+            "hybrid order, and says how fast it sorts is being measured: it was never made to wait "
+            "for the small request that measures it",
+            said["code"] == "measuring"
+            and said["used"] is False
+            and said["message"]
+            == f"Not sorted: how fast {SORTER} sorts is being measured now, so the passages are in "
+            "the order the search found them."
+            and said["ratePerSecond"] is None
+            and order_of(early) == order_of(self.hybrid[few[0]])
+            and early_took < 5.0,
+            (said, round(early_took, 1)),
+        )
+        NUMBERS["first_question_seconds"] = round(early_took, 2)
         first = ada.sort() or {}
         first_code = first.get("code")
         note(
@@ -2294,10 +2320,16 @@ class Run:
         parsed = SETTING_SPEED.match(status["text"])
         check(
             "budget.settings-say-so",
-            "the two settings say what is in effect: the sorter in use (offering every sorter Eugene "
-            "lists, none that is not a sorter) and, for Sort time, the rate, the seconds for 18 "
-            "passages and that this is over 3 s, so nothing is sorted",
-            fields["documentsSortModel"]["status"]["text"] == f"In use: {SORTER} (automatic)."
+            "the two settings say what is in effect, as the screen does: the sorter is chosen and "
+            "not in use (it is never said to be in use while nothing is sorted), offering every "
+            "sorter Eugene lists and none that is not a sorter; and, for Sort time, the rate, the "
+            "seconds for 18 passages and that this is over 3 s, so nothing is sorted",
+            fields["documentsSortModel"]["status"]["level"] == "info"
+            and fields["documentsSortModel"]["status"]["text"].startswith(
+                f"Chosen: {SORTER} (automatic), not sorting now: {SORTER} sorts about "
+            )
+            and "In use" not in fields["documentsSortModel"]["status"]["text"]
+            and sort.get("label") is None
             and fields["documentsSortModel"]["suggestions"][:2] == ["auto", "off"]
             and SORTER in fields["documentsSortModel"]["suggestions"]
             and OUTSIDE in fields["documentsSortModel"]["suggestions"]
@@ -3197,7 +3229,7 @@ class Run:
             "url": s.wb_url,
             "secret": ada.secret,
             "playwright": os.environ.get(
-                "WORKBENCH_PLAYWRIGHT", "D:/py/eugene-plexus/ui/node_modules/playwright"
+                "WORKBENCH_PLAYWRIGHT", str(ROOT / "ui" / "node_modules" / "playwright")
             ),
             "chrome": os.environ.get(
                 "WORKBENCH_CHROME", "C:/Program Files/Google/Chrome/Application/chrome.exe"
@@ -3331,6 +3363,7 @@ class Run:
             bool(up),
         )
         if up:
+            self.never_measured(few)
             # Workbench looks at the gateway's list every ten seconds at most: a sorter that was
             # started a moment ago is seen when that look is made again.
             self.settings(documentsSortModel=BGE)
@@ -3341,6 +3374,9 @@ class Run:
                 if seen
                 else "Workbench did not see the sorter that was started"
             )
+            # Its speed is measured behind that look, and a question waits for nothing: sorted
+            # questions begin when the screen says it is ready.
+            until(lambda: (ada.sort() or {}).get("code") == "ok", 90, every=1.0)
             before_sorter = s.engine_sorts["sorter"].mark()
             before_bge = s.engine_sorts["bge"].mark()
             rows = [self.ask(i) for i in few]
@@ -3620,7 +3656,9 @@ class Run:
 
     def stage_hung(self) -> None:
         """The sorter does not end: it stops answering. A sort that takes more than twice Sort time is
-        given up on, said so, and the next questions are not made to wait that long again.
+        given up on, said so, and the next questions are not made to wait that long again: what was
+        seen is a state of its own (it did not answer the last time it was asked, and when it is
+        asked again), never a speed, and it is asked again by a small test behind a question.
 
         The sorter has read well for a while first (eight sorts), and Sort time is a good deal more
         than a usual sort takes, so that a give-up that is blended into that history, and not taken
@@ -3695,15 +3733,24 @@ class Run:
                 started = time.perf_counter()
                 found = self.ask(k)
                 followers.append((k, found, time.perf_counter() - started))
+            asked_again = (
+                f"Not sorted: {SORTER} did not answer within {2 * budget:g} s the last time it was "
+                "asked, so the passages are in the order the search found them. Workbench asks it "
+                "again after "
+            )
             check(
                 "hung.not-again",
                 "and the next questions are not made to wait that long again: the sort that was given "
-                "up on is what is known of the sorter now, so each is over Sort time, said with the "
-                "numbers, answered at once from the hybrid order, and the sorter is not asked",
+                "up on is a state of its own, said as that and never as a speed (no rate, no advice to "
+                "raise Sort time, and when it is asked again), answered at once from the hybrid "
+                "order, and the sorter is not asked",
                 all(
-                    found["sort"]["code"] == "over_budget"
+                    found["sort"]["code"] == "slow"
                     and found["sort"]["used"] is False
-                    and OVER_BUDGET.match(found["sort"]["message"] or "") is not None
+                    and (found["sort"]["message"] or "").startswith(asked_again)
+                    and "Raise Sort time" not in (found["sort"]["message"] or "")
+                    and found["sort"]["ratePerSecond"] is None
+                    and found["sort"]["expectedSeconds"] is None
                     and took < 5
                     and order_of(found) == order_of(self.hybrid[k])
                     for k, found, took in followers
@@ -3712,31 +3759,117 @@ class Run:
                 [(f["sort"], round(t, 1)) for _, f, t in followers],
             )
             shown = ada.sort() or {}
+            fields = self.schema()
+            model_status = fields["documentsSortModel"]["status"]
+            seconds_status = fields["documentsSortSeconds"]["status"]
             check(
                 "hung.screen",
-                "and the screen says the sorter is too slow for Sort time now, with the speed it has "
-                "(the given-up sort's), which is less than the speed it had",
-                shown.get("code") == "over_budget"
-                and (shown.get("ratePerSecond") or 1e9)
-                < 0.8 * (warm["sort"]["ratePerSecond"] or 0),
-                (shown.get("code"), shown.get("ratePerSecond"), warm["sort"]["ratePerSecond"]),
+                "and the screen says the sorter did not answer the last time it was asked, with no "
+                'speed (it never read at one) and no "In use", and the two settings say the same: '
+                "chosen and not sorting now, and Sort time has no speed to say",
+                shown.get("code") == "slow"
+                and shown.get("sorting") is False
+                and shown.get("ratePerSecond") is None
+                and shown.get("rateFrom") is None
+                and shown.get("label") is None
+                and (shown.get("message") or "").startswith(asked_again)
+                and model_status["level"] == "warning"
+                and model_status["text"].startswith(
+                    f"Chosen: {SORTER} (automatic), not sorting now: {SORTER} did not answer within "
+                )
+                and seconds_status["level"] == "warning"
+                and seconds_status["text"].startswith(
+                    f"Not sorted: {SORTER} did not answer within "
+                )
+                and "tokens a second" not in seconds_status["text"],
+                (shown.get("code"), shown.get("ratePerSecond"), model_status, seconds_status),
             )
         finally:
             s.freeze_engine("sorter", False)
         until(lambda: s.engine_ready("sorter", 1), 60, every=1.0)
-        # Let go on, and Sort time raised past what the sort that was given up on showed (it did not
-        # read this much in twice the old Sort time), the sorter is used again.
-        raised = min(120.0, 4 * budget)
-        self.settings(documentsSortSeconds=raised)
-        until(lambda: (ada.sort() or {}).get("code") == "ok", 90, every=1.0)
+        # Let go on, nothing changed in the settings: the sorter is asked again by the small test,
+        # behind a look, after its turn (ten seconds, and longer each time it still does not
+        # answer), and is used again when it answers.
+        let_go = time.perf_counter()
+        back_ok = until(lambda: (h := ada.sort() or {}).get("code") == "ok" and h, 120, every=1.0)
+        NUMBERS["hung_asked_again_seconds"] = round(time.perf_counter() - let_go, 1)
         back = self.ask(hung_q)
         check(
             "hung.back",
-            "let go on, and with Sort time raised past what the sort that was given up on showed "
-            f"({raised:g} s), the sorter sorts again",
-            back["sort"]["used"] is True and back["sort"]["model"] == SORTER,
-            back["sort"],
+            "let go on, with Sort time as it was, the sorter is asked again by a small test and "
+            "sorts again: the screen says it sorts, and the question that hung is sorted",
+            bool(back_ok) and back["sort"]["used"] is True and back["sort"]["model"] == SORTER,
+            (back_ok, back["sort"]),
         )
+
+    def never_measured(self, pool: list[int]) -> None:
+        """A sorter that never answers its very first request (the second sorter, frozen before it
+        was ever measured) never holds a question: each is answered at once, from the hybrid order,
+        while the small test is in the air; and when that gives up (its own limit: twice Sort time,
+        never under 10 s) it is learned from as a sort given up on is, so the next question is
+        told it did not answer and is not made to wait for it either. Run by the stage that names
+        the second sorter, before it is used: Workbench has never seen how fast it reads."""
+        ada, s = self.ada, self.stack
+        limit = max(2 * SORT_SECONDS, 10.0)
+        s.freeze_engine("bge", True)
+        try:
+            self.settings(documentsSortModel=BGE)
+            # Workbench looks at the gateway's list every ten seconds at most: wait until it has
+            # seen the sorter that was just started (that look is what starts measuring it).
+            until(lambda: (ada.sort() or {}).get("model") == BGE, 60, every=1.0)
+            started = time.perf_counter()
+            first = self.ask(pool[0])
+            took_first = time.perf_counter() - started
+            started = time.perf_counter()
+            second = self.ask(pool[1])
+            took_second = time.perf_counter() - started
+            check(
+                "named.never-measured",
+                "a sorter that never answers its first request holds no question: while the small "
+                "test is in the air each is answered at once, from the hybrid order, and the reason "
+                "says it is being measured",
+                all(
+                    r["sort"]["code"] == "measuring"
+                    and r["sort"]["used"] is False
+                    and r["sort"]["model"] == BGE
+                    and order_of(r) == order_of(self.hybrid[i])
+                    for i, r in ((pool[0], first), (pool[1], second))
+                )
+                and took_first < 5
+                and took_second < 5,
+                (first["sort"], round(took_first, 1), round(took_second, 1)),
+            )
+            began = time.perf_counter()
+            learned = until(
+                lambda: (h := ada.sort() or {}).get("code") == "slow" and h,
+                limit + 90,
+                every=2.0,
+            )
+            NUMBERS["hung_probe_given_up_seconds"] = round(time.perf_counter() - began, 1)
+            started = time.perf_counter()
+            third = self.ask(pool[2])
+            took_third = time.perf_counter() - started
+            said = learned or {}
+            check(
+                "named.probe-learned",
+                f"the small test is given up on after its own limit ({limit:g} s) and learned from: "
+                f"the screen says {BGE} did not answer within {limit:g} s the last time it was asked, "
+                "with no speed, and the next question is answered at once and told so",
+                bool(learned)
+                and said.get("ratePerSecond") is None
+                and said.get("label") is None
+                and (said.get("message") or "").startswith(
+                    f"Not sorted: {BGE} did not answer within {limit:g} s the last time it was asked, "
+                )
+                and third["sort"]["code"] == "slow"
+                and third["sort"]["used"] is False
+                and order_of(third) == order_of(self.hybrid[pool[2]])
+                and took_third < 5,
+                (said.get("code"), said.get("message"), third["sort"], round(took_third, 1)),
+            )
+        finally:
+            s.freeze_engine("bge", False)
+            self.settings(documentsSortModel=None)
 
     # ----------------------------------------------------------------------------------------
     # 12
@@ -3952,7 +4085,11 @@ def main() -> int:
         "--work", default="", help="the work directory (default: in the scratchpad)"
     )
     args = parser.parse_args()
-    work = Path(args.work) if args.work else SCRATCH / "mr6b" / "acceptance-work"
+    # Both places are deleted and made again: refuse any that is not under the scratch root before
+    # either is touched.
+    work = under_scratch(args.work or SCRATCH / "mr6b" / "acceptance-work", "the work directory")
+    if args.snapshot:
+        under_scratch(args.snapshot, "the snapshot")
     if work.exists():
         shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True, exist_ok=True)

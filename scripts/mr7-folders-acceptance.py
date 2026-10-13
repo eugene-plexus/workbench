@@ -84,7 +84,10 @@ DRV_PY = ROOT / "inference-driver" / ".venv" / "Scripts" / "python.exe"
 TEMP = Path(os.environ.get("TEMP", tempfile.gettempdir()))
 LLAMA = Path(
     os.environ.get(
-        "EP_LLAMA_SERVER", "C:/Users/troyc/.eugene-plexus/engines/llama_cpp/b10948/llama-server.exe"
+        "EP_LLAMA_SERVER",
+        str(
+            Path.home() / ".eugene-plexus" / "engines" / "llama_cpp" / "b10948" / "llama-server.exe"
+        ),
     )
 )
 MODEL_FILE = Path(
