@@ -1391,9 +1391,8 @@ async def test_a_quick_test_and_a_question_in_the_air_together_when_a_sorter_han
 ) -> None:
     monkeypatch.setattr(sorting, "PROBE_MIN_LIMIT", 0.3)
     await warm(rig)  # the speed is the quick test's
-    rig.clock.advance(
-        sorting.RATE_MAX_AGE + 1
-    )  # old: it is measured again, behind the next question
+    # Old, so it is measured again behind the next question.
+    rig.clock.advance(sorting.RATE_MAX_AGE + 1)
     rig.settings.sort_seconds = 0.1  # the question's limit is 0.2 s, and the quick test's 0.3 s
     rig.gateway.hang = True
     found = await rig.sorting.sort(QUESTION, sheets(2))  # asked; the quick test is made behind it

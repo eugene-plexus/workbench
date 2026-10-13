@@ -3779,8 +3779,11 @@ class Run:
         history = {i: self.ask(i) for i in pool}
         sized = {i: r["sort"]["tokens"] for i, r in history.items() if r["sort"]["used"]}
         rate = (ada.sort() or {}).get("ratePerSecond") or 700.0
-        # The three questions with the fewest passages to sort, smallest first: the one that
-        # hangs is not the largest, so that the questions after it are not smaller than half of it.
+        # The three questions with the fewest passages to sort, smallest first, so that a usual
+        # sort is quick, Sort time can be short and the give-up soon. The one that hangs is the
+        # middle one: of the two that come after it one is larger and one is smaller, and a sorter
+        # that did not answer is asked by neither (it is stuck, not slow: the size of a question
+        # says nothing about whether it would be answered, MR6b round three).
         ranked = sorted(sized, key=lambda i: sized[i])
         picks = ranked[:3] if len(ranked) >= 3 else (ranked or pool[:3])
         while len(picks) < 3:
@@ -3788,12 +3791,14 @@ class Run:
         # Sort time: a usual sort of these questions takes a quarter of it or less.
         usual = max(sized.get(i, 0) for i in picks) / rate
         budget = float(max(15, 5 * math.ceil(4 * usual / 5)))
+        warm_q, hung_q, later_q = picks
         NUMBERS["hung"] = {
             "usual_sort_seconds": round(usual, 1),
             "sort_time": budget,
             "history_sorts": len(sized),
+            # The tokens of the question that hangs and of the two that follow it.
+            "tokens_hung_and_followers": [sized.get(hung_q), sized.get(later_q), sized.get(warm_q)],
         }
-        warm_q, hung_q, later_q = picks
         self.settings(documentsSortSeconds=budget)
         until(lambda: (ada.sort() or {}).get("code") == "ok", 90, every=1.0)
         warm = self.ask(warm_q)
@@ -3844,10 +3849,11 @@ class Run:
             )
             check(
                 "hung.not-again",
-                "and the next questions are not made to wait that long again: the sort that was given "
-                "up on is a state of its own, said as that and never as a speed (no rate, no advice to "
-                "raise Sort time, and when it is asked again), answered at once from the hybrid "
-                "order, and the sorter is not asked",
+                "and the next questions, one larger and one smaller than the one that hung, are not "
+                "made to wait that long again: the sort that was given up on is a state of its own, "
+                "said as that and never as a speed (no rate, no advice to raise Sort time, and when "
+                "it is asked again), answered at once from the hybrid order, and the sorter is not "
+                "asked",
                 all(
                     found["sort"]["code"] == "slow"
                     and found["sort"]["used"] is False

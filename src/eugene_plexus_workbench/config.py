@@ -327,12 +327,16 @@ FIELDS = [
             "Over this, the passages are left in the order they were found and the Documents "
             "screen says why, with the numbers. A sort that is asked and takes more than twice "
             "this is given up on, so one answer can wait that long. The sorter is then left "
-            "alone and the Documents screen says that it did not answer and when it is asked "
-            "again: by a small test, never by a question, after ten seconds and after twice as "
-            "long each time it still does not answer, up to ten minutes. It is used again once "
-            "it answers. As measured here, sorting 18 passages took about 7 seconds on a "
-            "12-thread processor and about 0.5 seconds on an RTX 5090, which is why the default "
-            "of 3 seconds sorts on the graphics card and not on that processor."
+            "alone, whatever the size of the question, and the Documents screen says that it "
+            "did not answer and when it is asked again: by a small test, never by a question, "
+            "after ten seconds and after twice as long each time it still does not answer, up "
+            "to ten minutes (questions that were waiting together when it stopped answering "
+            "count as one try). Raising this setting so that twice it is longer than the wait "
+            "that was given up on asks it again at once. It is used again once it answers. As "
+            "measured through Workbench with Qwen3-Reranker-0.6B, sorting 18 passages took "
+            "about 7 seconds on a 12-thread processor and about 0.6 seconds on an RTX 5090 "
+            "(the median of 60 questions on each), which is why the default of 3 seconds sorts "
+            "on the graphics card and not on that processor."
         ),
         category="documents",
         valueType=ConfigValueType.number,
