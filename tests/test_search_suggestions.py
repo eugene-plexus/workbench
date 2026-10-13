@@ -17,7 +17,7 @@ from eugene_plexus_workbench.answers import message_view
 from eugene_plexus_workbench.store import Store
 
 from .conftest import World
-from .test_store_schema import _V1_MESSAGES
+from .test_store_schema import _V2_STORE
 
 #: Google's shape: its own style, its logo, chips that are links.
 GOOGLE = (
@@ -92,8 +92,8 @@ def test_each_version_of_an_answer_keeps_its_own_suggestions(world: World) -> No
 def test_a_message_stored_before_schema_8_loads_without_suggestions(tmp_path: Path) -> None:
     path = tmp_path / "schema7.sqlite3"
     with sqlite3.connect(path) as db:
-        db.executescript(_V1_MESSAGES)
-        for target in range(2, 8):
+        db.executescript(_V2_STORE)
+        for target in range(3, 8):
             for statement in storage._MIGRATIONS[target]:
                 db.execute(statement)
         db.execute("UPDATE meta SET value = '7' WHERE key = 'schema'")

@@ -17,7 +17,7 @@ from eugene_plexus_workbench.answers import message_view
 from eugene_plexus_workbench.store import Store
 
 from .conftest import World
-from .test_store_schema import _V1_MESSAGES
+from .test_store_schema import _V2_STORE
 
 INSTALL = {"tokens": 4096, "source": "install"}
 
@@ -55,8 +55,8 @@ def test_a_cap_in_another_shape_is_not_kept(world: World) -> None:
 def test_a_message_stored_before_schema_9_loads_without_a_cap(tmp_path: Path) -> None:
     path = tmp_path / "schema8.sqlite3"
     with sqlite3.connect(path) as db:
-        db.executescript(_V1_MESSAGES)
-        for target in range(2, 9):
+        db.executescript(_V2_STORE)
+        for target in range(3, 9):
             for statement in storage._MIGRATIONS[target]:
                 db.execute(statement)
         db.execute("UPDATE meta SET value = '8' WHERE key = 'schema'")

@@ -1,4 +1,9 @@
-"""A store written by an older Workbench opens, and keeps every chat."""
+"""A store written by an older Workbench opens, and keeps every chat.
+
+The oldest is the one Workbench v0.1.0 wrote, schema 2 (`test_conversions.py` opens a real one,
+with chats, files and sessions in it). Each step from there is checked from the store the step
+expects: made by hand from `_V2_STORE` and the steps before it.
+"""
 
 from __future__ import annotations
 
@@ -12,11 +17,40 @@ from eugene_plexus_workbench import store as storage
 from eugene_plexus_workbench.answers import answer_text, message_view
 from eugene_plexus_workbench.store import SCHEMA_VERSION, Message, Store
 
-#: The messages table as schema 1 made it (Workbench v1, 2026-10-01).
-_V1_MESSAGES = """
-CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-INSERT INTO meta (key, value) VALUES ('schema', '1');
-CREATE TABLE messages (
+#: A store as Workbench v0.1.0 (pin 5ed0001) made it: schema 2, whole, with the one
+#: message the tests below open it for. The statements are `_SCHEMA` of that release,
+#: word for word (`git show 5ed0001:src/eugene_plexus_workbench/store.py`).
+_V2_STORE = """
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS people (
+    sub TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    username TEXT,
+    role TEXT NOT NULL,
+    first_seen REAL NOT NULL,
+    last_seen REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    id_hash TEXT PRIMARY KEY,
+    secret_hash TEXT NOT NULL,
+    sub TEXT NOT NULL,
+    refresh_token TEXT,
+    access_expires_at REAL NOT NULL,
+    created_at REAL NOT NULL,
+    expires_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chats (
+    id TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    title TEXT NOT NULL,
+    model TEXT,
+    settings TEXT NOT NULL DEFAULT '{}',
+    search INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chats_by_owner ON chats (owner, updated_at);
+CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY,
     chat_id TEXT NOT NULL,
     seq INTEGER NOT NULL,
@@ -32,17 +66,32 @@ CREATE TABLE messages (
     model TEXT,
     finish TEXT,
     created_at REAL NOT NULL,
-    finished_at REAL
+    finished_at REAL,
+    answer_from INTEGER,
+    reasoning_from INTEGER
 );
+CREATE INDEX IF NOT EXISTS messages_by_chat ON messages (chat_id, seq);
+CREATE TABLE IF NOT EXISTS files (
+    id TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    chat_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    media_type TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS files_by_chat ON files (chat_id);
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+INSERT INTO meta (key, value) VALUES ('schema', '2');
 INSERT INTO messages (id, chat_id, seq, role, content, status, created_at)
 VALUES ('m1', 'c1', 1, 'assistant', 'An answer from before.', 'done', 1.0);
 """
 
 
-def test_a_schema_1_store_gains_the_marks_and_keeps_its_messages(tmp_path: Path) -> None:
+def test_a_v0_1_store_keeps_its_messages_and_takes_the_marks(tmp_path: Path) -> None:
     path = tmp_path / "workbench.sqlite3"
     with sqlite3.connect(path) as db:
-        db.executescript(_V1_MESSAGES)
+        db.executescript(_V2_STORE)
 
     async def go() -> list[Message]:
         store = Store(path)
@@ -64,8 +113,8 @@ def test_a_schema_1_store_gains_the_marks_and_keeps_its_messages(tmp_path: Path)
 def test_schema_3_http_connections_survive_local_server_migration(tmp_path: Path) -> None:
     path = tmp_path / "schema3.sqlite3"
     with sqlite3.connect(path) as db:
-        db.executescript(_V1_MESSAGES)
-        for target in (2, 3):
+        db.executescript(_V2_STORE)
+        for target in (3,):
             for statement in storage._MIGRATIONS[target]:
                 db.execute(statement)
         db.execute("UPDATE meta SET value = '3' WHERE key = 'schema'")
@@ -100,13 +149,8 @@ def test_a_schema_6_store_keeps_its_attachments_and_gains_media(tmp_path: Path) 
     instead of a chat; an attachment written before keeps its chat."""
     path = tmp_path / "schema6.sqlite3"
     with sqlite3.connect(path) as db:
-        db.executescript(_V1_MESSAGES)
-        db.execute(
-            "CREATE TABLE files (id TEXT PRIMARY KEY, owner TEXT NOT NULL, chat_id TEXT NOT NULL, "
-            "name TEXT NOT NULL, media_type TEXT NOT NULL, size INTEGER NOT NULL, "
-            "created_at REAL NOT NULL)"
-        )
-        for target in range(2, 7):
+        db.executescript(_V2_STORE)
+        for target in range(3, 7):
             for statement in storage._MIGRATIONS[target]:
                 db.execute(statement)
         db.execute("INSERT INTO files VALUES ('f1', 'ann', 'c1', 'a.png', 'image/png', 9, 1.0)")
@@ -163,30 +207,11 @@ def test_a_new_store_starts_at_the_current_schema(tmp_path: Path) -> None:
     assert {"answer_from", "reasoning_from"} <= columns
 
 
-def test_interrupted_legacy_migration_recovers(tmp_path: Path) -> None:
-    path = tmp_path / "partial.sqlite3"
-    with sqlite3.connect(path) as db:
-        db.executescript(_V1_MESSAGES)
-        db.execute("ALTER TABLE messages ADD COLUMN answer_from INTEGER")
-    store = Store(path)
-    try:
-        db = store._conn()
-        assert (
-            db.execute("SELECT content FROM messages WHERE id = 'm1'").fetchone()[0]
-            == "An answer from before."
-        )
-        assert db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()[0] == str(
-            SCHEMA_VERSION
-        )
-    finally:
-        asyncio.run(store.close())
-
-
 def test_failed_migration_rolls_back_columns_and_version(tmp_path: Path, monkeypatch) -> None:
     path = tmp_path / "failed.sqlite3"
     with sqlite3.connect(path) as db:
-        db.executescript(_V1_MESSAGES)
-    monkeypatch.setitem(storage._MIGRATIONS, 2, [storage._MIGRATIONS[2][0], "INVALID SQL"])
+        db.executescript(_V2_STORE)
+    monkeypatch.setitem(storage._MIGRATIONS, 3, [storage._MIGRATIONS[3][0], "INVALID SQL"])
     store = Store(path)
     try:
         with pytest.raises(sqlite3.OperationalError):
@@ -194,8 +219,26 @@ def test_failed_migration_rolls_back_columns_and_version(tmp_path: Path, monkeyp
     finally:
         asyncio.run(store.close())
     with sqlite3.connect(path) as db:
+        assert db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()[0] == "2"
+        assert "tool_rounds" not in {row[1] for row in db.execute("PRAGMA table_info(messages)")}
+
+
+def test_a_store_from_before_v0_1_is_refused_and_left_as_it_is(tmp_path: Path) -> None:
+    """Schema 1 predates the first release; nobody holds one, so nothing converts it."""
+    path = tmp_path / "schema1.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.executescript(_V2_STORE)
+        db.execute("UPDATE meta SET value = '1' WHERE key = 'schema'")
+    store = Store(path)
+    try:
+        with pytest.raises(RuntimeError, match=r"unsupported schema 1 from before Workbench v0\.1"):
+            store._conn()
+    finally:
+        asyncio.run(store.close())
+    with sqlite3.connect(path) as db:
         assert db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()[0] == "1"
-        assert "answer_from" not in {row[1] for row in db.execute("PRAGMA table_info(messages)")}
+        assert "tool_rounds" not in {row[1] for row in db.execute("PRAGMA table_info(messages)")}
+    assert store.backup is None and list(tmp_path.glob("*.bak")) == []
 
 
 def test_future_schema_is_refused_before_creating_tables(tmp_path: Path) -> None:

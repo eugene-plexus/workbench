@@ -14,7 +14,7 @@ from eugene_plexus_workbench.store import SCHEMA_VERSION, Message, Store
 
 from .conftest import Browser, World
 from .test_chats import _events
-from .test_store_schema import _V1_MESSAGES
+from .test_store_schema import _V2_STORE
 from .test_tools import Remote, decide, pending, remote, setup
 
 __all__ = ["remote"]  # the fixture, for the tool transcript test
@@ -56,8 +56,8 @@ def _run(tmp_path: Path, steps: object) -> None:
 def test_a_schema_5_chat_opens_as_the_same_conversation(tmp_path: Path) -> None:
     path = tmp_path / "wb.sqlite3"
     with sqlite3.connect(path) as db:
-        db.executescript(_V1_MESSAGES)
-        for target in (2, 3, 4, 5):
+        db.executescript(_V2_STORE)
+        for target in (3, 4, 5):
             for statement in storage._MIGRATIONS[target]:
                 db.execute(statement)
         db.execute("UPDATE meta SET value = '5' WHERE key = 'schema'")

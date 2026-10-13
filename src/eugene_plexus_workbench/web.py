@@ -14,11 +14,12 @@ app reads the address itself.
 
 from __future__ import annotations
 
+import html
 import importlib.resources
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -51,6 +52,17 @@ NO_UI = """<!doctype html><meta charset="utf-8"><title>Workbench</title>
 <p>Workbench is running, but this build has no page to show. It was installed
 from source without its built front end; install it from Eugene's app
 catalogue, which uses the build that has one.</p>"""
+
+
+def degraded_page(problem: str) -> str:
+    """What a person sees at any address while their saved chats cannot be opened."""
+    return (
+        '<!doctype html><meta charset="utf-8"><title>Workbench</title>'
+        "<h1>Workbench could not open your saved chats</h1>"
+        f"<p>{html.escape(problem)}</p>"
+        "<p>Nothing was changed. Fix the cause, then restart Workbench from the Apps page "
+        "in Eugene's console.</p>"
+    )
 
 
 def static_dir(configured: Path | None) -> Path | None:
@@ -88,6 +100,39 @@ class SecurityHeaders:
             await send(message)
 
         await self.app(scope, receive, with_headers)
+
+
+class Degraded:
+    """A Workbench whose saved chats could not be opened answers for itself, and says why.
+
+    Pure ASGI and ahead of every route, because no route can work: the store is not there
+    (`app.state.degraded` holds why). `/healthz` answers `degraded` with the reason, so the
+    agent sees a Workbench that is up and the console can say what is wrong; every API
+    address answers 503 with it; any other address is a page that says it. Nothing here
+    reads or writes the store.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        problem = getattr(scope["app"].state, "degraded", None) if scope["type"] == "http" else None
+        if problem is None:
+            await self.app(scope, receive, send)
+            return
+        path = str(scope.get("path", ""))
+        response: Response
+        if path == "/healthz":
+            response = JSONResponse({"status": "degraded", "reason": problem})
+        elif path.startswith(_API_PREFIXES) or path == "/signin":
+            response = JSONResponse(
+                {"detail": {"message": problem}},
+                status_code=503,
+                headers={"Cache-Control": "no-store"},
+            )
+        else:
+            response = HTMLResponse(degraded_page(problem), status_code=503)
+        await response(scope, receive, send)
 
 
 def mount(app: FastAPI, root: Path | None) -> None:

@@ -43,13 +43,40 @@ log = logging.getLogger(__name__)
 DATABASE = "workbench.sqlite3"
 
 
+def why_the_store_did_not_open(store: Store, exc: Exception) -> str:
+    """One message for the log, `/healthz` and the page: the observed cause, and the copy."""
+    # Workbench's own errors already say what is wrong and where; SQLite's say only what.
+    cause = str(exc) if isinstance(exc, RuntimeError) else f"{type(exc).__name__}: {exc}"
+    kept = (
+        f" A copy of your chats from before the update is kept at {store.backup}."
+        if store.backup is not None
+        else ""
+    )
+    return f"Workbench could not open its saved chats, so it is running without them: {cause}{kept}"
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         store = Store(settings.data_dir / DATABASE)
-        await store.open()
+        try:
+            await store.open()
+        except Exception as exc:
+            # Degraded, not dead. A store that cannot be opened (a migration that failed, a
+            # newer Workbench's, one that is not a database) used to stop the whole process,
+            # and the agent restarted it into the same stop. It stays up instead and says
+            # why, in its log, on /healthz and on every page (`web.Degraded`); the saved
+            # chats are not touched, and starting again retries.
+            why = why_the_store_did_not_open(store, exc)
+            log.error("%s", why)
+            app.state.degraded = why
+            try:
+                yield
+            finally:
+                await store.close()
+            return
         interrupted = await store.mark_interrupted()
         if interrupted:
             log.info(
@@ -163,6 +190,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="Workbench", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.settings = settings
+    app.state.degraded = None
+    # Innermost: the headers and the canonical origin wrap what a degraded Workbench says.
+    app.add_middleware(web.Degraded)
     app.add_middleware(web.SecurityHeaders)
     if settings.public_origin:
         from .public_origin import CanonicalOrigin

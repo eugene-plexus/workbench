@@ -3,8 +3,16 @@
 **One interface, SQLite behind it** (`workbench-v1.md` W8). Every read and
 write goes through `Store`'s methods and nothing else names a table, so a
 Postgres store for a business that outgrows SQLite implements this class
-and nothing else changes. No migration tool yet: `SCHEMA_VERSION`, the
-statements under it and `_MIGRATIONS` are the whole history.
+and nothing else changes. No migration tool: `SCHEMA_VERSION`, the statements
+under it and `_MIGRATIONS` are the whole history, from `OLDEST_SCHEMA` (what
+Workbench v0.1 wrote) on. A store older than that, or newer than this knows, is
+refused and left as it is.
+
+**A store is migrated in one transaction with its version, after a copy of it is
+kept** (`workbench.sqlite3.schema-<N>.bak`, N the schema it was at): steps 6, 7 and
+11 rewrite chats, so what was there is kept whole. A migration that fails changes
+nothing, and `Store.open` raises with the cause; Workbench's lifespan serves a
+degraded page naming it instead of crashing (`app.py`).
 
 **One thread owns the connection.** SQLite is fast, but a write that waits
 on the disk must not stall every stream on the event loop, so each call
@@ -55,7 +63,9 @@ here: those are documents in the person's own index, named by `folder:<grant id>
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import os
 import sqlite3
 import time
 import unicodedata
@@ -66,6 +76,10 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 13
+
+#: The oldest schema this migrates from: what Workbench v0.1.0 wrote. Schema 1 predates
+#: it, and nobody holds one.
+OLDEST_SCHEMA = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -259,15 +273,10 @@ def _sources_get_kinds(db: sqlite3.Connection) -> None:
         db.execute("UPDATE messages SET sources = ? WHERE id = ?", (json.dumps(rebuilt), row["id"]))
 
 
-#: What brings a store written at version N-1 to N. `_SCHEMA` already holds
-#: the result, for a store made new. A step is a statement, or a function of
-#: the connection for what SQL alone cannot say.
+#: What brings a store written at version N-1 to N, for N above `OLDEST_SCHEMA`.
+#: `_SCHEMA` already holds the result, for a store made new. A step is a statement,
+#: or a function of the connection for what SQL alone cannot say.
 _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
-    # Where a reply's text after its last search begins (workbench#1).
-    2: [
-        "ALTER TABLE messages ADD COLUMN answer_from INTEGER",
-        "ALTER TABLE messages ADD COLUMN reasoning_from INTEGER",
-    ],
     3: [
         "ALTER TABLE messages ADD COLUMN tool_rounds TEXT NOT NULL DEFAULT '[]'",
         "CREATE TABLE IF NOT EXISTS tool_servers (id TEXT PRIMARY KEY, name TEXT NOT NULL, "
@@ -362,32 +371,75 @@ _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
 }
 
 
-def _initialize_schema(db: sqlite3.Connection, path: Path) -> None:
+def _stored_version(db: sqlite3.Connection) -> int | None:
+    """The schema a store says it is at, or None for a store with none (a new one)."""
+    has_meta = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
+    ).fetchone()
+    found = (
+        db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone() if has_meta else None
+    )
+    return int(found[0]) if found is not None else None
+
+
+def _keep_backup(db: sqlite3.Connection, path: Path, version: int) -> Path:
+    """A copy of the store as it is, kept beside it before a migration changes it.
+
+    SQLite's own online backup, so a store with a write-ahead log is copied whole
+    and the copy is one file that opens on its own. One copy per schema: one that
+    is already there is the older, made by a start that stopped or failed after
+    it, and is kept, not replaced. It is written under another name and renamed,
+    so a copy that exists is a finished one.
+    """
+    target = path.with_name(f"{path.name}.schema-{version}.bak")
+    if target.exists():
+        if not target.is_file():
+            raise OSError(f"{target} is not a file, so the store cannot be copied there")
+        return target
+    partial = target.with_name(target.name + ".part")
+    partial.unlink(missing_ok=True)
+    try:
+        copy = sqlite3.connect(partial)
+        try:
+            db.backup(copy)
+            copy.execute("PRAGMA journal_mode=DELETE")
+        finally:
+            copy.close()
+        os.replace(partial, target)
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
+    return target
+
+
+def _initialize_schema(
+    db: sqlite3.Connection, path: Path, on_backup: Callable[[Path], None] = lambda _: None
+) -> None:
     """Commit schema changes and their version together, including first boot.
 
-    Do not use executescript here: it commits an existing transaction. `_SCHEMA`
-    contains only individual DDL statements, which is why it may be split on
-    semicolons; the memory triggers hold semicolons, so `_MEMORY_SCHEMA` is a
-    list of whole statements. Version 2 also accepts the partial additions
-    left by the old autocommit migration runner; subsequent migrations must be
-    transactional.
+    `on_backup` is told of the copy kept before a migration the moment it exists, so a
+    migration that then fails can still say where it is. Do not use executescript
+    here: it commits an existing transaction. `_SCHEMA` contains only individual DDL
+    statements, which is why it may be split on semicolons; the memory triggers hold
+    semicolons, so `_MEMORY_SCHEMA` is a list of whole statements. Migrations are
+    transactional: a failure rolls back every column and the version with it.
     """
+    before = _stored_version(db)
+    if before is not None and OLDEST_SCHEMA <= before < SCHEMA_VERSION:
+        on_backup(_keep_backup(db, path, before))
     db.execute("BEGIN IMMEDIATE")
     try:
-        has_meta = db.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
-        ).fetchone()
-        found = (
-            db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
-            if has_meta
-            else None
-        )
-        version = int(found[0]) if found is not None else None
-        if version is not None and (version < 1 or version > SCHEMA_VERSION):
-            origin = " from a newer Workbench" if version > SCHEMA_VERSION else ""
+        version = _stored_version(db)
+        if version is not None and (version < OLDEST_SCHEMA or version > SCHEMA_VERSION):
+            origin = (
+                " from a newer Workbench"
+                if version > SCHEMA_VERSION
+                else " from before Workbench v0.1"
+            )
             raise RuntimeError(
                 f"{path} has unsupported schema {version}{origin}; this Workbench knows "
-                f"schemas 1 through {SCHEMA_VERSION}. Restore matching software and state."
+                f"schemas {OLDEST_SCHEMA} through {SCHEMA_VERSION}. Restore matching software "
+                "and state."
             )
         if version is not None:
             for target in range(version + 1, SCHEMA_VERSION + 1):
@@ -395,25 +447,6 @@ def _initialize_schema(db: sqlite3.Connection, path: Path) -> None:
                     if callable(statement):
                         statement(db)
                         continue
-                    if target == 2:
-                        columns = {
-                            row[1]: row[2] for row in db.execute("PRAGMA table_info(messages)")
-                        }
-                        partial = next(
-                            (
-                                name
-                                for name in ("answer_from", "reasoning_from")
-                                if statement == f"ALTER TABLE messages ADD COLUMN {name} INTEGER"
-                                and name in columns
-                            ),
-                            None,
-                        )
-                        if partial is not None:
-                            if columns[partial].upper() != "INTEGER":
-                                raise RuntimeError(
-                                    f"{path}: incompatible partial migration: {partial}"
-                                )
-                            continue
                     db.execute(statement)
         for statement in _SCHEMA.split(";"):
             if statement.strip():
@@ -426,7 +459,10 @@ def _initialize_schema(db: sqlite3.Connection, path: Path) -> None:
         )
         db.execute("COMMIT")
     except BaseException:
-        db.execute("ROLLBACK")
+        # SQLite may have rolled back by itself (a full disk does), and then there is nothing
+        # left to roll back: what is raised is the cause, not that.
+        with contextlib.suppress(sqlite3.Error):
+            db.execute("ROLLBACK")
         raise
 
 
@@ -981,8 +1017,14 @@ class Store:
         self._path = path
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="workbench-store")
         self._db: sqlite3.Connection | None = None
+        #: The copy kept before this store was migrated, if it was: what a failure after
+        #: the copy points the person to.
+        self.backup: Path | None = None
 
     # --- plumbing -------------------------------------------------------
+
+    def _kept(self, backup: Path) -> None:
+        self.backup = backup
 
     async def _run[T](self, fn: Callable[..., T], *args: Any) -> T:
         loop = asyncio.get_running_loop()
@@ -996,7 +1038,7 @@ class Store:
             db.execute("PRAGMA journal_mode=WAL")
             db.execute("PRAGMA foreign_keys=ON")
             try:
-                _initialize_schema(db, self._path)
+                _initialize_schema(db, self._path, self._kept)
             except sqlite3.OperationalError as exc:
                 db.close()
                 if "fts5" in str(exc).lower():
