@@ -392,7 +392,7 @@ export function TranscriptionForm({
       setRecording({ stop: () => recorder.stop(), started });
     } catch (error) {
       setProblem(
-        `The browser did not let Workbench use a microphone (${problemOf(error)}). Check the page's microphone permission, or choose a recording to upload.`,
+        `The browser blocked the microphone (${problemOf(error)}). Check the page's microphone permission, or choose a recording to upload.`,
       );
     }
   }

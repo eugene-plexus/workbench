@@ -33,9 +33,8 @@ export function SiteLinkNote({
         <>
           <p className="notice">
             <Link2 size={16} aria-hidden />
-            To work as yourself there, link your own account: on {label}, open {linkPage} and sign
-            in. Until then your calls run as the machine&apos;s owner, inside the folders shared
-            with you.
+            Link your own account: on {label}, open {linkPage} and sign in. Until then your calls
+            run as the machine&apos;s owner, inside the folders shared with you.
           </p>
           <CopyButton text={linkPage} label={`the link page for ${label}`} />
         </>

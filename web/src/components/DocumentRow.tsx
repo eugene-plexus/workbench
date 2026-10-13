@@ -179,8 +179,8 @@ export function DocumentRow({
           }}
         >
           <p className="wrap-anywhere">
-            Remove {doc.name}? Workbench deletes its copy of the file and the text it read from it,
-            and no chat can find it again. This cannot be undone.
+            Remove {doc.name}? Workbench deletes its copy, so no chat can find it again. This cannot
+            be undone.
           </p>
           <div className="flex flex-wrap gap-2">
             <button

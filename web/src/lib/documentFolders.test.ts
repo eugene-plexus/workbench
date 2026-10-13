@@ -426,7 +426,7 @@ describe("what was left out", () => {
       fileBytes: { limit: 50 * 1024 * 1024 },
     };
     expect(capsWords(reached)).toEqual([
-      "This folder has more than the 10,000 files Workbench keeps for one folder, so the files that come last are left out.",
+      "This folder has more than the 10,000 files Workbench keeps, so the last ones are left out.",
       "The copies Workbench keeps of this folder's files reached 2048 MiB, so files after that are skipped.",
       "3 folders more than 12 folders deep are not looked at.",
       "This folder has more names than Workbench looks at in one check, so some are not looked at.",
@@ -612,39 +612,33 @@ describe("the limits, stated from the numbers in effect", () => {
 
   it("says there is no file watcher, and how often it looks", () => {
     expect(said[0]).toBe(
-      "Workbench does not watch your folders. It looks at each one again every 10 minutes, and whenever you choose Sync now, so a change can take that long to show.",
+      "Folders are not watched: each is checked every 10 minutes and on Sync now, so a change can take that long to show.",
     );
-    expect(limitsWords({ ...LIMITS, syncMinutes: 1 })[0]).toContain("every 1 minute,");
-    expect(limitsWords({ ...LIMITS, syncMinutes: 90 })[0]).toContain("every 90 minutes,");
-  });
-
-  it("says a quick check misses an edit that keeps a file's size and time, and that a deep check finds it", () => {
-    expect(said[1]).toBe(
-      "A quick check compares each file's size and time with what Workbench read, so an edit that keeps both is missed. Sync now with a deep check reads every file again and finds it.",
-    );
+    expect(limitsWords({ ...LIMITS, syncMinutes: 1 })[0]).toContain("every 1 minute ");
+    expect(limitsWords({ ...LIMITS, syncMinutes: 90 })[0]).toContain("every 90 minutes ");
   });
 
   it("says folders on job sites cannot be added", () => {
-    expect(said[2]).toBe(
-      "Only folders on the machine Workbench runs on can be added. Folders on your job sites cannot be added yet.",
+    expect(said[1]).toBe(
+      "Only folders on the machine Workbench runs on can be added, not job site folders yet.",
     );
   });
 
-  it("says a first read of a big folder takes a while, and where to see how far it has got", () => {
-    expect(said[3]).toBe(
-      "The first read of a big folder takes a while. Files can be searched as each one is ready, and the counts on the folder say how far it has got.",
+  it("says a first read of a big folder takes a while, and that files are searchable as each is ready", () => {
+    expect(said[2]).toBe(
+      "The first read of a big folder takes a while. Files are searchable as each one is ready.",
     );
   });
 
   it("states each cap from the server's numbers, and what it reads", () => {
-    expect(said[4]).toBe(
-      "Workbench keeps its own copy of each file it reads, so a search never touches your folder. From one folder it takes up to 10,000 files and 2,048 MB, 12 folders deep, and a file may be up to 50 MiB. Workbench reads PDF, Word (.docx), Markdown, text, CSV, HTML and code files.",
+    expect(said[3]).toBe(
+      "From one folder Workbench takes up to 10,000 files and 2,048 MB, 12 folders deep; a file may be up to 50 MiB. Workbench reads PDF, Word (.docx), Markdown, text, CSV, HTML and code files.",
     );
-    expect(said[5]).toBe(
+    expect(said[4]).toBe(
       "With the files you add yourself, Workbench keeps up to 100,000 passages for you.",
     );
-    expect(limitsWords({ ...LIMITS, maxFiles: 500, maxMB: 10, maxDepth: 3 })[4]).toContain(
-      "it takes up to 500 files and 10 MB, 3 folders deep,",
+    expect(limitsWords({ ...LIMITS, maxFiles: 500, maxMB: 10, maxDepth: 3 })[3]).toContain(
+      "takes up to 500 files and 10 MB, 3 folders deep;",
     );
   });
 
@@ -664,35 +658,35 @@ describe("adding and removing", () => {
 
   it("tells anyone else to ask the owner", () => {
     expect(nothingToAddWords(false, false)).toBe(
-      "No folder has been given to you yet. The owner of this Workbench gives folders to people, in Toolbox · Tools. Ask them to give you one.",
+      "No folder has been given to you yet. Ask the owner of this Workbench to give you one.",
     );
   });
 
   it("says when every folder given is added already, and tells the owner how to be given another", () => {
     expect(nothingToAddWords(true, true)).toBe(
-      "Every folder you were given is added. To add another, give yourself one in Toolbox · Tools, under Folders · File tools.",
+      "Every folder you were given is added. To add another, give yourself one in Toolbox · Tools.",
     );
     expect(nothingToAddWords(false, true)).toBe("Every folder you were given is added.");
   });
 
   it("says what Remove folder does, and that the folder is never touched", () => {
     expect(removeFolderWords(folder())).toBe(
-      "Remove Work notes? Workbench stops checking it, and takes the 12 files it has from it out of your documents: its copies and the text it read from them are deleted, so no chat can find them again. The folder, the files in it and your access to it are never touched. You can add it again.",
+      "Remove Work notes? Workbench stops checking it and takes its 12 files out of your documents, so no chat can find them. The folder and your access to it are not touched; you can add it again.",
     );
     expect(removeFolderWords(folder({ counts: counts({ files: 1 }) }))).toContain(
-      "takes the 1 file it has from it out of your documents",
+      "takes its 1 file out of your documents",
     );
   });
 
   it("says what Remove folder does for a folder with no files read from it", () => {
     expect(removeFolderWords(waitingFolder())).toBe(
-      "Remove Work notes? Workbench stops checking it. The folder, the files in it and your access to it are never touched. You can add it again.",
+      "Remove Work notes? Workbench stops checking it. The folder and your access to it are not touched; you can add it again.",
     );
   });
 
   it("says what leaving one file out does, and that the folder's file is not touched", () => {
     expect(leaveOutWords("docs/a.md")).toBe(
-      "Leave out docs/a.md? Workbench deletes its copy of the file and the text it read from it, and adds /docs/a.md to this folder's ignore list, so that it does not come back at the next check. The file in your folder is not touched.",
+      "Leave out docs/a.md? Workbench deletes its copy and adds /docs/a.md to this folder's ignore list, so it stays out. The file in your folder is not touched.",
     );
   });
 });

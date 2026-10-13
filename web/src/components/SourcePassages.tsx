@@ -144,8 +144,7 @@ export function PassageList({
             ))}
           </ol>
           <p className="mt-1 text-xs text-muted">
-            What a person keeps in their documents is private to them, even where you may read their
-            chats.
+            A person&apos;s documents are private to them, even where you may read their chats.
           </p>
         </div>
       )}

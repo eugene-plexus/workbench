@@ -97,9 +97,9 @@ export function sortWhereWords(sort: SortFacts): string | null {
     case "local":
       return "It runs on your own machines, so what is in your documents stays on them.";
     case "external":
-      return `It runs ${sort.runsOn ? `on ${sort.runsOn}` : "outside your machines"}. The owner of this Workbench allowed the best passages of your documents for each question, and the question, to be sent there.`;
+      return `It runs ${sort.runsOn ? `on ${sort.runsOn}` : "outside your machines"}. The owner allowed each question and its best passages to be sent there.`;
     case "unknown":
-      return "Eugene cannot say where it runs. The owner of this Workbench allowed models outside your machines, so the best passages of your documents for each question, and the question, may leave them.";
+      return "Eugene cannot say where it runs. The owner allowed models outside your machines, so each question and its best passages may leave them.";
     default:
       return null;
   }
@@ -149,10 +149,10 @@ export function sortSpeedWords(sort: SortFacts): string | null {
 export function sortSpeedFromWords(sort: SortFacts): string | null {
   if (sort.ratePerSecond == null) return null;
   if (sort.rateFrom === "probe") {
-    return "How fast it reads comes mostly from quick tests Workbench ran on it, not from sorts of your questions.";
+    return "That speed comes mostly from quick tests, not from sorts of your questions.";
   }
   if (sort.rateFrom === "sorts") {
-    return "How fast it reads comes mostly from the sorts Workbench has made.";
+    return "That speed comes mostly from the sorts Workbench has made.";
   }
   return null;
 }

@@ -129,8 +129,8 @@ CASES: list[tuple[str, str, str, str, str, str]] = [
     (
         "an outside sorter is not said to be sent the best passages and the question",
         SORTING,
-        "The owner of this Workbench allowed the best passages of your documents for each question, and the question, to be sent there.",
-        "The owner of this Workbench allowed your documents to be sent there.",
+        "The owner allowed each question and its best passages to be sent there.",
+        "The owner allowed your documents to be sent there.",
         T_SORTING,
         "says where it runs, and what that means for what is in the person's documents",
     ),

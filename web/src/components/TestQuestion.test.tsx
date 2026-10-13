@@ -52,7 +52,7 @@ describe("the box", () => {
     render(<TestQuestion />);
     expect(screen.getByRole("heading", { level: 2, name: "Test a question" })).toBeInTheDocument();
     expect(screen.getByTestId("documents-test")).toHaveTextContent(
-      "No model is asked, and nothing leaves your machines.",
+      "No model is asked and nothing leaves your machines.",
     );
     expect(question()).toHaveAccessibleName("Your question");
     expect(question()).toHaveAttribute("maxlength", "2000");
@@ -433,8 +433,10 @@ describe("trying one way at a time", () => {
     expect(way("words")).toHaveAccessibleName("Words only");
     expect(way("meaning")).toHaveAccessibleName("Meaning only");
     const group = screen.getByRole("group", { name: "Search by" });
-    expect(group).toHaveAccessibleDescription(/sets aside a passage that is not near enough/);
-    expect(group).toHaveAccessibleDescription(/here, nothing is set aside/);
+    expect(group).toHaveAccessibleDescription(
+      /sets aside passages that match no word and are not close enough/,
+    );
+    expect(group).toHaveAccessibleDescription(/A single way sets nothing aside/);
   });
 
   it("asks the server for the one way that was chosen, by its name", async () => {

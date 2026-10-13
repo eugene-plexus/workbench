@@ -407,9 +407,8 @@ async def add_documents(
                 _refusal(
                     name,
                     status.HTTP_409_CONFLICT,
-                    f"You already keep {install.max_passages:,} passages, the most Workbench "
-                    "keeps for one person. Remove a document to add another, or ask the owner "
-                    "to raise the limit in Eugene's console.",
+                    f"You already keep {install.max_passages:,} passages, the limit. Remove a "
+                    "document to add another, or ask the owner to raise it.",
                 )
             )
             continue

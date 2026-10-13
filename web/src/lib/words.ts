@@ -160,9 +160,9 @@ export function lengthLimitNote(message: Pick<Message, "outputCap">): string {
     case "request":
       return `The answer reached this chat's “Longest answer (tokens)”, ${tokens}. Raise it in Chat settings, or ask it to continue.`;
     case "profile":
-      return `The answer reached the ${tokens}-token cap on this model's Library profile (Maximum output tokens, in the console). Change it there, or ask it to continue.`;
+      return `The answer reached the ${tokens}-token cap on this model's Library profile (Maximum output tokens). Change it there, or ask it to continue.`;
     case "install":
-      return `The answer reached this install's output cap of ${tokens} tokens (Default max output tokens, in the console's gateway settings). Clear it there for no cap, or ask it to continue.`;
+      return `The answer reached the install's ${tokens}-token output cap (Default max output tokens, in the console's gateway settings). Clear it there, or ask it to continue.`;
   }
 }
 
@@ -198,7 +198,7 @@ export const DEV_MODE_EXPLAINED =
 export function modeChanged(mode: "production" | "dev", at: string): string {
   const when = new Date(at).toLocaleString();
   return mode === "dev"
-    ? `Eugene switched to developer mode on ${when}. Its owner can now see what job sites return in chats made from now on.`
+    ? `Eugene switched to developer mode on ${when}. Its owner can see what job sites return in new chats.`
     : `Eugene switched to production mode on ${when}. Its owner can no longer see what job sites return.`;
 }
 export function redactedNote(site: string): string {

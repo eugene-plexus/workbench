@@ -190,13 +190,13 @@ describe("the sorter in use", () => {
     expect(
       sortWhereWords(sortFacts({ locality: "external", runsOn: "Cohere", allowExternal: true })),
     ).toBe(
-      "It runs on Cohere. The owner of this Workbench allowed the best passages of your documents for each question, and the question, to be sent there.",
+      "It runs on Cohere. The owner allowed each question and its best passages to be sent there.",
     );
     expect(sortWhereWords(sortFacts({ locality: "external", runsOn: null }))).toMatch(
-      /^It runs outside your machines\. The owner of this Workbench allowed/,
+      /^It runs outside your machines\. The owner allowed/,
     );
     expect(sortWhereWords(sortFacts({ locality: "unknown" }))).toBe(
-      "Eugene cannot say where it runs. The owner of this Workbench allowed models outside your machines, so the best passages of your documents for each question, and the question, may leave them.",
+      "Eugene cannot say where it runs. The owner allowed models outside your machines, so each question and its best passages may leave them.",
     );
     expect(sortWhereWords(sortFacts({ locality: null }))).toBeNull();
   });
@@ -253,10 +253,10 @@ describe("what the speed comes to", () => {
     // is more than half, or it is not). A sorter that is too slow is measured again by quick tests
     // alone, so a speed that began as sorts ends as theirs, and the page must say so.
     expect(sortSpeedFromWords(sortFacts({ rateFrom: "probe" }))).toBe(
-      "How fast it reads comes mostly from quick tests Workbench ran on it, not from sorts of your questions.",
+      "That speed comes mostly from quick tests, not from sorts of your questions.",
     );
     expect(sortSpeedFromWords(sortFacts({ rateFrom: "sorts" }))).toBe(
-      "How fast it reads comes mostly from the sorts Workbench has made.",
+      "That speed comes mostly from the sorts Workbench has made.",
     );
   });
 

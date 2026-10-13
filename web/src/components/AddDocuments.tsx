@@ -199,7 +199,7 @@ export function AddDocuments({ onChanged }: { onChanged: () => void }) {
       <p id={`${uid}-help`} className="help">
         {dragging
           ? "Drop the files to add them."
-          : "Choose files, or drop them here. Workbench reads each one so a chat can find the passages that have the words of your question."}
+          : "Choose files, or drop them here. Workbench reads each one so a chat can search it."}
       </p>
       <div className="flex flex-wrap items-center gap-3">
         <input

@@ -77,12 +77,12 @@ describe("for each code the server can say", () => {
       shown(searchFor(code));
       if (code === "ok") {
         expect(has("documents-search-help")).toBe(false);
-        expect(box()).not.toHaveTextContent("it does not look for meaning");
+        expect(box()).not.toHaveTextContent("It does not look for meaning");
       } else {
         expect(screen.getByTestId("documents-search-help")).toHaveTextContent(
           "“costs” does not find “cost”",
         );
-        expect(box()).toHaveTextContent("it does not look for meaning");
+        expect(box()).toHaveTextContent("It does not look for meaning");
       }
     },
   );
@@ -184,7 +184,7 @@ describe("meaning and words", () => {
     );
     expect(box()).toHaveClass("notice--warn");
     expect(screen.getByTestId("documents-search-where")).toHaveTextContent(
-      "It runs on OpenAI. The owner of this Workbench allowed the text of your documents and of your questions to be sent there.",
+      "It runs on OpenAI. The owner allowed the text of your documents and questions to be sent there.",
     );
   });
 
@@ -339,7 +339,7 @@ describe("words only, said as what it is", () => {
     shown(wordsOnly());
     expect(box().textContent).not.toMatch(/\b(soon|later|will|coming|meaning and words)\b/i);
     expect(screen.getByTestId("documents-search-help")).toHaveTextContent(
-      "A passage is found when it has the words of your question, spelled the same way: “costs” does not find “cost”, and it does not look for meaning.",
+      "Passages are found by the words in your question, spelled the same: “costs” does not find “cost”. It does not look for meaning.",
     );
   });
 

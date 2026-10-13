@@ -202,7 +202,7 @@ export const OWNER_OFF_EFFECT = "No document is searched, and no file can be add
 /** What words only means, said so it does not promise more: for as long as the
  * server says it is not searching by meaning. */
 export const WORDS_ONLY_HELP =
-  "A passage is found when it has the words of your question, spelled the same way: “costs” does not find “cost”, and it does not look for meaning.";
+  "Passages are found by the words in your question, spelled the same: “costs” does not find “cost”. It does not look for meaning.";
 
 // --- the person's own settings ---
 
@@ -231,8 +231,8 @@ export function externalLabel(choice: ExternalChoice): string {
 /** What a new chat starts with, as it is now. */
 export function newChatsWords(prefs: DocumentsPrefs): string {
   return prefs.effective.newChats
-    ? "New chats start with Documents on. You can turn it off in any chat, with its Documents button."
-    : "New chats start with Documents off. You can turn it on in any chat, with its Documents button.";
+    ? "New chats start with Documents on. Turn it off in any chat with its Documents button."
+    : "New chats start with Documents off. Turn it on in any chat with its Documents button.";
 }
 
 // --- adding files ---

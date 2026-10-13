@@ -135,7 +135,7 @@ def link_words(entry: Entry) -> tuple[str, str]:
         return (
             "cloud",
             "Not read: this file is kept online by a cloud-sync program (OneDrive, Dropbox ...), "
-            "and reading it would download it. Workbench reads files that are on this machine.",
+            "so reading it would download it.",
         )
     return (
         "link",

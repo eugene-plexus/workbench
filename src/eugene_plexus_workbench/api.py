@@ -1217,9 +1217,9 @@ async def upload(
         await asyncio.to_thread(_discard, target)
         raise _problem(
             status.HTTP_413_CONTENT_TOO_LARGE,
-            "This chat's attachments would add up to more than Eugene carries in one request "
-            f"({files.CHAT_LIMIT // files.MIB} MiB), because the whole chat is sent each time. "
-            "Remove a file not yet sent, or start a new chat to attach more.",
+            "This chat's attachments would add up to more than one request can carry "
+            f"({files.CHAT_LIMIT // files.MIB} MiB). Remove a file not yet sent, or start a "
+            "new chat.",
         )
     from . import documents_api
     from .context import new_nonce

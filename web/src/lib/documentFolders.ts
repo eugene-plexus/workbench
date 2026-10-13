@@ -364,7 +364,7 @@ export function capsWords(caps: FolderCaps): string[] {
   const said: string[] = [];
   if (caps.files.reached) {
     said.push(
-      `This folder has more than the ${caps.files.limit.toLocaleString()} files Workbench keeps for one folder, so the files that come last are left out.`,
+      `This folder has more than the ${caps.files.limit.toLocaleString()} files Workbench keeps, so the last ones are left out.`,
     );
   }
   if (caps.bytes.reached) {
@@ -540,18 +540,17 @@ export const patternsWords = (typed: number, most: number): string =>
 
 /** What a change of rules does, said before it is saved. */
 export const RULES_EFFECT =
-  "Workbench checks the folder again at once. Files that are left out now leave your documents, and files that are not are read.";
+  "Workbench checks the folder again at once. Files now left out leave your documents; the others are read.";
 
 // --- limits, stated ---
 
 /** The limits a person has to know, each a sentence, from the numbers in effect. */
 export function limitsWords(limits: FolderLimits): string[] {
   return [
-    `Workbench does not watch your folders. It looks at each one again every ${count(limits.syncMinutes, "minute")}, and whenever you choose Sync now, so a change can take that long to show.`,
-    "A quick check compares each file's size and time with what Workbench read, so an edit that keeps both is missed. Sync now with a deep check reads every file again and finds it.",
-    "Only folders on the machine Workbench runs on can be added. Folders on your job sites cannot be added yet.",
-    "The first read of a big folder takes a while. Files can be searched as each one is ready, and the counts on the folder say how far it has got.",
-    `Workbench keeps its own copy of each file it reads, so a search never touches your folder. From one folder it takes up to ${limits.maxFiles.toLocaleString()} files and ${limits.maxMB.toLocaleString()} MB, ${limits.maxDepth} folders deep, and a file may be up to ${sizeWords(limits.maxFileBytes)}. ${limits.reads}`,
+    `Folders are not watched: each is checked every ${count(limits.syncMinutes, "minute")} and on Sync now, so a change can take that long to show.`,
+    "Only folders on the machine Workbench runs on can be added, not job site folders yet.",
+    "The first read of a big folder takes a while. Files are searchable as each one is ready.",
+    `From one folder Workbench takes up to ${limits.maxFiles.toLocaleString()} files and ${limits.maxMB.toLocaleString()} MB, ${limits.maxDepth} folders deep; a file may be up to ${sizeWords(limits.maxFileBytes)}. ${limits.reads}`,
     `With the files you add yourself, Workbench keeps up to ${limits.maxPassages.toLocaleString()} passages for you.`,
     "The owner of this Workbench sets these limits.",
   ];
@@ -559,18 +558,17 @@ export function limitsWords(limits: FolderLimits): string[] {
 
 /** What the Folders section says first: what a folder is for, and that it is only ever read. */
 export const FOLDERS_INTRO =
-  "Point your documents at a folder the owner of this Workbench gave you. Workbench reads the files in it and keeps your documents in step with it, so a chat with Documents on can answer from them.";
-export const READ_ONLY_WORDS =
-  "Reading a folder for your documents never changes, adds or deletes anything in it.";
+  "Add a folder the owner gave you. Workbench reads its files as your documents and keeps them in step, so a chat with Documents on can answer from them.";
+export const READ_ONLY_WORDS = "It never changes, adds or deletes anything in the folder.";
 
 /** What the Add card says beside its button: what adding does, and where to stop it reading what
  * should not be read. */
 export const ADD_WORDS =
-  "Workbench starts reading it at once. If it holds things that should not be read, choose what to leave out first.";
+  "Workbench starts reading it at once. To keep something out, choose what to leave out first.";
 
 /** What a deep check is for, said beside the button that runs one. */
 export const DEEP_WORDS =
-  "A quick check compares each file's size and time with what Workbench read, so an edit that keeps both is missed. A deep check reads every file again and compares what is in it, so it finds that edit. It takes longer on a big folder.";
+  "A quick check misses an edit that keeps a file's size and time. A deep check reads every file again and finds it, but takes longer on a big folder.";
 
 /** What the Add card says when there is nothing to add: no folder was given to the person, or every
  * one they were given is added. Local folders are granted by the owner in Toolbox · Tools, so the
@@ -578,12 +576,12 @@ export const DEEP_WORDS =
 export function nothingToAddWords(owner: boolean, anyGiven: boolean): string {
   if (anyGiven) {
     return owner
-      ? "Every folder you were given is added. To add another, give yourself one in Toolbox · Tools, under Folders · File tools."
+      ? "Every folder you were given is added. To add another, give yourself one in Toolbox · Tools."
       : "Every folder you were given is added.";
   }
   return owner
-    ? "No folder has been given to you yet. Give yourself one in Toolbox · Tools: under Folders · File tools, choose “Grant an existing folder” and pick your own name as the person. It will be here once it is granted."
-    : "No folder has been given to you yet. The owner of this Workbench gives folders to people, in Toolbox · Tools. Ask them to give you one.";
+    ? "No folder has been given to you yet. In Toolbox · Tools, under Folders · File tools, choose “Grant an existing folder” and pick your own name as the person."
+    : "No folder has been given to you yet. Ask the owner of this Workbench to give you one.";
 }
 
 // --- removing ---
@@ -593,15 +591,15 @@ export function removeFolderWords(folder: Pick<DocumentFolder, "name" | "counts"
   const files = folder.counts.files;
   return `Remove ${folder.name}? Workbench stops checking it${
     files > 0
-      ? `, and takes the ${count(files, "file")} it has from it out of your documents: its copies and the text it read from them are deleted, so no chat can find them again`
+      ? ` and takes its ${count(files, "file")} out of your documents, so no chat can find them`
       : ""
-  }. The folder, the files in it and your access to it are never touched. You can add it again.`;
+  }. The folder and your access to it are not touched; you can add it again.`;
 }
 
 /** What leaving one file out does, asked before it is done. The server puts it on the folder's
  * ignore list, or it would come back at the next check. */
 export function leaveOutWords(path: string): string {
-  return `Leave out ${path}? Workbench deletes its copy of the file and the text it read from it, and adds /${path} to this folder's ignore list, so that it does not come back at the next check. The file in your folder is not touched.`;
+  return `Leave out ${path}? Workbench deletes its copy and adds /${path} to this folder's ignore list, so it stays out. The file in your folder is not touched.`;
 }
 
 // --- looking again ---

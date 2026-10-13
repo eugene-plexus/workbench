@@ -168,7 +168,7 @@ describe("what Workbench says", () => {
     const capped = (outputCap: Message["outputCap"]) =>
       statusWords(message({ status: "done", finish: "length", outputCap }));
     expect(capped({ tokens: 4096, source: "install" })).toContain(
-      "this install's output cap of 4,096 tokens (Default max output tokens",
+      "the install's 4,096-token output cap (Default max output tokens",
     );
     expect(capped({ tokens: 2000, source: "profile" })).toContain(
       "the 2,000-token cap on this model's Library profile",

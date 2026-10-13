@@ -246,10 +246,10 @@ describe("the person's settings", () => {
 
   it("says what a new chat starts with, as it is in effect", () => {
     expect(newChatsWords(prefs())).toBe(
-      "New chats start with Documents off. You can turn it on in any chat, with its Documents button.",
+      "New chats start with Documents off. Turn it on in any chat with its Documents button.",
     );
     expect(newChatsWords(prefs({ newChats: true, effective: { newChats: true } }))).toBe(
-      "New chats start with Documents on. You can turn it off in any chat, with its Documents button.",
+      "New chats start with Documents on. Turn it off in any chat with its Documents button.",
     );
     // What the owner allows is what is in effect, whatever the person once chose.
     expect(newChatsWords(prefs({ newChats: true, effective: { newChats: false } }))).toContain(

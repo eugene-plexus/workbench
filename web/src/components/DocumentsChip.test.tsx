@@ -194,7 +194,7 @@ describe("what the next message does", () => {
   it("says it searches the person's documents and sends the passages that match, and where to see which", () => {
     drawer(chatDocuments());
     expect(status()).toHaveTextContent(
-      "Each question you send is searched for in your documents, and the passages that match go to qwen3-8b. Sources under each answer says which.",
+      "Your documents are searched for each question, and the matching passages go to qwen3-8b. Sources under each answer lists them.",
     );
     expect(status()).not.toHaveClass("notice");
     // This chat has no files of its own that it searches, and does not say it has.
@@ -211,7 +211,7 @@ describe("what the next message does", () => {
       }),
     );
     expect(status()).toHaveTextContent(
-      "The files of this chat that you chose to search are searched too.",
+      "The files of this chat you chose to search are searched too.",
     );
   });
 
@@ -236,7 +236,7 @@ describe("what the next message does", () => {
       }),
     );
     expect(status()).toHaveTextContent(
-      "Your documents are still being read, so none can be searched yet. They are searched as soon as they are ready.",
+      "Your documents are still being read. They can be searched as soon as they are ready.",
     );
     expect(screen.queryByRole("button", { name: /Open Documents/ })).toBeNull();
   });
@@ -255,7 +255,7 @@ describe("what the next message does", () => {
       }),
     );
     expect(status()).toHaveTextContent(
-      "The files of this chat that you chose to search are searched for each question, and the passages that match go to qwen3-8b.",
+      "The files of this chat you chose to search are searched for each question, and matching passages go to qwen3-8b.",
     );
   });
 });
@@ -424,9 +424,7 @@ describe("a model that runs outside the person's machines", () => {
         chat: { documents: 1, passages: 4, waiting: 0 },
       },
     });
-    expect(status()).toHaveTextContent(
-      "The files of this chat that you chose to search are searched",
-    );
+    expect(status()).toHaveTextContent("The files of this chat you chose to search are searched");
     expect(status()).toHaveTextContent("Your documents were not sent: this chat uses OpenRouter");
     expect(screen.getByRole("button", { name: "Send for this chat" })).toBeInTheDocument();
   });
@@ -438,7 +436,7 @@ describe("the chat's own switch", () => {
     const toggle = screen.getByRole("switch", { name: "Documents in this chat" });
     expect(toggle).toBeChecked();
     expect(toggle).toHaveAccessibleDescription(
-      /Search your documents for each question you send here/,
+      /Send the matching passages of your documents with each question in this chat/,
     );
   });
 
@@ -600,7 +598,7 @@ describe("the owner reading someone else's chat", () => {
     expect(status()).toHaveTextContent(
       "Documents are on in this chat, and it answers only from them.",
     );
-    expect(status()).toHaveTextContent("what a person keeps in their documents is private to them");
+    expect(status()).toHaveTextContent("documents are private");
     expect(screen.queryByRole("switch")).toBeNull();
     expect(screen.queryByTestId("documents-manage")).toBeNull();
     expect(screen.queryByTestId("documents-counts")).toBeNull();

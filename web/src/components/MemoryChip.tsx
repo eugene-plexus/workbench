@@ -366,7 +366,7 @@ export function MemoryDrawer({
               <p>{readOnlyWords(view)}</p>
               <p className="help">
                 This is someone else&apos;s chat. You can see how many notes it used, not what they
-                said: notes are private to the person who wrote them.
+                said: notes are private.
               </p>
             </div>
           )}
@@ -384,8 +384,8 @@ export function MemoryDrawer({
                   <TriangleAlert size={16} aria-hidden />
                   <span>
                     <span className="notice-title">Notes changed since this chat started</span>
-                    This chat still uses the notes it started with, so its answers stay steady.
-                    Choose Refresh memory to use the new ones.
+                    This chat still uses the notes it started with. Choose Refresh memory to use the
+                    new ones.
                   </span>
                 </p>
               )}
@@ -409,7 +409,7 @@ export function MemoryDrawer({
                   </label>
                   <p id={`${uid}-switch-help`} className="help">
                     Turn it off to send no notes in this chat. It takes effect with your next
-                    message, which may start a little slower.
+                    message.
                   </p>
                 </div>
               )}

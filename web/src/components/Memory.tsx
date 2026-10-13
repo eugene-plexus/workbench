@@ -275,18 +275,16 @@ export function Memory({
                 What Workbench remembers about you. Only you can see this page.
               </p>
               <p className="help">
-                Notes are short lines about you and how you like answers. Workbench gives them to
-                the model in your chats, so you do not have to say them again. A chat keeps the
-                notes it started with, so its answers stay steady. A new or changed note reaches a
-                chat when you choose Refresh memory in it, and every new chat starts with it. A
-                deleted note leaves every chat at once.
+                Notes are short lines the model is given in your chats. A chat keeps the notes it
+                started with until you choose Refresh memory there; a deleted note leaves every chat
+                at once.
               </p>
             </div>
             {data.ownerReadsChats && (
               <p data-testid="memory-owner-reads" className="notice notice--warn">
                 <Eye size={16} aria-hidden />
-                The owner of this Workbench can read your chats, and an answer in a chat can quote
-                your notes. The owner cannot read this page.
+                The owner of this Workbench can read your chats, including any notes an answer
+                quotes. The owner cannot read this page.
               </p>
             )}
           </>
@@ -479,15 +477,15 @@ function Settings({
         </label>
         <p id={`${uid}-use-help`} data-testid="memory-use-effective" className="help">
           {effective.enabled
-            ? "Memory is on. The models in your chats are given your notes. You can turn it off for one chat from that chat's Memory button."
-            : "Memory is off because you turned it off. No model is given your notes, and Remember that … keeps nothing. Your notes stay saved here."}
+            ? "Memory is on: models in your chats are given your notes. Turn it off for one chat from its Memory button."
+            : "You turned memory off. No model is given your notes, and Remember that … keeps nothing. Your notes stay saved here."}
         </p>
       </div>
       <fieldset className="flex min-w-0 flex-col gap-2" aria-describedby={`${uid}-outside-help`}>
         <legend className="field-label mb-1">Models that run outside your machines</legend>
         <p id={`${uid}-outside-help`} className="help">
-          Some models run on another company&apos;s computers, through a cloud account added to
-          Eugene. Your notes would leave your machines to reach them.
+          Some models run on another company&apos;s computers. Your notes would leave your machines
+          to reach them.
         </p>
         {EXTERNAL_CHOICES.map((choice) => (
           <div key={choice.value}>
@@ -582,8 +580,8 @@ function BudgetField({
   return (
     <div className="mt-2 flex flex-col gap-3">
       <p className="help">
-        Each chat gives notes at most this many tokens, and never more than{" "}
-        {limits.budgetSharePercent}% of its model&apos;s window, so a small model gets less.
+        A chat gives notes at most this many tokens, and never more than {limits.budgetSharePercent}
+        % of its model&apos;s window.
       </p>
       <p data-testid="memory-budget-effective" className="help">
         In effect: <strong>{prefs.effective.budgetTokens.toLocaleString()} tokens</strong>.{" "}
@@ -657,7 +655,7 @@ function Usage({ data }: { data: MemoryPage }) {
         <p data-testid="memory-usage-limit" className="notice notice--warn">
           <TriangleAlert size={16} aria-hidden />
           You have {usage.maxNotes.toLocaleString()} notes, the limit. Delete some, or ask the owner
-          to raise the limit in Eugene&apos;s console.
+          to raise it.
         </p>
       )}
     </div>
@@ -1092,10 +1090,7 @@ function Starter({
   return (
     <div data-testid="memory-empty" className="card">
       <h3 className="title-card">Nothing remembered yet</h3>
-      <p className="help">
-        Type “Remember that …” in any chat, or add a note here. To start, write one note a line in
-        these two boxes.
-      </p>
+      <p className="help">Type “Remember that …” in any chat, or write one note a line below.</p>
       <form className="flex flex-col gap-4" onSubmit={(event) => void submit(event)}>
         <div className="field">
           <label htmlFor={`${uid}-about`} className="field-label">
@@ -1219,9 +1214,7 @@ function YourData({
       <h2 id={`${uid}-data`} className="title-section">
         Export or delete
       </h2>
-      <p className="help">
-        Your notes are yours. Export them as a file to read or keep, or delete them all.
-      </p>
+      <p className="help">Export your notes as a file, or delete them all.</p>
       <div className="flex flex-wrap gap-2">
         <button
           type="button"
@@ -1256,8 +1249,8 @@ function YourData({
             }}
           >
             <p>
-              Delete all {plural(count, "note")}? They leave this page and every chat&apos;s copy at
-              once, and this cannot be undone.
+              Delete all {plural(count, "note")}? They leave every chat at once. This cannot be
+              undone.
             </p>
             <div className="field w-full max-w-xs">
               <label htmlFor={`${uid}-typed`} className="field-label">

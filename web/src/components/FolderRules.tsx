@@ -147,8 +147,7 @@ export function RulesFields({
           Leave out what the folder&apos;s .gitignore files list
         </label>
         <p id={`${uid}-gitignore-help`} className="help ps-[1.625rem]">
-          {rules.gitignore} A project&apos;s build output is not what you mean to search, so this is
-          on unless you turn it off.
+          {rules.gitignore} This is on unless you turn it off.
         </p>
       </div>
       <details data-testid={`${prefix}-always`} className="group/always text-sm">

@@ -107,10 +107,9 @@ export function Tools({ owner, onClose }: { owner: boolean; onClose: () => void 
           </button>
         </header>
         <p className="help">
-          Connect an MCP server, then choose it in a chat&apos;s settings. Each call shows what it
-          will send and waits for your approval. Network connections are shared with everyone signed
-          into this Workbench. Local servers are available only to the owner. Folder access is
-          assigned separately below.
+          Connect an MCP server, then choose it in a chat&apos;s settings. You approve each call.
+          Network servers are shared with everyone signed into this Workbench; local servers are for
+          the owner only.
         </p>
         <Folders owner={owner} />
         <section aria-labelledby={`${uid}-servers`} className="section">

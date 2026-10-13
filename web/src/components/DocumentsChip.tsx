@@ -140,8 +140,8 @@ function Status({
         <div data-testid="documents-status" className="notice">
           <Info size={16} aria-hidden />
           <div>
-            The files of this chat that you chose to search are searched for each question, and the
-            passages that match go to {model}.
+            The files of this chat you chose to search are searched for each question, and matching
+            passages go to {model}.
             {view.reason && <span className="mt-1 block text-muted">{view.reason}</span>}
             {view.hint && <span className="mt-1 block text-muted">{view.hint}</span>}
             {code === "outside_model" && outside?.canSendForThisChat && (
@@ -206,7 +206,7 @@ function Status({
           <Info size={16} aria-hidden />
           <div>
             {library.waiting > 0
-              ? "Your documents are still being read, so none can be searched yet. They are searched as soon as they are ready."
+              ? "Your documents are still being read. They can be searched as soon as they are ready."
               : "You have no documents to search yet."}
             {library.waiting === 0 && (
               <div className="mt-2">
@@ -226,9 +226,9 @@ function Status({
     }
     return (
       <p data-testid="documents-status" className="text-sm">
-        Each question you send is searched for in your documents, and the passages that match go to{" "}
-        {model}. Sources under each answer says which.
-        {chat.documents > 0 && " The files of this chat that you chose to search are searched too."}
+        Your documents are searched for each question, and the matching passages go to {model}.
+        Sources under each answer lists them.
+        {chat.documents > 0 && " The files of this chat you chose to search are searched too."}
       </p>
     );
   }
@@ -395,7 +395,7 @@ export function DocumentsDrawer({
               <p>{readOnlyWords(view)}</p>
               <p className="help">
                 This is someone else&apos;s chat. You can see whether Documents was on, not what is
-                in them: what a person keeps in their documents is private to them.
+                in them: documents are private.
               </p>
             </div>
           )}
@@ -428,8 +428,8 @@ export function DocumentsDrawer({
                       Documents in this chat
                     </label>
                     <p id={`${uid}-switch-help`} className="help">
-                      Search your documents for each question you send here, and send the passages
-                      that match to the model. It takes effect with your next message.
+                      Send the matching passages of your documents with each question in this chat.
+                      It takes effect with your next message.
                     </p>
                   </div>
                   <div className="field">

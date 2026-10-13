@@ -959,7 +959,7 @@ describe("the page", () => {
     const invite = await screen.findByTestId("job-site-invite");
     const steps = within(invite).getAllByRole("listitem");
     expect(steps).toHaveLength(3);
-    expect(steps[0]).toHaveTextContent(/^The machine must already have Eugene installed/);
+    expect(steps[0]).toHaveTextContent(/^The machine needs Eugene installed/);
     expect(steps[1]).toHaveTextContent(/within 15 minutes/);
     expect(steps[2]).toHaveTextContent(/^It asks for your Eugene password there/);
     expect(invite.querySelector("ol")).not.toBeNull();
