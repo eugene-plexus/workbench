@@ -109,7 +109,8 @@ class Degraded:
     (`app.state.degraded` holds why). `/healthz` answers `degraded` with the reason, so the
     agent sees a Workbench that is up and the console can say what is wrong; every API
     address answers 503 with it; any other address is a page that says it. Nothing here
-    reads or writes the store.
+    reads or writes the store. The reason names no path (sign-in is down, so anyone can ask);
+    the log has the whole account.
     """
 
     def __init__(self, app: ASGIApp) -> None:

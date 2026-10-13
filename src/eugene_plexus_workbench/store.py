@@ -10,7 +10,10 @@ refused and left as it is.
 
 **A store is migrated in one transaction with its version, after a copy of it is
 kept** (`workbench.sqlite3.schema-<N>.bak`, N the schema it was at): steps 6, 7 and
-11 rewrite chats, so what was there is kept whole. A migration that fails changes
+11 rewrite chats, so what was there is kept whole. A copy is never written over: a
+store that has changed since the copy of its schema was kept (the older Workbench ran
+again between two starts) gets the next free name, `.schema-<N>.1.bak` and so on, and
+one that has not changed makes no second copy. A migration that fails changes
 nothing, and `Store.open` raises with the cause; Workbench's lifespan serves a
 degraded page naming it instead of crashing (`app.py`).
 
@@ -66,6 +69,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import sqlite3
 import time
 import unicodedata
@@ -80,6 +84,37 @@ SCHEMA_VERSION = 13
 #: The oldest schema this migrates from: what Workbench v0.1.0 wrote. Schema 1 predates
 #: it, and nobody holds one.
 OLDEST_SCHEMA = 2
+
+
+class StoreProblem(RuntimeError):
+    """The store cannot be opened, for a reason Workbench can name itself.
+
+    The exception's own text is the whole account, with every path in it, and goes to the log.
+    `public` says the same with none: a file by its own name alone. A Workbench that cannot open
+    its store cannot sign anyone in, so what it says on `/healthz`, to the API and on its page is
+    said to whoever asks (`app.py`).
+    """
+
+    def __init__(self, message: str, public: str) -> None:
+        super().__init__(message)
+        self.public = public
+
+
+def public_cause(exc: BaseException) -> str:
+    """Why `exc` stopped the store opening, in words that name no directory.
+
+    Only what is known to carry none is passed on. SQLite's own messages name a table or a
+    kind of fault, never a file. An operating system error is its `strerror`: its text adds the
+    path. Anything else is named by its type, and the log has the rest.
+    """
+    if isinstance(exc, StoreProblem):
+        return exc.public
+    if isinstance(exc, sqlite3.Error):
+        return str(exc) or type(exc).__name__
+    if isinstance(exc, OSError):
+        return exc.strerror or type(exc).__name__
+    return f"an unexpected {type(exc).__name__}"
+
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -382,21 +417,58 @@ def _stored_version(db: sqlite3.Connection) -> int | None:
     return int(found[0]) if found is not None else None
 
 
+def _copy_name(path: Path, version: int, number: int) -> Path:
+    """Where copy `number` of the store at `version` is kept: `<name>.schema-<N>.bak` for the
+    first, then `.schema-<N>.1.bak`, `.2.bak` and so on."""
+    suffix = f".{number}" if number else ""
+    return path.with_name(f"{path.name}.schema-{version}{suffix}.bak")
+
+
+def _copies_of(path: Path, version: int) -> list[tuple[int, Path]]:
+    """The copies kept of this store at `version`, oldest first, each with its number."""
+    named = re.compile(rf"{re.escape(path.name)}\.schema-{version}(?:\.(\d+))?\.bak")
+    found = []
+    for entry in path.parent.iterdir():
+        match = named.fullmatch(entry.name)
+        if match:
+            found.append((int(match.group(1) or 0), entry))
+    return sorted(found)
+
+
+def _same_bytes(first: Path, second: Path) -> bool:
+    if first.stat().st_size != second.stat().st_size:
+        return False
+    with first.open("rb") as one, second.open("rb") as other:
+        while True:
+            a, b = one.read(1 << 20), other.read(1 << 20)
+            if a != b:
+                return False
+            if not a:
+                return True
+
+
 def _keep_backup(db: sqlite3.Connection, path: Path, version: int) -> Path:
     """A copy of the store as it is, kept beside it before a migration changes it.
 
     SQLite's own online backup, so a store with a write-ahead log is copied whole
-    and the copy is one file that opens on its own. One copy per schema: one that
-    is already there is the older, made by a start that stopped or failed after
-    it, and is kept, not replaced. It is written under another name and renamed,
-    so a copy that exists is a finished one.
+    and the copy is one file that opens on its own. It is written under another name
+    and renamed, so a copy that exists is a finished one.
+
+    A copy is never written over: it may be the only one of what it held. A start that
+    stopped or failed after the copy and began again finds the store as that copy has it,
+    and makes no second one, so restarts do not fill the disk. A store that has changed
+    since (the older Workbench ran again between the two starts) is not in that copy, so
+    it gets the next free name, `.schema-<N>.1.bak` and so on. What is returned is the
+    copy that holds this store's content.
     """
-    target = path.with_name(f"{path.name}.schema-{version}.bak")
-    if target.exists():
-        if not target.is_file():
-            raise OSError(f"{target} is not a file, so the store cannot be copied there")
-        return target
-    partial = target.with_name(target.name + ".part")
+    copies = _copies_of(path, version)
+    newest = copies[-1][1] if copies else None
+    if newest is not None and not newest.is_file():
+        raise StoreProblem(
+            f"{newest} is not a file, so the store cannot be copied there",
+            f"{newest.name} is not a file, so the store cannot be copied there",
+        )
+    partial = path.with_name(f"{path.name}.schema-{version}.bak.part")
     partial.unlink(missing_ok=True)
     try:
         copy = sqlite3.connect(partial)
@@ -405,11 +477,15 @@ def _keep_backup(db: sqlite3.Connection, path: Path, version: int) -> Path:
             copy.execute("PRAGMA journal_mode=DELETE")
         finally:
             copy.close()
-        os.replace(partial, target)
+        if newest is not None and _same_bytes(partial, newest):
+            partial.unlink()
+            return newest
+        kept = _copy_name(path, version, copies[-1][0] + 1 if copies else 0)
+        os.replace(partial, kept)
     except BaseException:
         partial.unlink(missing_ok=True)
         raise
-    return target
+    return kept
 
 
 def _initialize_schema(
@@ -417,8 +493,8 @@ def _initialize_schema(
 ) -> None:
     """Commit schema changes and their version together, including first boot.
 
-    `on_backup` is told of the copy kept before a migration the moment it exists, so a
-    migration that then fails can still say where it is. Do not use executescript
+    `on_backup` is told of the copy that holds the store before a migration the moment it
+    is settled, so a migration that then fails can still say where it is. Do not use executescript
     here: it commits an existing transaction. `_SCHEMA` contains only individual DDL
     statements, which is why it may be split on semicolons; the memory triggers hold
     semicolons, so `_MEMORY_SCHEMA` is a list of whole statements. Migrations are
@@ -436,10 +512,11 @@ def _initialize_schema(
                 if version > SCHEMA_VERSION
                 else " from before Workbench v0.1"
             )
-            raise RuntimeError(
-                f"{path} has unsupported schema {version}{origin}; this Workbench knows "
-                f"schemas {OLDEST_SCHEMA} through {SCHEMA_VERSION}. Restore matching software "
-                "and state."
+            known = f"this Workbench knows schemas {OLDEST_SCHEMA} through {SCHEMA_VERSION}"
+            raise StoreProblem(
+                f"{path} has unsupported schema {version}{origin}; {known}. "
+                "Restore matching software and state.",
+                f"unsupported schema {version}{origin}; {known}",
             )
         if version is not None:
             for target in range(version + 1, SCHEMA_VERSION + 1):
@@ -1017,9 +1094,14 @@ class Store:
         self._path = path
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="workbench-store")
         self._db: sqlite3.Connection | None = None
-        #: The copy kept before this store was migrated, if it was: what a failure after
-        #: the copy points the person to.
+        #: The copy that holds this store as it was before it was migrated, if it was: a
+        #: new one, or the one an earlier start kept of the same content. What a failure
+        #: after the copy points the person to.
         self.backup: Path | None = None
+
+    @property
+    def path(self) -> Path:
+        return self._path
 
     # --- plumbing -------------------------------------------------------
 
@@ -1044,10 +1126,12 @@ class Store:
                 if "fts5" in str(exc).lower():
                     # Memory's search needs it; name the cause rather than a
                     # bare "no such module".
-                    raise RuntimeError(
+                    raise StoreProblem(
                         f"{self._path}: this Python's SQLite was built without full-text search "
                         f"(FTS5), which Workbench's memory needs ({exc}). Reinstall Workbench "
-                        "from Eugene's console, which brings a Python that has it."
+                        "from Eugene's console, which brings a Python that has it.",
+                        "this Python's SQLite was built without full-text search (FTS5), which "
+                        "Workbench's memory needs",
                     ) from exc
                 raise
             except BaseException:
