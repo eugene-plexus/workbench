@@ -7,7 +7,7 @@ agent hands Workbench at each start, and nothing else: no person signed
 in to Workbench can change these, the owner included -- they are changed
 from Eugene's console, by its operator.
 
-Sixteen settings. `ownerReadsChats` (W13): whether the owner may read the chats
+Eighteen settings. `ownerReadsChats` (W13): whether the owner may read the chats
 of the people they give Workbench to (Troy, C3 call 3: each business
 decides). Three are memory's (`memory.py`, MR1): whether people
 may keep notes at all, how many each may keep, and whether notes may be sent
@@ -21,6 +21,10 @@ documents may be sent to a model that runs outside this install's machines. Thre
 search by meaning's (MR5, `knowledge/meaning.py`): which search model finds passages by
 what they say (`auto`, or one named), whether the text of documents may go to one that
 runs outside the machines, and how fast Workbench asks it to add meaning to documents.
+Two are sorting's (MR6b, `knowledge/sorting.py`): which result sorter puts the best of the
+passages a search found in order (`auto`, `off`, or one named; a sorter outside the machines
+is used only when it is named and the setting above allows the text to go there), and the
+seconds a sort may add to an answer, over which passages are left in the order they were found.
 Four are the folders people point their documents at (MR7, `knowledge/folder_sync.py`): how
 often Workbench looks at them, and how many files, how many megabytes and how many folders deep
 it takes of one. Saved documents are not covered by `ownerReadsChats` either. Every one takes
@@ -30,6 +34,7 @@ effect at once, and `null` puts one back to its default.
 from __future__ import annotations
 
 import hmac
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -46,6 +51,8 @@ from ._generated.models import (
 )
 from .store import Store
 
+log = logging.getLogger(__name__)
+
 OWNER_READS_CHATS = "ownerReadsChats"
 MEMORY_ENABLED = "memoryEnabled"
 MEMORY_MAX_NOTES = "memoryMaxNotes"
@@ -58,6 +65,8 @@ DOCUMENTS_EXTERNAL_MODELS = "documentsExternalModels"
 DOCUMENTS_EMBEDDING_MODEL = "documentsEmbeddingModel"
 DOCUMENTS_EXTERNAL_EMBEDDING = "documentsExternalEmbedding"
 DOCUMENTS_EMBED_PER_MINUTE = "documentsEmbedRequestsPerMinute"
+DOCUMENTS_SORT_MODEL = "documentsSortModel"
+DOCUMENTS_SORT_SECONDS = "documentsSortSeconds"
 DOCUMENTS_FOLDER_SYNC_MINUTES = "documentsFolderSyncMinutes"
 DOCUMENTS_FOLDER_MAX_FILES = "documentsFolderMaxFiles"
 DOCUMENTS_FOLDER_MAX_MB = "documentsFolderMaxMB"
@@ -72,6 +81,7 @@ MAX_FILE_MB_LIMIT = 500
 MIN_WHOLE_TOKENS, MAX_WHOLE_TOKENS = 500, 200_000
 MIN_PASSAGES_LIMIT, MAX_PASSAGES_LIMIT = 100, 1_000_000
 MIN_EMBED_PER_MINUTE, MAX_EMBED_PER_MINUTE = 1, 6_000
+MIN_SORT_SECONDS, MAX_SORT_SECONDS = 0.5, 120.0
 MIN_SYNC_MINUTES, MAX_SYNC_MINUTES = 1, 1_440
 MIN_FOLDER_FILES, MAX_FOLDER_FILES = 10, 100_000
 MIN_FOLDER_MB, MAX_FOLDER_MB = 1, 102_400
@@ -79,6 +89,8 @@ MIN_FOLDER_DEPTH, MAX_FOLDER_DEPTH = 1, 31
 MAX_MODEL_ID = 256
 #: The search model setting's own word for "the first one that runs on this install's machines".
 AUTO = "auto"
+#: The result sorter setting's other word: passages are left in the order the search found them.
+OFF = "off"
 
 FIELDS = [
     ConfigField(
@@ -250,13 +262,15 @@ FIELDS = [
     ),
     ConfigField(
         key=DOCUMENTS_EXTERNAL_EMBEDDING,
-        label="Send the text of documents to a search model outside your machines",
+        label="Send the text of documents to a search model or result sorter outside your machines",
         description=(
             "Off (the default): the text of the passages in people's documents, and the "
-            "questions they ask, go only to a search model that runs on this install's own "
-            "machines. On: if the model named above runs outside them (a cloud account), "
-            "Workbench sends that account the text of every passage of everyone's documents "
-            "and every question they ask, and it leaves your machines. Turn it on only where "
+            "questions they ask, go only to a search model or result sorter that runs on this "
+            "install's own machines. On: if the search model named above runs outside them (a "
+            "cloud account), Workbench sends that account the text of every passage of "
+            "everyone's documents and every question they ask; and if the result sorter named "
+            "below runs outside them, it sends that account the best passages of every question "
+            "and the question itself. Either way it leaves your machines. Turn it on only where "
             "that is acceptable for everything people keep here."
         ),
         category="documents",
@@ -278,6 +292,57 @@ FIELDS = [
         default=30,
         minimum=MIN_EMBED_PER_MINUTE,
         maximum=MAX_EMBED_PER_MINUTE,
+    ),
+    ConfigField(
+        key=DOCUMENTS_SORT_MODEL,
+        label="Result sorter for My documents",
+        description=(
+            "The model that reads the best passages of a search beside the question and puts "
+            "them in the order that answers it best, so that the few sent to a chat are the "
+            "right few. Automatic (the default) uses the first result sorter that runs on this "
+            "install's own machines and is running now. Off leaves the passages in the order "
+            "the search found them. Name one to choose it. A sorter that runs outside your "
+            "machines is used only if you name it here and also allow it with the setting for "
+            "sending the text of documents outside your machines: automatic never picks one, "
+            "because the text of what people keep would leave. A sorter that is stopped, too "
+            "slow or fails never stops a search: the passages go in the order they were found "
+            "and Test a question says why."
+        ),
+        category="documents",
+        valueType=ConfigValueType.string,
+        default=AUTO,
+    ),
+    ConfigField(
+        key=DOCUMENTS_SORT_SECONDS,
+        label="Sort time (seconds; a sort is given up on after twice this)",
+        description=(
+            "How long a sort may be expected to take before Workbench leaves it out (default 3 "
+            "seconds); one that is asked is given up on after twice this. Before sorting, "
+            "Workbench works out how long it would take: the tokens to read (each passage, and "
+            "the question once for each passage; tokens are counted as characters divided by "
+            "three, deliberately high) over how many tokens a second this sorter reads, "
+            "measured from Workbench's own recent sorts and, before there is one, from a small "
+            "test made in the background (a question asked before that is answered with the "
+            "passages in the order they were found, and never waits for it). "
+            "Over this, the passages are left in the order they were found and the Documents "
+            "screen says why, with the numbers. A sort that is asked and takes more than twice "
+            "this is given up on, so one answer can wait that long. The sorter is then left "
+            "alone, whatever the size of the question, and the Documents screen says that it "
+            "did not answer and when it is asked again: by a small test, never by a question, "
+            "after ten seconds and after twice as long each time it still does not answer, up "
+            "to ten minutes (questions that were waiting together when it stopped answering "
+            "count as one try). Raising this setting so that twice it is longer than the wait "
+            "that was given up on asks it again at once. It is used again once it answers. As "
+            "measured through Workbench with Qwen3-Reranker-0.6B, sorting 18 passages took "
+            "about 7 seconds on a 12-thread processor and about 0.6 seconds on an RTX 5090 "
+            "(the median of 60 questions on each), which is why the default of 3 seconds sorts "
+            "on the graphics card and not on that processor."
+        ),
+        category="documents",
+        valueType=ConfigValueType.number,
+        default=3.0,
+        minimum=MIN_SORT_SECONDS,
+        maximum=MAX_SORT_SECONDS,
     ),
     ConfigField(
         key=DOCUMENTS_FOLDER_SYNC_MINUTES,
@@ -359,6 +424,8 @@ DEFAULTS: dict[str, Any] = {
     DOCUMENTS_EMBEDDING_MODEL: AUTO,
     DOCUMENTS_EXTERNAL_EMBEDDING: False,
     DOCUMENTS_EMBED_PER_MINUTE: 30,
+    DOCUMENTS_SORT_MODEL: AUTO,
+    DOCUMENTS_SORT_SECONDS: 3.0,
     DOCUMENTS_FOLDER_SYNC_MINUTES: 10,
     DOCUMENTS_FOLDER_MAX_FILES: 10_000,
     DOCUMENTS_FOLDER_MAX_MB: 2_048,
@@ -410,10 +477,26 @@ class DocumentSettings:
     embedding_model: str = AUTO
     external_embedding: bool = False
     embed_per_minute: int = 30
+    #: The result sorter (MR6b): `auto`, `off`, or the id the owner named; and the seconds a sort
+    #: may add to an answer. A sorter outside the machines needs `external_embedding` too.
+    sort_model: str = AUTO
+    sort_seconds: float = 3.0
 
     @property
     def max_bytes(self) -> int:
         return self.max_file_mb * 1024 * 1024
+
+
+def _sort_seconds(value: Any) -> float:
+    """The Sort time in effect: what was saved when it is a number the setting takes (a database
+    that was edited by hand never stops a search), otherwise the default."""
+    if (
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and MIN_SORT_SECONDS <= value <= MAX_SORT_SECONDS
+    ):
+        return float(value)
+    return float(DEFAULTS[DOCUMENTS_SORT_SECONDS])
 
 
 async def document_settings(store: Store) -> DocumentSettings:
@@ -425,6 +508,8 @@ async def document_settings(store: Store) -> DocumentSettings:
     model = await store.setting(DOCUMENTS_EMBEDDING_MODEL)
     outside = await store.setting(DOCUMENTS_EXTERNAL_EMBEDDING)
     rate = await store.setting(DOCUMENTS_EMBED_PER_MINUTE)
+    sorter = await store.setting(DOCUMENTS_SORT_MODEL)
+    sort_time = await store.setting(DOCUMENTS_SORT_SECONDS)
     return DocumentSettings(
         enabled=bool(enabled) if enabled is not None else bool(DEFAULTS[DOCUMENTS_ENABLED]),
         max_file_mb=int(largest) if largest is not None else int(DEFAULTS[DOCUMENTS_MAX_FILE_MB]),
@@ -446,6 +531,8 @@ async def document_settings(store: Store) -> DocumentSettings:
         embed_per_minute=(
             int(rate) if rate is not None else int(DEFAULTS[DOCUMENTS_EMBED_PER_MINUTE])
         ),
+        sort_model=(sorter.strip() if isinstance(sorter, str) and sorter.strip() else AUTO),
+        sort_seconds=_sort_seconds(sort_time),
     )
 
 
@@ -503,23 +590,47 @@ async def get_schema(request: Request) -> ConfigSchema:
 
 
 async def _fields(request: Request) -> list[ConfigField]:
-    """The fields, with the search model setting showing what it comes to now (settings
-    never lie): the models Eugene lists as suggestions, and a sentence saying which one is
-    in use, or why none is. A gateway that cannot be asked leaves it as it is."""
+    """The fields, with the search model and the result sorter settings showing what they come
+    to now (settings never lie): the models Eugene lists as suggestions, and a sentence saying
+    which one is in use, or why none is; and for Sort time, what it does with the sorter's
+    measured speed. A gateway that cannot be asked leaves a field as it is."""
     saved = getattr(request.app.state, "saved", None)
     meaning = getattr(saved, "meaning", None)
-    if meaning is None:
-        return FIELDS
-    try:
-        suggestions, status_ = await meaning.setting_view()
-    except Exception:  # a settings page never fails because a gateway did
-        return FIELDS
-    shown = [
-        f.model_copy(update={"suggestions": [AUTO, *suggestions], "status": status_})
-        if f.key == DOCUMENTS_EMBEDDING_MODEL
-        else f
-        for f in FIELDS
-    ]
+    sorting = getattr(saved, "sorting", None)
+    shown = list(FIELDS)
+    if meaning is not None:
+        try:
+            suggestions, status_ = await meaning.setting_view()
+        except Exception:  # a settings page never fails because a gateway did
+            log.warning(
+                "the search model setting could not say what it comes to; it is left as it is",
+                exc_info=True,
+            )
+        else:
+            shown = [
+                f.model_copy(update={"suggestions": [AUTO, *suggestions], "status": status_})
+                if f.key == DOCUMENTS_EMBEDDING_MODEL
+                else f
+                for f in shown
+            ]
+    if sorting is not None:
+        try:
+            view = await sorting.fields()
+        except Exception:  # nor because of a sorter
+            log.warning(
+                "the result sorter settings could not say what they come to; they are left as "
+                "they are",
+                exc_info=True,
+            )
+        else:
+            shown = [
+                f.model_copy(update={"suggestions": [AUTO, OFF, *view.ids], "status": view.model})
+                if f.key == DOCUMENTS_SORT_MODEL
+                else f.model_copy(update={"status": view.seconds})
+                if f.key == DOCUMENTS_SORT_SECONDS
+                else f
+                for f in shown
+            ]
     return shown
 
 
@@ -543,6 +654,8 @@ async def get_config(request: Request) -> ConfigDocument:
             DOCUMENTS_EMBEDDING_MODEL: documents.embedding_model,
             DOCUMENTS_EXTERNAL_EMBEDDING: documents.external_embedding,
             DOCUMENTS_EMBED_PER_MINUTE: documents.embed_per_minute,
+            DOCUMENTS_SORT_MODEL: documents.sort_model,
+            DOCUMENTS_SORT_SECONDS: documents.sort_seconds,
             DOCUMENTS_FOLDER_SYNC_MINUTES: folders.sync_minutes,
             DOCUMENTS_FOLDER_MAX_FILES: folders.max_files,
             DOCUMENTS_FOLDER_MAX_MB: folders.max_mb,
@@ -560,6 +673,21 @@ def _problem_with(key: str, value: Any) -> str | None:
         if isinstance(value, str) and value.strip() and len(value.strip()) <= MAX_MODEL_ID:
             return None
         return f"Must be auto, or the name of a search model (at most {MAX_MODEL_ID} characters)."
+    if key == DOCUMENTS_SORT_MODEL:
+        if isinstance(value, str) and value.strip() and len(value.strip()) <= MAX_MODEL_ID:
+            return None
+        return (
+            f"Must be auto, off, or the name of a result sorter (at most {MAX_MODEL_ID} "
+            "characters)."
+        )
+    if key == DOCUMENTS_SORT_SECONDS:
+        if (
+            isinstance(value, int | float)
+            and not isinstance(value, bool)
+            and MIN_SORT_SECONDS <= value <= MAX_SORT_SECONDS
+        ):
+            return None
+        return f"Must be a number of seconds from {MIN_SORT_SECONDS:g} to {MAX_SORT_SECONDS:g}."
     if key == DOCUMENTS_EMBED_PER_MINUTE:
         if (
             isinstance(value, int)

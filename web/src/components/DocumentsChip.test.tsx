@@ -15,6 +15,9 @@ import {
   saved,
   scanned,
   searchFor,
+  sortFacts,
+  sortFor,
+  SORTER,
   wordsOnly,
 } from "../test-saved";
 import { DocumentsChip, DocumentsDrawer, DocumentsHint } from "./DocumentsChip";
@@ -726,6 +729,21 @@ describe("how the documents are searched, in the drawer", () => {
     drawer(chatDocuments({ search: wordsOnly() }));
     expect(mode()).toHaveTextContent("Searching by words only.");
     expect(mode()).toHaveAttribute("data-mode", "words");
+  });
+
+  it("says the result sorter while it puts the best passages in order, as the Documents screen does", () => {
+    drawer(
+      chatDocuments({
+        search: byMeaning({ mode: `meaning and words, sorted by ${SORTER}`, sort: sortFacts() }),
+      }),
+    );
+    expect(mode()).toHaveTextContent(`Searching by meaning and words, sorted by ${SORTER}.`);
+    expect(mode()).toHaveAttribute("data-mode", `meaning and words, sorted by ${SORTER}`);
+  });
+
+  it("says nothing of a sorter that is not sorting: why is on the Documents screen", () => {
+    drawer(chatDocuments({ search: byMeaning({ sort: sortFor("over_budget") }) }));
+    expect(mode()).toHaveTextContent(/^Searching by meaning and words\.$/);
   });
 
   it.each(CODES)("%s: says the server's headline and its detail, and where Rebuild is", (code) => {

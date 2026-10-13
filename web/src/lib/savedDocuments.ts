@@ -57,7 +57,7 @@ export const IDLE_POLL_MS = 30_000;
 
 /** What the screen is waiting on, which sets how soon it asks again: documents being read
  * or being given their meaning (`busy`), meaning that waits for the search model or for the
- * key's limit (`waiting`), or nothing (`idle`). */
+ * key's limit, or a result sorter that is being measured (`waiting`), or nothing (`idle`). */
 export type Watching = "busy" | "waiting" | "idle";
 
 export function watching(page: DocumentsPage): Watching {
@@ -70,7 +70,12 @@ export function watching(page: DocumentsPage): Watching {
   // Passages read while no search model ran are taken up as soon as one is running.
   const takenUp = page.search.meaning && docs.some((doc) => doc.meaning?.state === "words_only");
   if (owing.some((doc) => !held(doc)) || header === "working" || takenUp) return "busy";
-  if (owing.length > 0 || header === "waiting" || header === "limited") return "waiting";
+  // A sorter that has not been measured is measured behind the look that found it: the screen
+  // says so and asks again in a few seconds, not in half a minute, so what was measured is shown.
+  const measuring = page.search.sort?.code === "measuring";
+  if (owing.length > 0 || header === "waiting" || header === "limited" || measuring) {
+    return "waiting";
+  }
   return "idle";
 }
 

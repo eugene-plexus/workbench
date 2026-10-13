@@ -18,6 +18,17 @@ rest go on, and what it said (`Report`) is kept with the result, so a person is 
 words only: the search model is not running" and is never told "nothing matched" for a
 search that did not run. A way of searching that fails any other way raises, as before.
 
+**Sorting what was found** (MR6b, design `workbench-sorting.md`). The best `SORT_FROM_EACH` (10)
+passages of each way of searching, each passage once (up to 20), may be sent to a result sorter,
+each as its headings, a new line and its words (`sheet_of`); what comes back is the order they are
+put in, ahead of the rest, which follow in the order they were fused in. `Retriever.retrieve` does
+it between `fuse` and `select` when it has a `Sorter` (`sorting.Sorting`). **A sorter that cannot
+or should not run never fails a search**: its passages stay in the fused order, and the
+`SortReport` says why, in the sorter's own words. Which sorter, and whether it is quick enough,
+are `sorting.py`'s to decide; this module asks, and applies the answer. A sorter's score is never
+shown, only the place it gave. A run that names its ways (Test a question, "try one way at a time")
+is not sorted, so that each way shows what it finds alone.
+
 **The one evidence rule** (design 4.4, item 7): there is no score threshold, and a
 passage is never left out for a low score. But a signal whose scores are similarities
 (meaning) may say a best similarity under its floor is not evidence by itself; then, and
@@ -45,17 +56,27 @@ number.
 
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 from .. import token_count
+from . import embedders
 from .index import Hit, Index
+
+log = logging.getLogger(__name__)
 
 #: Candidates a way of searching hands on, before the best are chosen.
 CANDIDATES = 50
+#: Passages each way of searching hands a result sorter, best first (design call 2). Measured on
+#: MR5's 60 questions: the best 10 of each, with their headings, gave recall@5 0.750 against the
+#: fused order's 0.600; the fused order's own 10 gave 0.667.
+SORT_FROM_EACH = 10
+#: What a result sorter's place is called in `ranks`, beside `words` and `meaning`.
+SORTER = "sorter"
 #: Passages sent by default, the most a person may ask for, and from one document.
 PASSAGES = 5
 PASSAGES_MAX = 10
@@ -259,6 +280,110 @@ def fuse(found: dict[str, list[Hit]], similar: Collection[str] = frozenset()) ->
     return [
         Candidate(by_chunk[c], tuple(via[c]), tuple(ranks[c]), similarity.get(c)) for c in order
     ]
+
+
+# --------------------------------------------------------------------------- #
+# sorting what was found
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class Sheet:
+    """A passage as a result sorter is sent it."""
+
+    #: Its headings, a new line, its words: the text a search model is given for it
+    #: (`embedders.passage_input`), without any model's prefix.
+    text: str
+    #: What reading it is worth, in tokens: the passage's own count (`Hit.tokens_est`).
+    tokens: int
+
+
+def sheet_of(hit: Hit) -> Sheet:
+    """The passage as a sorter is sent it. Without its headings a sorter loses what the words
+    leave out ("Trade-off: ..." under "J25. Windows, while the person is signed out"): measured,
+    text alone gained nothing (recall@5 +0.000 on the fused 10) and with the headings +0.067."""
+    return Sheet(
+        embedders.passage_input(embedders.PLAIN, hit.heading_path, hit.text), hit.tokens_est
+    )
+
+
+@dataclass
+class SortReport:
+    """What sorting the passages a search found came to, in what a person is told of it."""
+
+    #: Whether the passages were put in the sorter's order. When not, `code` and `message` say
+    #: why, in words (`not_running`, `over_budget`, `slow`, ...; `off` and `none_set_up` are
+    #: `quiet`: the sorter was never in play, and that is not worth saying beside every answer).
+    sorted: bool = False
+    #: The sorter that sorted, or that would have: the one named, or the one chosen.
+    model: str | None = None
+    code: str | None = None
+    message: str | None = None
+    quiet: bool = False
+    #: The setting as it is: `auto`, `off`, or the id the owner named.
+    setting: str | None = None
+    #: How many passages were (or would have been) sent, and what reading them is worth.
+    passages: int = 0
+    tokens: int | None = None
+    #: The tokens a second the sorter was priced at, the seconds the sort was expected to take,
+    #: and the seconds Sort time allows: what the decision was made of.
+    rate: float | None = None
+    expected: float | None = None
+    budget: float | None = None
+    #: How long the sort took, when it ran.
+    seconds: float | None = None
+
+
+@dataclass(frozen=True)
+class Sorted:
+    """A sorter's answer: the order it put the sheets in, or why it did not."""
+
+    #: Where each sheet is, best first: every position of the sheets sent, each once. None when
+    #: they were not sorted (`report` says why).
+    order: tuple[int, ...] | None
+    report: SortReport
+
+
+class Sorter(Protocol):
+    """A result sorter: puts the passages a search found in the order that answers the
+    question best (`sorting.Sorting` is one). It decides for itself whether to run, and says
+    so in the report; it may raise, and the search goes on without it."""
+
+    async def sort(self, query: str, sheets: Sequence[Sheet]) -> Sorted: ...
+
+
+def sort_pool(
+    candidates: Sequence[Candidate],
+    found: Mapping[str, Sequence[Hit]],
+    each: int = SORT_FROM_EACH,
+) -> list[Candidate]:
+    """The passages a sorter is given: the best `each` of every way of searching, each passage
+    once, in the order the ways were fused in (so a tie in the sorter's scores is the fused
+    order's). A way that found fewer gives what it found; one way alone gives its best `each`."""
+    wanted = {hit.chunk_id for hits in found.values() for hit in hits[:each]}
+    return [c for c in candidates if c.hit.chunk_id in wanted]
+
+
+def sorted_by(
+    candidates: Sequence[Candidate], pool: Sequence[Candidate], order: Sequence[int]
+) -> list[Candidate]:
+    """`candidates` with the passages of `pool` first, in `order` (positions in `pool`, best
+    first), each with the place the sorter gave it (`ranks`), and then the rest in the order
+    they were in. The ways that found a passage (`via`) are not the sorter's to change."""
+    placed = [
+        replace(pool[position], ranks=(*pool[position].ranks, (SORTER, place)))
+        for place, position in enumerate(order, start=1)
+    ]
+    sent = {c.hit.chunk_id for c in pool}
+    return [*placed, *(c for c in candidates if c.hit.chunk_id not in sent)]
+
+
+def sorted_mode(mode: str, sort: SortReport | None) -> str:
+    """How a search is told when its passages were sorted: `meaning and words, sorted by
+    Qwen3-Reranker`; as it was when they were not."""
+    if sort is not None and sort.sorted and sort.model:
+        return f"{mode}, sorted by {sort.model}"
+    return mode
 
 
 # --------------------------------------------------------------------------- #
@@ -493,11 +618,17 @@ class Retrieval:
     #: Passages that were chosen and did not fit the budget.
     did_not_fit: int = 0
     #: How it searched: `words`, `meaning`, `meaning and words`, or `none` when no way of
-    #: searching could run.
+    #: searching could run; and, when a result sorter put the passages in order, `, sorted by
+    #: <the sorter>` after it (`meaning and words, sorted by Qwen3-Reranker`).
     mode: str = "words"
-    #: The ways that ran, and what each said.
+    #: The ways that ran, and what each said; and what the sorter said, under `sorter` (`ran` is
+    #: whether it sorted, `hits` how many passages it put in order).
     ways: tuple[str, ...] = ("words",)
     reports: dict[str, Report] = field(default_factory=dict)
+    #: What sorting came to: whether it sorted and, when not, why, with the numbers it was
+    #: decided by. None when this Workbench has no sorter, nothing was found to sort, or the run
+    #: named its ways (those are shown as each found them).
+    sort: SortReport | None = None
 
 
 def mode_of(ran: Sequence[str]) -> str:
@@ -513,8 +644,12 @@ def mode_of(ran: Sequence[str]) -> str:
 class Retriever:
     """Every way of searching, and the steps that follow them. One per Workbench."""
 
-    def __init__(self, signals: Sequence[Signal] | None = None) -> None:
+    def __init__(
+        self, signals: Sequence[Signal] | None = None, sorter: Sorter | None = None
+    ) -> None:
         self.signals: list[Signal] = list(signals) if signals else [WordSignal()]
+        #: A result sorter that puts the best passages in order (MR6b), or None: the fused order.
+        self.sorter = sorter
 
     @property
     def mode(self) -> str:
@@ -538,12 +673,16 @@ class Retriever:
         """Search `scopes` of one person's index for `query`. `question` is what the
         person asked (a file it names is not held to `per_document`); `budget` is the
         tokens the passages may take, and `overhead` what each one's tags cost. `ways`
-        names the ways of searching to use (Test a question, to see what each finds); none
-        means all, and then the evidence rule applies.
+        names the ways of searching to use (Test a question, to see what each finds alone);
+        none means all, and then the evidence rule applies and the passages are sorted (when a
+        sorter runs). **A run that names its ways is not sorted**: what each way finds alone is
+        shown as it found it, in its own order, so a person can tell the way from the sorter.
 
         Raises what a search raises (`IndexUnavailable`, an `sqlite3` error): a search
         that could not run is never an empty result. A way of searching that says it
-        is unavailable (`SignalUnavailable`) is left out and reported."""
+        is unavailable (`SignalUnavailable`) is left out and reported. A result sorter that
+        cannot run, or is not quick enough, or fails any way at all, is left out and reported
+        too (`Retrieval.sort`): the passages are in the fused order, and the search is whole."""
         signals = [s for s in self.signals if ways is None or s.name in ways]
         found: dict[str, list[Hit]] = {}
         reports: dict[str, Report] = {}
@@ -563,6 +702,19 @@ class Retriever:
         candidates = fuse(found, similar) if found else []
         if not candidates:
             return Retrieval(query, mode=mode_of(ran), ways=ran, reports=reports)
+        sort: SortReport | None = None
+        if self.sorter is not None and ways is None:
+            candidates, sort = await self._sort(query, question, candidates, found)
+            # Said among the reports, beside each way's: the sorter ran when it sorted, and when
+            # it did not, `code` and `message` say why, in its own words.
+            reports[SORTER] = Report(
+                SORTER,
+                sort.sorted,
+                hits=sort.passages if sort.sorted else 0,
+                code=sort.code,
+                message=sort.message,
+                quiet=sort.quiet,
+            )
         named = {c.hit.doc_id for c in candidates if names_document(c.hit.name, question)}
         chosen = select(
             candidates, k=max(1, min(k, PASSAGES_MAX)), per_document=per_document, named=named
@@ -573,10 +725,61 @@ class Retriever:
             passages=[explain(query, p) for p in fit],
             found=len(candidates),
             did_not_fit=dropped,
-            mode=mode_of(ran),
+            mode=sorted_mode(mode_of(ran), sort),
             ways=ran,
             reports=reports,
+            sort=sort,
         )
+
+    async def _sort(
+        self,
+        query: Query,
+        question: str,
+        candidates: list[Candidate],
+        found: Mapping[str, Sequence[Hit]],
+    ) -> tuple[list[Candidate], SortReport]:
+        """The candidates with the sorter's best first (`sorted_by`), and what sorting came to.
+        Never raises: a sorter that fails is a search without a sorter."""
+        assert self.sorter is not None
+        pool = sort_pool(candidates, found)
+        asked = (query.asked or question[:LATEST_CHARS]).strip()
+        if len(pool) < 2 or not asked:
+            # One passage has no order to be put in, and nothing asked has nothing to sort by.
+            return candidates, SortReport(
+                code="nothing_to_sort" if asked else "no_question", quiet=True, passages=len(pool)
+            )
+        try:
+            done = await self.sorter.sort(asked, [sheet_of(c.hit) for c in pool])
+        except Exception as exc:  # a sorter's failure is never a search's
+            log.warning(
+                "sorting the passages of a search failed in Workbench itself: %s",
+                type(exc).__name__,
+                exc_info=True,
+            )
+            return candidates, SortReport(
+                code="error",
+                message=(
+                    f"Not sorted: sorting failed in Workbench itself ({type(exc).__name__}), so "
+                    "the passages are in the order the search found them. See Workbench's log."
+                ),
+                passages=len(pool),
+            )
+        if done.order is None:
+            return candidates, done.report
+        if sorted(done.order) != list(range(len(pool))):
+            log.warning(
+                "a sorter gave an order that is not of the %d passages it was sent", len(pool)
+            )
+            return candidates, replace(
+                done.report,
+                sorted=False,
+                code="unusable",
+                message=(
+                    "Not sorted: the sorter's answer did not place each of the "
+                    f"{len(pool)} passages once, so they are in the order the search found them."
+                ),
+            )
+        return sorted_by(candidates, pool, done.order), done.report
 
     @staticmethod
     async def _weigh(

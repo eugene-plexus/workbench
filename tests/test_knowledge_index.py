@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import shutil
 import sqlite3
+import weakref
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -73,6 +74,10 @@ def new(
     )
 
 
+#: One lock for each index: the adding and the claiming of one `put` are one step (see `put`).
+_PUTTING: weakref.WeakKeyDictionary[Index, asyncio.Lock] = weakref.WeakKeyDictionary()
+
+
 async def put(
     index: Index,
     doc_id: str,
@@ -84,7 +89,27 @@ async def put(
     source: str = "upload",
     sha: str | None = None,
 ) -> Document:
-    """A document read and searchable: its original and text on the disk, its passages in."""
+    """A document read and searchable: its original and text on the disk, its passages in.
+
+    A claim takes whatever is waiting, so a `put` that is adding while another is claiming can have
+    its document taken by the other, and then finds nothing to claim (issue #7: `assert claimed is
+    not None` failed on a slow runner with 24 of them started at once). Adding and claiming are one
+    step here, in turn with other puts to the same index; a search or a delete is not held by it.
+    """
+    async with _PUTTING.setdefault(index, asyncio.Lock()):
+        return await _put(index, doc_id, text, name, scope, ready, source, sha)
+
+
+async def _put(
+    index: Index,
+    doc_id: str,
+    text: str,
+    name: str,
+    scope: str,
+    ready: bool,
+    source: str,
+    sha: str | None,
+) -> Document:
     added = await index.add(new(doc_id, name, scope, sha, source=source))
     assert not added.unchanged
     index.original_path(doc_id).parent.mkdir(parents=True, exist_ok=True)
@@ -775,6 +800,31 @@ async def test_two_people_never_see_each_others_documents_even_for_the_same_word
     assert ada.path != bo.path and ada.originals != bo.originals
     owners = {Indexes.owner_of(d) for d in indexes.person_dirs()}
     assert owners == {ADA, BO}
+
+
+async def test_two_puts_started_together_do_not_take_each_others_documents(
+    indexes: Indexes,
+) -> None:
+    """Issue #7, made certain: the first document is added and the second `put` adds and claims
+    before the first has claimed, so a claim (which takes the oldest waiting) would take the
+    first's document for the second. The helper's two steps are one, in turn."""
+    index = indexes.get(ADA)
+    assert index is not None
+    real_add = index.add
+
+    async def add_then_wait(doc: NewDocument) -> Any:
+        added = await real_add(doc)
+        if doc.id == "doc-first":
+            await asyncio.sleep(0.05)  # added, and not yet claimed
+        return added
+
+    index.add = add_then_wait  # type: ignore[method-assign]
+    first, second = await asyncio.gather(
+        put(index, "doc-first", "First paragraph about harbours."),
+        put(index, "doc-second", "Second paragraph about harbours.", name="b.md"),
+    )
+    assert first.status == "ready" and second.status == "ready"
+    assert await index.check() == []
 
 
 async def test_many_things_at_once_do_not_corrupt_an_index(indexes: Indexes) -> None:

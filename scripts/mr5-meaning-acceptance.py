@@ -70,8 +70,8 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from joserfc import jwt
 from joserfc.jwk import RSAKey
 
-ROOT = Path(os.environ.get("EP_ROOT", "D:/py/eugene-plexus"))
 HERE = Path(__file__).resolve().parent.parent
+ROOT = Path(os.environ.get("EP_ROOT", str(HERE.parent)))
 WB = Path(
     os.environ.get(
         "EP_WORKBENCH",
@@ -84,40 +84,23 @@ WB_PY = Path(
 GW_PY = ROOT / "gateway" / ".venv" / "Scripts" / "python.exe"
 DRV_PY = ROOT / "inference-driver" / ".venv" / "Scripts" / "python.exe"
 TEMP = Path(os.environ.get("TEMP", tempfile.gettempdir()))
-SCRATCH = Path(
-    os.environ.get(
-        "EP_SCRATCH",
-        "C:/Users/troyc/AppData/Local/Temp/claude/d--py-eugene-plexus-specs/"
-        "8fdf4703-5901-4dea-a989-c9fe897eef3c/scratchpad",
-    )
+#: The acceptance models live in one folder (EP_MODELS_DIR; default ~/.eugene-plexus/acceptance-models).
+MODELS = Path(
+    os.environ.get("EP_MODELS_DIR", str(Path.home() / ".eugene-plexus" / "acceptance-models"))
 )
 LLAMA = Path(
     os.environ.get(
-        "EP_LLAMA_SERVER", "C:/Users/troyc/.eugene-plexus/engines/llama_cpp/b10948/llama-server.exe"
-    )
-)
-CHAT_FILE = Path(
-    os.environ.get("EP_MODEL_FILE", str(TEMP / "ep-s9-model" / "Qwen3-0.6B-Q4_K_M.gguf"))
-)
-#: The search model of the run of record, Qwen3-Embedding-0.6B at Q8_0: kept beside the other
-#: acceptance models when it is there, else where the research downloaded it.
-_QWEN_HOME = Path("C:/Users/troyc/.eugene-plexus/acceptance-models/Qwen3-Embedding-0.6B-Q8_0.gguf")
-QWEN_FILE = Path(
-    os.environ.get(
-        "EP_QWEN_EMBED",
+        "EP_LLAMA_SERVER",
         str(
-            _QWEN_HOME
-            if _QWEN_HOME.exists()
-            else SCRATCH / "rag" / "dl" / "gguf" / "Qwen3-Embedding-0.6B-Q8_0.gguf"
+            Path.home() / ".eugene-plexus" / "engines" / "llama_cpp" / "b10948" / "llama-server.exe"
         ),
     )
 )
-NOMIC_FILE = Path(
-    os.environ.get(
-        "EP_NOMIC_EMBED",
-        "C:/Users/troyc/.eugene-plexus/acceptance-models/nomic-embed-text-v1.5.Q8_0.gguf",
-    )
-)
+CHAT_FILE = Path(os.environ.get("EP_MODEL_FILE", str(MODELS / "Qwen3-0.6B-Q4_K_M.gguf")))
+#: The search model of the run of record, Qwen3-Embedding-0.6B at Q8_0, beside the other
+#: acceptance models.
+QWEN_FILE = Path(os.environ.get("EP_QWEN_EMBED", str(MODELS / "Qwen3-Embedding-0.6B-Q8_0.gguf")))
+NOMIC_FILE = Path(os.environ.get("EP_NOMIC_EMBED", str(MODELS / "nomic-embed-text-v1.5.Q8_0.gguf")))
 #: Eugene's own design documents are the corpus. The run of record used a copy of the 76 files as
 #: they are at specs c5f725d (set EP_DESIGN_DOCS to a checkout of that commit's docs/design to
 #: repeat it): the questions' labels are headings in them, and a check says so before anything

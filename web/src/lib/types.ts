@@ -1025,11 +1025,88 @@ export interface RebuildView {
   model: string | null;
 }
 
+/** The ways documents are searched, as the server tells a mode: `none` is a search none of
+ * whose ways could run. */
+export type SearchMode = "words" | "meaning" | "meaning and words" | "none";
+
+/** A mode as the server says it when a result sorter put the best passages in order (MR6b):
+ * how documents were searched, then `, sorted by <the sorter>`: `meaning and words, sorted by
+ * Qwen3-Reranker`. Every other mode is one of `SearchMode`. */
+export type SortedMode = `${Exclude<SearchMode, "none">}, sorted by ${string}`;
+
+/** Every code the result sorter can say, on the Documents screen (`SortFacts.code`) and for a
+ * question (`SortRun.code`, which is null for a question that was sorted). `ok` is only the
+ * screen's: a sort of the usual size is quick enough. `measuring` is why a question was not
+ * sorted while the sorter's speed was not known yet (it is measured behind the question, which
+ * never waits for it), and the screen's while that lasts. The rest are why passages were not
+ * sorted: `off` and `none_set_up` (never in play), `not_running`, `not_listed`, `not_sorter`,
+ * `outside` and `outside_only` (which sorter), `over_budget` (too slow for Sort time: a measured
+ * speed) and `slow` (it did not answer in time, which is not a speed: no `ratePerSecond`),
+ * `limited`, `key`, `unreachable`, `refused`, `unusable` and `error` (what the sorter or the
+ * gateway said), and the question's own: `nothing_to_sort`, `no_question`, `not_asked` (also a
+ * question that named its way, which is not sorted) and `none`. */
+export type SortCode =
+  | "ok"
+  | "measuring"
+  | "over_budget"
+  | "off"
+  | "none_set_up"
+  | "not_running"
+  | "not_listed"
+  | "not_sorter"
+  | "outside"
+  | "outside_only"
+  | "limited"
+  | "key"
+  | "unreachable"
+  | "slow"
+  | "refused"
+  | "unusable"
+  | "error"
+  | "nothing_to_sort"
+  | "no_question"
+  | "not_asked"
+  | "none";
+
+/** The result sorter right now (`sorting.Standing.view`, from a live look and what was
+ * measured): which one, how fast it reads, the time a sort may add to an answer, and whether a
+ * sort of the usual size is quick enough (`sorting`), or why not (`code` and `message`, in the
+ * server's words, with the numbers). `typical` is that usual sort. `quiet` is a sorter that was
+ * never in play, which is not worth saying beside every answer. */
+export interface SortFacts {
+  /** The Result sorter setting as it is: `auto`, `off`, or the id the owner named. */
+  setting: string;
+  automatic: boolean;
+  sorting: boolean;
+  code: SortCode;
+  message: string | null;
+  quiet: boolean;
+  model: string | null;
+  named: string | null;
+  /** "In use: X (automatic)", said only while a sort of the usual size is made (`sorting`): a
+   * sorter that is chosen and not in use has none. */
+  label: string | null;
+  locality: "local" | "external" | "unknown" | null;
+  runsOn: string | null;
+  allowExternal: boolean;
+  outside: string[];
+  /** The Sort time setting: how long a sort may be expected to take (one that is asked is given
+   * up on after twice this). */
+  budgetSeconds: number;
+  /** How fast it reads, as it was measured; null while nothing is measured and while it is only
+   * known that it did not answer (`slow`), which is not a speed. `rateFrom` is what that mostly
+   * comes from: `probe` while quick tests of the sorter read more than half of what it is made of,
+   * `sorts` after. */
+  ratePerSecond: number | null;
+  rateFrom: "probe" | "sorts" | null;
+  typical: { passages: number; passageTokens: number; tokens: number; seconds: number | null };
+}
+
 /** How documents are searched right now (`saved_api.search_facts`, from a live look):
  * `headline` is the sentence to show, `detail` says why in the code's own words, and
- * `actions` what the person can do about it. */
+ * `actions` what the person can do about it. `sort` is the result sorter. */
 export interface SearchFacts {
-  mode: "words" | "meaning and words";
+  mode: "words" | "meaning and words" | SortedMode;
   words: boolean;
   meaning: boolean;
   headline: string;
@@ -1039,6 +1116,7 @@ export interface SearchFacts {
   model: SearchModelView | null;
   adding: AddingView | null;
   rebuild: RebuildView | null;
+  sort?: SortFacts | null;
 }
 
 /** What a person has set (`null`: not chosen) and what is in effect, with whose
@@ -1113,11 +1191,13 @@ export interface MeaningRebuilt {
 /** How a passage was found: by its words, by what it says, or by both. */
 export type Via = "words" | "meaning" | "both";
 
-/** Where each way of searching put a passage, 1 being its best. Never a score: a way's
- * scores are of a scale that means nothing beside another's. */
+/** Where each way of searching put a passage, 1 being its best, and where the result sorter
+ * put it among the passages it was given (`sorter`: only the best of each way are given).
+ * Never a score: a way's scores are of a scale that means nothing beside another's. */
 export interface Places {
   words?: number;
   meaning?: number;
+  sorter?: number;
 }
 
 /** One passage `POST /api/documents/test` found, with why it matched. `similarity` is how
@@ -1163,6 +1243,26 @@ export interface MeaningRun {
   belowFloor: boolean;
 }
 
+/** What sorting the passages of a search came to (`saved_api.sort_block`): whether the best
+ * passages were put in a result sorter's order (`used`) and by which sorter; if not, why, in
+ * the server's words (`code` and `message`; `quiet` when no sorter was ever in play), with the
+ * numbers it was decided by: the tokens to read, the speed the sorter was priced at, the seconds
+ * that would take, and the Sort time allowed. `seconds` is how long a sort took. Never a score. */
+export interface SortRun {
+  used: boolean;
+  code: SortCode | null;
+  message: string | null;
+  quiet: boolean;
+  model: string | null;
+  setting: string | null;
+  passages: number;
+  tokens: number | null;
+  ratePerSecond: number | null;
+  expectedSeconds: number | null;
+  budgetSeconds: number | null;
+  seconds: number | null;
+}
+
 /** The ways of searching a question can ask to be tried by (`ways`). */
 export type Way = "words" | "meaning";
 
@@ -1172,8 +1272,10 @@ export type Way = "words" | "meaning";
 export interface TestedQuestion {
   status: "found" | "nothing_matched" | "no_words" | "no_documents" | "unavailable";
   query: { text: string; terms: string[]; phrases: string[] };
-  mode: "words" | "meaning" | "meaning and words" | "none";
+  mode: "words" | "meaning" | "meaning and words" | "none" | SortedMode;
   meaning: MeaningRun;
+  /** Whether the passages were sorted, by which sorter, and if not, why. */
+  sort?: SortRun;
   passages: TestedPassage[];
   found: number;
   didNotFit: number;
@@ -1251,7 +1353,7 @@ export interface SearchRecord {
   query: string | null;
   terms: string[];
   phrases: string[];
-  mode: "words" | "meaning" | "meaning and words" | "none";
+  mode: "words" | "meaning" | "meaning and words" | "none" | SortedMode;
   scope: { library: boolean; chat: boolean };
   documentsOnly: boolean;
   askedAnyway: boolean;
@@ -1277,6 +1379,9 @@ export interface SearchRecord {
   /** Whether search by meaning ran for this answer, with which search model, and if not,
    * why; null for a search that was not run (MR5). */
   meaning: MeaningRun | null;
+  /** Whether the passages were sorted by a result sorter, and if not, why (MR6b). Absent from
+   * an answer made before sorting. */
+  sort?: SortRun | null;
 }
 
 // --- folders (MR7): `/api/documents/folders`, as `folder_docs_api.py` answers ---

@@ -17,6 +17,9 @@ import {
   noSearchModel,
   paused,
   searchFor,
+  sortFacts,
+  sortFor,
+  SORTER,
   wordsOnly,
 } from "../test-saved";
 import { DocumentsSearch } from "./DocumentsSearch";
@@ -380,5 +383,51 @@ describe("what is offered is what the server offers, and to whom", () => {
     cleanup();
     shown(searchFor("not_running"), person);
     expect(has("documents-open-backends")).toBe(false);
+  });
+});
+
+// --- the result sorter (MR6b) ---
+
+describe("how the documents are searched, with a result sorter", () => {
+  const sorted = (over: Partial<ReturnType<typeof byMeaning>> = {}) =>
+    byMeaning({ mode: `meaning and words, sorted by ${SORTER}`, sort: sortFacts(), ...over });
+
+  it("says the sorter in the headline while it puts the best passages in order", () => {
+    shown(sorted());
+    expect(screen.getByTestId("documents-search-headline")).toHaveTextContent(
+      `Searching by meaning and words, sorted by ${SORTER}.`,
+    );
+    expect(box()).toHaveAttribute("data-mode", `meaning and words, sorted by ${SORTER}`);
+    expect(box()).not.toHaveClass("notice--warn");
+  });
+
+  it("still says which search model is in use, and where it runs, as before", () => {
+    shown(sorted());
+    expect(screen.getByTestId("documents-search-model")).toHaveTextContent(
+      "In use: Qwen3-Embedding-0.6B-Q8_0 (automatic)",
+    );
+    expect(screen.getByTestId("documents-search-where")).toHaveTextContent(
+      "It runs on your own machines",
+    );
+  });
+
+  it("says nothing of a sorter that is not sorting: the headline is the server's own", () => {
+    shown(byMeaning({ sort: sortFor("over_budget") }));
+    expect(screen.getByTestId("documents-search-headline")).toHaveTextContent(
+      /^Searching by meaning and words\.$/,
+    );
+    expect(box()).toHaveAttribute("data-mode", "meaning and words");
+  });
+
+  it("says it of a search by words, and keeps the rest of the server's sentence", () => {
+    shown(
+      noSearchModel({
+        mode: `words, sorted by ${SORTER}` as never,
+        sort: sortFacts(),
+      }),
+    );
+    expect(screen.getByTestId("documents-search-headline")).toHaveTextContent(
+      `Searching by words only, sorted by ${SORTER}. No search model is running.`,
+    );
   });
 });

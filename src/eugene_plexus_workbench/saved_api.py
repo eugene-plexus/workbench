@@ -37,6 +37,13 @@ meaning is added (`meaning`), and each passage found says how it was found (`via
 `meaning` or `both`). The words search never depends on it: when meaning cannot run, the answer
 says it was searched by words only (`retrieval.meaning`), and never that nothing matched.
 
+**A result sorter** (MR6b, `knowledge/sorting.py`) is the step after the two ways of searching: the
+best passages of each are sent to it, and it puts them in the order that answers the question best,
+when one is running on the install's own machines and is quick enough (Sort time). The mode says
+so (`meaning and words, sorted by Qwen3-Reranker`), each passage's `ranks` says where the sorter
+put it, and `sort` says why when it did not, with the numbers. A sorter that cannot run never fails
+a search: the passages are in the order they were found. Under an answer, Sources are unchanged.
+
 **A search that cannot run is never "nothing matched".** What searching came to is kept
 with the answer (`Message.retrieval`): `used`, `nothing_matched` (a normal result),
 `skipped` (and why: the window, the room, the model, no words) or `failed` (and the
@@ -84,6 +91,7 @@ from .knowledge.index import (
 from .knowledge.meaning import Queue, Status
 from .knowledge.saved import OriginalMissing, SavedDocuments, hash_file, new_id
 from .knowledge.search import Retrieval, Retrieved, plan_query
+from .knowledge.sorting import Standing
 from .store import Chat, Message, Person, Store
 
 log = logging.getLogger(__name__)
@@ -171,14 +179,32 @@ async def meaning_status(request: Request, person: Person) -> Status | None:
     return await saved.meaning.status(saved.index(person.sub, create=False), person.sub)
 
 
-def search_facts(status: Status | None) -> dict[str, Any]:
+async def sort_standing(request: Request) -> Standing | None:
+    """How passages are sorted now, from a live look (`Sorting.standing`); None when this
+    Workbench has no gateway to ask about a sorter. A sorter that cannot be looked at never
+    stops a screen: it is a Standing that says why."""
+    sorting = _saved(request).sorting
+    if sorting is None:
+        return None
+    try:
+        return await sorting.standing()
+    except Exception:  # a screen never fails because of a sorter
+        log.warning("looking at the result sorter failed in Workbench itself", exc_info=True)
+        return None
+
+
+def search_facts(status: Status | None, sort: Standing | None = None) -> dict[str, Any]:
     """How documents are searched right now, for the Documents screen's header: the mode in
-    effect (`meaning and words` or `words`), the sentence that says it, why when it is not
-    both, what the person can do (`actions`: `rebuild`, `get_search_model`), which search model
-    and whether its prefixes are known, and how adding meaning is going (`adding`). Said from a
-    live look, never from what was true when the last document was added."""
+    effect (`meaning and words` or `words`, and `, sorted by <the sorter>` after it while a
+    result sorter is putting the best passages in order), the sentence that says it, why when it
+    is not both, what the person can do (`actions`: `rebuild`, `get_search_model`), which search
+    model and whether its prefixes are known, and how adding meaning is going (`adding`). `sort`
+    is the sorter: which one (`setting`, `model`), how fast it reads (`ratePerSecond`), the
+    time allowed (`budgetSeconds`), and whether a sort of the usual size is quick enough
+    (`sorting`) or why not (`code`, `message`, with the numbers). Said from a live look, never from
+    what was true when the last document was added."""
     if status is None:
-        return {
+        facts: dict[str, Any] = {
             "mode": "words",
             "words": True,
             "meaning": False,
@@ -190,7 +216,12 @@ def search_facts(status: Status | None) -> dict[str, Any]:
             "adding": None,
             "rebuild": None,
         }
-    return status.view()
+    else:
+        facts = status.view()
+    facts["sort"] = sort.view() if sort is not None else None
+    if sort is not None and sort.sorting:
+        facts["mode"] = f"{facts['mode']}, sorted by {sort.model}"
+    return facts
 
 
 def meaning_row(
@@ -286,7 +317,7 @@ async def list_documents(request: Request) -> dict[str, Any]:
             "owed": totals.owed if totals else 0,
         },
         "limits": limits_view(install),
-        "search": search_facts(status),
+        "search": search_facts(status, await sort_standing(request)),
         "prefs": prefs_view(prefs, install),
         "installEnabled": install.enabled,
         # The standing line: an answer can quote a document, so a person who is in an
@@ -471,7 +502,10 @@ async def rebuild_meaning(request: Request) -> dict[str, Any]:
             "Workbench has no gateway to ask about a search model, so it cannot add meaning.",
         )
     owed = await saved.meaning.rebuild(person.sub)
-    return {"passages": owed, "search": search_facts(await meaning_status(request, person))}
+    return {
+        "passages": owed,
+        "search": search_facts(await meaning_status(request, person), await sort_standing(request)),
+    }
 
 
 @router.get("/api/documents/prefs")
@@ -587,6 +621,47 @@ def meaning_block(result: Retrieval | None, model: str | None, configured: bool)
     }
 
 
+def sort_block(result: Retrieval | None, configured: bool) -> dict[str, Any]:
+    """What sorting the passages came to, for a person to be told: whether the best passages were
+    put in a result sorter's order (`used`) and by which sorter (`model`); if not, why, in words
+    (`quiet` when sorting was never in play, and is not worth saying beside every answer), with
+    the numbers it was decided by: how many passages, their `tokens`, the speed the sorter was
+    priced at (`ratePerSecond`), the seconds that would take (`expectedSeconds`) and the time
+    allowed (`budgetSeconds`, the Sort time setting); and, when it ran, how long it took
+    (`seconds`). `setting` is the Result sorter setting as it is. Never a score: a passage's
+    place by the sorter is in its `ranks`, beside its places by words and by meaning."""
+    report = result.sort if result is not None else None
+    if report is None:
+        return {
+            "used": False,
+            "code": "not_asked" if configured else "none",
+            "message": None,
+            "quiet": True,
+            "model": None,
+            "setting": None,
+            "passages": 0,
+            "tokens": None,
+            "ratePerSecond": None,
+            "expectedSeconds": None,
+            "budgetSeconds": None,
+            "seconds": None,
+        }
+    return {
+        "used": report.sorted,
+        "code": report.code,
+        "message": report.message,
+        "quiet": report.quiet,
+        "model": report.model,
+        "setting": report.setting,
+        "passages": report.passages,
+        "tokens": report.tokens,
+        "ratePerSecond": round(report.rate, 1) if report.rate is not None else None,
+        "expectedSeconds": round(report.expected, 2) if report.expected is not None else None,
+        "budgetSeconds": report.budget,
+        "seconds": round(report.seconds, 3) if report.seconds is not None else None,
+    }
+
+
 async def built_model(index: Index) -> str | None:
     """The search model this person's meaning was built with, or None while there is none."""
     try:
@@ -604,8 +679,12 @@ async def test_question(request: Request, body: QuestionToTry) -> dict[str, Any]
     own documents. `status` is `found`, `nothing_matched` (a normal result), `no_words`
     (nothing in the question to search for), `no_documents`, or `unavailable` (only with
     `ways`: none of the ways asked for could run; `meaning` says why); a search that cannot
-    run is a 503 with its words, never `nothing_matched`. `mode` is how it searched, and
-    `meaning` says whether meaning ran, with which search model, or why not."""
+    run is a 503 with its words, never `nothing_matched`. `mode` is how it searched (and,
+    when a result sorter put the best passages in order, `, sorted by <the sorter>` after it), and
+    `meaning` says whether meaning ran, with which search model, or why not. `sort` says whether
+    the passages were sorted and by which sorter, or why not, with the numbers (the tokens, the
+    sorter's speed, the seconds that would take and the Sort time allowed); each passage's
+    `why.ranks` holds its place by words, by meaning and by the sorter (`sorter`), never a score."""
     person = await _person(request)
     store, saved = _store(request), _saved(request)
     install = await config.document_settings(store)
@@ -636,6 +715,7 @@ async def test_question(request: Request, body: QuestionToTry) -> dict[str, Any]
         "budget": {**budget.view(), "block": block, "perPassage": each},
         "searched": {"documents": 0, "passages": 0, "waiting": 0},
         "meaning": meaning_block(None, None, saved.meaning is not None),
+        "sort": sort_block(None, saved.sorting is not None),
     }
     index = saved.index(person.sub, create=False)
     documents, passages, waiting = (
@@ -660,6 +740,7 @@ async def test_question(request: Request, body: QuestionToTry) -> dict[str, Any]
     )
     out["mode"] = result.mode
     out["meaning"] = meaning_block(result, await built_model(index), saved.meaning is not None)
+    out["sort"] = sort_block(result, saved.sorting is not None)
     out["passages"] = [_hit_view(p) for p in result.passages]
     out["found"] = result.found
     out["didNotFit"] = result.did_not_fit
@@ -1000,7 +1081,7 @@ async def chat_documents_view(
             "limit": context.retrieval_limit(access.window),
             "window": access.window,
         },
-        "search": search_facts(status),
+        "search": search_facts(status, await sort_standing(request)),
     }
 
 
@@ -1062,6 +1143,7 @@ def retrieval_view(
     searched: tuple[int, int, int] | None = None,
     took: float | None = None,
     meaning: dict[str, Any] | None = None,
+    sort: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """What a message keeps of a search of the person's documents. `status` is `used`
     (passages were sent), `nothing_matched` (a normal result), `skipped` (not searched,
@@ -1097,6 +1179,9 @@ def retrieval_view(
         #: Whether search by meaning ran (`used`), and with which search model; if not, why
         #: (`code`, `message`; `quiet` when it was never in play): "searched by words only: ...".
         "meaning": meaning,
+        #: Whether the best passages were put in a result sorter's order (`used`), by which
+        #: sorter, and if not, why, with the numbers (`sort_block`). The mode says it too.
+        "sort": sort,
     }
 
 
@@ -1238,6 +1323,7 @@ async def retrieve(
         known["meaning"] = meaning_block(
             result, await built_model(index), saved.meaning is not None
         )
+        known["sort"] = sort_block(result, saved.sorting is not None)
         gone = result.reports.get("meaning")
         if gone is not None and not gone.ran and not gone.quiet:
             # Meaning could not run for this answer: searched by words only, and said so.

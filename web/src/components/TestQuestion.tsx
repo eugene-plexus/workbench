@@ -9,6 +9,12 @@
  * only, to see what each finds by itself: a run that names its way sets nothing aside, so a
  * passage is listed however near it is. "Nothing matched" is a normal result and is said so;
  * a search that cannot run is the server's own words, never an empty list.
+ *
+ * When a result sorter put the best passages in order (MR6b) the mode says by which, each
+ * passage says where the sorter put it beside where words and meaning did (a place, never a
+ * score), and how many it sorted and how long that took is said; when it did not, why is said in
+ * the server's words with the numbers (too slow for Sort time, stopped, ...), never left to be
+ * guessed from the order. A sorter that was never in play is not worth a line.
  */
 
 import { ChevronRight, CircleAlert, FileSearch, Info } from "lucide-react";
@@ -25,6 +31,7 @@ import {
   type WayChoice,
   waysOf,
 } from "../lib/documentMeaning";
+import { sortedWords, sortNote } from "../lib/documentSorting";
 import { failureWords } from "../lib/memory";
 import {
   leftOutWords,
@@ -45,10 +52,10 @@ const MAX_QUESTION = 2000;
  * mode the server names then is only how it is set up. */
 const SEARCHED: readonly TestedQuestion["status"][] = ["found", "nothing_matched"];
 
-function Hit({ hit }: { hit: TestedPassage }) {
+function Hit({ hit, sorted }: { hit: TestedPassage; sorted: boolean }) {
   const uid = useId();
   const matched = matchedWords(hit.why.terms, hit.why.phrases);
-  const places = placesWords(hit.why.ranks, hit.why.similarity);
+  const places = placesWords(hit.why.ranks, hit.why.similarity, sorted);
   return (
     <li data-testid="documents-test-hit" className="flex flex-col gap-1 px-4 py-3">
       <p className="wrap-anywhere">
@@ -208,6 +215,11 @@ export function TestQuestion({ search }: { search?: SearchFacts }) {
       ? meaningNote(found.meaning, result?.meaning ?? false)
       : null;
   const closeness = found && SEARCHED.includes(found.status) ? closenessWords(found.meaning) : null;
+  // Whether the passages were put in a sorter's order, and how, or why not.
+  const wasSearched = found !== undefined && SEARCHED.includes(found.status);
+  const sorted = wasSearched && found.sort?.used === true;
+  const sortedLine = wasSearched ? sortedWords(found.sort) : null;
+  const notSorted = wasSearched ? sortNote(found.sort) : null;
   return (
     <section aria-labelledby={`${uid}-test`} className="section" data-testid="documents-test">
       <h2 id={`${uid}-test`} className="title-section">
@@ -278,7 +290,7 @@ export function TestQuestion({ search }: { search?: SearchFacts }) {
           {found.passages.length > 0 && (
             <ol className="divide-y divide-line rounded-plexus border border-line bg-panel">
               {found.passages.map((hit) => (
-                <Hit key={`${hit.docId}:${hit.rank}`} hit={hit} />
+                <Hit key={`${hit.docId}:${hit.rank}`} hit={hit} sorted={sorted} />
               ))}
             </ol>
           )}
@@ -293,6 +305,16 @@ export function TestQuestion({ search }: { search?: SearchFacts }) {
               </li>
             )}
             {closeness && <li data-testid="documents-test-closeness">{closeness}</li>}
+            {sortedLine && <li data-testid="documents-test-sorted">{sortedLine}</li>}
+            {notSorted && (
+              <li
+                data-testid="documents-test-sort"
+                data-code={found.sort?.code ?? undefined}
+                className="wrap-anywhere"
+              >
+                {notSorted}
+              </li>
+            )}
             {searched && <li className="wrap-anywhere">{searched}</li>}
             {left && <li>{left}</li>}
             <li>{searchedCounts(found)}</li>

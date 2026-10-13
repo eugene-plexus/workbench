@@ -11,6 +11,8 @@ one transaction), reading one **again**, and what happens to a chat's own docume
 when its chat or its file goes. With a gateway it also holds search by meaning (MR5,
 `meaning.py`): the worker that adds meaning to what is read, and the way of searching that
 finds a passage by what it says; a document that goes ends the request that was only for it.
+And a result sorter (MR6b, `sorting.py`) that puts the best of the passages a search found in
+the order that answers the question best, when one is running and quick enough.
 
 There are two kinds, told by their scope (`index.LIBRARY`, `index.chat_scope`): the
 ones a person keeps in My documents, searched by every chat that has Documents on,
@@ -32,6 +34,7 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from .. import files
 from .index import (
@@ -48,11 +51,29 @@ from .index import (
     folder_source,
 )
 from .ingest import ChatOwners, Ingest, Owed, Reconciled
-from .meaning import Gateway, Meaning, SettingsReader
+from .listing import Listing
+from .meaning import Gateway as MeaningGateway
+from .meaning import Meaning
+from .meaning import Settings as MeaningSettings
 from .reader import Reader
 from .search import Retriever, WordSignal
+from .sorting import Gateway as SortingGateway
+from .sorting import Settings as SortingSettings
+from .sorting import Sorting
 
 log = logging.getLogger(__name__)
+
+
+class Gateway(MeaningGateway, SortingGateway, Protocol):
+    """What saved documents need of the gateway: its models, search by meaning's embeddings, and
+    sorting's rerank (`hub.Hub` is one)."""
+
+
+class Settings(MeaningSettings, SortingSettings, Protocol):
+    """What saved documents need of the install's settings (`config.DocumentSettings`)."""
+
+
+SettingsReader = Callable[[], Awaitable[Settings]]
 
 HASH_CHUNK = 1024 * 1024
 
@@ -103,12 +124,20 @@ class SavedDocuments:
     ) -> None:
         self.root = root
         self.indexes = Indexes(root)
-        #: Search by meaning: only with a gateway to ask. Without one, words only.
+        #: Search by meaning, and a result sorter for the best of what is found (MR6b): only
+        #: with a gateway to ask. Without one, words only, in the order they were found.
         self.meaning: Meaning | None = None
+        self.sorting: Sorting | None = None
         if gateway is not None and settings is not None:
-            self.meaning = Meaning(self.indexes, gateway, settings)
+            # One look at the gateway's list of models for both: a gateway that does not answer
+            # holds a screen once, not once for each of them.
+            listing = Listing(gateway)
+            self.meaning = Meaning(self.indexes, gateway, settings, listing=listing)
+            self.sorting = Sorting(gateway, settings, listing=listing)
             owed = owed or self.meaning.owed
-            retriever = retriever or Retriever([WordSignal(), self.meaning.signal])
+            retriever = retriever or Retriever(
+                [WordSignal(), self.meaning.signal], sorter=self.sorting
+            )
         self.ingest = Ingest(self.indexes, reader, cap, owed=owed)
         self.retriever = retriever or Retriever()
 
@@ -126,6 +155,8 @@ class SavedDocuments:
         await self.ingest.aclose()
         if self.meaning is not None:
             await self.meaning.aclose()
+        if self.sorting is not None:
+            await self.sorting.aclose()
         await self.indexes.aclose()
 
     async def _cancel(self, sub: str, doc_ids: list[str]) -> None:

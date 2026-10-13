@@ -59,14 +59,11 @@ from .index import (
     MeaningCounts,
     Pending,
 )
+from .listing import Listing, Probe
 from .search import Query, SignalUnavailable
 
 log = logging.getLogger(__name__)
 
-#: How long a look at the gateway's list of models is kept, and a failed one.
-PROBE_TTL = 10.0
-PROBE_ERROR_TTL = 3.0
-PROBE_TIMEOUT = 8.0
 #: How long what a search model answered to is kept before a tiny request asks again. Every
 #: real answer renews it, so while documents are being embedded it never needs to ask.
 SEEN_TTL = 60.0
@@ -221,17 +218,6 @@ class Throughput:
 
 
 @dataclass(frozen=True)
-class Probe:
-    """A look at the gateway's list of models."""
-
-    at: float
-    models: tuple[SearchModel, ...] = ()
-    listed: frozenset[str] = frozenset()
-    #: Why it could not be asked, if it could not.
-    error: HubError | None = None
-
-
-@dataclass(frozen=True)
 class Resolved:
     """Which search model is in use now, or why none."""
 
@@ -276,6 +262,9 @@ class Block:
     #: `waiting` (the search model is not there) or `limited` (the key is at its limit).
     state: str
     until: float
+    #: Set because the gateway lists no search model that can be used, as against a request that
+    #: failed: the first ends when a model is listed, and the second only when it is tried again.
+    no_model: bool = False
 
 
 def too_long(exc: HubError) -> bool:
@@ -315,6 +304,18 @@ def problem(exc: HubError, model: str) -> tuple[str, str]:
         return "key", f"{WORDS_ONLY}{exc.message}"
     if exc.kind in ("unreachable", "setup"):
         return "unreachable", f"{WORDS_ONLY}{exc.message}"
+    if exc.status == 503 and exc.retry_after is not None:
+        # The gateway is holding requests back for a moment and says for how long (a backend
+        # that failed is cooling down, or its recovery is being tried: measured live for a
+        # result sorter, MR6b acceptance, within a second of the engine being started again).
+        # The search model is running or has just been started, so it is not "not running", and
+        # there is nothing for a person to start. Said as what was observed, in the gateway's
+        # words.
+        return "error", (
+            f"{WORDS_ONLY}Eugene's gateway asked Workbench to wait "
+            f"{embedders.seconds_words(exc.retry_after)} before asking the search model {model} "
+            f"again ({said}), so a question could not be searched by meaning."
+        )
     if exc.status in (503, 404):
         return "not_running", (
             f"{WORDS_ONLY}the search model {model} is not running. "
@@ -485,6 +486,7 @@ class Meaning:
         clock: Callable[[], float] = time.perf_counter,
         wall: Callable[[], float] = time.time,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        listing: Listing | None = None,
     ) -> None:
         self.indexes = indexes
         self.gateway = gateway
@@ -495,8 +497,8 @@ class Meaning:
         self.cache = vectors.MatrixCache(clock=clock)
         self.limiter = RateLimiter(clock=clock, sleep=sleep)
         self.signal = MeaningSignal(self)
-        self._probe: Probe | None = None
-        self._probe_lock = asyncio.Lock()
+        #: The gateway's list of models: one look, shared with sorting (`listing.py`).
+        self.listing = listing if listing is not None else Listing(gateway, clock=clock)
         self._seen: dict[str, Seen] = {}
         self._rates: dict[str, Throughput] = {}
         #: People who may have passages owed their meaning, in the order they are served.
@@ -561,38 +563,10 @@ class Meaning:
     # --- the gateway: which search models there are --------------------------
 
     async def probe(self, *, fresh: bool = False) -> Probe:
-        """The gateway's models, as a look at them: cached for `PROBE_TTL` seconds (a failed
-        look for a few), so a screen that asks every second asks the gateway once in ten."""
-
-        def good(found: Probe | None) -> bool:
-            if found is None or fresh:
-                return False
-            return self._clock() - found.at < (PROBE_ERROR_TTL if found.error else PROBE_TTL)
-
-        if self._probe is not None and good(self._probe):
-            return self._probe
-        async with self._probe_lock:
-            if self._probe is not None and good(self._probe):
-                return self._probe
-            try:
-                listing = await asyncio.wait_for(self.gateway.models(), PROBE_TIMEOUT)
-            except HubError as exc:
-                found = Probe(self._clock(), error=exc)
-            except TimeoutError:
-                found = Probe(
-                    self._clock(),
-                    error=HubError(
-                        f"Eugene's gateway did not list its models within {PROBE_TIMEOUT:.0f} "
-                        "seconds.",
-                        status=504,
-                        kind="timeout",
-                    ),
-                )
-            else:
-                models, listed = embedders.search_models(listing)
-                found = Probe(self._clock(), tuple(models), frozenset(listed))
-            self._probe = found
-            return found
+        """The gateway's models, as a look at them: the one look that is kept and shared with
+        sorting (`listing.Listing`, ten seconds, and a failed look for a few), so a screen that
+        asks every second asks the gateway once in ten; of it, the search models."""
+        return await self.listing.probe(embedders.SURFACE, fresh=fresh)
 
     async def resolve(self, built: Identity | None = None) -> Resolved:
         """The search model in use now (`embedders.choose`), from a live look at the gateway.
@@ -632,7 +606,7 @@ class Meaning:
         """What the search model answered is not trusted any more (it just failed), and
         neither is the last look at the gateway."""
         self._seen.pop(request_id, None)
-        self._probe = None
+        self.listing.forget()
 
     def rate_of(self, model: str | None, per_minute: int | None = None) -> float | None:
         """Passages a second this search model is adding, from what it just did; and never more
@@ -772,6 +746,8 @@ class Meaning:
         not been, the worker is woken, so a search model that was started after their
         documents were read is noticed the first time they come back."""
         if index.sub in self._owing:
+            if index.sub in self._blocked:
+                self._wake.set()  # waiting out a block: a look is a reason to see if it is over
             return
         try:
             counts = await index.meaning_counts()
@@ -855,6 +831,8 @@ class Meaning:
         soonest: float | None = None
         for sub in list(self._owing):
             wait = self._until.get(sub, 0.0) - now
+            if wait > 0 and await self._model_is_back(sub):
+                wait = 0.0
             if wait > 0:
                 soonest = wait if soonest is None else min(soonest, wait)
                 continue
@@ -877,12 +855,36 @@ class Meaning:
             return soonest
         return None if not self._owing else 0.0
 
+    async def _model_is_back(self, sub: str) -> bool:
+        """Whether a wait that was set because there was no search model to use is over, because
+        there is one now. A block does not outlive what it waits for: a document that says "no
+        search model is set up" while one is listed is a lie for as long as the wait has left (5
+        seconds, and then longer each time). The wait is ended, and what it had counted is not held
+        against the model that is back. MR6b round two found it in the flaky test of issue #6: a
+        pass that met a document that was not yet decided as words only (`searchable`, for a
+        moment) set a 5 s wait, and the model that came a moment later was not used for 5 s."""
+        block = self._blocked.get(sub)
+        if block is None or not block.no_model:
+            return False
+        if (await self.resolve(None)).model is None:
+            return False
+        self._until.pop(sub, None)
+        self._failures.pop(sub, None)
+        return True
+
     def _wait(
-        self, sub: str, code: str, message: str, seconds: float, state: str = "waiting"
+        self,
+        sub: str,
+        code: str,
+        message: str,
+        seconds: float,
+        state: str = "waiting",
+        *,
+        no_model: bool = False,
     ) -> Outcome:
         """This person's documents wait `seconds`, and say why."""
         until = self._clock() + seconds
-        self._blocked[sub] = Block(code, message, state, until)
+        self._blocked[sub] = Block(code, message, state, until, no_model)
         self._until[sub] = until
         return Outcome.BLOCKED
 
@@ -914,11 +916,18 @@ class Meaning:
                     resolved.code,
                     resolved.message or WORDS_ONLY.strip(),
                     self._retry_in(sub, RETRY_SECONDS),
+                    no_model=True,
                 )
             try:
                 seen = await self.identify(model.id)
             except HubError as exc:
                 return self._failed(sub, exc, model.id)
+            # The model is there and answers: whatever this person's documents waited for is not
+            # what they wait for now, and a request that is in the air is work, not waiting. (The
+            # block was kept until a batch was stored, so a batch that was held up, or was slow,
+            # left every document saying "Meaning is waiting: no search model is set up" beside a
+            # search model that was answering.) A request that fails sets its own block.
+            self._blocked.pop(sub, None)
             if built is not None and (bad := self._mismatch(built, seen)) is not None:
                 # Paused: nothing is added with another model's numbers. Whoever looks at the
                 # documents next (`touch`) brings the worker back to see if that has changed.
@@ -1302,7 +1311,8 @@ class Meaning:
                     message = "Meaning is paused until you choose Rebuild."
                 else:
                     message = f"Meaning is waiting: {reason_of(detail or headline)}"
-            elif (block := self._blocked.get(sub)) is not None:
+            elif (block := self._blocked.get(sub)) is not None and not block.no_model:
+                # (A wait for a search model that is over, while one is running, is not said.)
                 state, message = "waiting", f"Meaning is waiting: {reason_of(block.message)}"
             else:
                 state = "working"

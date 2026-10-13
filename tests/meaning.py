@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 import pytest
 
+from eugene_plexus_workbench.knowledge import listing as listing_module
 from eugene_plexus_workbench.knowledge import meaning as meaning_module
 
 from .conftest import ADMIN_TOKEN, Browser, World, search_model
@@ -48,8 +49,8 @@ def corpus() -> list[tuple[str, bytes]]:
 @pytest.fixture
 def quick(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Short memories, so a test that changes what the gateway lists is noticed at once."""
-    monkeypatch.setattr(meaning_module, "PROBE_TTL", 0.05)
-    monkeypatch.setattr(meaning_module, "PROBE_ERROR_TTL", 0.02)
+    monkeypatch.setattr(listing_module, "TTL", 0.05)
+    monkeypatch.setattr(listing_module, "ERROR_TTL", 0.02)
     monkeypatch.setattr(meaning_module, "SEEN_TTL", 0.05)
     yield
 

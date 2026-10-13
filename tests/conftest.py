@@ -32,10 +32,12 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response, Streamin
 from joserfc import jwt
 from joserfc.jwk import RSAKey
 
+from eugene_plexus_workbench import token_count
 from eugene_plexus_workbench.app import create_app
+from eugene_plexus_workbench.knowledge import sorting
 from eugene_plexus_workbench.settings import Settings
 
-from . import fake_embedding
+from . import fake_embedding, fake_rerank
 
 CLIENT_ID = "wb-client"
 CLIENT_SECRET = "wb-client-secret"
@@ -309,6 +311,21 @@ def search_model(
     entry: dict[str, Any] = {"id": model_id, "object": "model", "x_eugene_plexus": info}
     if owned_by is not None:
         entry["owned_by"] = owned_by
+    return entry
+
+
+def sorter_model(
+    model_id: str,
+    *,
+    locality: str | None = "local",
+    ready: bool = True,
+    owned_by: str | None = None,
+) -> dict[str, Any]:
+    """A result sorter as the gateway lists it (MR6b): the `rerank` surface, where it runs
+    (`locality=None` leaves the key out, as an older gateway would) and whether a backend is
+    running it."""
+    entry = search_model(model_id, locality=locality, ready=ready, owned_by=owned_by)
+    entry["x_eugene_plexus"]["surfaces"] = ["rerank"]
     return entry
 
 
@@ -611,6 +628,10 @@ class FakeGateway:
     #: The one model every gateway of these tests lists that only embeds, and says nothing of
     #: where it runs (so Workbench cannot place it); search by meaning's tests do without it.
     embedder_listed: bool = True
+    #: How many times the list of models was asked for, and how long each answer is held back
+    #: (a gateway that does not answer its list: the shared look, MR6b).
+    models_asked: int = 0
+    models_delay: float = 0.0
     #: Search models listed (`search_model`), whole; `/v1/embeddings` answers for each that is
     #: ready, with the stand-in meaning of `fake_embedding`.
     search_models: list[dict[str, Any]] = field(default_factory=list)
@@ -634,12 +655,50 @@ class FakeGateway:
     embed_refuse: str | None = None
     #: A request with this text in it answers with a vector that is not a number.
     embed_nan: str | None = None
+    #: Result sorters listed (`sorter_model`), whole; `/v1/rerank` answers for each that is ready,
+    #: scoring a passage by `fake_rerank.score` (0 to 1), best first.
+    sorters: list[dict[str, Any]] = field(default_factory=list)
+    #: Every rerank request: its body, when it came, and how many were in the air then.
+    rerank_requests: list[dict[str, Any]] = field(default_factory=list)
+    rerank_in_flight: int = 0
+    #: Tokens a second the sorter reads, as `token_count` counts them (the passages, and the
+    #: question once for each): a request takes that long. None answers at once.
+    rerank_rate: float | None = None
+    #: Seconds every request takes, beside what its tokens take.
+    rerank_delay: float = 0.0
+    #: Answers for the next requests, as (status, body, headers), before it behaves.
+    rerank_script: list[tuple[int, Any, dict[str, str]]] = field(default_factory=list)
+    #: A passage with this text in it is scored this, whatever the question: `{text: score}`.
+    rerank_prefer: dict[str, float] = field(default_factory=dict)
+
+    def rerank_tokens(self, body: dict[str, Any]) -> int:
+        """What reading a request is worth, as Workbench counts it: each passage and the question
+        once for each passage."""
+        asked = token_count.estimate(body["query"])
+        texts = [d if isinstance(d, str) else d["text"] for d in body["documents"]]
+        return sum(token_count.estimate(t) + asked for t in texts)
+
+    def sorts(self) -> list[dict[str, Any]]:
+        """The bodies of the rerank requests that were sorts of a search, not the small probe that
+        measures how fast the sorter reads (which asks about a greenhouse)."""
+        return [
+            r["body"] for r in self.rerank_requests if r["body"]["query"] != sorting.PROBE_QUESTION
+        ]
+
+    def probes(self) -> list[dict[str, Any]]:
+        """The bodies of the small requests that measure how fast the sorter reads."""
+        return [
+            r["body"] for r in self.rerank_requests if r["body"]["query"] == sorting.PROBE_QUESTION
+        ]
 
     def app(self) -> FastAPI:
         app = FastAPI()
 
         @app.get("/v1/models")
         async def models(request: Request) -> Any:
+            self.models_asked += 1
+            if self.models_delay:
+                await asyncio.sleep(self.models_delay)
             if request.headers.get("authorization") != f"Bearer {APP_KEY}":
                 return JSONResponse({"error": {"message": "invalid key"}}, status_code=401)
             return {
@@ -676,6 +735,7 @@ class FakeGateway:
                         else []
                     ),
                     *self.search_models,
+                    *self.sorters,
                     *self.image_models,
                     *self.audio_models,
                     *self.video_models,
@@ -875,6 +935,31 @@ class FakeGateway:
                 self.embed_gate = None
             return {"listed": [m["id"] for m in self.search_models]}
 
+        @app.post("/__fake/sorters")
+        async def fake_sorters(request: Request) -> Any:
+            """A test's hand on the gateway while a browser drives Workbench (MR6b): which result
+            sorters it lists from now on, as `{"sorters": [{"id": ..., "ready": true}]}`, and how many
+            tokens a second they read (`rate`, as Workbench counts tokens; null answers at once). The
+            Chrome check lists, slows and stops a sorter through it, as the owner would in Eugene's
+            console."""
+            body = await request.json()
+            self.sorters = [
+                sorter_model(
+                    m["id"], locality=m.get("locality", "local"), ready=m.get("ready", True)
+                )
+                for m in body["sorters"]
+            ]
+            if "rate" in body:
+                self.rerank_rate = float(body["rate"]) if body["rate"] else None
+            return {"listed": [m["id"] for m in self.sorters]}
+
+        @app.get("/__fake/sorter-calls")
+        async def fake_sorter_calls() -> Any:
+            """What the sorters were asked, so a browser check can say that a sorter that was too
+            slow, stopped or off was asked nothing: the sorts of a question, and the small test of
+            how fast one reads."""
+            return {"sorts": len(self.sorts()), "probes": len(self.probes())}
+
         @app.post("/v1/embeddings")
         async def embeddings(request: Request) -> Any:
             body = await request.json()
@@ -950,6 +1035,65 @@ class FakeGateway:
                 )
             finally:
                 self.embed_in_flight -= 1
+
+        @app.post("/v1/rerank")
+        async def rerank(request: Request) -> Any:
+            body = await request.json()
+            self.rerank_requests.append(
+                {"body": body, "at": time.perf_counter(), "in_flight": self.rerank_in_flight}
+            )
+            if request.headers.get("authorization") != f"Bearer {APP_KEY}":
+                return JSONResponse({"error": {"message": "invalid key"}}, status_code=401)
+            self.rerank_in_flight += 1
+            try:
+                if self.rerank_delay:
+                    await asyncio.sleep(self.rerank_delay)
+                if self.rerank_rate:
+                    await asyncio.sleep(self.rerank_tokens(body) / self.rerank_rate)
+                if self.rerank_script:
+                    code, payload, headers = self.rerank_script.pop(0)
+                    if isinstance(payload, str):
+                        return Response(
+                            payload,
+                            status_code=code,
+                            media_type="text/plain",
+                            headers=headers,
+                        )
+                    return JSONResponse(payload, status_code=code, headers=headers)
+                model = body.get("model")
+                entry = next((m for m in self.sorters if m["id"] == model), None)
+                if entry is None:
+                    return JSONResponse(
+                        {"error": {"message": f"The model '{model}' is not served here."}},
+                        status_code=404,
+                    )
+                if not entry["x_eugene_plexus"].get("ready_backends"):
+                    return JSONResponse(
+                        {"error": {"message": f"No backend for '{model}' is ready."}},
+                        status_code=503,
+                    )
+                texts = [d if isinstance(d, str) else d["text"] for d in body["documents"]]
+                scored = [
+                    {
+                        "index": i,
+                        "relevance_score": fake_rerank.score(
+                            body["query"], text, self.rerank_prefer
+                        ),
+                    }
+                    for i, text in enumerate(texts)
+                ]
+                scored.sort(key=lambda r: (-r["relevance_score"], r["index"]))
+                if isinstance(body.get("top_n"), int):
+                    scored = scored[: body["top_n"]]
+                tokens = self.rerank_tokens(body)
+                return {
+                    "object": "list",
+                    "model": model,
+                    "results": scored,
+                    "usage": {"prompt_tokens": tokens, "total_tokens": tokens},
+                }
+            finally:
+                self.rerank_in_flight -= 1
 
         @app.post("/v1/chat/completions")
         async def chat(request: Request) -> Any:

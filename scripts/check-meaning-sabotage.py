@@ -725,8 +725,11 @@ CASES: list[Case] = [
     one(
         "the search model setting takes anything",
         CONFIG,
+        # The result sorter's setting (MR6b) has the same check on the next lines, so the key
+        # it belongs to is part of the anchor.
+        "    if key == DOCUMENTS_EMBEDDING_MODEL:\n"
         "        if isinstance(value, str) and value.strip() and len(value.strip()) <= MAX_MODEL_ID:",
-        "        if True:",
+        "    if key == DOCUMENTS_EMBEDDING_MODEL:\n        if True:",
         API_T
         + "test_the_search_model_setting_shows_what_it_comes_to_and_the_new_settings_refuse_what_they_cannot_take",
     ),

@@ -34,7 +34,7 @@ from .meaning import (
 )
 from .saved import add, ask, by_name, chat_on, keep, listing, start
 from .test_documents_page import LIB, interface
-from .test_saved_page import literals, server_text, union
+from .test_saved_page import base_mode, literals, server_text, union
 
 PARAPHRASE = "who records the boats arriving?"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -171,7 +171,7 @@ def test_the_header_has_the_fields_the_page_reads_down_to_each_number(
     found = listing(ada)
     head = found["search"]
     assert set(head) == interface("SearchFacts")
-    assert head["code"] == "ok" and head["mode"] in literals("SearchFacts", "mode")
+    assert head["code"] == "ok" and base_mode(head["mode"]) in literals("SearchFacts", "mode")
     assert set(head["model"]) == interface("SearchModelView")
     assert set(head["model"]["prefixes"]) == interface("SearchPrefixes")
     assert set(head["adding"]) == interface("AddingView")
@@ -336,7 +336,7 @@ def test_what_a_chat_keeps_of_meaning_has_the_fields_the_page_reads(
     answer = ask(ada, chat_on(ada), PARAPHRASE)
     record = answer["retrieval"]
     assert set(record["meaning"]) == interface("MeaningRun") and record["meaning"]["used"] is True
-    assert record["mode"] in literals("SearchRecord", "mode")
+    assert base_mode(record["mode"]) in literals("SearchRecord", "mode")
     passages = [s for s in answer["sources"] if s.get("passage")]
     assert passages and {s["via"] for s in passages} <= union("Via")
 

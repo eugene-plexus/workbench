@@ -9,7 +9,10 @@
  * since the console is the owner's.
  *
  * The page promises nothing the server did not say: words only is said as what it is, with
- * what it does and does not find, for as long as meaning is not in use.
+ * what it does and does not find, for as long as meaning is not in use. While a result sorter is
+ * putting the best passages in order the headline says so ("Searching by meaning and words,
+ * sorted by ..."); the sorter's own notice (DocumentsSort) says where it runs and how fast, or
+ * why passages are not sorted.
  */
 
 import { ExternalLink, Search, TriangleAlert } from "lucide-react";
@@ -24,6 +27,7 @@ import {
   modelInUse,
   ownerWords,
   rebuildWords,
+  searchHeadline,
   searchTone,
   whereWords,
   whoseWords,
@@ -67,7 +71,7 @@ export function DocumentsSearch({
       <Glyph size={16} aria-hidden />
       <div className="flex flex-col gap-1.5">
         <span data-testid="documents-search-headline" className="notice-title">
-          {facts.headline}
+          {searchHeadline(facts)}
         </span>
         {detail && <span data-testid="documents-search-detail">{detail}</span>}
         {model && (

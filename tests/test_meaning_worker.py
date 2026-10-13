@@ -528,6 +528,125 @@ async def test_a_search_model_that_is_listed_but_not_running_gets_no_requests_an
     assert await world.meaning._cycle() == 0.0, "it looked again, and it is there"
 
 
+async def test_a_wait_for_a_search_model_ends_when_one_is_listed_and_does_not_outlive_it(
+    world: World,
+) -> None:
+    """The flaky test of issue #6 (found in MR6b round two, with a trace of a failing run): a pass
+    met a document that was not yet decided as words only (it was `searchable` for a moment) and
+    set a 5 s wait because no search model was there; the model came a moment later and was not
+    used for 5 seconds, and what the screen said in the meantime was "no search model is set up"
+    beside a model that was listed. A wait for a search model ends when one is there."""
+    world.gateway.listing = []
+    await world.add("doc00001", 4)  # searchable: counted as owed, and no model in play
+    pause = await world.meaning._cycle()
+    block = world.meaning._blocked[ADA]
+    assert pause is not None and 0 < pause <= 5.0 and block.code == "none_set_up" and block.no_model
+    # The model is listed. Somebody looks at the screen: no clock has moved.
+    world.gateway.listing = [search_model(EMBED)]
+    world.meaning.listing.forget()
+    world.meaning._wake.clear()
+    await world.meaning.touch(world.index())
+    assert world.meaning._wake.is_set(), "a look wakes a worker that is waiting out a block"
+    assert await world.meaning._cycle() == 0.0, "and it goes on at once, not when the 5 s are up"
+    assert ADA not in world.meaning._blocked and await world.embedded() == 4
+    assert world.meaning._failures.get(ADA) is None, "a model that was away is not a failure"
+
+
+async def test_a_model_that_is_back_is_not_held_to_the_failures_of_its_absence_the_moment_it_is_seen(
+    world: World,
+) -> None:
+    """Asserted straight after `_model_is_back`, and not after the batch that follows it, which
+    clears the count as well and so hid a count that was left behind (MR6b round two's review): a
+    search model that was away is not a failure, and the next real failure must wait 5 s, not the
+    10 s or 20 s that the count of its absence would make it."""
+    world.gateway.listing = []
+    await world.add("doc00001", 4)
+    await world.meaning._cycle()  # no search model: a wait, and the first failure counted
+    assert world.meaning._failures[ADA] == 1 and world.meaning._blocked[ADA].no_model
+    assert ADA in world.meaning._until
+    world.gateway.listing = [search_model(EMBED)]
+    world.meaning.listing.forget()
+    assert await world.meaning._model_is_back(ADA) is True
+    assert ADA not in world.meaning._failures, "what it had counted is not held against it"
+    assert ADA not in world.meaning._until, "and the wait is over"
+    # Not back while there is still none: nothing is ended and nothing is forgotten.
+    world.gateway.listing = []
+    world.meaning.listing.forget()
+    world.meaning._failures[ADA] = 2
+    world.meaning._until[ADA] = world.clock() + 30.0
+    assert await world.meaning._model_is_back(ADA) is False
+    assert world.meaning._failures[ADA] == 2 and ADA in world.meaning._until
+
+
+async def test_a_wait_that_a_failed_request_set_is_not_ended_by_the_model_being_listed(
+    world: World,
+) -> None:
+    """The gateway lists the model, and its request failed: that is not the same thing as no model
+    being there, so a look does not end the wait (the backoff is what stops a worker that hammers
+    a model that fails), and the screen still says what failed."""
+    await world.add("doc00001", 4)
+    await world.warm()
+    world.gateway.errors.append(HubError("No backend for 'embed-model' is ready.", status=503))
+    pause = await world.meaning._cycle()
+    block = world.meaning._blocked[ADA]
+    assert pause and block.code == "not_running" and block.no_model is False
+    world.meaning._wake.clear()
+    await world.meaning.touch(world.index())
+    assert world.meaning._wake.is_set()
+    again = await world.meaning._cycle()
+    assert again is not None and again > 0, "still waiting: the model is listed, and it failed"
+    said = (await world.meaning.status(world.index(), ADA)).adding
+    assert said["state"] == "waiting" and "is not running" in said["message"]
+
+
+async def test_a_request_that_is_held_up_is_work_and_not_a_wait_for_the_search_model(
+    world: World,
+) -> None:
+    """The block was kept until a batch was stored, so a batch that was slow, or held, left every
+    document saying "Meaning is waiting: no search model is set up" beside a model that answered."""
+    world.gateway.listing = []
+    await world.add("doc00001", 4)
+    await world.meaning._cycle()  # no model: blocked
+    assert world.meaning._blocked[ADA].no_model
+    world.gateway.listing = [search_model(EMBED)]
+    world.meaning.listing.forget()
+    world.clock.advance(60)  # its wait is over: nothing here is the lift of a look
+    await world.warm()
+    world.gateway.gate = asyncio.Event()  # and the batch is held up
+    turn = asyncio.create_task(world.meaning._cycle())
+    for _ in range(200):
+        if world.gateway.in_flight:
+            break
+        await asyncio.sleep(0.01)
+    assert world.gateway.in_flight == 1
+    assert ADA not in world.meaning._blocked, "a request in the air is work, not a wait"
+    status = await world.meaning.status(world.index(), ADA)
+    assert status.adding["state"] == "working" and status.code == "ok"
+    doc = await world.index().document("doc00001")
+    assert doc is not None
+    row = world.meaning.document_view(doc, status.queue, status)
+    assert row is not None and row["state"] == "adding"
+    world.gateway.gate.set()
+    assert await asyncio.wait_for(turn, 15) == 0.0
+
+
+async def test_the_header_does_not_say_a_search_model_is_not_there_when_one_is_running(
+    world: World,
+) -> None:
+    await world.add("doc00001", 4)
+    await world.warm()
+    world.meaning._blocked[ADA] = meaning_module.Block(
+        "none_set_up",
+        "Searching by words only: no search model is set up.",
+        "waiting",
+        9999.0,
+        True,
+    )
+    status = await world.meaning.status(world.index(), ADA)
+    assert status.code == "ok" and status.adding["state"] == "working", "the model is listed"
+    assert "no search model is set up" not in (status.adding["message"] or "")
+
+
 async def test_each_other_failure_waits_and_says_what_was_observed(world: World) -> None:
     await world.add("doc00001", 4)
     await world.warm()
@@ -771,6 +890,53 @@ async def test_a_failure_while_looking_for_the_long_passage_keeps_what_was_found
     assert world.meaning._blocked[ADA].code == "not_running"
 
 
+#: What the gateway says to a request that comes while a backend that failed is cooling down: a 503
+#: that asks for a second's wait (measured for a result sorter, MR6b acceptance).
+COOLING_DOWN = (
+    "A backend serving this model is not ready yet: Eligible backends are cooling down or "
+    "already probing recovery. Try a new request later.. If an engine is still loading its "
+    "weights this will clear on its own."
+)
+
+
+def test_a_503_that_asks_for_a_wait_is_the_gateway_holding_requests_back_and_not_a_stopped_model() -> (
+    None
+):
+    """Measured live for a result sorter, and the same reading was in this module: after a model's
+    engine was started again, the gateway held the next requests back for a second with a 503 and a
+    `Retry-After`, and Workbench said the model was not running and to start it, of a model that
+    was. A 503 that asks for a wait is the gateway's wait, said in its own words; one that does not
+    is a model that is not ready, as ever."""
+    held = HubError("x", status=503, words=COOLING_DOWN, retry_after=1.0)
+    code, words = meaning_module.problem(held, EMBED)
+    assert code == "error"
+    assert words == (
+        "Searching by words only: Eugene's gateway asked Workbench to wait 1 s before asking the "
+        f"search model embed-model again ({COOLING_DOWN}), so a question could not be searched by "
+        "meaning."
+    )
+    assert "is not running" not in words and "Start it" not in words
+    assert meaning_module.problem(
+        HubError("x", status=503, words=COOLING_DOWN, retry_after=12.0), EMBED
+    )[1].startswith("Searching by words only: Eugene's gateway asked Workbench to wait 12 s ")
+    for plain in (HubError("x", status=503), HubError("x", status=404, retry_after=3.0)):
+        again, said = meaning_module.problem(plain, EMBED)
+        assert again == "not_running" and "the search model embed-model is not running" in said
+
+
+async def test_a_worker_held_back_by_the_gateway_says_so_and_does_not_say_the_model_is_stopped(
+    world: World,
+) -> None:
+    await world.add("doc00001", 4)
+    await world.warm()
+    world.gateway.errors.append(HubError("x", status=503, words=COOLING_DOWN, retry_after=1.0))
+    await world.meaning._cycle()
+    blocked = world.meaning._blocked[ADA]
+    assert blocked.code == "error"
+    assert "asked Workbench to wait 1 s" in blocked.message
+    assert "is not running" not in blocked.message
+
+
 # --------------------------------------------------------------------------- #
 # a removal, a stop, and who is served
 # --------------------------------------------------------------------------- #
@@ -934,12 +1100,12 @@ async def test_a_document_is_owed_its_meaning_only_when_a_search_model_is_in_pla
     assert doc is not None
     assert await world.meaning.owed(world.index(), doc) is True and ADA in world.meaning._owing
     world.gateway.listing = []
-    world.meaning._probe = None
+    world.meaning.listing.forget()
     world.meaning._owing.clear()
     assert await world.meaning.owed(world.index(), doc) is False and not world.meaning._owing
     empty = doc.__class__(**{**doc.__dict__, "chunks": 0})
     world.gateway.listing = [search_model(EMBED)]
-    world.meaning._probe = None
+    world.meaning.listing.forget()
     assert await world.meaning.owed(world.index(), empty) is False, "no passages, nothing owed"
 
 
@@ -951,7 +1117,7 @@ async def test_a_search_model_started_after_the_documents_were_read_is_noticed_w
     await world.index().finish("doc00001")  # ready by words: no model then
     world.meaning._owing.clear()
     world.gateway.listing = [search_model(EMBED)]
-    world.meaning._probe = None
+    world.meaning.listing.forget()
     status = await world.meaning.status(world.index(), ADA)  # the person opens the screen
     assert status.code == "ok" and ADA in world.meaning._owing, "so the worker is woken"
     await world.run()
@@ -1168,7 +1334,7 @@ async def test_a_document_that_is_not_read_has_no_meaning_to_say_anything_of(wor
 async def test_a_waiting_documents_row_says_why_it_waits(world: World) -> None:
     await world.add("doc00001", 4)
     world.gateway.listing = [search_model(EMBED, ready=False)]
-    world.meaning._probe = None
+    world.meaning.listing.forget()
     status = await world.meaning.status(world.index(), ADA)
     doc = await world.index().document("doc00001")
     assert doc is not None

@@ -1,0 +1,130 @@
+{
+ "seconds": [
+  [
+   0.001,
+   "0 s"
+  ],
+  [
+   0.0449,
+   "0.04 s"
+  ],
+  [
+   0.45,
+   "0.45 s"
+  ],
+  [
+   0.5,
+   "0.5 s"
+  ],
+  [
+   0.999,
+   "1 s"
+  ],
+  [
+   1.0,
+   "1 s"
+  ],
+  [
+   1.04,
+   "1 s"
+  ],
+  [
+   1.26,
+   "1.3 s"
+  ],
+  [
+   3.0,
+   "3 s"
+  ],
+  [
+   6.94,
+   "6.9 s"
+  ],
+  [
+   7.02,
+   "7 s"
+  ],
+  [
+   9.96,
+   "10 s"
+  ],
+  [
+   10.0,
+   "10 s"
+  ],
+  [
+   10.4,
+   "10 s"
+  ],
+  [
+   10.6,
+   "11 s"
+  ],
+  [
+   12.4,
+   "12 s"
+  ],
+  [
+   59.9,
+   "60 s"
+  ],
+  [
+   120.0,
+   "120 s"
+  ]
+ ],
+ "rates": [
+  [
+   5.0,
+   "about 5 tokens a second"
+  ],
+  [
+   45.6,
+   "about 46 tokens a second"
+  ],
+  [
+   99.6,
+   "about 100 tokens a second"
+  ],
+  [
+   100.0,
+   "about 100 tokens a second"
+  ],
+  [
+   104.9,
+   "about 100 tokens a second"
+  ],
+  [
+   105.1,
+   "about 110 tokens a second"
+  ],
+  [
+   124.4,
+   "about 120 tokens a second"
+  ],
+  [
+   820.0,
+   "about 820 tokens a second"
+  ],
+  [
+   849.9,
+   "about 850 tokens a second"
+  ],
+  [
+   1234.5,
+   "about 1,200 tokens a second"
+  ],
+  [
+   4100.0,
+   "about 4,100 tokens a second"
+  ],
+  [
+   18765.0,
+   "about 19,000 tokens a second"
+  ],
+  [
+   123456.7,
+   "about 120,000 tokens a second"
+  ]
+ ]
+}

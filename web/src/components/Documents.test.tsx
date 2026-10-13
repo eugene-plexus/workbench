@@ -10,7 +10,7 @@ import { act, cleanup, fireEvent, render, screen, within } from "@testing-librar
 
 import { ApiError, api, del, documentText, fileOf, post, put, upload } from "../lib/api";
 import { saveFile } from "../lib/memory";
-import { FIRST_POLL_MS, IDLE_POLL_MS, POLL_MS } from "../lib/savedDocuments";
+import { FIRST_POLL_MS, IDLE_POLL_MS, POLL_MS, WAITING_POLL_MS } from "../lib/savedDocuments";
 import type {
   DocumentFolders,
   DocumentsPrefs,
@@ -44,6 +44,10 @@ import {
   saved,
   scanned,
   searchFor,
+  SORT_CODES,
+  sortFacts,
+  sortFor,
+  SORTER,
   tested,
   waiting,
   withMeaning,
@@ -1523,5 +1527,156 @@ describe("the Folders section, on the screen (MR7)", () => {
     expect(first("documents-page").textContent).not.toMatch(
       /\b(RAG|vectors?|embeddings?|chunks?|retriev\w*)\b/i,
     );
+  });
+});
+
+// --- the result sorter (MR6b) ---
+
+describe("how the screen says the best passages are sorted", () => {
+  const sortedMode = `meaning and words, sorted by ${SORTER}`;
+  /** A search model in use and a sorter that is sorting, as the server's live look says it. */
+  const sorting = (over: Partial<SearchFacts> = {}): Partial<SearchFacts> => ({
+    mode: sortedMode as never,
+    sort: sortFacts(),
+    ...over,
+  });
+  const sortBox = () => screen.getByTestId("documents-sort");
+
+  it("says the sorter in the headline, and under it which sorter is in use, where it runs and how fast it reads", async () => {
+    await opened({ docs: [withMeaning()], meaning: true, search: sorting() });
+    expect(screen.getByTestId("documents-search-headline")).toHaveTextContent(
+      `Searching by meaning and words, sorted by ${SORTER}.`,
+    );
+    expect(screen.getByTestId("documents-sort-model")).toHaveTextContent(
+      `In use: ${SORTER} (automatic)`,
+    );
+    expect(screen.getByTestId("documents-sort-where")).toHaveTextContent(
+      "It runs on your own machines",
+    );
+    expect(screen.getByTestId("documents-sort-speed")).toHaveTextContent(
+      "sorts about 4,100 tokens a second here",
+    );
+    // Beside how the documents are searched, and after it.
+    const after = screen
+      .getByTestId("documents-search")
+      .compareDocumentPosition(screen.getByTestId("documents-sort"));
+    expect(after & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("says why passages are not sorted, with the numbers, and the headline does not say they are", async () => {
+    await opened({
+      docs: [withMeaning()],
+      meaning: true,
+      search: { sort: sortFor("over_budget") },
+    });
+    expect(screen.getByTestId("documents-search-headline")).toHaveTextContent(
+      /^Searching by meaning and words\.$/,
+    );
+    expect(screen.getByTestId("documents-sort-reason")).toHaveTextContent(
+      `Not sorted: ${SORTER} sorts about 820 tokens a second here, so sorting the 18 passages a question usually finds (about 300 tokens each) would add about 7 s to each answer, and Sort time is 3 s.`,
+    );
+    expect(sortBox()).not.toHaveTextContent("In use");
+  });
+
+  it("says nothing of a sorter that was never set up, and the screen is as it was", async () => {
+    await opened({ docs: [withMeaning()], meaning: true });
+    expect(screen.queryByTestId("documents-sort")).toBeNull();
+    expect(screen.getByTestId("documents-search-headline")).toHaveTextContent(
+      /^Searching by meaning and words\.$/,
+    );
+  });
+
+  it("says nothing of one where it was not told of one: no gateway, or a server before sorting", async () => {
+    await opened({ docs: [saved()], search: { sort: null } });
+    expect(screen.queryByTestId("documents-sort")).toBeNull();
+    cleanup();
+    await opened({ docs: [saved()], meaning: true, search: { sort: undefined } });
+    expect(screen.queryByTestId("documents-sort")).toBeNull();
+  });
+
+  it("is a live look: a sorter that stopped is named at the next look, and sorting is said again when it is back", async () => {
+    await opened({ docs: [withMeaning()], meaning: true, search: sorting() });
+    expect(screen.getByTestId("documents-sort-model")).toBeInTheDocument();
+    server.search = { sort: sortFor("not_running") };
+    await wait(IDLE_POLL_MS);
+    expect(screen.getByTestId("documents-sort-reason")).toHaveTextContent(
+      `Not sorted: the sorter ${SORTER} is not running. Start it in Eugene's console under Backends.`,
+    );
+    expect(screen.queryByTestId("documents-sort-model")).toBeNull();
+    expect(sortBox()).toHaveClass("notice--warn");
+    expect(screen.getByTestId("documents-search-headline")).toHaveTextContent(
+      /^Searching by meaning and words\.$/,
+    );
+    server.search = sorting();
+    await wait(IDLE_POLL_MS);
+    expect(screen.getByTestId("documents-sort-model")).toBeInTheDocument();
+    expect(screen.getByTestId("documents-search-headline")).toHaveTextContent(
+      `sorted by ${SORTER}`,
+    );
+  });
+
+  it("looks again in seconds while the sorter is measured, not in half a minute, and shows what was measured", async () => {
+    await opened({ docs: [withMeaning()], meaning: true, search: { sort: sortFor("measuring") } });
+    expect(screen.getByTestId("documents-sort-reason")).toHaveTextContent(
+      `Measuring how fast ${SORTER} sorts, to tell whether it is quick enough.`,
+    );
+    const before = reads;
+    server.search = { sort: sortFor("over_budget") };
+    await wait(WAITING_POLL_MS);
+    expect(reads).toBe(before + 1);
+    expect(screen.getByTestId("documents-sort-reason")).toHaveTextContent(
+      "sorts about 820 tokens a second here",
+    );
+    // Measured: it goes back to looking each half minute, and not each few seconds.
+    await wait(WAITING_POLL_MS * 4);
+    expect(reads).toBe(before + 1);
+    await wait(IDLE_POLL_MS);
+    expect(reads).toBe(before + 2);
+  });
+
+  it("tells the owner where a sorter that stopped is started, and a person who is not the owner who to ask", async () => {
+    await opened(
+      { docs: [withMeaning()], meaning: true, search: { sort: sortFor("not_running") } },
+      OWNER,
+    );
+    expect(screen.getByTestId("documents-sort-open-backends")).toHaveAttribute(
+      "href",
+      "http://nas:8279/inference/",
+    );
+    cleanup();
+    await opened(
+      { docs: [withMeaning()], meaning: true, search: { sort: sortFor("not_running") } },
+      PERSON,
+    );
+    expect(screen.queryByTestId("documents-sort-open-backends")).toBeNull();
+    expect(screen.getByTestId("documents-sort-ask-owner")).toHaveTextContent(
+      "Ask the owner of this Workbench to fix this in Eugene's console.",
+    );
+  });
+
+  it("says nothing of a sorter where the owner has turned documents off", async () => {
+    await opened({
+      installEnabled: false,
+      docs: [saved()],
+      meaning: true,
+      search: sorting(),
+    });
+    expect(screen.queryByTestId("documents-sort")).toBeNull();
+  });
+
+  it("says nothing of how it works underneath, with a sorter in each state", async () => {
+    // A model's name is its own and may have such a word in it: this holds the words the page says.
+    const names = /Qwen3-Embedding-0\.6B-Q8_0|[\w.-]*rerank[\w.-]*/gi;
+    for (const code of SORT_CODES) {
+      await opened({ docs: [withMeaning()], meaning: true, search: { sort: sortFor(code) } });
+      const said = (screen.getByTestId("documents-page").textContent ?? "").replace(
+        names,
+        "a-model",
+      );
+      expect(said, code).not.toMatch(
+        /\b(RAG|vectors?|embeddings?|chunks?|retriev\w*|rerank\w*)\b/i,
+      );
+      cleanup();
+    }
   });
 });

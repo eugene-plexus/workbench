@@ -75,7 +75,11 @@ export function searchProblem(models: Models | null, model: Model | undefined): 
   if (!models) return null;
   if (!models.webSearch.available) return models.webSearch.reason ?? "Search cannot run here.";
   if (model && !model.webSearch) {
-    return `${model.id} can neither search nor use tools, so it cannot search the web. Pick another model.`;
+    // Eugene's limit, not the model's: tools are assumed, and a model is listed without
+    // them only when its backend refused them or Eugene has no way to give them
+    // (specs docs/design/tools-assumed.md). "Can neither search nor use tools" blamed
+    // a model that does both elsewhere (Qwen3.8-Flash-Next on Strata, 2026-10-12).
+    return `Eugene cannot give ${model.id} tools as it runs here, so it cannot search the web. Pick another model.`;
   }
   return null;
 }
