@@ -105,9 +105,9 @@ class Listing:
         next look is a fresh one."""
         self._last = None
 
-    def _good(self, found: Look | None) -> bool:
-        if found is None:
-            return False
+    def _good(self, found: Look) -> bool:
+        """Whether a look is still as good as a new one: ten seconds for one that listed the
+        models, three for one that could not."""
         return self._clock() - found.at < (ERROR_TTL if found.error else TTL)
 
     async def look(self, *, fresh: bool = False) -> Look:
