@@ -14,11 +14,12 @@
 
 import { useCallback, useSyncExternalStore, type ReactNode } from "react";
 import type { Typeset } from "./mathTypeset";
+import { workerQueue, type Outcome as Settled } from "./workerQueue";
 
 export type { Typeset };
 
 /** What laying out a formula came to; `again` when the next try may differ. */
-export type Outcome = Typeset | { error: string; again: true };
+export type Outcome = Settled<Typeset>;
 
 /** Lays out one formula; null when it was skipped because nobody wants it. */
 export interface Engine {
@@ -30,124 +31,25 @@ export const FORMULA_MS = 1_500;
 /** How long the worker may take to start (KaTeX is read once per worker). */
 export const START_MS = 10_000;
 
-type Job = {
-  id: number;
-  tex: string;
-  display: boolean;
-  wanted?: () => boolean;
-  resolve: (result: Outcome | null) => void;
-};
-
-type Reply = { ready?: boolean; id?: number; markup?: string; error?: string };
-
-function seconds(ms: number): string {
-  return `${(ms / 1000).toLocaleString("en")} s`;
-}
-
-/** The engine on a worker made by `make`, with its limits. */
+/** The engine on a worker made by `make`, with its limits (lib/workerQueue.ts). */
 export function workerEngine(
   make: () => Worker,
   limits: { formula: number; start: number } = { formula: FORMULA_MS, start: START_MS },
 ): Engine {
-  const queue: Job[] = [];
-  let worker: Worker | null = null;
-  let ready = false;
-  let running: Job | null = null;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let next = 1;
-
-  function end(): void {
-    clearTimeout(timer);
-    worker?.terminate();
-    worker = null;
-    ready = false;
-  }
-
-  /**
-   * The running formula fails with `reason` (`again` if the worker, not the
-   * formula, was at fault); a new worker takes the rest.
-   */
-  function failRunning(reason: string, again: boolean): void {
-    const job = running;
-    running = null;
-    end();
-    job?.resolve(again ? { error: reason, again } : { error: reason });
-    pump();
-  }
-
-  /** The worker never started: every formula waiting fails with `reason`, for now. */
-  function failStart(reason: string): void {
-    end();
-    for (const job of queue.splice(0)) job.resolve({ error: reason, again: true });
-  }
-
-  function start(): void {
-    try {
-      worker = make();
-    } catch (error) {
-      failStart(`formulas cannot be laid out in this browser: ${String(error)}`);
-      return;
-    }
-    worker.onmessage = (event: MessageEvent<Reply>) => {
-      const reply = event.data;
-      if (reply.ready) {
-        clearTimeout(timer);
-        ready = true;
-        pump();
-        return;
-      }
-      const job = running;
-      if (!job || reply.id !== job.id) return;
-      clearTimeout(timer);
-      running = null;
-      job.resolve(
-        typeof reply.markup === "string"
-          ? { markup: reply.markup }
-          : { error: String(reply.error ?? "no reason was given") },
-      );
-      pump();
-    };
-    worker.onerror = (event: ErrorEvent) => {
-      event.preventDefault();
-      const reason = `the formula worker stopped: ${event.message || "no reason was given"}`;
-      if (running) failRunning(reason, true);
-      else failStart(reason);
-    };
-    timer = setTimeout(
-      () => failStart(`the formula worker did not start within ${seconds(limits.start)}`),
-      limits.start,
-    );
-  }
-
-  function pump(): void {
-    if (running) return;
-    if (!worker) {
-      if (queue.length) start();
-      return;
-    }
-    if (!ready) return;
-    let job = queue.shift();
-    while (job?.wanted && !job.wanted()) {
-      job.resolve(null);
-      job = queue.shift();
-    }
-    if (!job) return;
-    running = job;
-    worker.postMessage({ id: job.id, tex: job.tex, display: job.display });
-    timer = setTimeout(
-      () => failRunning(`it took longer than ${seconds(limits.formula)} to lay out`, false),
-      limits.formula,
-    );
-  }
-
-  return {
-    typeset(tex, display, wanted) {
-      return new Promise((resolve) => {
-        queue.push({ id: next++, tex, display, wanted, resolve });
-        pump();
-      });
+  const queue = workerQueue<{ tex: string; display: boolean }, Typeset>(
+    make,
+    { job: limits.formula, start: limits.start },
+    {
+      worker: "the formula worker",
+      unavailable: "formulas cannot be laid out in this browser",
+      doing: "to lay out",
     },
-  };
+    (reply) =>
+      typeof reply.markup === "string"
+        ? { markup: reply.markup }
+        : { error: String(reply.error ?? "no reason was given") },
+  );
+  return { typeset: (tex, display, wanted) => queue.run({ tex, display }, wanted) };
 }
 
 // --- what the page shows ---------------------------------------------------------
