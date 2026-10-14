@@ -25,7 +25,7 @@ from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFil
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import config, files
+from . import artifacts, config, files
 from .answers import Answers, Preparation, Progress, message_view
 from .context import reading_view
 from .conversation import SAMPLING, request_for
@@ -469,9 +469,15 @@ async def _chat_detail(
         raise _problem(status.HTTP_404_NOT_FOUND, "There is no such message in this chat.")
     places = versions(tree)
     attached = {f.id: f for f in await store.files_for_chat(chat.id, uploads=True)}
+    kept: dict[str, list[dict[str, Any]]] = {}
+    for record in await store.artifacts_for_chat(chat.id):
+        kept.setdefault(record.message_id, []).append(artifacts.summary(record))
     views = []
     for m in path(tree, via):
         view = message_view(m)
+        # What each block the person changed keeps (rich content RC5), for the page
+        # to find by its block's words.
+        view["artifacts"] = kept.get(m.id, [])
         view["files"] = [
             {
                 "id": i,
@@ -585,6 +591,7 @@ def redact_for_owner(views: list[dict[str, Any]], hidden: dict[str, str]) -> lis
                 "finishedAt": view["finishedAt"],
                 "attachments": [],
                 "files": [],
+                "artifacts": [],
                 "toolRounds": [],
                 "error": None,
                 "model": view.get("model"),

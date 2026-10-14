@@ -11,6 +11,7 @@ import { Sidebar } from "./components/Sidebar";
 import { SignIn } from "./components/SignIn";
 import { Tools } from "./components/Tools";
 import { api, onSignedOut, patch, post, releaseAllFileUrls, SignedOut } from "./lib/api";
+import { forgetDrafts } from "./lib/artifacts";
 import { forgetDiagrams } from "./lib/diagramClient";
 import { forgetFormulas } from "./lib/mathClient";
 import { type Door, mediaFromPath, mediaPath } from "./lib/media";
@@ -228,12 +229,13 @@ export default function App() {
 
   // Signed out, however it came about: nothing a chat showed stays in the
   // page to be shown again (rich content RC3): no file's blob: address, no
-  // drawn diagram, no laid-out formula.
+  // drawn diagram, no laid-out formula, no artifact's unsaved edit (RC5).
   useEffect(() => {
     if (phase.kind !== "signed-out") return;
     releaseAllFileUrls();
     forgetDiagrams();
     forgetFormulas();
+    forgetDrafts();
   }, [phase.kind]);
 
   useEffect(() => {

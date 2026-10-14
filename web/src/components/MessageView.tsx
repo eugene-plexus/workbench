@@ -10,7 +10,15 @@ import {
   Scissors,
   TriangleAlert,
 } from "lucide-react";
-import { type ReactNode, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import { fileUrl, post } from "../lib/api";
 import { stableCitations } from "../lib/citations";
@@ -39,6 +47,7 @@ import {
   VERSIONS_WAIT,
 } from "../lib/words";
 import { Markdown } from "./Markdown";
+import { ArtifactScope, type Scope } from "./Artifact";
 import { CopyButton } from "./CopyButton";
 import { useDocumentText } from "./DocumentText";
 import { type RememberProps, useRemember } from "./RememberThis";
@@ -90,6 +99,25 @@ export function MessageView({
         ? undefined
         : memory,
   });
+  // What the answer's blocks need to be artifacts (Artifact.tsx): the chat is read
+  // again when one is kept, by the latest `onChanged`.
+  const changed = useRef(onChanged);
+  useEffect(() => {
+    changed.current = onChanged;
+  });
+  const artifacts = message.artifacts;
+  const writing = message.status === "running";
+  const artifactScope = useMemo<Scope>(
+    () => ({
+      chatId,
+      messageId: message.id,
+      artifacts: artifacts ?? [],
+      readOnly,
+      writing,
+      onKept: () => changed.current(),
+    }),
+    [chatId, message.id, artifacts, readOnly, writing],
+  );
   const arrows = (
     <VersionArrows
       chatId={chatId}
@@ -347,7 +375,9 @@ export function MessageView({
             }
           />
         ) : (
-          <Markdown text={answer} citations={stableCitations(message)} />
+          <ArtifactScope.Provider value={artifactScope}>
+            <Markdown text={answer} citations={stableCitations(message)} />
+          </ArtifactScope.Provider>
         ))}
       {running && answer && (
         // Once the first words are on the page the line is not gone: it moves

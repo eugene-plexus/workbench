@@ -170,6 +170,10 @@ function markOpenFences(node: HastRoot | Element, source: unknown): void {
     const from = child.position?.start.offset;
     const to = child.position?.end.offset;
     if (code?.type !== "element" || code.tagName !== "code") continue;
+    // The fence's words after its language (`artifact title="…"`), for the code
+    // block to read (Markdown.tsx): the parser keeps them aside, off the element.
+    const meta = (code.data as { meta?: unknown } | undefined)?.meta;
+    if (typeof meta === "string" && meta) code.properties.dataMeta = meta.slice(0, 500);
     if (typeof source !== "string" || from === undefined || to === undefined) continue;
     // `data-fence="open"` on the code: a block is coloured when it closes, and
     // not on every chunk of the answer while it is being written.

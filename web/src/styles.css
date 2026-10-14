@@ -2042,3 +2042,208 @@ textarea {
     font-size: 20px;
   }
 }
+
+/* ---- RC5: artifacts ---- */
+/* A block an answer asked to be an artifact: a card that opens it. The left
+   edge takes the console's accent, as a boundary does (workbench-reading). */
+.artifact-card {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  margin: 0.75rem 0;
+  padding: 0.5rem 0.5rem 0.5rem 0.75rem;
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--accent-left);
+  border-radius: calc(var(--radius) + 2px);
+  background: var(--panel);
+  color: var(--muted);
+}
+.artifact-card-words {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+}
+.artifact-card-title {
+  overflow: hidden;
+  color: var(--heading);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.artifact-dialog {
+  width: min(96vw, 1200px);
+  max-width: none;
+  height: min(92vh, 1000px);
+  max-height: none;
+  padding: 0;
+  border: 1px solid var(--border-hover);
+  border-radius: calc(var(--radius) + 2px);
+  background: var(--panel);
+  color: var(--foreground);
+}
+.artifact-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+.artifact-dialog::backdrop {
+  background: rgb(0 0 0 / 0.6);
+}
+.artifact-dialog-head,
+.artifact-dialog-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.375rem 0.5rem 0.375rem 0.875rem;
+  border-bottom: 1px solid var(--rule);
+}
+.artifact-dialog-head {
+  background: var(--panel-hover);
+  color: var(--muted);
+  font-size: 0.8125rem;
+}
+.artifact-dialog-name {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+.artifact-dialog-title {
+  overflow: hidden;
+  color: var(--heading);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.artifact-tabs {
+  display: flex;
+  gap: 0.25rem;
+}
+.artifact-tab {
+  min-height: 2.25rem;
+  padding: 0 0.75rem;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+}
+.artifact-tab[aria-selected="true"] {
+  border-bottom-color: var(--accent-left);
+  color: var(--foreground-strong);
+}
+.artifact-tab:hover {
+  color: var(--foreground);
+}
+.artifact-revision select {
+  max-width: 100%;
+  min-height: 2.25rem;
+  padding: 0 0.5rem;
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius);
+  background: var(--panel-soft);
+  color: var(--foreground);
+  font-size: 0.8125rem;
+}
+.artifact-unsaved {
+  margin: 0;
+  padding: 0.375rem 0.875rem;
+  border-bottom: 1px solid var(--status-warn-border);
+  background: var(--status-warn-bg);
+  color: var(--status-warn-fg);
+}
+.artifact-dialog-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  padding: 1rem;
+  overflow: auto;
+}
+/* A panel not shown stays, as a running preview must: hidden, not removed. */
+.artifact-dialog-body[hidden] {
+  display: none;
+}
+.artifact-picture {
+  overflow: auto;
+}
+.artifact-picture img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
+.artifact-source {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.artifact-editor {
+  flex: 1;
+  min-height: 16rem;
+  padding: 0.5rem;
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius);
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  resize: none;
+  tab-size: 2;
+}
+.artifact-source-tools,
+.artifact-run {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+.artifact-preview {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+/* A preview is its own page: white, as a page is unless it says otherwise. */
+.artifact-frame {
+  flex: 1;
+  width: 100%;
+  min-height: 20rem;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: #ffffff;
+}
+.artifact-notes {
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--status-warn-border);
+  border-radius: var(--radius);
+  background: var(--status-warn-bg);
+  color: var(--status-warn-fg);
+  font-size: 0.8125rem;
+  overflow-wrap: anywhere;
+}
+.artifact-notes ul {
+  margin: 0;
+  padding-left: 1rem;
+  list-style: disc;
+}
+.artifact-notes p {
+  margin: 0.375rem 0 0;
+}
+.artifact-problem {
+  margin: 0.5rem 0.875rem;
+}
+@media (max-width: 480px) {
+  .artifact-dialog {
+    width: 100vw;
+    height: 100dvh;
+    border-radius: 0;
+  }
+  .artifact-dialog-body {
+    padding: 0.5rem;
+  }
+}
+/* ---- end RC5 ---- */

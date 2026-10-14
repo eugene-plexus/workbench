@@ -491,7 +491,7 @@ def test_a_schema_9_file_gains_memory_and_keeps_every_chat(tmp_path: Path) -> No
 
     run(path, body)
     with sqlite3.connect(path) as db:
-        assert db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone() == ("14",)
+        assert db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone() == ("15",)
         tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         triggers = {
             r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'")

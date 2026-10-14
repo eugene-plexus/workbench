@@ -61,6 +61,11 @@ settings for them.
 **Folders** (schema 13): `document_folders` is the granted folders a person has pointed their
 Documents at (MR7), each filtered by `owner` in its own query. What was read from them is not
 here: those are documents in the person's own index, named by `folder:<grant id>/<path>`.
+
+**Artifacts** (schema 15): a block of an answer the person changed, kept with every revision
+(`artifacts.py`). `artifacts` names the message, the block (`digest`, the number of its first
+revision's words) and its kind and title; `artifact_revisions` holds each revision's source,
+numbered from 1 and never rewritten. They go with their chat.
 """
 
 from __future__ import annotations
@@ -79,7 +84,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 #: The oldest schema this migrates from: what Workbench v0.1.0 wrote. Schema 1 predates
 #: it, and nobody holds one.
@@ -238,6 +243,27 @@ CREATE TABLE IF NOT EXISTS document_folders (
     synced_at REAL,
     checked_at REAL,
     PRIMARY KEY (owner, grant_id)
+);
+CREATE TABLE IF NOT EXISTS artifacts (
+    id TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    chat_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('markdown', 'svg', 'html', 'react')),
+    title TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    UNIQUE (message_id, kind, digest)
+);
+CREATE INDEX IF NOT EXISTS artifacts_by_chat ON artifacts (chat_id);
+CREATE TABLE IF NOT EXISTS artifact_revisions (
+    artifact_id TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    author TEXT NOT NULL CHECK (author IN ('answer', 'person')),
+    created_at REAL NOT NULL,
+    PRIMARY KEY (artifact_id, number)
 );
 """
 
@@ -414,6 +440,19 @@ _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
         "ALTER TABLE files ADD COLUMN origin TEXT NOT NULL DEFAULT 'upload' "
         "CHECK (origin IN ('upload', 'tool'))",
         "CREATE INDEX IF NOT EXISTS files_by_message ON files (message_id)",
+    ],
+    # Artifacts (rich content RC5, 2026-10-14): a block of an answer the person changed,
+    # with every revision; new tables only, so nothing that was there changes.
+    15: [
+        "CREATE TABLE IF NOT EXISTS artifacts (id TEXT PRIMARY KEY, owner TEXT NOT NULL, "
+        "chat_id TEXT NOT NULL, message_id TEXT NOT NULL, digest TEXT NOT NULL, "
+        "kind TEXT NOT NULL CHECK (kind IN ('markdown', 'svg', 'html', 'react')), "
+        "title TEXT NOT NULL, created_at REAL NOT NULL, UNIQUE (message_id, kind, digest))",
+        "CREATE INDEX IF NOT EXISTS artifacts_by_chat ON artifacts (chat_id)",
+        "CREATE TABLE IF NOT EXISTS artifact_revisions (artifact_id TEXT NOT NULL, "
+        "number INTEGER NOT NULL, source TEXT NOT NULL, size INTEGER NOT NULL, "
+        "author TEXT NOT NULL CHECK (author IN ('answer', 'person')), created_at REAL NOT NULL, "
+        "PRIMARY KEY (artifact_id, number))",
     ],
 }
 
@@ -735,6 +774,48 @@ class FileInUse(Exception):
 
 
 @dataclass
+class ArtifactRecord:
+    """A block of an answer the person changed (`artifacts.py`), with how many revisions
+    it has and when the last was saved."""
+
+    id: str
+    owner: str
+    chat_id: str
+    message_id: str
+    digest: str
+    kind: str
+    title: str
+    created_at: float
+    revisions: int = 0
+    updated_at: float = 0.0
+
+
+@dataclass
+class Revision:
+    """One revision of an artifact, by the answer (revision 1, when the answer holds it)
+    or the person; `source` only when it was asked for."""
+
+    number: int
+    author: str
+    size: int
+    created_at: float
+    source: str | None = None
+
+
+class ArtifactLimit(Exception):
+    """An artifact, or a revision of one, past what one keeps; its words say which."""
+
+
+class StaleRevision(Exception):
+    """An edit begun from one revision, when a later one (`last`) has been saved since."""
+
+    def __init__(self, base: int, last: int) -> None:
+        super().__init__(f"revision {last} was saved after revision {base}")
+        self.base = base
+        self.last = last
+
+
+@dataclass
 class MediaRow:
     """One request a media screen sent, or one file brought in (`kind`)."""
 
@@ -882,6 +963,92 @@ def _file(row: sqlite3.Row) -> FileRecord:
         reading=_reading(row["reading"]),
         message_id=row["message_id"],
         origin=row["origin"],
+    )
+
+
+#: An artifact with its revisions counted (`artifacts` joined to `artifact_revisions`).
+_ARTIFACT_SELECT = (
+    "SELECT a.id, a.owner, a.chat_id, a.message_id, a.digest, a.kind, a.title, a.created_at, "
+    "COUNT(r.number) AS revisions, MAX(r.created_at) AS updated_at FROM artifacts a "
+    "LEFT JOIN artifact_revisions r ON r.artifact_id = a.id"
+)
+
+
+def _artifact(row: sqlite3.Row) -> ArtifactRecord:
+    return ArtifactRecord(
+        id=row["id"],
+        owner=row["owner"],
+        chat_id=row["chat_id"],
+        message_id=row["message_id"],
+        digest=row["digest"],
+        kind=row["kind"],
+        title=row["title"],
+        created_at=row["created_at"],
+        revisions=int(row["revisions"] or 0),
+        updated_at=float(row["updated_at"] or row["created_at"]),
+    )
+
+
+def _artifact_room(db: sqlite3.Connection, owner: str, size: int, limit: int) -> None:
+    """`ArtifactLimit` when `size` more bytes would take a person's artifacts past `limit`."""
+    kept = int(
+        db.execute(
+            "SELECT COALESCE(SUM(r.size), 0) FROM artifact_revisions r "
+            "JOIN artifacts a ON a.id = r.artifact_id WHERE a.owner = ?",
+            (owner,),
+        ).fetchone()[0]
+    )
+    if kept + size > limit:
+        mb = 1024 * 1024
+        raise ArtifactLimit(
+            f"Your artifacts keep {kept // mb} MB of the {limit // mb} MB they may; "
+            "deleting a chat that holds some makes room"
+        )
+
+
+def _append_revision(
+    db: sqlite3.Connection,
+    artifact_id: str,
+    revision: Revision,
+    *,
+    base: int | None,
+    most: int,
+    person_bytes: int,
+) -> Revision:
+    """`revision` kept as the artifact's next, numbered here, in the caller's transaction;
+    the last one, as it is, when its source is the same. `StaleRevision` when `base` (the
+    revision the edit began from) is not the last; `ArtifactLimit` past `most`
+    revisions, or the person's `person_bytes`, or when the artifact is no longer kept."""
+    owner = db.execute("SELECT owner FROM artifacts WHERE id = ?", (artifact_id,)).fetchone()
+    if owner is None:
+        raise ArtifactLimit("This artifact is no longer kept")
+    last = db.execute(
+        "SELECT number, source, size, author, created_at FROM artifact_revisions "
+        "WHERE artifact_id = ? ORDER BY number DESC LIMIT 1",
+        (artifact_id,),
+    ).fetchone()
+    if last is not None and last["source"] == revision.source:
+        return Revision(
+            number=last["number"],
+            author=last["author"],
+            size=last["size"],
+            created_at=last["created_at"],
+        )
+    if base is not None and last is not None and last["number"] != base:
+        raise StaleRevision(base, last["number"])
+    number = (last["number"] if last is not None else 0) + 1
+    if number > most:
+        raise ArtifactLimit(
+            f"This artifact keeps {most} revisions, the most one may; download this one to keep it"
+        )
+    _artifact_room(db, owner[0], revision.size, person_bytes)
+    db.execute(
+        "INSERT INTO artifact_revisions (artifact_id, number, source, size, author, "
+        "created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (artifact_id, number, revision.source, revision.size, revision.author, revision.created_at),
+    )
+    return Revision(
+        number=number, author=revision.author, size=revision.size, created_at=revision.created_at
     )
 
 
@@ -1334,6 +1501,12 @@ class Store:
             db = self._conn()
             db.execute("BEGIN")
             try:
+                db.execute(
+                    "DELETE FROM artifact_revisions WHERE artifact_id IN "
+                    "(SELECT id FROM artifacts WHERE chat_id = ?)",
+                    (chat_id,),
+                )
+                db.execute("DELETE FROM artifacts WHERE chat_id = ?", (chat_id,))
                 db.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
                 db.execute("DELETE FROM files WHERE chat_id = ?", (chat_id,))
                 db.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
@@ -1653,6 +1826,173 @@ class Store:
                 db.execute("ROLLBACK")
                 raise
             return _file(row) if row is not None else None
+
+        return await self._run(go)
+
+    # --- artifacts (rich content RC5) -------------------------------------
+
+    async def artifacts_for_chat(self, chat_id: str) -> list[ArtifactRecord]:
+        """A chat's artifacts, the oldest first, each with its revisions counted."""
+
+        def go() -> list[ArtifactRecord]:
+            rows = self._conn().execute(
+                f"{_ARTIFACT_SELECT} WHERE a.chat_id = ? GROUP BY a.id ORDER BY a.created_at",
+                (chat_id,),
+            )
+            return [_artifact(r) for r in rows]
+
+        return await self._run(go)
+
+    async def artifact(self, artifact_id: str) -> ArtifactRecord | None:
+        def go() -> ArtifactRecord | None:
+            row = (
+                self._conn()
+                .execute(f"{_ARTIFACT_SELECT} WHERE a.id = ? GROUP BY a.id", (artifact_id,))
+                .fetchone()
+            )
+            return _artifact(row) if row is not None else None
+
+        return await self._run(go)
+
+    async def add_artifact(
+        self,
+        record: ArtifactRecord,
+        first: Revision,
+        *,
+        then: Revision | None = None,
+        base: int | None = None,
+        per_message: int,
+        most: int,
+        person_bytes: int,
+    ) -> tuple[ArtifactRecord, bool]:
+        """The message's artifact for this block, kept now with `first` as its revision 1
+        when there is none yet, and whether it was kept now; with `then`, the person's
+        edit begun from revision `base`, added in the same transaction (`_append_revision`).
+        `ArtifactLimit` when the message has `per_message` already, or past a limit;
+        nothing is kept then."""
+
+        def go() -> tuple[str, bool]:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                found = db.execute(
+                    "SELECT id FROM artifacts WHERE message_id = ? AND kind = ? AND digest = ?",
+                    (record.message_id, record.kind, record.digest),
+                ).fetchone()
+                artifact_id, made = (
+                    (str(found[0]), False) if found is not None else (record.id, True)
+                )
+                if made:
+                    count = db.execute(
+                        "SELECT COUNT(*) FROM artifacts WHERE message_id = ?",
+                        (record.message_id,),
+                    ).fetchone()[0]
+                    if int(count) >= per_message:
+                        raise ArtifactLimit(
+                            f"This answer keeps {per_message} artifacts already, the most one may"
+                        )
+                    _artifact_room(db, record.owner, first.size, person_bytes)
+                    db.execute(
+                        "INSERT INTO artifacts (id, owner, chat_id, message_id, digest, kind, "
+                        "title, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            record.id,
+                            record.owner,
+                            record.chat_id,
+                            record.message_id,
+                            record.digest,
+                            record.kind,
+                            record.title,
+                            record.created_at,
+                        ),
+                    )
+                    db.execute(
+                        "INSERT INTO artifact_revisions (artifact_id, number, source, size, "
+                        "author, created_at) VALUES (?, 1, ?, ?, ?, ?)",
+                        (record.id, first.source, first.size, first.author, first.created_at),
+                    )
+                if then is not None:
+                    _append_revision(
+                        db, artifact_id, then, base=base, most=most, person_bytes=person_bytes
+                    )
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return artifact_id, made
+
+        artifact_id, made = await self._run(go)
+        kept = await self.artifact(artifact_id)
+        assert kept is not None
+        return kept, made
+
+    async def add_revision(
+        self,
+        artifact_id: str,
+        revision: Revision,
+        *,
+        base: int | None = None,
+        most: int,
+        person_bytes: int,
+    ) -> Revision:
+        """`revision` kept as the artifact's next (`_append_revision`)."""
+
+        def go() -> Revision:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                kept = _append_revision(
+                    db, artifact_id, revision, base=base, most=most, person_bytes=person_bytes
+                )
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return kept
+
+        return await self._run(go)
+
+    async def revisions(self, artifact_id: str) -> list[Revision]:
+        """An artifact's revisions, the oldest first, without their source."""
+
+        def go() -> list[Revision]:
+            rows = self._conn().execute(
+                "SELECT number, author, size, created_at FROM artifact_revisions "
+                "WHERE artifact_id = ? ORDER BY number",
+                (artifact_id,),
+            )
+            return [
+                Revision(
+                    number=r["number"],
+                    author=r["author"],
+                    size=r["size"],
+                    created_at=r["created_at"],
+                )
+                for r in rows
+            ]
+
+        return await self._run(go)
+
+    async def revision(self, artifact_id: str, number: int) -> Revision | None:
+        def go() -> Revision | None:
+            r = (
+                self._conn()
+                .execute(
+                    "SELECT number, author, size, created_at, source FROM artifact_revisions "
+                    "WHERE artifact_id = ? AND number = ?",
+                    (artifact_id, number),
+                )
+                .fetchone()
+            )
+            if r is None:
+                return None
+            return Revision(
+                number=r["number"],
+                author=r["author"],
+                size=r["size"],
+                created_at=r["created_at"],
+                source=r["source"],
+            )
 
         return await self._run(go)
 

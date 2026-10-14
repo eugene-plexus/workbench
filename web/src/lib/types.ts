@@ -1,5 +1,7 @@
 /** What Workbench's own API answers with (src/eugene_plexus_workbench/api.py). */
 
+import type { ArtifactSummary } from "./artifacts";
+
 export type MessageStatus = "done" | "running" | "stopped" | "interrupted" | "failed";
 
 /** What a web search found and the answer linked. */
@@ -118,6 +120,9 @@ export interface Message {
   /** Its place among its versions, from 1: the edits of a message, or the
    * tries of an answer, oldest first (workbench-answer-versions.md). */
   versions?: Versions;
+  /** What the blocks the person changed keep (rich content RC5), found again by
+   * each block's words (lib/artifacts.ts `digest`). */
+  artifacts?: ArtifactSummary[];
   /** The output cap the gateway sent for this answer and where it came
    * from; null when it sent none or did not say (2026-10-10). */
   outputCap?: OutputCap | null;

@@ -1,3 +1,4 @@
+import { KIND_NAMES } from "./artifacts";
 import { isDocumentSource, isPassageSource, sourceLine } from "./documents";
 import { passageLine } from "./savedDocuments";
 import type { Chat, ChatDetail } from "./types";
@@ -105,6 +106,22 @@ export function chatMarkdown(detail: ChatDetail): string {
           );
           if (named.length) lines.push("Returned by the tool, not included:", named.join("\n"));
         }
+      }
+      // An artifact the person changed, by name: its revisions are Workbench's
+      // to keep, not in an export (its first is the answer's own block, above).
+      const kept = message.artifacts ?? [];
+      if (kept.length) {
+        lines.push(
+          "### Artifacts",
+          kept
+            .map(
+              (a) =>
+                `- ${oneLine(a.title)} (${KIND_NAMES[a.kind]}): ${a.revisions} ` +
+                `revision${a.revisions === 1 ? "" : "s"}, the first the answer's block; ` +
+                "the others are kept in Workbench, not here",
+            )
+            .join("\n"),
+        );
       }
       if (message.sources.length) {
         // Files are listed as what was sent to the model, not as what it used.
