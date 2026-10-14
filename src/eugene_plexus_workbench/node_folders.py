@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import time
 import uuid
 from typing import Any
@@ -421,8 +420,8 @@ class NodeFolders:
         *,
         asked: bool = False,
         approval: dict[str, Any] | None = None,
-    ) -> tuple[str, bool, dict[str, Any]]:
-        """Run one tool: its result as text, whether it is an error, and what
+    ) -> tuple[dict[str, Any], bool, dict[str, Any]]:
+        """Run one tool: its MCP result, whether it is an error, and what
         Eugene said about it (the install's mode, J13a; every site's result is
         a job-site result; the person's open window, J14b). A call the site
         holds for the person's signature raises `Held`."""
@@ -454,17 +453,8 @@ class NodeFolders:
         response = answer["response"]
         if response.get("error"):
             raise FolderError(str(response["error"].get("message") or f"{tool} failed."))
-        result = response.get("result") or {}
-        text = "\n".join(
-            str(block.get("text", ""))
-            if block.get("type") == "text"
-            else f"[Unsupported {block.get('type')} result]"
-            for block in result.get("content") or []
-            if isinstance(block, dict)
-        )
-        structured = result.get("structuredContent")
-        if structured is not None:
-            encoded = json.dumps(structured, ensure_ascii=False)
-            if text.strip() != encoded:
-                text = (text + "\n" + encoded).strip()
-        return text or "The tool returned no content.", bool(result.get("isError")), meta
+        result = response.get("result")
+        if not isinstance(result, dict):
+            result = {}
+        # Its blocks are read where every server's are (content.py).
+        return result, bool(result.get("isError")), meta

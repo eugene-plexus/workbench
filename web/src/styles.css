@@ -744,6 +744,54 @@ textarea {
   line-height: 1.25rem;
 }
 
+/* What a tool returned beyond its words (rich-content RC3): pictures, sounds,
+   videos and files under the call's state, each with its name, type, size and
+   a download; an address it named is a line of its own. */
+.tool-content {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+.tool-file {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  margin: 0;
+  padding: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-soft);
+}
+.tool-file-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.5rem;
+  min-width: 0;
+  font-size: 0.8125rem;
+}
+.tool-picture {
+  display: block;
+  max-width: 100%;
+  max-height: 20rem;
+  height: auto;
+  width: auto;
+  border-radius: var(--radius);
+}
+.tool-video {
+  display: block;
+  max-width: 100%;
+  max-height: 24rem;
+}
+.tool-link {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.5rem;
+  font-size: 0.8125rem;
+}
+
 /* Diagrams (rich-content RC2): the picture under the code block's head, as
    wide as the column at most; its own size in a dialog. The head's tools
    wrap on a phone. */

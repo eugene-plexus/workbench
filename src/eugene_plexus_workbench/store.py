@@ -79,7 +79,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 #: The oldest schema this migrates from: what Workbench v0.1.0 wrote. Schema 1 predates
 #: it, and nobody holds one.
@@ -185,9 +185,12 @@ CREATE TABLE IF NOT EXISTS files (
     media_id TEXT,
     width INTEGER,
     height INTEGER,
-    reading TEXT
+    reading TEXT,
+    message_id TEXT,
+    origin TEXT NOT NULL DEFAULT 'upload' CHECK (origin IN ('upload', 'tool'))
 );
 CREATE INDEX IF NOT EXISTS files_by_chat ON files (chat_id);
+CREATE INDEX IF NOT EXISTS files_by_message ON files (message_id);
 CREATE INDEX IF NOT EXISTS files_by_media ON files (media_id);
 CREATE TABLE IF NOT EXISTS media (
     id TEXT PRIMARY KEY,
@@ -402,6 +405,15 @@ _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
         "status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'withdrawn')), "
         "problem TEXT, report TEXT, added_at REAL NOT NULL, synced_at REAL, checked_at REAL, "
         "PRIMARY KEY (owner, grant_id))",
+    ],
+    # Tool results (rich content RC3, 2026-10-13): a picture, a sound or a file a tool
+    # returned is a file of its chat, made for one answer (`message_id`) by a tool
+    # (`origin`), apart from what a person uploads.
+    14: [
+        "ALTER TABLE files ADD COLUMN message_id TEXT",
+        "ALTER TABLE files ADD COLUMN origin TEXT NOT NULL DEFAULT 'upload' "
+        "CHECK (origin IN ('upload', 'tool'))",
+        "CREATE INDEX IF NOT EXISTS files_by_message ON files (message_id)",
     ],
 }
 
@@ -708,6 +720,10 @@ class FileRecord:
     #: tokens, the delimiter suffix its text is sent in, and how much of it the
     #: person chose to read. None for a file that is not a document.
     reading: dict[str, Any] | None = None
+    #: The answer a tool made it for (rich content RC3); None for an upload.
+    message_id: str | None = None
+    #: `upload` (a person's attachment or a media file) or `tool` (a tool's result).
+    origin: str = "upload"
 
 
 class AttachmentGone(Exception):
@@ -864,6 +880,8 @@ def _file(row: sqlite3.Row) -> FileRecord:
         width=row["width"],
         height=row["height"],
         reading=_reading(row["reading"]),
+        message_id=row["message_id"],
+        origin=row["origin"],
     )
 
 
@@ -1480,7 +1498,8 @@ class Store:
         def go() -> None:
             self._conn().execute(
                 "INSERT INTO files (id, owner, chat_id, name, media_type, size, created_at, "
-                "media_id, width, height, reading) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "media_id, width, height, reading, message_id, origin) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     record.id,
                     record.owner,
@@ -1493,8 +1512,50 @@ class Store:
                     record.width,
                     record.height,
                     json.dumps(record.reading) if record.reading is not None else None,
+                    record.message_id,
+                    record.origin,
                 ),
             )
+
+        await self._run(go)
+
+    async def tool_bytes(self, owner: str) -> int:
+        """How much a person's tool results hold, in bytes (rich content RC3)."""
+
+        def go() -> int:
+            row = (
+                self._conn()
+                .execute(
+                    "SELECT COALESCE(SUM(size), 0) FROM files WHERE owner = ? AND origin = 'tool'",
+                    (owner,),
+                )
+                .fetchone()
+            )
+            return int(row[0])
+
+        return await self._run(go)
+
+    async def tool_orphans(self) -> list[FileRecord]:
+        """Tool results no answer refers to: kept, then Workbench stopped before
+        the answer that made them was saved with them. Their bytes are the
+        caller's to remove."""
+
+        def go() -> list[FileRecord]:
+            db = self._conn()
+            out = []
+            for row in db.execute("SELECT * FROM files WHERE origin = 'tool'").fetchall():
+                message = db.execute(
+                    "SELECT tool_rounds FROM messages WHERE id = ?", (row["message_id"],)
+                ).fetchone()
+                if message is None or '"' + row["id"] + '"' not in (message["tool_rounds"] or ""):
+                    out.append(_file(row))
+            return out
+
+        return await self._run(go)
+
+    async def delete_files(self, file_ids: list[str]) -> None:
+        def go() -> None:
+            self._conn().executemany("DELETE FROM files WHERE id = ?", [(i,) for i in file_ids])
 
         await self._run(go)
 
@@ -1553,9 +1614,15 @@ class Store:
 
         return await self._run(go)
 
-    async def files_for_chat(self, chat_id: str) -> list[FileRecord]:
+    async def files_for_chat(self, chat_id: str, *, uploads: bool = False) -> list[FileRecord]:
+        """A chat's files; with `uploads`, only what people attached, not what tools
+        returned (rich content RC3)."""
+
         def go() -> list[FileRecord]:
-            rows = self._conn().execute("SELECT * FROM files WHERE chat_id = ?", (chat_id,))
+            sql = "SELECT * FROM files WHERE chat_id = ?"
+            if uploads:
+                sql += " AND origin = 'upload'"
+            rows = self._conn().execute(sql, (chat_id,))
             return [_file(r) for r in rows]
 
         return await self._run(go)
@@ -1571,7 +1638,8 @@ class Store:
             db.execute("BEGIN IMMEDIATE")
             try:
                 row = db.execute(
-                    "SELECT * FROM files WHERE id = ? AND chat_id = ?", (file_id, chat_id)
+                    "SELECT * FROM files WHERE id = ? AND chat_id = ? AND origin = 'upload'",
+                    (file_id, chat_id),
                 ).fetchone()
                 if row is not None:
                     for m in db.execute(

@@ -87,7 +87,7 @@ def test_a_schema_10_file_gains_reading_and_every_source_a_kind_and_keeps_every_
         assert db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone() == (
             str(SCHEMA_VERSION),
         )
-        assert SCHEMA_VERSION == 13
+        assert SCHEMA_VERSION == 14
         assert "reading" in {r[1] for r in db.execute("PRAGMA table_info(files)")}
     expected = [{"kind": "web", **s} for s in WEB]
     assert json.loads(sources_of(path, "web")) == expected
@@ -140,7 +140,7 @@ def test_a_schema_9_file_reaches_the_current_schema_in_one_boot(tmp_path: Path) 
     put_sources(path, {"web": json.dumps(WEB)})
     run(path, lambda store: store.open())
     with sqlite3.connect(path) as db:
-        assert db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone() == ("13",)
+        assert db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone() == ("14",)
         tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert {"memory_notes", "memory_prefs"} <= tables
     assert json.loads(sources_of(path, "web")) == [{"kind": "web", **s} for s in WEB]
@@ -157,7 +157,7 @@ def test_a_new_store_and_a_migrated_one_have_the_same_files_table(tmp_path: Path
             return [tuple(r[1:3]) for r in db.execute("PRAGMA table_info(files)")]
 
     assert columns(old) == columns(new)
-    assert columns(new)[-1] == ("reading", "TEXT")
+    assert columns(new)[-3:] == [("reading", "TEXT"), ("message_id", "TEXT"), ("origin", "TEXT")]
 
 
 def record(

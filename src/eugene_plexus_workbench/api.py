@@ -468,7 +468,7 @@ async def _chat_detail(
     if via is not None and all(m.id != via for m in tree):
         raise _problem(status.HTTP_404_NOT_FOUND, "There is no such message in this chat.")
     places = versions(tree)
-    attached = {f.id: f for f in await store.files_for_chat(chat.id)}
+    attached = {f.id: f for f in await store.files_for_chat(chat.id, uploads=True)}
     views = []
     for m in path(tree, via):
         view = message_view(m)
@@ -850,7 +850,7 @@ def _no_running(request: Request, chat: Chat) -> None:
 
 
 async def _chat_files(request: Request, chat: Chat) -> list[FileRecord]:
-    records: list[FileRecord] = await _state(request).store.files_for_chat(chat.id)
+    records: list[FileRecord] = await _state(request).store.files_for_chat(chat.id, uploads=True)
     return records
 
 
@@ -1210,7 +1210,7 @@ async def upload(
     def counts(media_type: str) -> bool:
         return files.travels(media_type) or (legacy_pdf and media_type == files.PDF)
 
-    existing = await store.files_for_chat(chat.id)
+    existing = await store.files_for_chat(chat.id, uploads=True)
     if counts(found.media_type) and (
         sum(r.size for r in existing if counts(r.media_type)) + size > files.CHAT_LIMIT
     ):
@@ -1298,6 +1298,17 @@ async def remove_upload(request: Request, chat_id: str, file_id: str) -> Respons
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+async def _hidden_file(request: Request, chat: Chat, record: FileRecord) -> bool:
+    """Whether the message a file belongs to is hidden from the install owner
+    (J13a): a tool's result made for it, or an upload it carries. The file is
+    hidden as its message is, through its address as on the page."""
+    tree = await _state(request).store.tree(chat.id)
+    hidden = hidden_from_owner(tree, (await install_mode(request))["mode"])
+    if record.message_id is not None:
+        return record.message_id in hidden
+    return any(m.id in hidden for m in tree if record.id in m.attachments)
+
+
 async def _may_read_file(request: Request, person: Person, record: FileRecord) -> None:
     """A file is readable by whoever may read what it belongs to: its chat,
     or its media row (workbench-media-screens.md §2.7). The file's own
@@ -1305,11 +1316,13 @@ async def _may_read_file(request: Request, person: Person, record: FileRecord) -
     store: Store = _state(request).store
     if record.chat_id is not None:
         try:
-            chat, _ = await _readable_chat(request, person, record.chat_id)
+            chat, read_only = await _readable_chat(request, person, record.chat_id)
         except HTTPException:
             # Not "no such chat": the same words as for a file that is not there.
             raise _problem(status.HTTP_404_NOT_FOUND, "There is no such file.") from None
-        if chat.owner == record.owner:
+        if chat.owner == record.owner and not (
+            read_only and await _hidden_file(request, chat, record)
+        ):
             return
     elif record.media_id is not None:
         row = await store.media(record.media_id)

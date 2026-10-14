@@ -211,10 +211,20 @@ def install(server: FastAPI, fake: Any, state: dict[str, Any]) -> None:
         if params["name"] == "write_text":
             state["content"] = args["text"]
         result = {"text": state["content"], "sha256": "a" * 64}
+        content: list[dict[str, Any]] = [{"type": "text", "text": json.dumps(result)}]
+        if state.get("picture"):
+            # A picture with the words (rich content RC3), as a site's server may send.
+            content.append(
+                {
+                    "type": "image",
+                    "data": base64.b64encode(state["picture"]).decode(),
+                    "mimeType": "image/png",
+                }
+            )
         return answer(
             {
                 "result": {
-                    "content": [{"type": "text", "text": json.dumps(result)}],
+                    "content": content,
                     "structuredContent": result,
                     "isError": False,
                 }

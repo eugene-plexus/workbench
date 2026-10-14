@@ -62,9 +62,15 @@ def test_a_working_scene_may_run_its_own_style_and_nothing_else(world: World) ->
     (scenes / "eugene-test.svg").write_text("<svg/>", encoding="utf-8")
     (scenes / "notes.txt").write_text("x", encoding="utf-8")
     (world.settings.static_dir / "eugene-face.svg").write_text("<svg/>", encoding="utf-8")
+    mascots = world.settings.static_dir / "mascots"
+    mascots.mkdir(exist_ok=True)
+    (mascots / "eugene-test.svg").write_text("<svg/>", encoding="utf-8")
     scene = httpx.get(world.workbench + "/scenes/eugene-test.svg", trust_env=False)
     assert scene.status_code == 200 and scene.headers["content-type"] == "image/svg+xml"
     assert scene.headers["content-security-policy"] == SCENE_CSP
+    # A mascot moves by its own style too (the website's poses since f428560).
+    mascot = httpx.get(world.workbench + "/mascots/eugene-test.svg", trust_env=False)
+    assert mascot.headers["content-security-policy"] == SCENE_CSP
     assert "default-src 'none'" in SCENE_CSP and "script-src" not in SCENE_CSP
     assert scene.headers["x-content-type-options"] == "nosniff"
     for path in ("/scenes/notes.txt", "/eugene-face.svg", "/"):

@@ -25,6 +25,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from .content import Keeper, let_go
 from .hub import Hub, HubError
 from .node_folders import Held
 from .store import Message, Person, Store, interrupt_tools
@@ -184,6 +185,8 @@ class Running:
     watchers: set[asyncio.Queue[dict[str, Any]]] = field(default_factory=set)
     approvals: dict[str, asyncio.Future[bool]] = field(default_factory=dict)
     person: Person | None = None
+    #: What each call kept of what its tool returned (content.py).
+    keepers: list[Keeper] = field(default_factory=list)
 
 
 class Watch:
@@ -397,6 +400,9 @@ class Answers:
                 mark_cited(m)  # never in the way of saving what was written
             try:
                 await asyncio.shield(self._save(running, final=True))
+                # A file a stopped call kept and never named: no answer shows it.
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(let_go(running.keepers, m.tool_rounds))
             finally:
                 self._running.pop(chat_id, None)
                 self.publish(chat_id, {"type": "done", "message": message_view(m)})
@@ -527,7 +533,22 @@ class Answers:
                         # Commit intent before dispatch, so a crash cannot look
                         # like a call that is safe to repeat.
                         await self._checkpoint(running)
-                        await session.execute(step, self._signer(running))
+                        # What it returns is kept as the chat's files before the
+                        # checkpoint below says the answer has them.
+                        keeper = (
+                            Keeper(
+                                self._store,
+                                self._tools.data_dir,
+                                chat.owner,
+                                running.chat_id,
+                                m.id,
+                            )
+                            if chat is not None
+                            else None
+                        )
+                        if keeper is not None:
+                            running.keepers.append(keeper)
+                        await session.execute(step, self._signer(running), keeper)
                     else:
                         step.update(
                             status="declined",

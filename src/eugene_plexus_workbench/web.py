@@ -159,7 +159,9 @@ def mount(app: FastAPI, root: Path | None) -> None:
                     else "no-cache"
                 )
                 headers = {"Cache-Control": cache}
-                if path.startswith("scenes/") and path.endswith(".svg"):
+                # A mascot moves as the website's does (its own inline style),
+                # as a working scene does: the same policy for both.
+                if path.startswith(("scenes/", "mascots/")) and path.endswith(".svg"):
                     headers["Content-Security-Policy"] = SCENE_CSP
                 return FileResponse(candidate, headers=headers)
         return FileResponse(root / "index.html", headers={"Cache-Control": "no-cache"})
