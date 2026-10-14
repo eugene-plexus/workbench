@@ -232,10 +232,10 @@ CASES: list[tuple[str, str, str, str, str]] = [
     ),
     (
         "the request is built without the notes",
-        API,
-        "            fresh, history, records, root=root, model=model, search=search, memory=notes",
-        "            fresh, history, records, root=root, model=model, search=search, memory=None",
-        f"{HTTP}::test_the_notes_go_in_the_one_system_message_after_the_instructions",
+        "src/eugene_plexus_workbench/api.py",
+        "            memory=notes,",
+        "            memory=None,",
+        "tests/test_memory_api.py::test_the_notes_go_in_the_one_system_message_after_the_instructions",
     ),
     # --- the first request, and every one after ----------------------------
     (

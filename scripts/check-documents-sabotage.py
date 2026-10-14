@@ -251,14 +251,14 @@ CASES: list[tuple[str, str, list[tuple[str, str]], str]] = [
     ),
     (
         "a reader works in Workbench's own directory",
-        READER,
+        "src/eugene_plexus_workbench/knowledge/reader.py",
         [
             (
-                "            child = self._start_child(record.id, argv, work)",
-                "            child = self._start_child(record.id, argv, Path.cwd())",
+                "            child = self._start_child(key, argv, work)",
+                "            child = self._start_child(key, argv, Path.cwd())",
             )
         ],
-        f"{T_READER}::test_a_reader_holds_none_of_workbenchs_secrets_and_works_in_a_directory_of_its_own",
+        "tests/test_reader.py::test_a_reader_holds_none_of_workbenchs_secrets_and_works_in_a_directory_of_its_own",
     ),
     (
         "a crash is not named",
@@ -584,14 +584,14 @@ CASES: list[tuple[str, str, list[tuple[str, str]], str]] = [
     ),
     (
         "a file's owner is told it belongs to someone's chat",
-        API,
+        "src/eugene_plexus_workbench/api.py",
         [
             (
-                '            raise _problem(status.HTTP_404_NOT_FOUND, "There is no such file.") from None\n        if chat.owner == record.owner:',
-                "            raise\n        if chat.owner == record.owner:",
+                '            raise _problem(status.HTTP_404_NOT_FOUND, "There is no such file.") from None\n        if chat.owner == record.owner and not (',
+                "            raise\n        if chat.owner == record.owner and not (",
             )
         ],
-        f"{T_API}::test_another_person_gets_a_404_for_everything_of_a_file_that_is_not_theirs",
+        "tests/test_documents_api.py::test_another_person_gets_a_404_for_everything_of_a_file_that_is_not_theirs",
     ),
     # --- taking a file away ----------------------------------------------------------
     (
@@ -619,14 +619,14 @@ CASES: list[tuple[str, str, list[tuple[str, str]], str]] = [
     # --- what an answer lists --------------------------------------------------------
     (
         "a search's citation has no kind",
-        ANSWERS,
+        "src/eugene_plexus_workbench/answers.py",
         [
             (
-                'm.sources.append({"kind": "web", "url": url, "title": citation.get("title") or url})',
-                'm.sources.append({"url": url, "title": citation.get("title") or url})',
+                'source = {"kind": "web", "url": url, "title": citation.get("title") or url}',
+                'source = {"url": url, "title": citation.get("title") or url}',
             )
         ],
-        f"{T_API}::test_documents_come_first_and_a_searchs_citations_after_with_their_kind",
+        "tests/test_documents_api.py::test_documents_come_first_and_a_searchs_citations_after_with_their_kind",
     ),
     # --- the owner's switches --------------------------------------------------------
     (
