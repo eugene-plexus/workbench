@@ -147,6 +147,63 @@ def answer_text(message: Message) -> str:
     return after or message.content
 
 
+def sources_view(message: Message) -> list[dict[str, Any]]:
+    """A message's sources as the page reads them: where the answer cites a web
+    source (`spans`, Python indexes into `content`) becomes `marks`, the same
+    places as the page counts them (UTF-16)."""
+    out: list[dict[str, Any]] = []
+    for source in message.sources:
+        spans = source.get("spans")
+        if not spans:
+            out.append(source)
+            continue
+        view = {k: v for k, v in source.items() if k != "spans"}
+        view["marks"] = [
+            [_js_length(message.content[:a]), _js_length(message.content[:b])] for a, b in spans
+        ]
+        out.append(view)
+    return out
+
+
+def cite(message: Message, source: dict[str, Any], citation: dict[str, Any], base: int) -> None:
+    """Where the answer cites `source`, from a `url_citation` annotation.
+
+    Its `start_index` is a Python index into the text of the one request that
+    wrote it (the gateway's `server_tools.citations`), so it counts from
+    `base`, where that request's text began. But the gateway counts its rounds'
+    text joined with a blank line it never streams (gateway#16, its
+    `_final`), so an answer written after a draft is off by two a round. So
+    the place is where the text holds the address, at the occurrence nearest
+    the gateway's index; a Markdown link around it is cited whole, as the
+    gateway cites it. Where the text does not hold the address, there is no
+    place: none is made up."""
+    start = citation.get("start_index")
+    url = str(source.get("url") or "")
+    if not isinstance(start, int) or start < 0 or not url:
+        return
+    text = message.content
+    want = base + start
+    best: tuple[int, str] | None = None
+    for spelled in dict.fromkeys((url, url.rstrip("/"))):
+        if not spelled:
+            continue
+        at = text.find(spelled, base)
+        while at >= 0:
+            if best is None or abs(at - want) < abs(best[0] - want):
+                best = (at, spelled)
+            at = text.find(spelled, at + 1)
+    if best is None:
+        return
+    a, b = best[0], best[0] + len(best[1])
+    if text[max(base, a - 2) : a] == "](":
+        opening = text.rfind("[", base, a - 2)
+        if opening >= 0 and text[b : b + 1] == ")":
+            a, b = opening, b + 1
+    spans = source.setdefault("spans", [])
+    if [a, b] not in spans and len(spans) < 20:
+        spans.append([a, b])
+
+
 def message_view(message: Message) -> dict[str, Any]:
     """A message as the page reads it."""
     return {
@@ -158,7 +215,7 @@ def message_view(message: Message) -> dict[str, Any]:
         "attachments": message.attachments,
         "status": message.status,
         "error": message.error,
-        "sources": message.sources,
+        "sources": sources_view(message),
         "searches": message.searches,
         "searchSuggestions": message.search_suggestions,
         "search": message.search,
@@ -187,6 +244,8 @@ class Running:
     person: Person | None = None
     #: What each call kept of what its tool returned (content.py).
     keepers: list[Keeper] = field(default_factory=list)
+    #: Where the text of the request being streamed begins in the message.
+    request_from: int = 0
 
 
 class Watch:
@@ -411,6 +470,8 @@ class Answers:
         calls = Calls()
         running.message.finish = None
         prior_searches = running.message.searches
+        # Where this request's text begins: its citations count from here.
+        running.request_from = len(running.message.content)
         async for chunk in self._hub.stream_chat(body):
             extension = chunk.get("x_eugene_plexus") or {}
             if isinstance(extension.get("web_searches"), int):
@@ -668,9 +729,14 @@ class Answers:
         for annotation in delta.get("annotations") or []:
             citation = (annotation or {}).get("url_citation") or {}
             url = citation.get("url")
-            if isinstance(url, str) and all(s.get("url") != url for s in m.sources):
-                m.sources.append({"kind": "web", "url": url, "title": citation.get("title") or url})
-                event["sources"] = m.sources
+            if not isinstance(url, str):
+                continue
+            source = next((s for s in m.sources if s.get("url") == url), None)
+            if source is None:
+                source = {"kind": "web", "url": url, "title": citation.get("title") or url}
+                m.sources.append(source)
+            cite(m, source, citation, running.request_from)
+            event["sources"] = sources_view(m)
         finish = choice.get("finish_reason")
         if isinstance(finish, str):
             m.finish = finish

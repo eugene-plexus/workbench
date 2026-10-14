@@ -61,7 +61,8 @@ beforeEach(() => {
     "fetch",
     vi.fn(async (url: string) => {
       fetched.push(url);
-      return new Response(new Blob(["bytes"]), { status: 200 });
+      // Words, not a Blob: Node 22's Response cannot read the page's (jsdom's) Blob.
+      return new Response("bytes", { status: 200 });
     }),
   );
   vi.spyOn(URL, "createObjectURL").mockImplementation(() => `blob:made-${++made}`);

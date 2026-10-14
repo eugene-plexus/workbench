@@ -558,6 +558,9 @@ class FakeGateway:
     mode: str = "answer"
     words: list[str] = field(default_factory=lambda: ["Hello", " from", " the", " model."])
     delay: float = 0.0
+    #: A searched answer's `url_citation`s, as the gateway sends them (rich
+    #: content RC4); None sends one for example.org with no place in the text.
+    citations: list[dict[str, Any]] | None = None
     #: The "draft" mode's progress marks around its search.
     draft_phases: tuple[str | None, ...] = ("started", "finished")
     release: asyncio.Event | None = None
@@ -1215,12 +1218,19 @@ class FakeGateway:
                     return
                 annotations = []
                 if "web_search_options" in body:
-                    annotations = [
-                        {
-                            "type": "url_citation",
-                            "url_citation": {"url": "https://example.org/page", "title": "A page"},
-                        }
-                    ]
+                    annotations = (
+                        [{"type": "url_citation", "url_citation": c} for c in self.citations]
+                        if self.citations is not None
+                        else [
+                            {
+                                "type": "url_citation",
+                                "url_citation": {
+                                    "url": "https://example.org/page",
+                                    "title": "A page",
+                                },
+                            }
+                        ]
+                    )
                     yield chunk({"annotations": annotations})
                 yield chunk({}, finish=self.finish, extension=extension(bool(annotations)))
                 yield "data: [DONE]\n\n"

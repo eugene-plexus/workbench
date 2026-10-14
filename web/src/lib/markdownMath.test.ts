@@ -130,8 +130,8 @@ describe("money and other dollars stay text", () => {
     const found = parse(`Before $x$. ${piece.repeat(times)}`);
     const ms = performance.now() - started;
     // Each opener looked to its reach before (3 to 6 s here); now the parse
-    // stops looking once it has spent its budget.
-    expect(ms).toBeLessThan(1_500);
+    // stops looking once it has spent its budget. A loaded CI runner took 1.7 s.
+    expect(ms).toBeLessThan(2_500);
     expect(found.formulas.map((f) => f.tex)).toEqual(["x"]);
   });
 
