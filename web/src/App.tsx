@@ -10,7 +10,9 @@ import { type Handoff, Media } from "./components/Media";
 import { Sidebar } from "./components/Sidebar";
 import { SignIn } from "./components/SignIn";
 import { Tools } from "./components/Tools";
-import { api, onSignedOut, patch, post, SignedOut } from "./lib/api";
+import { api, onSignedOut, patch, post, releaseAllFileUrls, SignedOut } from "./lib/api";
+import { forgetDiagrams } from "./lib/diagramClient";
+import { forgetFormulas } from "./lib/mathClient";
 import { type Door, mediaFromPath, mediaPath } from "./lib/media";
 import { saveDraft } from "./lib/conveniences";
 import { forget, takeFragment } from "./lib/session";
@@ -223,6 +225,16 @@ export default function App() {
     window.addEventListener("popstate", back);
     return () => window.removeEventListener("popstate", back);
   }, []);
+
+  // Signed out, however it came about: nothing a chat showed stays in the
+  // page to be shown again (rich content RC3): no file's blob: address, no
+  // drawn diagram, no laid-out formula.
+  useEffect(() => {
+    if (phase.kind !== "signed-out") return;
+    releaseAllFileUrls();
+    forgetDiagrams();
+    forgetFormulas();
+  }, [phase.kind]);
 
   useEffect(() => {
     const fragment = takeFragment();

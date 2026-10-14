@@ -158,7 +158,41 @@ export interface ToolCall {
   held?: HeldCall;
   /** When your open window on that site ended, as of this call. */
   windowUntil?: string;
+  /** What the call returned, in order (rich content RC3); `result` is the
+   * same as the words the model is sent. Absent from a call made before. */
+  content?: ContentBlock[];
+  contentVersion?: number;
 }
+
+/** A file a tool returned, kept as its chat's own. */
+export interface ToolFile {
+  id: string;
+  type: "image" | "audio" | "video" | "file";
+  fileId: string;
+  name: string;
+  mediaType: string;
+  size: number;
+  width?: number;
+  height?: number;
+  /** What a file said it was, when its bytes did not bear it out. */
+  declaredType?: string;
+}
+
+/** One block of a tool's result (rich content RC3). */
+export type ContentBlock =
+  | { id: string; type: "text"; text: string; source?: string }
+  | ToolFile
+  | { id: string; type: "data"; data: unknown }
+  | {
+      id: string;
+      type: "link";
+      uri: string;
+      name: string;
+      title?: string;
+      description?: string;
+      mimeType?: string;
+    }
+  | { id: string; type: "unsupported"; what: string; reason: string };
 
 /** A call a site holds for your signature (`SiteHeldCall`, J86). */
 export interface HeldCall {

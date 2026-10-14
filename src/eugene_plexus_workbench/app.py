@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from . import (
     api,
     config,
+    content,
     documents_api,
     folder_docs_api,
     folders_api,
@@ -101,6 +102,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             log.info(
                 "%d media request(s) were cut off by the last restart; marked interrupted", cut
             )
+        # A tool's files kept for an answer that stopped before it was saved
+        # with them: no answer names them, so nothing could show or delete them.
+        removed = await content.remove_orphans(store, settings.data_dir)
+        if removed:
+            log.info("%d tool result file(s) no answer names were removed", removed)
         # Eugene's sign-in is this install's own agent: never via a proxy.
         http = httpx.AsyncClient(timeout=15.0, trust_env=False, verify=ssl_context())
         provider = Provider(

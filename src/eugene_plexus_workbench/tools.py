@@ -25,6 +25,7 @@ from referencing import Registry
 from referencing.exceptions import NoSuchResource
 
 from . import folder_io, folders
+from .content import CONTENT_VERSION, Keeper, normalize
 from .local_tools import LocalProcesses, LocalToolError, unavailable
 from .node_folders import FILES as SITE_FILES
 from .node_folders import PREFIX as NODE_FOLDER_PREFIX
@@ -41,7 +42,6 @@ ASK_META = "eugene-plexus/ask"
 #: instead of asking first.
 SIGNED_META = "eugene-plexus/signed"
 MAX_ARGUMENTS = 16_384
-MAX_RESULT = 65_536
 MAX_RESPONSE = 2_097_152
 
 
@@ -197,6 +197,8 @@ class Calls:
 class Tools:
     def __init__(self, store: Store, settings: Settings) -> None:
         self.store = store
+        #: Where a tool's pictures, sounds and files are kept (content.py).
+        self.data_dir = settings.data_dir
         self.local = LocalProcesses(settings)
         self.folders = folders.Folders(store, settings)
         self.node_folders: NodeFolders | None = None
@@ -562,10 +564,13 @@ class ToolSession:
             ),
         }
 
-    async def execute(self, call: dict[str, Any], signer: Signer | None = None) -> None:
+    async def execute(
+        self, call: dict[str, Any], signer: Signer | None = None, keeper: Keeper | None = None
+    ) -> None:
         """Run one prepared call. A job site that holds it for the person's
         signature (J14b) is answered by `signer`, which waits for the person
-        and returns what to send again, or None when they declined."""
+        and returns what to send again, or None when they declined. A result's
+        pictures, sounds and files are kept by `keeper` (content.py)."""
         server, client, tool, _ = self.tools[call["name"]]
         if server["transport"] == "site":
             try:
@@ -574,7 +579,7 @@ class ToolSession:
                 approval: dict[str, Any] | None = None
                 while True:
                     try:
-                        text, is_error, meta = await self.node_folders.call_tool(
+                        result, is_error, meta = await self.node_folders.call_tool(
                             self.person,
                             server["site"],
                             server["server"],
@@ -610,9 +615,9 @@ class ToolSession:
                         label=server.get("label"),
                         mode=meta["mode"],
                     )
-                if len(text) > MAX_RESULT:
-                    text = text[:MAX_RESULT] + "\n[Tool result truncated at 65536 characters.]"
-                call.update(status="failed" if is_error else "done", result=text)
+                await self._settle(
+                    call, result.get("content"), result.get("structuredContent"), is_error, keeper
+                )
             except folder_io.WriteUncertain as exc:
                 call.update(status="uncertain", result=str(exc))
             except folder_io.FolderError as exc:
@@ -649,17 +654,12 @@ class ToolSession:
                 result = await client.session.call_tool(
                     tool, call["arguments"], read_timeout_seconds=120
                 )
-            text = "\n".join(
-                block.text if block.type == "text" else f"[Unsupported {block.type} result]"
+            blocks = [
+                block.model_dump(mode="json", by_alias=True, exclude_none=True)
                 for block in result.content
-            )
-            if result.structured_content is not None:
-                text += "\n" + json.dumps(result.structured_content, ensure_ascii=False)
-            if len(text) > MAX_RESULT:
-                text = text[:MAX_RESULT] + "\n[Tool result truncated at 65536 characters.]"
-            call.update(
-                status="failed" if result.is_error else "done",
-                result=text or "The tool returned no content.",
+            ]
+            await self._settle(
+                call, blocks, result.structured_content, bool(result.is_error), keeper
             )
         except asyncio.CancelledError:
             raise
@@ -670,3 +670,21 @@ class ToolSession:
                 result=f"{reason} The tool call did not return a result. "
                 "It may have acted. Check the server before trying again.",
             )
+
+    @staticmethod
+    async def _settle(
+        call: dict[str, Any],
+        blocks: Any,
+        structured: Any,
+        is_error: bool,
+        keeper: Keeper | None,
+    ) -> None:
+        """A finished call's result: its blocks (content.py, one path for every
+        server) and the text the model is sent again."""
+        content, text = await normalize(call["id"], blocks, structured, keeper)
+        call.update(
+            status="failed" if is_error else "done",
+            content=content,
+            contentVersion=CONTENT_VERSION,
+            result=text or "The tool returned no content.",
+        )

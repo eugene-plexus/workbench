@@ -218,6 +218,12 @@ export function setDiagramEngine(next: DiagramEngine | null): void {
   asked.clear();
 }
 
+/** Signed out: no picture of a chat's diagram is kept to be shown again. */
+export function forgetDiagrams(): void {
+  kept.clear();
+  keptBytes = 0;
+}
+
 /** How many pictures are kept, and their size (for tests). */
 export function keptSize(): { count: number; bytes: number } {
   return { count: kept.size, bytes: keptBytes };

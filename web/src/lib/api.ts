@@ -133,16 +133,35 @@ export const put = <T>(path: string, body: unknown) =>
 
 export const del = (path: string) => api<void>(path, { method: "DELETE" });
 
+/** Every blob: address made for a file, so signing out can end them all. */
+const made = new Set<string>();
+
 /** A file the server keeps, fetched with the secret and shown from a blob:
- * address, since an `<img src>` cannot carry a header. */
+ * address, since an `<img src>` cannot carry a header. Asked for again each
+ * time it is shown: a file the person may no longer read is not kept here. */
 export async function fileUrl(id: string): Promise<string> {
   const response = await checked(
     await fetch(`/api/files/${encodeURIComponent(id)}`, {
       credentials: "same-origin",
       headers: headers(),
+      cache: "no-store",
     }),
   );
-  return URL.createObjectURL(await response.blob());
+  const url = URL.createObjectURL(await response.blob());
+  made.add(url);
+  return url;
+}
+
+/** A blob: address no longer shown. */
+export function releaseFileUrl(url: string): void {
+  made.delete(url);
+  URL.revokeObjectURL(url);
+}
+
+/** Signing out (or losing access): no file shown before can be shown again. */
+export function releaseAllFileUrls(): void {
+  for (const url of made) URL.revokeObjectURL(url);
+  made.clear();
 }
 
 /** Text the server keeps, fetched with the secret since a plain link cannot carry

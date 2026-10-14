@@ -66,6 +66,8 @@ function literal(text: string): string {
   return `${fence}\n${text}\n${fence}`;
 }
 
+const KIND_WORDS = { image: "Picture", audio: "Sound", video: "Video", file: "File" } as const;
+
 /** A local text snapshot; file contents and app credentials are never fetched. */
 export function chatMarkdown(detail: ChatDetail): string {
   const lines = [
@@ -90,6 +92,18 @@ export function chatMarkdown(detail: ChatDetail): string {
           );
           lines.push(literal(JSON.stringify(call.arguments, null, 2)));
           if (call.result !== null) lines.push(literal(call.result));
+          // What the tool returned beyond its words, by name: a file's bytes and
+          // Workbench's own addresses are not in an export.
+          const named = (call.contentVersion === 1 ? (call.content ?? []) : []).flatMap((b) =>
+            b.type === "image" || b.type === "audio" || b.type === "video" || b.type === "file"
+              ? [`- ${KIND_WORDS[b.type]}: ${oneLine(b.name)} (${b.mediaType}, ${b.size} bytes)`]
+              : b.type === "link"
+                ? [`- Address named: ${oneLine(b.name || b.uri)} ${oneLine(b.uri)}`]
+                : b.type === "unsupported"
+                  ? [`- Not kept: ${oneLine(b.what)}, ${oneLine(b.reason)}`]
+                  : [],
+          );
+          if (named.length) lines.push("Returned by the tool, not included:", named.join("\n"));
         }
       }
       if (message.sources.length) {

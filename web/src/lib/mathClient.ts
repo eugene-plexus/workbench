@@ -89,6 +89,12 @@ export function setMathEngine(next: Engine | null): void {
   asked.clear();
 }
 
+/** Signed out: no laid-out formula of a chat is kept to be shown again. */
+export function forgetFormulas(): void {
+  kept.clear();
+  keptBytes = 0;
+}
+
 /** How many formulas are kept, and their markup's size (for tests). */
 export function keptSize(): { count: number; bytes: number } {
   return { count: kept.size, bytes: keptBytes };

@@ -292,7 +292,7 @@ async def plan_for(
             for record in need:
                 await reader.start(record)  # one whose task is gone is started again
             await reader.wait([r.id for r in need], _wait_seconds())
-            records = {r.id: r for r in await store.files_for_chat(chat.id)}
+            records = {r.id: r for r in await store.files_for_chat(chat.id, uploads=True)}
         # A file chosen to be searched is searched once its own document can be: made
         # if it is gone (derived data heals), and waited for, as a file being read is.
         searches = await _await_searches(request, chat, records, progress)
@@ -365,7 +365,7 @@ async def _read_again(
             await reader.start(again)
     if wait:
         await reader.wait(ids, _wait_seconds())
-    return {r.id: r for r in await store.files_for_chat(chat.id)}
+    return {r.id: r for r in await store.files_for_chat(chat.id, uploads=True)}
 
 
 def _blocked(plan: context.Plan) -> Blocked | None:
@@ -556,7 +556,9 @@ async def files_view(
     model would do with it. Files not yet sent are decided together, as the one
     message the person is writing, after everything the chat already carries."""
     store: Store = _state(request).store
-    records = sorted(await store.files_for_chat(chat.id), key=lambda r: (r.created_at, r.id))
+    records = sorted(
+        await store.files_for_chat(chat.id, uploads=True), key=lambda r: (r.created_at, r.id)
+    )
     by_id = {r.id: r for r in records}
     if override is not None:
         by_id[override.id] = override
