@@ -707,6 +707,87 @@ textarea {
   color: var(--muted);
 }
 
+/* Formulas (rich-content RC1). KaTeX's own stylesheet arrives with the first
+   formula; these place it in an answer. A display formula wider than the
+   column scrolls in its own box, which a keyboard can reach. */
+.answer .math-display {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.2em 0;
+  text-align: center;
+}
+.answer .math-display > .katex-display {
+  margin: 0;
+}
+.answer .math-display:focus-visible {
+  outline-offset: -2px;
+}
+/* Its source, for the moment before the formula is laid out. */
+.answer .math-pending {
+  color: var(--muted);
+  font-family: var(--font-code);
+  font-size: 0.88em;
+}
+/* A formula that cannot be shown is its source, as code, underlined to say
+   there is a reason (in its title, and to a screen reader). */
+.answer .math-failed {
+  text-decoration: underline dotted;
+  text-underline-offset: 0.2em;
+}
+.answer .code-note {
+  padding: 0.4rem 0.875rem;
+  border-top: 1px solid var(--rule);
+  color: var(--muted);
+  font-size: 0.8125rem;
+  line-height: 1.25rem;
+}
+
+/* Footnotes: a reference is a small number; the notes sit under a hairline in
+   the chrome's size. The heading that names them is for a screen reader. */
+.answer sup {
+  line-height: 0;
+}
+.answer [data-footnote-ref] {
+  padding: 0 0.1em;
+  text-decoration: none;
+}
+.answer [data-footnote-ref]::before {
+  content: "[";
+}
+.answer [data-footnote-ref]::after {
+  content: "]";
+}
+.answer [data-footnotes] {
+  max-width: var(--measure);
+  margin-top: 1.6em;
+  padding-top: 0.6em;
+  border-top: 1px solid var(--rule);
+  color: var(--muted);
+  font-size: 0.875em;
+}
+.answer [data-footnotes] > h2 {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  border: 0;
+  white-space: nowrap;
+}
+/* Where a reference landed, for a mouse as well as a keyboard. */
+.answer [data-footnotes] li:focus {
+  border-radius: var(--radius);
+  background: var(--panel-soft);
+}
+.answer [data-footnote-backref] {
+  margin-inline-start: 0.25em;
+  text-decoration: none;
+}
+
 /* Syntax colour (6.4): only classes, so dark and light follow with no script,
    and only colour. Plex Mono is loaded upright at 400 and font-synthesis is
    off, so an italic comment or a bold token would be a face the page does not
