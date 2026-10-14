@@ -35,20 +35,19 @@
   --faint: #959aa0;
 
   /* the answer's labels and boundaries */
-  --heading: #e3c2a8;
-  --accent-right: #cf9a72;
+  --heading: #ebc3a1;
+  --accent-right: #e2a16d;
   /* Warm text, where a mark's colour is not enough: inline code, on its soft
-     fill, and an alert's label. 7:1 on that fill in both schemes (the mark's
-     own colour is 6.1:1 in dark and 4.1:1 in light). */
-  --accent-right-text: #dca67e;
+     fill, and an alert's label. At least 7:1 on that fill in both schemes. */
+  --accent-right-text: #eeb184;
 
   /* you, controls, what is current */
-  --accent-left: #7fb0cf;
-  --accent-hover: #9cc5df;
-  --accent-active: #6e9cbb;
+  --accent-left: #70b8e0;
+  --accent-hover: #91cced;
+  --accent-active: #5da3cc;
   --on-accent-left: #0c1216;
-  --link: #9cc5df;
-  --link-hover: #b4d6ec;
+  --link: #91cced;
+  --link-hover: #acdff8;
   --tint: #2b353d;
   --tint-edge: #506473;
 
@@ -59,22 +58,22 @@
   --rule: #3a4048;
 
   /* status: a glyph, words and a tint, never colour alone */
-  --status-warn-fg: #dcb079;
-  --status-warn-bg: rgb(131 96 41 / 0.18);
-  --status-warn-border: #836029;
-  --status-error-fg: #dd9a93;
-  --status-error-bg: rgb(143 70 61 / 0.2);
-  --status-error-border: #8f463d;
-  --status-ok-fg: #93c6a6;
-  --status-ok-bg: rgb(58 117 81 / 0.18);
-  --status-ok-border: #3a7551;
-  --status-info-fg: #9cc5df;
-  --status-info-bg: rgb(127 176 207 / 0.12);
-  --status-info-border: #476c84;
-  --danger-edge: #aa766f;
+  --status-warn-fg: #e8b565;
+  --status-warn-bg: rgb(151 106 37 / 0.18);
+  --status-warn-border: #976a25;
+  --status-error-fg: #eb988e;
+  --status-error-bg: rgb(164 79 67 / 0.2);
+  --status-error-border: #a44f43;
+  --status-ok-fg: #86cda4;
+  --status-ok-bg: rgb(56 134 90 / 0.18);
+  --status-ok-border: #38865a;
+  --status-info-fg: #91cced;
+  --status-info-bg: rgb(112 184 224 / 0.12);
+  --status-info-border: #46758e;
+  --danger-edge: #bd7d72;
 
   /* what the browser would otherwise decide */
-  --selection: rgb(127 176 207 / 0.34);
+  --selection: rgb(112 184 224 / 0.34);
   --scrollbar-thumb: #68717b;
   --scrollbar-thumb-hover: #8793a0;
 
