@@ -7,6 +7,15 @@ vi.mock("../lib/api", () => ({ api: vi.fn(), post: vi.fn(), del: vi.fn() }));
 
 const grant = { id: "notes", name: "Project notes", subject: "ada", writable: false, usable: true };
 
+it("directs an empty chat folder picker to Workbench's folder grants", async () => {
+  vi.mocked(api).mockResolvedValue({ available: true, grants: [] });
+  render(<FolderSelection selected={[]} onChange={() => undefined} />);
+  expect(await screen.findByText(/Grant an existing folder/)).toHaveTextContent(
+    "Toolbox · Tools → Folders · File tools",
+  );
+  expect(screen.queryByText(/People page/)).toBeNull();
+});
+
 it("lets a central host select online node folders and clear offline selections", async () => {
   vi.mocked(api).mockResolvedValue({
     available: true,

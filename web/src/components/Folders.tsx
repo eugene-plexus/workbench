@@ -429,8 +429,8 @@ export function FolderSelection({
       )}
       {grants?.length === 0 && (
         <p className="empty">
-          No folders assigned to you. The owner can assign node folders in Eugene&apos;s People
-          page, or local folders in Tools.
+          No folders assigned to you. The owner can grant access in Workbench: Toolbox · Tools →
+          Folders · File tools → Grant an existing folder.
         </p>
       )}
       {grants?.map((grant) => (

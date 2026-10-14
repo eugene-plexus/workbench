@@ -727,15 +727,30 @@ def test_checks_are_not_made_while_the_owner_has_turned_documents_off(
     age(notes)
     _, ada, gid = setup(world, notes)
     add_and_settle(ada, gid)
+    service = sync_of(world)
+    cycle = service._cycle
+    disabled_cycles: list[float] = []
+
+    async def observed_cycle() -> float:
+        delay = await cycle()
+        if not (await service._documents()).enabled:
+            disabled_cycles.append(time.perf_counter())
+        return float(delay)
+
+    monkeypatch.setattr(service, "_cycle", observed_cycle)
     settings(world, documentsEnabled=False, documentsFolderSyncMinutes=1)
+    # Wait until the loop has observed the disabled setting and any earlier check
+    # has finished. A fixed sleep can expire without the loop running under load.
+    until(lambda: len(disabled_cycles) >= 1)
     write(notes, "new.md", md("Arrives while documents are off."))
-    time.sleep(0.6)
+    age(notes)  # This check is about the owner's switch, not a file still being saved.
+    before = len(disabled_cycles)
+    until(lambda: len(disabled_cycles) >= before + 2)
     assert set(by_path(ada, gid)) == {"a.md"}
     assert sync_now(ada, gid).status_code == 403
+    previous = checked_at(ada, gid)
     settings(world, documentsEnabled=True)
-    end = time.perf_counter() + 30
-    while time.perf_counter() < end and "new.md" not in by_path(ada, gid):
-        time.sleep(0.05)
+    settle_folder(ada, gid, after=previous)
     assert "new.md" in by_path(ada, gid), "and it is looked at again once they are on"
 
 

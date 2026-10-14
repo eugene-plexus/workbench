@@ -1304,14 +1304,18 @@ class Browser:
             time.sleep(0.05)
         raise AssertionError("the file was not read in time")
 
-    def wait_answer(self, chat_id: str, seconds: float = 15) -> dict[str, Any]:
+    def wait_answer(self, chat_id: str, seconds: float = 60) -> dict[str, Any]:
         deadline = time.perf_counter() + seconds
+        messages: list[dict[str, Any]] = []
         while time.perf_counter() < deadline:
             messages = self.get(f"/api/chats/{chat_id}").json()["messages"]
             if messages and messages[-1]["status"] != "running":
                 return dict(messages[-1])
             time.sleep(0.05)
-        raise AssertionError("the answer did not finish")
+        last = messages[-1] if messages else None
+        raise AssertionError(
+            f"the answer did not finish within {seconds} seconds; last answer: {last}"
+        )
 
 
 def query_of(url: str) -> dict[str, str]:

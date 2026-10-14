@@ -395,13 +395,16 @@ CASES: list[Case] = [
         "            candidates, k=1000, per_document=per_document, named=named\n",
         SEARCHES + "test_the_retriever_picks_chooses_joins_and_fits_in_that_order",
     ),
-    one(
+    (
         "a search that breaks is nothing matched",
-        SEARCH,
-        "            found[signal.name] = await signal.search(index, query, scopes, CANDIDATES)\n",
-        "            try:\n                found[signal.name] = await signal.search(index, query, scopes, CANDIDATES)\n"
-        "            except Exception:\n                found[signal.name] = []\n",
-        SEARCHES + "test_a_way_of_searching_that_breaks_raises_and_is_never_nothing_matched",
+        "src/eugene_plexus_workbench/knowledge/search.py",
+        [
+            (
+                "                hits = await signal.search(index, query, scopes, CANDIDATES)\n",
+                "                try:\n                    hits = await signal.search(index, query, scopes, CANDIDATES)\n                except Exception:\n                    hits = []\n",
+            )
+        ],
+        "tests/test_knowledge_search.py::test_a_way_of_searching_that_breaks_raises_and_is_never_nothing_matched",
     ),
     # --- the index: its file, its search, its deletion --------------------------------
     one(
@@ -845,12 +848,16 @@ CASES: list[Case] = [
         INGESTS + "test_cancelling_a_documents_key_ends_its_real_reader_and_the_next_is_read",
     ),
     # --- the person's own documents ---------------------------------------------------
-    one(
+    (
         "a replaced file's reader is left running",
-        SAVED,
-        "        if added.replaced:\n            await self.ingest.cancel(sub, [d.id for d in added.replaced])\n",
-        "        if added.replaced:\n            pass\n",
-        FACADE + "test_replacing_a_document_ends_the_reader_of_the_old_one_by_its_key",
+        "src/eugene_plexus_workbench/knowledge/saved.py",
+        [
+            (
+                "        if added.replaced:\n            await self._cancel(sub, [d.id for d in added.replaced])\n",
+                "        if added.replaced:\n            pass\n",
+            )
+        ],
+        "tests/test_saved_facade.py::test_replacing_a_document_ends_the_reader_of_the_old_one_by_its_key",
     ),
     one(
         "a document is added and never read",
@@ -866,19 +873,27 @@ CASES: list[Case] = [
         "        if added.unchanged:\n            return added\n",
         FACADE + "test_the_same_file_again_is_not_read_again_and_the_copy_is_thrown_away",
     ),
-    one(
+    (
         "a removed document's reader is not ended first",
-        SAVED,
-        "            await self.ingest.cancel(sub, [doc_id])\n            try:\n                return await index.delete(doc_id)\n",
-        "            try:\n                return await index.delete(doc_id)\n",
-        FACADE + "test_removing_a_document_ends_its_reader_first_so_nothing_holds_its_file",
+        "src/eugene_plexus_workbench/knowledge/saved.py",
+        [
+            (
+                "            await self._cancel(sub, [doc_id])\n            try:\n                return await index.delete(doc_id)\n",
+                "            try:\n                return await index.delete(doc_id)\n",
+            )
+        ],
+        "tests/test_saved_facade.py::test_removing_a_document_ends_its_reader_first_so_nothing_holds_its_file",
     ),
-    one(
+    (
         "a file that stays held is not waited for",
-        SAVED,
-        "                if attempt == 2:\n                    raise\n",
-        "                if True:\n                    raise\n",
-        FACADE + "test_a_file_that_stays_held_is_waited_for_and_then_named_and_nothing_is_removed",
+        "src/eugene_plexus_workbench/knowledge/saved.py",
+        [
+            (
+                "                return await index.delete(doc_id)\n            except DeleteFailed:\n                if attempt == 2:",
+                "                return await index.delete(doc_id)\n            except DeleteFailed:\n                if True:",
+            )
+        ],
+        "tests/test_saved_facade.py::test_a_file_that_stays_held_is_waited_for_and_then_named_and_nothing_is_removed",
     ),
     one(
         "a document whose original is gone is read again",
@@ -925,12 +940,16 @@ CASES: list[Case] = [
         "    if doc is None:\n",
         SCOPES + "test_a_chats_own_document_is_not_reachable_through_the_routes_of_my_documents",
     ),
-    one(
+    (
         "My documents lists a chat's documents",
-        SAVED_API,
-        "        documents = await index.documents(LIBRARY)\n",
-        "        documents = await index.documents()\n",
-        SCOPES + "test_a_chats_own_document_is_not_reachable_through_the_routes_of_my_documents",
+        "src/eugene_plexus_workbench/saved_api.py",
+        [
+            (
+                '        documents = await index.documents(LIBRARY, only="upload")\n',
+                "        documents = await index.documents()\n",
+            )
+        ],
+        "tests/test_saved_scopes.py::test_a_chats_own_document_is_not_reachable_through_the_routes_of_my_documents",
     ),
     one(
         "an image is kept as a document",

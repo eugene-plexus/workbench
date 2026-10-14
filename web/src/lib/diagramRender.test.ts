@@ -88,14 +88,20 @@ it.each([
     "Quadrant chart",
   ],
   ["xychart", "xychart-beta\n  x-axis [a, b]\n  bar [1, 2]", "XY chart"],
-])("draws a %s", async (_, source, kind) => {
-  const result = await drawn(source);
-  expect(result.kind).toBe(kind);
-  expect(result.tree[0]).toBe("svg");
-  expect(result.tree[1].viewBox).toMatch(/^-?[\d.]+ -?[\d.]+ [\d.]+ [\d.]+$/);
-  // Mermaid's stylesheet is written into the elements and goes.
-  expect(tags(result.tree).has("style")).toBe(false);
-});
+])(
+  "draws a %s",
+  async (_, source, kind) => {
+    const result = await drawn(source);
+    expect(result.kind).toBe(kind);
+    expect(result.tree[0]).toBe("svg");
+    expect(result.tree[1].viewBox).toMatch(/^-?[\d.]+ -?[\d.]+ [\d.]+ [\d.]+$/);
+    // Mermaid's stylesheet is written into the elements and goes.
+    expect(tags(result.tree).has("style")).toBe(false);
+  },
+  // The first drawing loads Mermaid's diagram modules on a busy runner. These
+  // cases check output; diagramClient tests separately enforce worker deadlines.
+  15_000,
+);
 
 it("names every kind it draws", () => {
   expect(new Set(Object.values(KINDS)).size).toBe(13);
