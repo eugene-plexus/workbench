@@ -5,7 +5,8 @@ session. So the Content Security Policy lets scripts and styles come only
 from Workbench itself with nothing inline, images only from Workbench,
 `data:` and `blob:` -- an image an answer names is never fetched -- and no
 framing. The page itself renders an answer's images as links (`web/`); this
-is the second lock on the same door.
+is the second lock on the same door. One page is framed, by Workbench's alone:
+an artifact's preview, under a policy of its own (`PREVIEW_CSP`).
 
 The front end is a single-page app (W9): every path that is not the API,
 signing in, or one of its own files is answered with `index.html`, and the
@@ -16,9 +17,12 @@ from __future__ import annotations
 
 import html
 import importlib.resources
+import json
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -46,12 +50,70 @@ CSP = "; ".join(
 #: script and outside references out of the file itself.
 SCENE_CSP = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'"
 
+#: An artifact's preview (rich content RC5): the page that runs a page or a component an
+#: answer wrote, after the person pressed Run, framed only by Workbench's own page. Its own
+#: policy holds it apart: `sandbox` without `allow-same-origin` gives it no origin, so it
+#: reads no cookie or storage of Workbench's and cannot reach the page that framed it; it
+#: loads nothing from the network (`connect-src 'none'`, pictures and fonts only from
+#: `data:` and `blob:`) and of Workbench's only scripts, which it runs (inline too: what an
+#: answer wrote is inline); no worker, frame or plugin. A form's own script runs
+#: (`allow-forms`: a sandbox without it fires no `submit`, so a component's form does
+#: nothing), and a form never sends: the preview's script stops each sending before it
+#: starts (web/src/preview/runtime.ts), and `form-action 'none'` refuses any it missed. The
+#: page's own policy (`CSP`) is unchanged by it. The frame's `sandbox="allow-scripts
+#: allow-forms"` repeats this, and denies it popups and moving the page it is in
+#: (web/src/components/ArtifactPreview.tsx).
+PREVIEW_CSP = "; ".join(
+    [
+        "default-src 'none'",
+        "script-src 'self' 'unsafe-inline'",
+        "style-src 'self' 'unsafe-inline'",
+        "img-src data: blob:",
+        "media-src data: blob:",
+        "font-src data:",
+        "connect-src 'none'",
+        "worker-src 'none'",
+        "child-src 'none'",
+        "frame-src 'none'",
+        "object-src 'none'",
+        "manifest-src 'none'",
+        "base-uri 'none'",
+        "form-action 'none'",
+        "frame-ancestors 'self'",
+        "sandbox allow-scripts allow-forms",
+    ]
+)
+
+PREVIEW_PATH = "/preview/frame"
+
+#: The preview's page: its script and nothing else. A classic script, not a module: a
+#: module is fetched as another origin's, which a page with no origin cannot do without
+#: CORS (web/vite.preview.config.ts builds it).
+PREVIEW_PAGE = (
+    '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+    '<meta name="viewport" content="width=device-width, initial-scale=1">'
+    "<title>Preview</title>"
+    '<script src="/preview/runtime.js"></script></head><body></body></html>'
+)
+
 _API_PREFIXES = ("/api/", "/v1/", "/oidc/")
 
 NO_UI = """<!doctype html><meta charset="utf-8"><title>Workbench</title>
 <p>Workbench is running, but this build has no page to show. It was installed
 from source without its built front end; install it from Eugene's app
 catalogue, which uses the build that has one.</p>"""
+
+
+async def invalid_request(_request: Request, exc: Exception) -> Response:
+    """A request the API refuses as not its shape: FastAPI's own answer, written so a
+    character that is no text (a lone surrogate, which JSON may carry) cannot turn the
+    refusal into an error of the server's (its own writer encodes as UTF-8)."""
+    errors = exc.errors() if isinstance(exc, RequestValidationError) else []
+    return Response(
+        json.dumps({"detail": jsonable_encoder(errors)}, ensure_ascii=True),
+        status_code=422,
+        media_type="application/json",
+    )
 
 
 def degraded_page(problem: str) -> str:
@@ -84,16 +146,21 @@ class SecurityHeaders:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        api = str(scope.get("path", "")).startswith("/api/")
+        path = str(scope.get("path", ""))
+        api = path.startswith("/api/")
+        # Only an artifact's preview is framed, and only by Workbench's page.
+        framed = path == PREVIEW_PATH
 
         async def with_headers(message: Message) -> None:
             if message["type"] == "http.response.start":
                 headers = MutableHeaders(scope=message)
-                if "content-security-policy" not in headers:
+                if framed:
+                    headers["Content-Security-Policy"] = PREVIEW_CSP
+                elif "content-security-policy" not in headers:
                     headers["Content-Security-Policy"] = CSP
                 headers["X-Content-Type-Options"] = "nosniff"
                 headers["Referrer-Policy"] = "no-referrer"
-                headers["X-Frame-Options"] = "DENY"
+                headers["X-Frame-Options"] = "SAMEORIGIN" if framed else "DENY"
                 headers["Cross-Origin-Opener-Policy"] = "same-origin"
                 if api and "cache-control" not in headers:
                     headers["Cache-Control"] = "no-store"
@@ -140,6 +207,11 @@ def mount(app: FastAPI, root: Path | None) -> None:
     """Serve the page, its files, and `index.html` for every other path."""
 
     built = root.resolve() if root is not None else None
+
+    # An artifact's preview: its headers are `SecurityHeaders`' (PREVIEW_CSP).
+    @app.get(PREVIEW_PATH, include_in_schema=False)
+    def preview() -> Response:
+        return HTMLResponse(PREVIEW_PAGE, headers={"Cache-Control": "no-cache"})
 
     # Not async: it touches the disk, and FastAPI runs a plain function in
     # its thread pool rather than on the loop every stream shares.

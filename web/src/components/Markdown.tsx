@@ -19,6 +19,10 @@
  *   be shown is its source.
  * - A mermaid code block is drawn in a worker and shown as a picture
  *   (MermaidDiagram.tsx); one that cannot be drawn is its source.
+ * - In an answer, a block that asks to be an artifact (an `html artifact` fence)
+ *   is a card that opens it, and a plain block of Markdown, SVG, HTML or JSX
+ *   can be opened as one (Artifact.tsx). Nothing in either runs until the
+ *   person presses Run, and then in a frame of its own.
  *
  * How it reads is the stylesheet's (`.answer`, styles.css); the parts that
  * need an element of their own are made here: the code block (language and
@@ -30,6 +34,7 @@ import {
   Children,
   isValidElement,
   memo,
+  useContext,
   useId,
   useMemo,
   type MouseEvent,
@@ -47,6 +52,8 @@ import {
 } from "../lib/markdownPlugins";
 import { type Citations, followCitation, remarkCitations } from "../lib/citations";
 import { NotDrawn, readSource } from "../lib/chartSpec";
+import { askedFor, kindOf } from "../lib/artifacts";
+import { ArtifactCard, ArtifactScope } from "./Artifact";
 import { Block } from "./Block";
 import { MathFormula } from "./MathFormula";
 import { MermaidDiagram } from "./MermaidDiagram";
@@ -78,7 +85,12 @@ export function safeHref(href: string | undefined | null): string | null {
   return SAFE.test(trimmed) ? trimmed : null;
 }
 
-type CodeProps = { className?: string; children?: ReactNode; "data-fence"?: string };
+type CodeProps = {
+  className?: string;
+  children?: ReactNode;
+  "data-fence"?: string;
+  "data-meta"?: string;
+};
 
 /** A display formula that cannot be shown: its source, as a block of code. */
 function formulaSource(tex: string, reason: string): ReactNode {
@@ -86,6 +98,7 @@ function formulaSource(tex: string, reason: string): ReactNode {
 }
 
 function CodeBlock({ children }: { children: ReactNode }) {
+  const scope = useContext(ArtifactScope);
   const code = Children.toArray(children)[0];
   if (!isValidElement<CodeProps>(code)) {
     return <Block language={null} source={textOf(children)} open={false} />;
@@ -107,7 +120,14 @@ function CodeBlock({ children }: { children: ReactNode }) {
   if (language === "mermaid" && !open) return <MermaidDiagram source={source} />;
   // A chart or table asked for in so many words (lib/chartSpec.ts).
   if (language === "chart" && !open) return <ChartBlock source={source} />;
-  return <Block language={language} source={source} open={open} />;
+  // An artifact the answer asked for, once its fence has closed, in an answer
+  // (Artifact.tsx); any other block of its kind can be opened as one.
+  const kind = kindOf(language);
+  const asked = kind && !open && scope ? askedFor(code.props["data-meta"], kind) : null;
+  if (kind && asked !== null) {
+    return <ArtifactCard kind={kind} language={language} title={asked} source={source} />;
+  }
+  return <Block language={language} source={source} open={open} openAs={kind} />;
 }
 
 function textOf(node: ReactNode): string {

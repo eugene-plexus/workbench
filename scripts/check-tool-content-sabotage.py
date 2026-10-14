@@ -336,6 +336,10 @@ def broken_build(output: str) -> bool:
 
 
 def main() -> int:
+    # A failing check's output (vitest's own marks) must print where stdout is a
+    # Windows code page, or the run ends on the print and not on the check.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")
     only = sys.argv[1] if len(sys.argv) > 1 else ""
     cases = [case for case in CASES if only.lower() in case[0].lower()]
     for label, name, before, _after, _kind, _check in cases:
