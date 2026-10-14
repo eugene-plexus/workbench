@@ -41,6 +41,13 @@ SHOWN = "src/components/Artifact.test.tsx"
 LIB = "src/lib/artifacts.test.ts"
 FRAME = "src/preview/runtime.test.ts"
 BROWSER_TEST = "tests/test_rich_artifacts_browser.py"
+# Rich content RC6: shown and run in place.
+RUNNER = "web/src/lib/previewRunner.ts"
+CARD = "web/src/components/Artifact.tsx"
+ME = "src/eugene_plexus_workbench/api.py"
+RUNS = "src/lib/previewRunner.test.ts"
+INLINE = "src/components/ArtifactInline.test.tsx"
+INLINE_BROWSER = "tests/test_rich_artifacts_inline_browser.py"
 
 CASES: list[tuple[str, str, str, str, str, str]] = [
     (
@@ -273,6 +280,144 @@ CASES: list[tuple[str, str, str, str, str, str]] = [
     ),
 ]
 
+RC6_CASES: list[tuple[str, str, str, str, str, str]] = [
+    (
+        "previews start together, none waiting for the one before",
+        RUNNER,
+        "    if (running().some((e) => e.readyAt === null || "
+        "t - e.readyAt < PROBATION_MS)) return;",
+        "",
+        "vitest",
+        f"{RUNS}::start one at a time",
+    ),
+    (
+        "any number run at once",
+        RUNNER,
+        "    if (others.length < MAX_RUNNING) return true;",
+        "    return true;",
+        "vitest",
+        f"{RUNS}::make room by stopping the one longest out of view",
+    ),
+    (
+        "a frame that never got its source can be named the one that loops",
+        RUNNER,
+        "        given.find((e) => e.slot.focused()) ??\n"
+        "        [...given].sort((a, b) => (b.readyAt ?? 0) - (a.readyAt ?? 0))[0];",
+        "        live.find((e) => e.slot.focused()) ??\n"
+        "        [...live].sort((a, b) => b.startedAt - a.startedAt)[0];",
+        "vitest",
+        f"{RUNS}::never name one whose frame never got its source",
+    ),
+    (
+        "the one that looped runs by itself again",
+        RUNNER,
+        "          stuck.add(e.slot.key());\n",
+        "",
+        "vitest",
+        f"{RUNS}::name the one the person was in",
+    ),
+    (
+        "the others are not started again",
+        RUNNER,
+        "          e.wanted = e.visible;",
+        "          e.wanted = false;",
+        "vitest",
+        f"{RUNS}::name the one the person was in",
+    ),
+    (
+        "the owner's view runs someone's previews by itself",
+        CARD,
+        "            auto={runPreviews && !scope.readOnly && !scope.writing}",
+        "            auto={runPreviews && !scope.writing}",
+        "vitest",
+        f"{INLINE}::waits for Run when the person turned that off",
+    ),
+    (
+        "the person's switch is not obeyed",
+        CARD,
+        "            auto={runPreviews && !scope.readOnly && !scope.writing}",
+        "            auto={!scope.readOnly && !scope.writing}",
+        "vitest",
+        f"{INLINE}::waits for Run when the person turned that off",
+    ),
+    (
+        "an answer still being written runs its previews",
+        CARD,
+        "            auto={runPreviews && !scope.readOnly && !scope.writing}",
+        "            auto={runPreviews && !scope.readOnly}",
+        "vitest",
+        f"{INLINE}::runs nothing by itself in an answer still being written",
+    ),
+    (
+        "silence across a stall of the page's own is a loop",
+        RUNNER,
+        "    if (hidden() || gap > 2 * WATCH_MS) {",
+        "    if (false) {",
+        "vitest",
+        f"{RUNS}::do not call a group stuck across a gap",
+    ),
+    (
+        "a frame that floods the page is read in full",
+        PREVIEW,
+        "      if (++counted > MESSAGES_PER_SECOND) return;\n",
+        "",
+        "vitest",
+        f"{INLINE}::reads a frame that floods the page only so far",
+    ),
+    (
+        "a frame's height moves at every message",
+        PREVIEW,
+        "          if (sizing !== undefined) return;\n",
+        "",
+        "vitest",
+        f"{INLINE}::moves its height at most every so often",
+    ),
+    (
+        "a Markdown artifact's own fences are artifacts that run",
+        "web/src/components/ArtifactBody.tsx",
+        "        <ArtifactScope.Provider value={null}>\n"
+        "          <Markdown text={latest.source} />\n"
+        "        </ArtifactScope.Provider>",
+        "        <Markdown text={latest.source} />",
+        "vitest",
+        f"{INLINE}::holds no artifacts of its own",
+    ),
+    (
+        "a frame is as tall as its page, however tall",
+        PREVIEW,
+        "  return Math.round(Math.max(LEAST_HEIGHT, Math.min(page, windowHeight * MOST_HEIGHT)));",
+        "  return Math.round(page);",
+        "vitest",
+        f"{INLINE}::takes its page's height",
+    ),
+    (
+        "a preview does not say it still answers",
+        RUNTIME,
+        '    own.__previewAlive = window.setInterval(() => post({ type: "alive" }), ALIVE_MS);',
+        "    own.__previewAlive = 0;",
+        "vitest",
+        f"{FRAME}::says it still answers",
+    ),
+    (
+        "previews run by themselves only for one who turned it on",
+        ME,
+        '        "runPreviews": run_previews is not False,',
+        '        "runPreviews": run_previews is True,',
+        "pytest",
+        f"{BACKEND}::test_previews_run_when_shown_until_the_person_turns_it_off",
+    ),
+    (
+        "the switch takes words for yes",
+        ME,
+        "    on: StrictBool",
+        "    on: bool",
+        "pytest",
+        f"{BACKEND}::test_previews_run_when_shown_until_the_person_turns_it_off",
+    ),
+]
+
+CASES += RC6_CASES
+
 BROWSER_CASES: list[tuple[str, str, str, str, str, str]] = [
     (
         "a written page's form is sent by its button",
@@ -284,6 +429,18 @@ BROWSER_CASES: list[tuple[str, str, str, str, str, str]] = [
         BROWSER_TEST,
     ),
 ]
+
+BROWSER_CASES.append(
+    (
+        "a written page's frame does not follow its page's height",
+        RUNTIME,
+        "  if (window.ResizeObserver) "
+        "new ResizeObserver(size).observe(document.documentElement);\n",
+        "",
+        "browser",
+        INLINE_BROWSER,
+    )
+)
 
 if os.getenv("WORKBENCH_PLAYWRIGHT"):
     CASES += BROWSER_CASES

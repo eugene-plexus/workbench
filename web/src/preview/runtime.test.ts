@@ -7,7 +7,7 @@
 
 import * as React from "react";
 
-import { compile, componentOf, listen, requireFor, withReporter } from "./runtime";
+import { ALIVE_MS, beat, compile, componentOf, listen, requireFor, withReporter } from "./runtime";
 
 describe("a component", () => {
   it("imports React and nothing else, saying so", () => {
@@ -77,6 +77,41 @@ describe("a form", () => {
   });
 });
 
+describe("a running preview", () => {
+  it("says it still answers, every half second, and how tall its page is", () => {
+    vi.useFakeTimers();
+    const observed: ResizeObserverCallback[] = [];
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: ResizeObserverCallback) {
+          observed.push(callback);
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+    const said = vi.spyOn(window, "postMessage").mockImplementation(() => undefined);
+    try {
+      beat();
+      vi.advanceTimersByTime(ALIVE_MS * 2 + 1);
+      const kinds = () => said.mock.calls.map(([m]) => (m as { type: string }).type);
+      expect(kinds().filter((k) => k === "alive")).toHaveLength(2);
+      vi.spyOn(document.documentElement, "getBoundingClientRect").mockReturnValue({
+        height: 240.2,
+      } as DOMRect);
+      observed[0]!([], {} as ResizeObserver);
+      observed[0]!([], {} as ResizeObserver);
+      expect(said.mock.calls.map(([m]) => m)).toContainEqual({ type: "size", height: 241 });
+      expect(kinds().filter((k) => k === "size")).toHaveLength(1);
+    } finally {
+      said.mockRestore();
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("a page", () => {
   it("is written with the reporter first, after its doctype so it keeps its mode", () => {
     const page = withReporter("<!DOCTYPE html>\n<p>Hi</p>");
@@ -91,6 +126,8 @@ describe("a page", () => {
       "beforeunload",
       'addEventListener("submit"',
       '"sending a form"',
+      '"size"',
+      "ResizeObserver",
     ]) {
       expect(page).toContain(said);
     }

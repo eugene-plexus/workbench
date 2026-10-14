@@ -2048,8 +2048,8 @@ textarea {
    edge takes the console's accent, as a boundary does (workbench-reading). */
 .artifact-card {
   display: flex;
-  align-items: center;
-  gap: 0.625rem;
+  flex-direction: column;
+  gap: 0.5rem;
   margin: 0.75rem 0;
   padding: 0.5rem 0.5rem 0.5rem 0.75rem;
   border: 1px solid var(--rule);
@@ -2057,6 +2057,28 @@ textarea {
   border-radius: calc(var(--radius) + 2px);
   background: var(--panel);
   color: var(--muted);
+}
+.artifact-card-head {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+}
+/* RC6: the artifact drawn where its answer puts it. */
+.artifact-body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.5rem;
+  color: var(--foreground);
+}
+.artifact-doc {
+  max-height: 32rem;
+  overflow: auto;
+  padding: 0.25rem 0.5rem;
+  border-top: 1px solid var(--rule);
+}
+.artifact-doc:focus-visible {
+  outline-offset: -2px;
 }
 .artifact-card-words {
   display: flex;
@@ -2215,6 +2237,12 @@ textarea {
   border: 1px solid var(--rule);
   border-radius: var(--radius);
   background: #ffffff;
+}
+/* In an answer the frame takes its page's height (set from script, ArtifactPreview.tsx). */
+.artifact-frame-inline {
+  flex: none;
+  height: 10rem;
+  min-height: 0;
 }
 .artifact-notes {
   padding: 0.5rem 0.75rem;

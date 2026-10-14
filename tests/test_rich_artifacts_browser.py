@@ -128,6 +128,9 @@ def test_artifacts_and_their_previews_in_chrome(
     )
     ada = world.browser()
     ada.sign_in("p-ada")
+    # RC5's checks are of previews that wait for Run: RC6's running by themselves
+    # is tests/test_rich_artifacts_inline_browser.py's.
+    assert ada.put("/api/me/run-previews", json={"on": False}).status_code == 200
     made = ada.new_chat()
     world.gateway.words = [ANSWER]
     sent = ada.post(f"/api/chats/{made}/messages", json={"content": "Make them"})

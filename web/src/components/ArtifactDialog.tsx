@@ -30,10 +30,9 @@ import {
   MAX_SOURCE,
   runs,
 } from "../lib/artifacts";
-import { readSvg, Refused } from "../lib/svgArtifact";
-import type { Opened, Scope } from "./Artifact";
+import { ArtifactScope, type Opened, type Scope } from "./Artifact";
+import { SvgPicture } from "./ArtifactBody";
 import { ArtifactPreview } from "./ArtifactPreview";
-import { Block } from "./Block";
 import { Markdown } from "./Markdown";
 
 function save(text: string, name: string): void {
@@ -59,36 +58,6 @@ function revisionLabel(revision: RevisionView, count: number): string {
   const by = revision.author === "answer" ? "from the answer" : "edited";
   const at = when(revision.createdAt);
   return `Revision ${revision.number} of ${count}, ${by}${at ? `, ${at}` : ""}`;
-}
-
-function SvgPicture({ source, title }: { source: string; title: string }) {
-  const read = useMemo(() => {
-    try {
-      return { picture: readSvg(source, "#ffffff") };
-    } catch (error) {
-      return { reason: error instanceof Refused ? error.message : String(error) };
-    }
-  }, [source]);
-  if ("reason" in read) {
-    return (
-      <Block
-        language="svg"
-        source={source}
-        open={false}
-        note={`Picture not shown: ${read.reason}`}
-      />
-    );
-  }
-  return (
-    <div className="artifact-picture" tabIndex={0} role="group" aria-label={title}>
-      <img
-        src={read.picture.src}
-        width={read.picture.width}
-        height={read.picture.height}
-        alt={read.picture.title || title}
-      />
-    </div>
-  );
 }
 
 type Tab = "preview" | "source";
@@ -273,7 +242,12 @@ export default function ArtifactDialog({
   if (loading || (saved === undefined && draft === null)) {
     preview = <p className="text-sm text-muted">Reading the revision…</p>;
   } else if (kind === "markdown") {
-    preview = <Markdown text={shown} />;
+    // Its own blocks are plain: an artifact holds no artifacts of its own.
+    preview = (
+      <ArtifactScope.Provider value={null}>
+        <Markdown text={shown} />
+      </ArtifactScope.Provider>
+    );
   } else if (kind === "svg") {
     preview = <SvgPicture source={shown} title={title} />;
   } else if (runs(kind)) {
@@ -283,6 +257,7 @@ export default function ArtifactDialog({
         kind={kind === "html" ? "html" : "react"}
         source={shown}
         title={title}
+        blockKey={key}
       />
     );
   }
