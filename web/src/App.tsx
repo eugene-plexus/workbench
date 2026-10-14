@@ -9,9 +9,11 @@ import { Memory } from "./components/Memory";
 import { type Handoff, Media } from "./components/Media";
 import { Sidebar } from "./components/Sidebar";
 import { SignIn } from "./components/SignIn";
+import { RunPreviews } from "./components/Artifact";
 import { Tools } from "./components/Tools";
-import { api, onSignedOut, patch, post, releaseAllFileUrls, SignedOut } from "./lib/api";
+import { api, onSignedOut, patch, post, put, releaseAllFileUrls, SignedOut } from "./lib/api";
 import { forgetDrafts } from "./lib/artifacts";
+import { runner } from "./lib/previewRunner";
 import { forgetDiagrams } from "./lib/diagramClient";
 import { forgetFormulas } from "./lib/mathClient";
 import { type Door, mediaFromPath, mediaPath } from "./lib/media";
@@ -236,6 +238,7 @@ export default function App() {
     forgetDiagrams();
     forgetFormulas();
     forgetDrafts();
+    runner.reset();
   }, [phase.kind]);
 
   useEffect(() => {
@@ -398,270 +401,280 @@ export default function App() {
   }
 
   return (
-    <div className="relative flex h-full">
-      {/* The first stop: past the sidebar to what the page is about. A button
+    <RunPreviews.Provider value={phase.me.runPreviews !== false}>
+      <div className="relative flex h-full">
+        {/* The first stop: past the sidebar to what the page is about. A button
           and not a link, because a history change closes the pages. */}
-      <button
-        type="button"
-        className="skip-link btn btn-primary"
-        onClick={() =>
-          focusOn(
-            document.getElementById("conversation") ??
-              document.getElementById("view-heading") ??
-              document.querySelector("main h1"),
-          )
-        }
-      >
-        {view === "chat" ? "Skip to the conversation" : "Skip to the page"}
-      </button>
-      <div className={`${showChats ? "flex" : "hidden"} w-full shrink-0 md:flex md:w-auto`}>
-        <Sidebar
-          me={phase.me}
-          chats={chats}
-          chatsLoaded={chatsLoaded}
-          current={chatId}
-          onOpen={open}
-          onOpenMedia={(person) => openMedia("images", person)}
-          onClose={() => setShowChats(false)}
-          onNew={() => void newChat()}
-          creating={creating}
-          error={chatsError}
-          onRetry={() => void refreshChats()}
-          onSignOut={async () => {
-            await post("/api/signout").catch(() => undefined);
-            forget();
-            setChats([]);
-            setChatsLoaded(false);
-            setPhase({ kind: "signed-out", message: "You signed out.", unavailable: null });
-          }}
-        />
-      </div>
-      <main className={`${showChats ? "hidden md:flex" : "flex"} min-w-0 flex-1 flex-col`}>
-        <div className="relative">
-          {/* Every page is always there, and the one you are on is marked, so
+        <button
+          type="button"
+          className="skip-link btn btn-primary"
+          onClick={() =>
+            focusOn(
+              document.getElementById("conversation") ??
+                document.getElementById("view-heading") ??
+                document.querySelector("main h1"),
+            )
+          }
+        >
+          {view === "chat" ? "Skip to the conversation" : "Skip to the page"}
+        </button>
+        <div className={`${showChats ? "flex" : "hidden"} w-full shrink-0 md:flex md:w-auto`}>
+          <Sidebar
+            me={phase.me}
+            chats={chats}
+            chatsLoaded={chatsLoaded}
+            current={chatId}
+            onOpen={open}
+            onOpenMedia={(person) => openMedia("images", person)}
+            onClose={() => setShowChats(false)}
+            onNew={() => void newChat()}
+            creating={creating}
+            error={chatsError}
+            onRetry={() => void refreshChats()}
+            onSignOut={async () => {
+              await post("/api/signout").catch(() => undefined);
+              forget();
+              setChats([]);
+              setChatsLoaded(false);
+              setPhase({ kind: "signed-out", message: "You signed out.", unavailable: null });
+            }}
+            onRunPreviews={async (on) => {
+              const kept = await put<{ runPreviews: boolean }>("/api/me/run-previews", { on });
+              setPhase((was) =>
+                was.kind === "ready"
+                  ? { ...was, me: { ...was.me, runPreviews: kept.runPreviews } }
+                  : was,
+              );
+            }}
+          />
+        </div>
+        <main className={`${showChats ? "hidden md:flex" : "flex"} min-w-0 flex-1 flex-col`}>
+          <div className="relative">
+            {/* Every page is always there, and the one you are on is marked, so
               nothing moves when you change page. On a phone the row scrolls
               sideways; `relative` makes it the box that holds a tab's visually
               hidden words, so they scroll with it and never widen the page. */}
-          <nav
-            aria-label="Workbench"
-            className="relative flex flex-wrap items-center border-b border-line px-2 py-1 max-sm:flex-nowrap max-sm:overflow-x-auto max-sm:[&>*]:shrink-0 sm:gap-x-1 sm:px-3"
-          >
-            <button
-              type="button"
-              onClick={() => setShowChats(true)}
-              aria-controls="chat-navigation"
-              className="nav-tab md:hidden"
+            <nav
+              aria-label="Workbench"
+              className="relative flex flex-wrap items-center border-b border-line px-2 py-1 max-sm:flex-nowrap max-sm:overflow-x-auto max-sm:[&>*]:shrink-0 sm:gap-x-1 sm:px-3"
             >
-              Chats
-            </button>
-            <button
-              type="button"
-              aria-current={view === "tools" ? "page" : undefined}
-              className="nav-tab"
-              onClick={() => {
-                if (view === "tools") return;
-                setShowSites(false);
-                setShowTools(true);
-              }}
-            >
-              <Wrench size={14} aria-hidden />
-              Toolbox · Tools
-            </button>
-            <button
-              type="button"
-              aria-current={view === "media" ? "page" : undefined}
-              className="nav-tab"
-              data-testid="open-media"
-              onClick={() => {
-                if (view === "media") return;
-                openMedia("images");
-              }}
-            >
-              <Boxes size={14} aria-hidden />
-              Bins · Media
-            </button>
-            <button
-              type="button"
-              aria-current={view === "documents" ? "page" : undefined}
-              className="nav-tab"
-              data-testid="open-documents"
-              onClick={() => {
-                if (view === "documents") return;
-                openDocuments();
-              }}
-            >
-              <Files size={14} aria-hidden />
-              Documents
-            </button>
-            <button
-              type="button"
-              aria-current={view === "memory" ? "page" : undefined}
-              className="nav-tab"
-              data-testid="open-memory"
-              onClick={() => {
-                if (view === "memory") return;
-                openMemory();
-              }}
-            >
-              <Brain size={14} aria-hidden />
-              Memory
-            </button>
-            {!phase.me.owner && (
               <button
                 type="button"
-                aria-current={view === "sites" ? "page" : undefined}
+                onClick={() => setShowChats(true)}
+                aria-controls="chat-navigation"
+                className="nav-tab md:hidden"
+              >
+                Chats
+              </button>
+              <button
+                type="button"
+                aria-current={view === "tools" ? "page" : undefined}
                 className="nav-tab"
                 onClick={() => {
-                  if (view === "sites") return;
-                  setShowTools(false);
-                  setShowSites(true);
+                  if (view === "tools") return;
+                  setShowSites(false);
+                  setShowTools(true);
                 }}
               >
-                <Laptop size={14} aria-hidden />
-                Job sites <span className="max-sm:sr-only">(your machines)</span>
+                <Wrench size={14} aria-hidden />
+                Toolbox · Tools
               </button>
-            )}
-            <button
-              ref={shortcutsButton}
-              type="button"
-              onClick={() => setShowShortcuts((shown) => !shown)}
-              aria-expanded={showShortcuts}
-              aria-controls="keyboard-shortcuts"
-              className="nav-tab nav-keys ml-auto text-muted"
-            >
-              <Keyboard size={14} aria-hidden />
-              Keyboard shortcuts
-            </button>
-          </nav>
-          {showShortcuts && (
-            // An overlay under the bar, not a push that moves the chat down.
-            <aside
-              id="keyboard-shortcuts"
-              aria-label="Keyboard shortcuts"
-              className="absolute right-4 top-full z-20 max-h-[calc(100dvh-5rem)] w-[min(30rem,calc(100vw-2rem))] overflow-y-auto rounded-plexus border border-line bg-panel p-4 shadow-lg"
-            >
-              <Shortcuts />
               <button
                 type="button"
-                className="btn btn-quiet -ml-2 mt-3"
+                aria-current={view === "media" ? "page" : undefined}
+                className="nav-tab"
+                data-testid="open-media"
                 onClick={() => {
-                  setShowShortcuts(false);
-                  shortcutsButton.current?.focus();
+                  if (view === "media") return;
+                  openMedia("images");
                 }}
               >
-                Close shortcuts
+                <Boxes size={14} aria-hidden />
+                Bins · Media
+              </button>
+              <button
+                type="button"
+                aria-current={view === "documents" ? "page" : undefined}
+                className="nav-tab"
+                data-testid="open-documents"
+                onClick={() => {
+                  if (view === "documents") return;
+                  openDocuments();
+                }}
+              >
+                <Files size={14} aria-hidden />
+                Documents
+              </button>
+              <button
+                type="button"
+                aria-current={view === "memory" ? "page" : undefined}
+                className="nav-tab"
+                data-testid="open-memory"
+                onClick={() => {
+                  if (view === "memory") return;
+                  openMemory();
+                }}
+              >
+                <Brain size={14} aria-hidden />
+                Memory
+              </button>
+              {!phase.me.owner && (
+                <button
+                  type="button"
+                  aria-current={view === "sites" ? "page" : undefined}
+                  className="nav-tab"
+                  onClick={() => {
+                    if (view === "sites") return;
+                    setShowTools(false);
+                    setShowSites(true);
+                  }}
+                >
+                  <Laptop size={14} aria-hidden />
+                  Job sites <span className="max-sm:sr-only">(your machines)</span>
+                </button>
+              )}
+              <button
+                ref={shortcutsButton}
+                type="button"
+                onClick={() => setShowShortcuts((shown) => !shown)}
+                aria-expanded={showShortcuts}
+                aria-controls="keyboard-shortcuts"
+                className="nav-tab nav-keys ml-auto text-muted"
+              >
+                <Keyboard size={14} aria-hidden />
+                Keyboard shortcuts
+              </button>
+            </nav>
+            {showShortcuts && (
+              // An overlay under the bar, not a push that moves the chat down.
+              <aside
+                id="keyboard-shortcuts"
+                aria-label="Keyboard shortcuts"
+                className="absolute right-4 top-full z-20 max-h-[calc(100dvh-5rem)] w-[min(30rem,calc(100vw-2rem))] overflow-y-auto rounded-plexus border border-line bg-panel p-4 shadow-lg"
+              >
+                <Shortcuts />
+                <button
+                  type="button"
+                  className="btn btn-quiet -ml-2 mt-3"
+                  onClick={() => {
+                    setShowShortcuts(false);
+                    shortcutsButton.current?.focus();
+                  }}
+                >
+                  Close shortcuts
+                </button>
+              </aside>
+            )}
+          </div>
+          {phase.me.installModeNotice && phase.me.installMode && phase.me.installModeChangedAt && (
+            <aside
+              role="status"
+              data-testid="install-mode-notice"
+              className="notice notice--warn notice--bar"
+            >
+              <Info size={16} aria-hidden />
+              {modeChanged(phase.me.installMode, phase.me.installModeChangedAt)}{" "}
+              <button
+                className="btn btn-quiet -my-1 ml-auto shrink-0"
+                onClick={async () => {
+                  await post("/api/me/mode-seen").catch(() => undefined);
+                  setPhase({ kind: "ready", me: { ...phase.me, installModeNotice: false } });
+                }}
+              >
+                OK
               </button>
             </aside>
           )}
-        </div>
-        {phase.me.installModeNotice && phase.me.installMode && phase.me.installModeChangedAt && (
-          <aside
-            role="status"
-            data-testid="install-mode-notice"
-            className="notice notice--warn notice--bar"
+          {showSites ? (
+            <JobSites onClose={() => setShowSites(false)} sub={phase.me.sub} />
+          ) : showTools ? (
+            <Tools owner={phase.me.owner} onClose={() => setShowTools(false)} />
+          ) : media ? (
+            <Media
+              key={`${media.door}:${mediaPerson?.sub ?? ""}`}
+              me={phase.me}
+              door={media.door}
+              focus={media.id}
+              person={mediaPerson}
+              onClose={() => open(chatId)}
+              onDoor={(door) => openMedia(door, mediaPerson)}
+              onToChat={(id, attachment) => {
+                setHandoff({ chatId: id, attachments: [attachment] });
+                open(id);
+                void refreshChats();
+              }}
+              onTextToChat={async (text) => {
+                // A transcript waits as the new chat's unsent text (M7).
+                try {
+                  const chat = await post<Chat>("/api/chats", {});
+                  saveDraft(phase.me.sub, chat.id, text);
+                  setChats((current) => [chat, ...current]);
+                  open(chat.id);
+                } catch (error) {
+                  setActionError(error instanceof Error ? error.message : String(error));
+                }
+              }}
+            />
+          ) : documentsOpen ? (
+            <Documents
+              me={phase.me}
+              onClose={() => open(chatId)}
+              onAsk={() => void askAboutDocuments()}
+              onTools={() => {
+                setShowSites(false);
+                setShowTools(true);
+              }}
+            />
+          ) : memoryOpen ? (
+            <Memory
+              chats={chats}
+              chatsLoaded={chatsLoaded}
+              onOpenChat={open}
+              onClose={() => open(chatId)}
+            />
+          ) : chatId ? (
+            <ChatView
+              key={chatId}
+              chatId={chatId}
+              attachments={handoff?.chatId === chatId ? handoff.attachments : undefined}
+              me={phase.me}
+              models={models}
+              modelsError={modelsError}
+              onChanged={refreshChats}
+              onDeleted={() => {
+                open(null);
+                void refreshChats();
+              }}
+              onOpenMemory={openMemory}
+              onOpenDocuments={openDocuments}
+            />
+          ) : (
+            <Empty
+              hasChats={chats.length > 0}
+              modelsError={modelsError}
+              noModels={models !== null && models.models.length === 0}
+              onNew={() => void newChat()}
+              creating={creating}
+            />
+          )}
+        </main>
+        {actionError && (
+          <div
+            role="alert"
+            className="notice notice--error notice--float absolute inset-x-3 bottom-3 z-10 shadow-lg"
           >
-            <Info size={16} aria-hidden />
-            {modeChanged(phase.me.installMode, phase.me.installModeChangedAt)}{" "}
+            <CircleAlert size={16} aria-hidden />
+            {actionError}{" "}
             <button
               className="btn btn-quiet -my-1 ml-auto shrink-0"
-              onClick={async () => {
-                await post("/api/me/mode-seen").catch(() => undefined);
-                setPhase({ kind: "ready", me: { ...phase.me, installModeNotice: false } });
-              }}
+              onClick={() => setActionError(null)}
             >
-              OK
+              Dismiss
             </button>
-          </aside>
+          </div>
         )}
-        {showSites ? (
-          <JobSites onClose={() => setShowSites(false)} sub={phase.me.sub} />
-        ) : showTools ? (
-          <Tools owner={phase.me.owner} onClose={() => setShowTools(false)} />
-        ) : media ? (
-          <Media
-            key={`${media.door}:${mediaPerson?.sub ?? ""}`}
-            me={phase.me}
-            door={media.door}
-            focus={media.id}
-            person={mediaPerson}
-            onClose={() => open(chatId)}
-            onDoor={(door) => openMedia(door, mediaPerson)}
-            onToChat={(id, attachment) => {
-              setHandoff({ chatId: id, attachments: [attachment] });
-              open(id);
-              void refreshChats();
-            }}
-            onTextToChat={async (text) => {
-              // A transcript waits as the new chat's unsent text (M7).
-              try {
-                const chat = await post<Chat>("/api/chats", {});
-                saveDraft(phase.me.sub, chat.id, text);
-                setChats((current) => [chat, ...current]);
-                open(chat.id);
-              } catch (error) {
-                setActionError(error instanceof Error ? error.message : String(error));
-              }
-            }}
-          />
-        ) : documentsOpen ? (
-          <Documents
-            me={phase.me}
-            onClose={() => open(chatId)}
-            onAsk={() => void askAboutDocuments()}
-            onTools={() => {
-              setShowSites(false);
-              setShowTools(true);
-            }}
-          />
-        ) : memoryOpen ? (
-          <Memory
-            chats={chats}
-            chatsLoaded={chatsLoaded}
-            onOpenChat={open}
-            onClose={() => open(chatId)}
-          />
-        ) : chatId ? (
-          <ChatView
-            key={chatId}
-            chatId={chatId}
-            attachments={handoff?.chatId === chatId ? handoff.attachments : undefined}
-            me={phase.me}
-            models={models}
-            modelsError={modelsError}
-            onChanged={refreshChats}
-            onDeleted={() => {
-              open(null);
-              void refreshChats();
-            }}
-            onOpenMemory={openMemory}
-            onOpenDocuments={openDocuments}
-          />
-        ) : (
-          <Empty
-            hasChats={chats.length > 0}
-            modelsError={modelsError}
-            noModels={models !== null && models.models.length === 0}
-            onNew={() => void newChat()}
-            creating={creating}
-          />
-        )}
-      </main>
-      {actionError && (
-        <div
-          role="alert"
-          className="notice notice--error notice--float absolute inset-x-3 bottom-3 z-10 shadow-lg"
-        >
-          <CircleAlert size={16} aria-hidden />
-          {actionError}{" "}
-          <button
-            className="btn btn-quiet -my-1 ml-auto shrink-0"
-            onClick={() => setActionError(null)}
-          >
-            Dismiss
-          </button>
-        </div>
-      )}
-    </div>
+      </div>
+    </RunPreviews.Provider>
   );
 }
 

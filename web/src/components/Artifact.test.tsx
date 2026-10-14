@@ -10,7 +10,7 @@ import { api, ApiError, post } from "../lib/api";
 import { type ArtifactSummary, digest, forgetDrafts } from "../lib/artifacts";
 import { chatMarkdown } from "../lib/conveniences";
 import type { ChatDetail } from "../lib/types";
-import { ArtifactScope, type Scope } from "./Artifact";
+import { ArtifactScope, RunPreviews, type Scope } from "./Artifact";
 import { PREVIEW_FRAME, readSaid } from "./ArtifactPreview";
 import { Markdown } from "./Markdown";
 
@@ -35,15 +35,19 @@ function scope(over: Partial<Scope> = {}): Scope {
   };
 }
 
+/** An answer, with previews waiting for Run (RC5's way; RC6's running by themselves is
+ * ArtifactInline.test.tsx's). */
 function shown(text: string, value: Scope | null = scope()) {
   return render(
-    value ? (
-      <ArtifactScope.Provider value={value}>
+    <RunPreviews.Provider value={false}>
+      {value ? (
+        <ArtifactScope.Provider value={value}>
+          <Markdown text={text} />
+        </ArtifactScope.Provider>
+      ) : (
         <Markdown text={text} />
-      </ArtifactScope.Provider>
-    ) : (
-      <Markdown text={text} />
-    ),
+      )}
+    </RunPreviews.Provider>,
   );
 }
 

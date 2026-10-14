@@ -304,3 +304,17 @@ def test_the_preview_is_a_page_of_its_own_and_the_chat_s_policy_is_unchanged(
     assert page.headers["content-security-policy"] == CSP
     assert page.headers["x-frame-options"] == "DENY"
     assert "frame-ancestors 'none'" in CSP and "script-src 'self';" in CSP + ";"
+
+
+def test_previews_run_when_shown_until_the_person_turns_it_off(world: World) -> None:
+    ada, bo = world.browser(), world.browser()
+    ada.sign_in("p-ada")
+    bo.sign_in("p-bo")
+    assert ada.get("/api/me").json()["runPreviews"] is True, "on unless turned off"
+    off = ada.put("/api/me/run-previews", json={"on": False})
+    assert off.status_code == 200 and off.json() == {"runPreviews": False}
+    assert ada.get("/api/me").json()["runPreviews"] is False
+    assert bo.get("/api/me").json()["runPreviews"] is True, "a person's own"
+    assert ada.put("/api/me/run-previews", json={"on": "yes"}).status_code == 422
+    ada.put("/api/me/run-previews", json={"on": True})
+    assert ada.get("/api/me").json()["runPreviews"] is True

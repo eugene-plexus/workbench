@@ -26,6 +26,7 @@ export function Sidebar({
   error,
   onRetry,
   chatsLoaded = true,
+  onRunPreviews,
 }: {
   me: Me;
   chats: Chat[];
@@ -41,6 +42,8 @@ export function Sidebar({
   onRetry: () => void;
   /** False until the first list of chats has come back (or failed). */
   chatsLoaded?: boolean;
+  /** Keep whether the person's previews run when shown (rich content RC6). */
+  onRunPreviews?: (on: boolean) => Promise<void>;
 }) {
   const [query, setQuery] = useState("");
   const groups = chatGroups(chats, query);
@@ -210,6 +213,9 @@ export function Sidebar({
           </a>
         </div>
       )}
+      {onRunPreviews && (
+        <RunPreviewsSwitch on={me.runPreviews !== false} onChange={onRunPreviews} />
+      )}
       <div className="flex items-center justify-between gap-2 border-t border-line px-4 py-2 text-sm">
         <span className="truncate" data-testid="me">
           {me.name}
@@ -224,6 +230,51 @@ export function Sidebar({
         </button>
       </div>
     </nav>
+  );
+}
+
+/**
+ * Whether the person's previews run by themselves when shown (rich content RC6),
+ * as Workbench keeps it: the box shows what was kept, and says so when keeping
+ * it failed.
+ */
+function RunPreviewsSwitch({
+  on,
+  onChange,
+}: {
+  on: boolean;
+  onChange: (on: boolean) => Promise<void>;
+}) {
+  const [saving, setSaving] = useState(false);
+  const [problem, setProblem] = useState("");
+  return (
+    <div className="border-t border-line px-4 py-2 text-sm">
+      <label className="flex min-h-7 items-center gap-2">
+        <input
+          type="checkbox"
+          checked={on}
+          disabled={saving}
+          onChange={async (event) => {
+            const next = event.target.checked;
+            setSaving(true);
+            setProblem("");
+            try {
+              await onChange(next);
+            } catch (error) {
+              setProblem(`Not changed: ${error instanceof Error ? error.message : String(error)}`);
+            } finally {
+              setSaving(false);
+            }
+          }}
+        />
+        Run previews when shown
+      </label>
+      {problem && (
+        <p role="alert" className="text-error">
+          {problem}
+        </p>
+      )}
+    </div>
   );
 }
 

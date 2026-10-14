@@ -331,6 +331,8 @@ export interface Me {
   installMode?: "production" | "dev";
   installModeChangedAt?: string | null;
   installModeNotice?: boolean;
+  /** Whether the person's artifact previews run when shown (RC6); on unless turned off. */
+  runPreviews?: boolean;
 }
 
 /** What a rule says of a group of tools (J70). */

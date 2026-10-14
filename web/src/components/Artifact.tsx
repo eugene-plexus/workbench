@@ -1,10 +1,12 @@
 /**
- * Artifacts in an answer (workbench-rich-content-roadmap.md RC5): a block the
- * answer asked to be one (an `html artifact title="…"` fence) is a card that
- * opens it beside the chat, and any other closed block of Markdown, SVG,
- * HTML, JSX or TSX has Open as artifact in its head. Opening one runs
- * nothing: the dialog (ArtifactDialog.tsx) shows Markdown and SVG as they
- * read, and a page or a component only when the person presses Run.
+ * Artifacts in an answer (workbench-rich-content-roadmap.md RC5, RC6): a block
+ * the answer asked to be one (an `html artifact title="…"` fence) is drawn where
+ * it stands (ArtifactBody.tsx): Markdown as it reads, SVG as a picture, a page
+ * or a component in its frame, run by itself once on screen when the person
+ * lets previews run (`RunPreviews`), never in the owner's view of someone
+ * else's chat. Open shows it beside the chat (ArtifactDialog.tsx) with its
+ * source, revisions and download. Any other closed block of Markdown, SVG,
+ * HTML, JSX or TSX has Open as artifact in its head.
  *
  * Only a message's answer is a scope for them (`ArtifactScope`, from
  * MessageView.tsx): the same Markdown elsewhere (a draft, a preview of a
@@ -36,8 +38,12 @@ export type Scope = {
 
 export const ArtifactScope = createContext<Scope | null>(null);
 
-// Loaded when an artifact is first opened: a chat of words alone never fetches it.
+/** Whether the person lets previews run when shown (theirs, kept by Workbench; App.tsx). */
+export const RunPreviews = createContext(true);
+
+// Loaded when an artifact is first opened, or drawn: a chat of words alone fetches neither.
 const ArtifactDialog = lazy(() => import("./ArtifactDialog"));
+const ArtifactBody = lazy(() => import("./ArtifactBody"));
 
 export type Opened = {
   kind: ArtifactKind;
@@ -66,7 +72,8 @@ function revisionWords(kept: ArtifactSummary | null): string {
   return `${kept.revisions} revisions`;
 }
 
-/** A block the answer asked to be an artifact: its title, kind and revisions, and Open. */
+/** A block the answer asked to be an artifact: drawn where it stands, with its title, kind,
+ * revisions, and Open. */
 export function ArtifactCard({
   kind,
   language,
@@ -79,6 +86,7 @@ export function ArtifactCard({
   source: string;
 }) {
   const scope = useContext(ArtifactScope);
+  const runPreviews = useContext(RunPreviews);
   const [opened, setOpened] = useOpened();
   const original = blockText(source);
   const kept = useMemo(
@@ -89,24 +97,38 @@ export function ArtifactCard({
   const shownTitle = kept?.title ?? title;
   return (
     <div className="artifact-card" data-testid="artifact-card" data-kind={kind}>
-      <Icon size={18} aria-hidden="true" className="shrink-0" />
-      <span className="artifact-card-words">
-        <span className="artifact-card-title">{shownTitle}</span>
-        <span className="text-sm text-muted">
-          {KIND_NAMES[kind]} · {revisionWords(kept)}
+      <div className="artifact-card-head">
+        <Icon size={18} aria-hidden="true" className="shrink-0" />
+        <span className="artifact-card-words">
+          <span className="artifact-card-title">{shownTitle}</span>
+          <span className="text-sm text-muted">
+            {KIND_NAMES[kind]} · {revisionWords(kept)}
+          </span>
         </span>
-      </span>
-      <button
-        type="button"
-        className="act"
-        aria-haspopup="dialog"
-        aria-label={`Open ${shownTitle}`}
-        disabled={!scope}
-        onClick={() => setOpened({ kind, language, title: shownTitle, original })}
-      >
-        <PanelRightOpen size={14} aria-hidden="true" />
-        Open
-      </button>
+        <button
+          type="button"
+          className="act"
+          aria-haspopup="dialog"
+          aria-label={`Open ${shownTitle}`}
+          disabled={!scope}
+          onClick={() => setOpened({ kind, language, title: shownTitle, original })}
+        >
+          <PanelRightOpen size={14} aria-hidden="true" />
+          Open
+        </button>
+      </div>
+      {scope && (
+        <Suspense fallback={null}>
+          <ArtifactBody
+            scope={scope}
+            kind={kind}
+            title={shownTitle}
+            original={original}
+            kept={kept}
+            auto={runPreviews && !scope.readOnly && !scope.writing}
+          />
+        </Suspense>
+      )}
       {scope && opened && <Dialog scope={scope} opened={opened} onClose={() => setOpened(null)} />}
     </div>
   );

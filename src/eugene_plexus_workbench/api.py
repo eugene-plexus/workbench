@@ -23,7 +23,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 from . import artifacts, config, files
 from .answers import Answers, Preparation, Progress, message_view
@@ -222,12 +222,23 @@ def _mode_seen_key(sub: str) -> str:
     return f"installModeSeen:{sub}"
 
 
+def _run_previews_key(sub: str) -> str:
+    """Whether a person's artifact previews run when shown (rich content RC6); on unless
+    they turned it off."""
+    return f"runPreviews:{sub}"
+
+
+class RunPreviews(BaseModel):
+    on: StrictBool
+
+
 @router.get("/api/me")
 async def me(request: Request) -> dict[str, Any]:
     person = await _person(request)
     reads = await config.owner_reads_chats(_state(request).store)
     mode = await install_mode(request)
     seen = await _state(request).store.setting(_mode_seen_key(person.sub))
+    run_previews = await _state(request).store.setting(_run_previews_key(person.sub))
     return {
         # Every person sees the install's mode, and is told when it changed
         # since they last acknowledged it (J18).
@@ -245,7 +256,16 @@ async def me(request: Request) -> dict[str, Any]:
         ),
         # The standing line (W4) is for everyone the owner can read.
         "ownerReadsChats": reads,
+        "runPreviews": run_previews is not False,
     }
+
+
+@router.put("/api/me/run-previews")
+async def put_run_previews(request: Request, body: RunPreviews) -> dict[str, Any]:
+    """Whether the person's artifact previews run when shown, or wait for Run."""
+    person = await _person(request)
+    await _state(request).store.put_setting(_run_previews_key(person.sub), body.on)
+    return {"runPreviews": body.on}
 
 
 @router.post("/api/me/mode-seen", status_code=status.HTTP_204_NO_CONTENT)

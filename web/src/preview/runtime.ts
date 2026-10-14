@@ -26,8 +26,9 @@
  * The page sends one message, `{type: "run", nonce, kind, source}`, after
  * this script says `ready`; later ones are ignored. This script says
  * `started` or `failed` (a component that cannot run, and why), each with the
- * nonce; `error`, `refused` (what was not loaded or sent) and `leaving` (the
- * preview tried to go to another page).
+ * nonce; `error`, `refused` (what was not loaded or sent), `leaving` (the
+ * preview tried to go to another page), `alive` (it still answers) and `size`
+ * (its page's height).
  */
 
 import { createElement, type ComponentType } from "react";
@@ -47,6 +48,8 @@ const MODULES = new Map<string, unknown>([
 
 /** A message's words are cut to this. */
 const MOST = 500;
+/** How often a preview says it still answers. */
+export const ALIVE_MS = 500;
 
 /**
  * What a form's sending is said as. A form is never sent from a preview, and
@@ -106,8 +109,9 @@ function post(message: Record<string, unknown>): void {
  * The reporter a page is written with, first thing: what fails, what is not
  * loaded, a link that would leave, and leaving itself, told to the page.
  * Writing a page clears this script's own listeners (document.open), but not
- * what it changed on the window: `listen`'s `form.submit()` stays refused, and
- * the reporter refuses a form sent by its button.
+ * what it changed on the window or its timers: `listen`'s `form.submit()` stays
+ * refused and `beat`'s beat goes on; the reporter refuses a form sent by its
+ * button, and watches the new page's height.
  */
 const REPORTER = `<script>(function () {
   var most = ${MOST};
@@ -123,6 +127,10 @@ const REPORTER = `<script>(function () {
     if (a && a.getAttribute("href").charAt(0) !== "#") { e.preventDefault(); post({ type: "refused", what: cut(a.href) }); }
   }, true);
   addEventListener("submit", function (e) { if (!e.defaultPrevented) { e.preventDefault(); post({ type: "refused", what: FORM }); } });
+  var last = -1;
+  function size() { var h = Math.ceil(document.documentElement.getBoundingClientRect().height); if (h !== last) { last = h; post({ type: "size", height: h }); } }
+  if (window.ResizeObserver) new ResizeObserver(size).observe(document.documentElement);
+  addEventListener("load", size);
 })();</script>`.replace(/FORM/g, JSON.stringify(FORM));
 
 /** A page with the reporter first: after its doctype, so the page keeps its mode. */
@@ -164,6 +172,31 @@ export function listen(): void {
     event.preventDefault();
     post({ type: "refused", what: FORM });
   });
+}
+
+/**
+ * That it still answers, every `ALIVE_MS` (components/ArtifactPreview.tsx's
+ * watchdog: every preview of the page is one process, and one that loops
+ * silences them all), and how tall its page is, whenever that changes. A
+ * written page's reporter keeps both (`REPORTER`); the beat is the window's,
+ * which writing the page does not clear; its height is watched again by the
+ * reporter, as writing the page replaces the element watched here.
+ */
+export function beat(): void {
+  const own = window as unknown as { __previewAlive?: number };
+  if (!own.__previewAlive) {
+    own.__previewAlive = window.setInterval(() => post({ type: "alive" }), ALIVE_MS);
+  }
+  let last = -1;
+  const size = () => {
+    const height = Math.ceil(document.documentElement.getBoundingClientRect().height);
+    if (height === last) return;
+    last = height;
+    post({ type: "size", height });
+  };
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(size).observe(document.documentElement);
+  }
 }
 
 type Run = { type: "run"; nonce: string; kind: "html" | "react"; source: string };
@@ -239,6 +272,7 @@ function runReact(source: string, nonce: string): void {
 export function start(): void {
   let ran = false;
   listen();
+  beat();
   window.addEventListener("message", (event) => {
     if (ran || event.source !== window.parent || !isRun(event.data)) return;
     ran = true;
