@@ -84,6 +84,13 @@ describe("an invalid field's edge", () => {
   });
 });
 
+describe("words hidden for a screen reader cannot lengthen the page", () => {
+  it("a Markdown artifact's box holds what its Markdown hides (a footnotes heading)", () => {
+    expect(declares(".artifact-doc", "overflow: auto")).toBe(true);
+    expect(declares(".artifact-doc", "position: relative")).toBe(true);
+  });
+});
+
 describe("a long string cannot widen the page", () => {
   it.each([".notice", ".check", ".title-page", ".title-section"])("%s wraps it", (selector) => {
     for (const declaration of ["overflow-wrap: anywhere", "min-width: 0"]) {

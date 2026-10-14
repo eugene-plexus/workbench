@@ -2071,7 +2071,10 @@ textarea {
   gap: 0.5rem;
   color: var(--foreground);
 }
+/* Relative: what its Markdown hides for a screen reader (a footnotes heading)
+   stays in its own scrolling box, not below it in the thread. */
 .artifact-doc {
+  position: relative;
   max-height: 32rem;
   overflow: auto;
   padding: 0.25rem 0.5rem;

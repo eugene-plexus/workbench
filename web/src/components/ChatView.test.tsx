@@ -128,6 +128,12 @@ describe("the conversation", () => {
     expect(region.className).toContain("[scrollbar-gutter:stable_both-edges]");
   });
 
+  it("holds what is hidden in it for a screen reader, so nothing deep in it scrolls the page", () => {
+    view();
+    const region = screen.getByRole("region", { name: "Conversation" });
+    expect(region).toHaveClass("relative", "overflow-y-auto");
+  });
+
   it("sits on the same frame as the header and the composer", () => {
     detail = { chat, messages: [message({ role: "user", content: "Hi" })], ownerName: null };
     view();

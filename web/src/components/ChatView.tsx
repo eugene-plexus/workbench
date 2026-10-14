@@ -466,11 +466,13 @@ export function ChatView({
           }}
           id="conversation"
           // A named, focusable region, so PageUp and the arrow keys scroll it
-          // from the keyboard.
+          // from the keyboard. Relative, so words hidden for a screen reader
+          // deep in the thread (a footnotes heading) stay inside it, rather
+          // than reaching below the window and scrolling the whole page.
           role="region"
           aria-label="Conversation"
           tabIndex={0}
-          className="min-h-0 flex-1 overflow-y-auto px-4 pb-8 pt-6 [scrollbar-gutter:stable_both-edges] focus-visible:-outline-offset-2"
+          className="relative min-h-0 flex-1 overflow-y-auto px-4 pb-8 pt-6 [scrollbar-gutter:stable_both-edges] focus-visible:-outline-offset-2"
           data-testid="messages"
         >
           <div ref={content} className="mx-auto flex max-w-3xl flex-col gap-4">
