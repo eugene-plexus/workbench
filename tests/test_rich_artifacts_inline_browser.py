@@ -41,8 +41,25 @@ GROWS = (
     " for (var i = 0; i < 8; i++) { var p = document.createElement('p');"
     " p.textContent = 'More ' + i; document.body.appendChild(p); } }, 4000)</script>"
 )
+# Footnotes in a long Markdown artifact and in the answer around it: each list's heading is
+# hidden for a screen reader, and once reached below the window and scrolled the whole page.
+MENU = "\n\n".join(
+    [
+        "# Menu",
+        *(f"Item {n} of the menu." for n in range(40)),
+        "Prices vary.[^menu]",
+        "[^menu]: With the season.",
+    ]
+)
 FAR = "\n\n".join(
-    ["First, a page:", fence("html", "Far", SHORT), PLAIN_WORDS, fence("html", "Grows", GROWS)]
+    [
+        "First, a page:[^far]",
+        fence("html", "Far", SHORT),
+        fence("markdown", "Menu", MENU),
+        PLAIN_WORDS,
+        fence("html", "Grows", GROWS),
+        "[^far]: A footnote of the answer's own.",
+    ]
 )
 STUCK = "\n\n".join(
     [fence("html", "Calm", CALM), fence("html", "Calm too", CALM_TOO), fence("html", "Busy", BUSY)]

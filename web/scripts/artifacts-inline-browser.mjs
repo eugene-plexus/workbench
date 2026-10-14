@@ -1,4 +1,4 @@
-/* global process, console, URL, document, window, performance, requestAnimationFrame, setTimeout */
+/* global process, console, URL, document, window, performance, requestAnimationFrame, setTimeout, getComputedStyle */
 // Artifacts shown and run in place, in Chrome (workbench-rich-content-roadmap.md
 // RC6), under the headers Workbench really sends: Markdown and SVG drawn where
 // the answer puts them; a component started by itself on screen, answering
@@ -7,7 +7,8 @@
 // before it is on screen; at most four at once; a preview that loops named and
 // stopped, the others started again, and not run by itself after a reload; the
 // person's switch kept and obeyed; the owner's view of a chat waiting for Run;
-// a phone. Each check is one PASS or FAIL line.
+// footnotes, in an answer and in a Markdown artifact, that never lengthen the
+// page; a phone. Each check is one PASS or FAIL line.
 import { mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 
@@ -264,6 +265,37 @@ try {
   await card(page, "Far").scrollIntoViewIfNeeded();
   await runsBy(page, "Far");
   check("a preview out of view does not run until it is on screen", early === 0, `${early}`);
+  // Footnotes far down the chat, and in a long Markdown artifact: each list's heading
+  // is hidden for a screen reader (positioned out of sight). The thread holds the
+  // answer's, the artifact's box holds its own, and the page itself never scrolls.
+  const hidden = await page.evaluate(() => {
+    const thread = document.getElementById("conversation");
+    const positioned = (box) =>
+      [...box.querySelectorAll("*")].filter((el) => getComputedStyle(el).position === "absolute");
+    const loose = (box) => positioned(box).filter((el) => !box.contains(el.offsetParent)).length;
+    const docs = [...thread.querySelectorAll(".artifact-doc")];
+    const page = () =>
+      document.scrollingElement.scrollHeight - document.scrollingElement.clientHeight;
+    const atEnd = page();
+    thread.scrollTop = 0;
+    return {
+      thread: positioned(thread).length,
+      threadLoose: loose(thread),
+      docs: docs.map((doc) => positioned(doc).length),
+      docsLoose: docs.reduce((n, doc) => n + loose(doc), 0),
+      page: Math.max(atEnd, page()),
+    };
+  });
+  check(
+    "footnotes far down a chat do not lengthen the page",
+    hidden.page === 0 && hidden.thread > 1 && hidden.threadLoose === 0,
+    JSON.stringify(hidden),
+  );
+  check(
+    "a Markdown artifact's box holds what its Markdown hides",
+    hidden.docs.length === 1 && hidden.docs[0] > 0 && hidden.docsLoose === 0,
+    JSON.stringify(hidden),
+  );
   policy.push(...(await page.evaluate(() => window.__policy)));
   await context.close();
 

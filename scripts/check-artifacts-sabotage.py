@@ -48,6 +48,11 @@ ME = "src/eugene_plexus_workbench/api.py"
 RUNS = "src/lib/previewRunner.test.ts"
 INLINE = "src/components/ArtifactInline.test.tsx"
 INLINE_BROWSER = "tests/test_rich_artifacts_inline_browser.py"
+# After RC6 landed: footnotes that scrolled the page, a proxy's script in a preview.
+CHAT = "web/src/components/ChatView.tsx"
+STYLES = "web/src/styles.css"
+CHAT_TEST = "src/components/ChatView.test.tsx"
+SHEET = "src/stylesheet.test.ts"
 
 CASES: list[tuple[str, str, str, str, str, str]] = [
     (
@@ -413,6 +418,30 @@ RC6_CASES: list[tuple[str, str, str, str, str, str]] = [
         "    on: bool",
         "pytest",
         f"{BACKEND}::test_previews_run_when_shown_until_the_person_turns_it_off",
+    ),
+    (
+        "words hidden deep in the thread reach below it",
+        CHAT,
+        'className="relative min-h-0 flex-1 overflow-y-auto px-4',
+        'className="min-h-0 flex-1 overflow-y-auto px-4',
+        "vitest",
+        f"{CHAT_TEST}::holds what is hidden in it for a screen reader",
+    ),
+    (
+        "a Markdown artifact's hidden words reach out of its box",
+        STYLES,
+        ".artifact-doc {\n  position: relative;\n",
+        ".artifact-doc {\n",
+        "vitest",
+        f"{SHEET}::a Markdown artifact's box holds what its Markdown hides",
+    ),
+    (
+        "a proxy in front may rewrite the pages",
+        WEB,
+        'NO_CACHE = "no-cache, no-transform"',
+        'NO_CACHE = "no-cache"',
+        "pytest",
+        f"{BACKEND}::test_a_proxy_in_front_is_told_to_leave_the_pages_as_written",
     ),
 ]
 

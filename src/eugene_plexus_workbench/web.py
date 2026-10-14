@@ -96,6 +96,11 @@ PREVIEW_PAGE = (
     '<script src="/preview/runtime.js"></script></head><body></body></html>'
 )
 
+#: The page's files are served as written: a proxy in front (Cloudflare) otherwise adds
+#: its own script to each page, which the page's policy refuses and a preview reports
+#: as a load of its own. `no-transform` is what such a proxy leaves alone.
+NO_CACHE = "no-cache, no-transform"
+
 _API_PREFIXES = ("/api/", "/v1/", "/oidc/")
 
 NO_UI = """<!doctype html><meta charset="utf-8"><title>Workbench</title>
@@ -211,7 +216,7 @@ def mount(app: FastAPI, root: Path | None) -> None:
     # An artifact's preview: its headers are `SecurityHeaders`' (PREVIEW_CSP).
     @app.get(PREVIEW_PATH, include_in_schema=False)
     def preview() -> Response:
-        return HTMLResponse(PREVIEW_PAGE, headers={"Cache-Control": "no-cache"})
+        return HTMLResponse(PREVIEW_PAGE, headers={"Cache-Control": NO_CACHE})
 
     # Not async: it touches the disk, and FastAPI runs a plain function in
     # its thread pool rather than on the loop every stream shares.
@@ -228,7 +233,7 @@ def mount(app: FastAPI, root: Path | None) -> None:
                 cache = (
                     "public, max-age=31536000, immutable"
                     if path.startswith("assets/")
-                    else "no-cache"
+                    else NO_CACHE
                 )
                 headers = {"Cache-Control": cache}
                 # A mascot moves as the website's does (its own inline style),
@@ -236,4 +241,4 @@ def mount(app: FastAPI, root: Path | None) -> None:
                 if path.startswith(("scenes/", "mascots/")) and path.endswith(".svg"):
                     headers["Content-Security-Policy"] = SCENE_CSP
                 return FileResponse(candidate, headers=headers)
-        return FileResponse(root / "index.html", headers={"Cache-Control": "no-cache"})
+        return FileResponse(root / "index.html", headers={"Cache-Control": NO_CACHE})

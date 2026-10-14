@@ -306,6 +306,19 @@ def test_the_preview_is_a_page_of_its_own_and_the_chat_s_policy_is_unchanged(
     assert "frame-ancestors 'none'" in CSP and "script-src 'self';" in CSP + ";"
 
 
+def test_a_proxy_in_front_is_told_to_leave_the_pages_as_written(world: World) -> None:
+    # Cloudflare adds its analytics script to a page it may transform: refused by the
+    # page's policy, and in a preview reported as the preview's own load.
+    assert world.settings.static_dir is not None
+    world.settings.static_dir.mkdir(parents=True, exist_ok=True)
+    (world.settings.static_dir / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    ada = world.browser()
+    for path in ("/preview/frame", "/chats/x", "/"):
+        response = ada.get(path)
+        assert response.status_code == 200, path
+        assert response.headers["cache-control"] == "no-cache, no-transform", path
+
+
 def test_previews_run_when_shown_until_the_person_turns_it_off(world: World) -> None:
     ada, bo = world.browser(), world.browser()
     ada.sign_in("p-ada")
