@@ -180,3 +180,31 @@ function markOpenFences(node: HastRoot | Element, source: unknown): void {
 export function rehypeOpenFences() {
   return (tree: HastRoot, file: { value: unknown }) => markOpenFences(tree, file.value);
 }
+
+// --- footnotes, one answer's own --------------------------------------------
+//
+// The parser prefixes a footnote's ids with the answer's own prefix
+// (`clobberPrefix`), except the heading that names the notes for a screen
+// reader, which is `footnote-label` in every answer, and the reference that
+// points at it. Both take the prefix here, so no two answers share an id.
+
+const LABEL = "footnote-label";
+
+function scopeLabel(node: HastRoot | Element, prefix: string): void {
+  for (const child of node.children) {
+    if (child.type !== "element") continue;
+    const props = child.properties;
+    if (props.id === LABEL) props.id = prefix + LABEL;
+    if (Array.isArray(props.ariaDescribedBy)) {
+      props.ariaDescribedBy = props.ariaDescribedBy.map((id) =>
+        id === LABEL ? prefix + LABEL : id,
+      );
+    }
+    scopeLabel(child, prefix);
+  }
+}
+
+/** The plugin for one answer, whose ids all begin with `prefix`. */
+export function rehypeFootnoteScope(prefix: string) {
+  return () => (tree: HastRoot) => scopeLabel(tree, prefix);
+}

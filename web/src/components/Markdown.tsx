@@ -11,7 +11,12 @@
  *   would send the chat away. The page's Content Security Policy refuses
  *   the fetch as well; this is the first lock on the same door.
  * - Only http, https and mailto links are links, opened in a new tab with
- *   no opener and no referrer.
+ *   no opener and no referrer. A footnote's reference and its way back are
+ *   the one exception: each moves focus to its partner inside the same answer
+ *   and changes nothing else (not the address, not the page's hash).
+ * - Formulas (`$x$`, `\(x\)`, `$$x$$`, `\[x\]`: lib/markdownMath.ts) are laid
+ *   out in a worker and drawn as elements (MathFormula.tsx); one that cannot
+ *   be shown is its source.
  *
  * How it reads is the stylesheet's (`.answer`, styles.css); the parts that
  * need an element of their own are made here: the code block (language and
@@ -19,13 +24,28 @@
  * box (workbench-reading.md 6.3).
  */
 
-import { Children, isValidElement, memo, type ReactNode } from "react";
+import {
+  Children,
+  isValidElement,
+  memo,
+  useId,
+  useMemo,
+  type MouseEvent,
+  type ReactNode,
+} from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { colourCode } from "../lib/highlight";
-import { rehypeOpenFences, remarkAlerts, remarkAllowedHtml } from "../lib/markdownPlugins";
+import { remarkMath } from "../lib/markdownMath";
+import {
+  rehypeFootnoteScope,
+  rehypeOpenFences,
+  remarkAlerts,
+  remarkAllowedHtml,
+} from "../lib/markdownPlugins";
 import { CopyButton } from "./CopyButton";
+import { MathFormula } from "./MathFormula";
 
 const SAFE = /^(https?:|mailto:)/i;
 
@@ -49,10 +69,12 @@ const Block = memo(function Block({
   language,
   source,
   open,
+  note,
 }: {
   language: string | null;
   source: string;
   open: boolean;
+  note?: string;
 }) {
   // The colour waits for the fence to close, and a block that cannot be coloured
   // (no language, a plain one, one this page does not know, past the size cap)
@@ -69,9 +91,15 @@ const Block = memo(function Block({
       <pre tabIndex={0} aria-label={`${language ?? "Code"} block`}>
         <code className={coloured ? `hljs ${named}` : named}>{coloured ?? source}</code>
       </pre>
+      {note && <p className="code-note">{note}</p>}
     </div>
   );
 });
+
+/** A display formula that cannot be shown: its source, as a block of code. */
+function formulaSource(tex: string, reason: string): ReactNode {
+  return <Block language="math" source={tex} open={false} note={`Formula not shown: ${reason}`} />;
+}
 
 function CodeBlock({ children }: { children: ReactNode }) {
   const code = Children.toArray(children)[0];
@@ -80,13 +108,18 @@ function CodeBlock({ children }: { children: ReactNode }) {
   }
   // The language as the fence wrote it ("bash", "py"); none when it wrote none.
   const language = /language-([\w#+.-]+)/.exec(code.props.className ?? "")?.[1] ?? null;
-  return (
-    <Block
-      language={language}
-      source={textOf(code.props.children)}
-      open={code.props["data-fence"] === "open"}
-    />
-  );
+  const source = textOf(code.props.children);
+  const open = code.props["data-fence"] === "open";
+  // A block formula (`$$`, `\[`, or a fence whose language is `math`), once
+  // it has closed.
+  if (language === "math" && !open) {
+    return (
+      <div className="math-block">
+        <MathFormula tex={source.trim()} display failed={formulaSource} />
+      </div>
+    );
+  }
+  return <Block language={language} source={source} open={open} />;
 }
 
 function textOf(node: ReactNode): string {
@@ -98,6 +131,27 @@ function textOf(node: ReactNode): string {
   }
   return "";
 }
+
+/**
+ * A footnote's reference or its way back: focus moves to its partner, found
+ * by id inside the same answer and nowhere else, and the address is left
+ * alone (a hash would be the app's route).
+ */
+function toPartner(event: MouseEvent<HTMLAnchorElement>): void {
+  event.preventDefault();
+  const link = event.currentTarget;
+  const region = link.closest<HTMLElement>("[data-md-scope]");
+  const id = link.getAttribute("href")?.slice(1) ?? "";
+  const scope = region?.dataset.mdScope;
+  if (!region || !scope || !id.startsWith(scope)) return;
+  const target = [...region.querySelectorAll<HTMLElement>("[id]")].find((el) => el.id === id);
+  target?.focus();
+}
+
+type FootnoteProps = {
+  "data-footnote-ref"?: unknown;
+  "data-footnote-backref"?: unknown;
+};
 
 const components: Components = {
   img({ src, alt }) {
@@ -115,7 +169,28 @@ const components: Components = {
       </a>
     );
   },
-  a({ href, children }) {
+  a({ href, children, id, className, ...rest }) {
+    const footnote = rest as FootnoteProps;
+    const isRef = footnote["data-footnote-ref"] != null;
+    const isBack = footnote["data-footnote-backref"] != null;
+    // Only the parser makes these (raw HTML is dropped, and a model's own
+    // `[x](#id)` has neither), and only a link inside the page.
+    if ((isRef || isBack) && href?.startsWith("#")) {
+      return (
+        <a
+          href={href}
+          id={id}
+          className={className}
+          aria-describedby={rest["aria-describedby"]}
+          aria-label={rest["aria-label"]}
+          data-footnote-ref={isRef ? "" : undefined}
+          data-footnote-backref={isBack ? "" : undefined}
+          onClick={toPartner}
+        >
+          {children}
+        </a>
+      );
+    }
     const safe = safeHref(href);
     if (!safe) return <span>{children}</span>;
     return (
@@ -126,6 +201,19 @@ const components: Components = {
   },
   pre({ children }) {
     return <CodeBlock>{children}</CodeBlock>;
+  },
+  code({ className, children }) {
+    const kind = /\bmath-(inline|display)\b/.exec(className ?? "")?.[1];
+    if (kind) return <MathFormula tex={textOf(children)} display={kind === "display"} />;
+    return <code className={className}>{children}</code>;
+  },
+  // A footnote is where its reference sends focus.
+  li({ id, className, children }) {
+    return (
+      <li id={id} className={className} tabIndex={id ? -1 : undefined}>
+        {children}
+      </li>
+    );
   },
   // A wide table scrolls inside its own box, not the answer; the wrapper (and
   // not `display: block` on the table) keeps it a table to a screen reader.
@@ -159,8 +247,7 @@ const components: Components = {
 
 // At module scope: react-markdown builds its processor on every render, and a
 // streamed answer renders on every chunk.
-const remarkPlugins = [remarkGfm, remarkAllowedHtml, remarkAlerts, remarkBreaks];
-const rehypePlugins = [rehypeOpenFences];
+const remarkPlugins = [remarkGfm, remarkMath, remarkAllowedHtml, remarkAlerts, remarkBreaks];
 
 /**
  * `quiet` is for a draft the model wrote before a search or a tool call: it
@@ -169,6 +256,9 @@ const rehypePlugins = [rehypeOpenFences];
  * Memoised, because its props are a string and a flag: a streamed answer
  * changes the page on every token, and only the answer being written should
  * be parsed again, not every finished one above it in the thread.
+ *
+ * Each one has its own prefix for the ids it makes, so two answers with a
+ * `[^1]`, or a draft and its answer, each keep their own footnotes.
  */
 export const Markdown = memo(function Markdown({
   text,
@@ -177,11 +267,20 @@ export const Markdown = memo(function Markdown({
   text: string;
   quiet?: boolean;
 }) {
+  const scope = `md${useId().replace(/[^\w-]/g, "")}-`;
+  const { rehypePlugins, remarkRehypeOptions } = useMemo(
+    () => ({
+      rehypePlugins: [rehypeOpenFences, rehypeFootnoteScope(scope)],
+      remarkRehypeOptions: { clobberPrefix: scope },
+    }),
+    [scope],
+  );
   return (
-    <div className={quiet ? "answer answer-quiet" : "answer"}>
+    <div className={quiet ? "answer answer-quiet" : "answer"} data-md-scope={scope}>
       <ReactMarkdown
         remarkPlugins={remarkPlugins}
         rehypePlugins={rehypePlugins}
+        remarkRehypeOptions={remarkRehypeOptions}
         components={components}
         skipHtml
       >
