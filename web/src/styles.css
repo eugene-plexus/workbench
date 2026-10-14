@@ -744,6 +744,112 @@ textarea {
   line-height: 1.25rem;
 }
 
+/* Diagrams (rich-content RC2): the picture under the code block's head, as
+   wide as the column at most; its own size in a dialog. The head's tools
+   wrap on a phone. */
+.answer .diagram-block .code-head {
+  flex-wrap: wrap;
+  padding-block: 0.125rem;
+}
+.diagram-tools {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.125rem;
+}
+.diagram-tools .act[aria-pressed="true"] {
+  background: var(--panel);
+  color: var(--link);
+}
+.answer .diagram-view {
+  display: flex;
+  justify-content: center;
+  padding: 0.75rem;
+  overflow: auto;
+  background: var(--panel);
+}
+.answer .diagram-view:focus-visible {
+  outline-offset: -2px;
+}
+.answer .diagram-view img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+.diagram-dialog {
+  width: min(96vw, 1600px);
+  max-width: none;
+  height: min(92vh, 1200px);
+  max-height: none;
+  padding: 0;
+  border: 1px solid var(--border-hover);
+  border-radius: calc(var(--radius) + 2px);
+  background: var(--panel);
+  color: var(--foreground);
+}
+.diagram-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+.diagram-dialog::backdrop {
+  background: rgb(0 0 0 / 0.6);
+}
+.diagram-dialog-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.375rem 0.5rem 0.375rem 0.875rem;
+  border-bottom: 1px solid var(--rule);
+  background: var(--panel-hover);
+  color: var(--muted);
+  font-size: 0.8125rem;
+}
+.diagram-dialog-title {
+  color: var(--heading);
+  font-weight: 600;
+}
+.diagram-zoom {
+  min-width: 3.5em;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.diagram-dialog-body {
+  flex: 1;
+  min-height: 0;
+  padding: 1rem;
+  overflow: auto;
+}
+.diagram-dialog-body:focus-visible {
+  outline-offset: -2px;
+}
+.diagram-dialog-body img {
+  display: block;
+  max-width: none;
+  margin: 0 auto;
+}
+/* On a phone the tools are their icons; each keeps its name for a screen reader. */
+@media (max-width: 480px) {
+  .diagram-tool-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+@media (max-width: 640px) {
+  .diagram-dialog {
+    width: 100vw;
+    height: 100dvh;
+    border: 0;
+    border-radius: 0;
+  }
+}
+
 /* Footnotes: a reference is a small number; the notes sit under a hairline in
    the chrome's size. The heading that names them is for a screen reader. */
 .answer sup {

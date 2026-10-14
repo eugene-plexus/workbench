@@ -17,6 +17,8 @@
  * - Formulas (`$x$`, `\(x\)`, `$$x$$`, `\[x\]`: lib/markdownMath.ts) are laid
  *   out in a worker and drawn as elements (MathFormula.tsx); one that cannot
  *   be shown is its source.
+ * - A mermaid code block is drawn in a worker and shown as a picture
+ *   (MermaidDiagram.tsx); one that cannot be drawn is its source.
  *
  * How it reads is the stylesheet's (`.answer`, styles.css); the parts that
  * need an element of their own are made here: the code block (language and
@@ -36,7 +38,6 @@ import {
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
-import { colourCode } from "../lib/highlight";
 import { remarkMath } from "../lib/markdownMath";
 import {
   rehypeFootnoteScope,
@@ -44,8 +45,9 @@ import {
   remarkAlerts,
   remarkAllowedHtml,
 } from "../lib/markdownPlugins";
-import { CopyButton } from "./CopyButton";
+import { Block } from "./Block";
 import { MathFormula } from "./MathFormula";
+import { MermaidDiagram } from "./MermaidDiagram";
 
 const SAFE = /^(https?:|mailto:)/i;
 
@@ -56,45 +58,6 @@ export function safeHref(href: string | undefined | null): string | null {
 }
 
 type CodeProps = { className?: string; children?: ReactNode; "data-fence"?: string };
-
-/**
- * A code block: its language and Copy joined to the code in one box, and the
- * code coloured once its fence has closed. Memoised on what it is shown from,
- * three strings and a flag: a streamed answer renders on every token, and a
- * block above the text being written has long stopped changing, so React skips
- * it (turning 300 lines of coloured tokens into elements and comparing them
- * took 70 ms a token here).
- */
-const Block = memo(function Block({
-  language,
-  source,
-  open,
-  note,
-}: {
-  language: string | null;
-  source: string;
-  open: boolean;
-  note?: string;
-}) {
-  // The colour waits for the fence to close, and a block that cannot be coloured
-  // (no language, a plain one, one this page does not know, past the size cap)
-  // is its text.
-  const coloured = language && !open ? colourCode(language, source) : null;
-  const named = language ? `language-${language}` : undefined;
-  return (
-    <div className="code-block">
-      <div className="code-head">
-        <span className="code-lang">{language ?? "code"}</span>
-        <CopyButton text={source} label="code" />
-      </div>
-      {/* A focusable scroller, so a keyboard can reach code wider than its box. */}
-      <pre tabIndex={0} aria-label={`${language ?? "Code"} block`}>
-        <code className={coloured ? `hljs ${named}` : named}>{coloured ?? source}</code>
-      </pre>
-      {note && <p className="code-note">{note}</p>}
-    </div>
-  );
-});
 
 /** A display formula that cannot be shown: its source, as a block of code. */
 function formulaSource(tex: string, reason: string): ReactNode {
@@ -119,6 +82,8 @@ function CodeBlock({ children }: { children: ReactNode }) {
       </div>
     );
   }
+  // A diagram, once its fence has closed; until then it is the code it is.
+  if (language === "mermaid" && !open) return <MermaidDiagram source={source} />;
   return <Block language={language} source={source} open={open} />;
 }
 
