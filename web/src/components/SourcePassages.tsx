@@ -33,7 +33,13 @@ function Passage({ source }: { source: PassageSource }) {
   const matched = matchedWords(source.terms, source.phrases);
   const cited = source.cited === true;
   return (
-    <li data-testid="passage-source" data-cited={cited ? "true" : "false"} data-via={source.via}>
+    <li
+      data-testid="passage-source"
+      data-cited={cited ? "true" : "false"}
+      data-via={source.via}
+      // A citation's [n] in the answer opens this one (lib/citations.ts).
+      data-passage-rank={source.rank}
+    >
       <details className="group/p">
         <summary
           data-testid="passage-toggle"

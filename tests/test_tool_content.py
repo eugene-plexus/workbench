@@ -245,6 +245,14 @@ def mixed() -> Iterator[str]:
             structuredContent={"made": text},
         )
 
+    @mcp.tool()
+    async def plot(text: str) -> CallToolResult:
+        """Return a chart (rich content RC4)."""
+        return CallToolResult(
+            content=[TextContent(type="text", text=f"A chart of {text}.")],
+            structuredContent=PLOT,
+        )
+
     server = ServerThread(mcp.streamable_http_app(json_response=True)).start()
     try:
         yield server.url + "/mcp"
@@ -252,7 +260,19 @@ def mixed() -> Iterator[str]:
         server.stop()
 
 
-def run_mixed(world: World, url: str) -> tuple[Any, Any, str, dict[str, Any]]:
+#: The chart the `plot` tool returns, asked for in so many words.
+PLOT = {
+    "workbench": "chart",
+    "version": 1,
+    "type": "line",
+    "title": "Load over a day",
+    "x": {"label": "Hour"},
+    "y": {"label": "Requests"},
+    "series": [{"name": "Requests", "points": [[0, 3], [6, 9], [12, 21], [18, 14], [23, 5]]}],
+}
+
+
+def run_mixed(world: World, url: str, tool: str = "mixed") -> tuple[Any, Any, str, dict[str, Any]]:
     owner = world.browser()
     owner.sign_in("operator")
     added = owner.post("/api/tools/servers", json={"name": "Mixed", "url": url, "token": ""})
@@ -263,6 +283,7 @@ def run_mixed(world: World, url: str) -> tuple[Any, Any, str, dict[str, Any]]:
     settings = {"settings": {"toolServers": [added.json()["id"]]}}
     assert ada.patch(f"/api/chats/{chat}", json=settings).status_code == 200
     world.gateway.mode = "tools"
+    world.gateway.tool_name = tool
     ada.post(f"/api/chats/{chat}/messages", json={"content": "Make me everything"})
     assert decide(ada, chat, pending(ada, chat), True).status_code == 204
     done = ada.wait_answer(chat)

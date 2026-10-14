@@ -10,11 +10,13 @@
  */
 
 import { Download, FileText, Film, Image as ImageIcon, Link2, Music } from "lucide-react";
-import { useEffect, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 
 import { fileUrl, releaseFileUrl } from "../lib/api";
+import { asksToBeDrawn, NotDrawn, readSpec, type Spec } from "../lib/chartSpec";
 import type { ContentBlock, ToolFile } from "../lib/types";
 import { safeHref } from "./Markdown";
+import { Structured } from "./Structured";
 
 /** A size as a person reads it. */
 export function sizeWords(size: number): string {
@@ -189,6 +191,34 @@ function FileCard({ file }: { file: ToolFile }) {
   );
 }
 
+/**
+ * A tool's chart or table, or why it is not drawn and its data. Read once for
+ * its data: a call's view renders again on every token of the answer.
+ */
+const DrawnData = memo(function DrawnData({ data }: { data: unknown }) {
+  const read = useMemo((): { spec: Spec } | { reason: string } => {
+    try {
+      return { spec: readSpec(data) };
+    } catch (error) {
+      return { reason: error instanceof NotDrawn ? error.message : String(error) };
+    }
+  }, [data]);
+  if ("reason" in read) {
+    return (
+      <div data-testid="tool-not-drawn">
+        <p className="text-sm text-muted">Not drawn: {read.reason}.</p>
+        <details className="tool-data">
+          <summary className="disclosure cursor-pointer text-muted hover:text-fg">Data</summary>
+          <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-plexus border border-line bg-soft p-2 font-mono text-[0.8125rem] leading-5">
+            {JSON.stringify(data, null, 2)}
+          </pre>
+        </details>
+      </div>
+    );
+  }
+  return <Structured spec={read.spec} />;
+});
+
 function Shown({ block }: { block: ContentBlock }) {
   switch (block.type) {
     case "image":
@@ -217,6 +247,9 @@ function Shown({ block }: { block: ContentBlock }) {
       );
     }
     case "data":
+      // A chart or table the tool asked for in so many words (lib/chartSpec.ts);
+      // any other data is the data it is.
+      if (asksToBeDrawn(block.data)) return <DrawnData data={block.data} />;
       return (
         <details className="tool-data">
           <summary className="disclosure cursor-pointer text-muted hover:text-fg">Data</summary>

@@ -7,6 +7,10 @@ export interface WebSource {
   kind: "web";
   url: string;
   title: string;
+  /** Where the answer cites it, as [start, end) in the message's content,
+   * counted as the page counts (rich content RC4). Absent when the gateway
+   * gave no place. */
+  marks?: [number, number][];
 }
 
 /** A document that was sent to the model with the message (MR2). It lists what

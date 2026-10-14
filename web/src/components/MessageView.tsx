@@ -13,6 +13,7 @@ import {
 import { type ReactNode, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 
 import { fileUrl, post } from "../lib/api";
+import { stableCitations } from "../lib/citations";
 import {
   about,
   isDocumentSource,
@@ -346,7 +347,7 @@ export function MessageView({
             }
           />
         ) : (
-          <Markdown text={answer} />
+          <Markdown text={answer} citations={stableCitations(message)} />
         ))}
       {running && answer && (
         // Once the first words are on the page the line is not gone: it moves
@@ -386,8 +387,9 @@ export function MessageView({
           )}
           {web.length > 0 && (
             <ol className="mt-2 list-decimal space-y-1 pl-5 marker:text-muted wrap-anywhere">
-              {web.map((source) => (
-                <li key={source.url}>
+              {web.map((source, i) => (
+                // A citation's number in the answer moves here (lib/citations.ts).
+                <li key={source.url} data-source-n={i + 1}>
                   <a
                     href={safe(source.url)}
                     target="_blank"

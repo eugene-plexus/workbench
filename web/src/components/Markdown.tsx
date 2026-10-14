@@ -45,9 +45,30 @@ import {
   remarkAlerts,
   remarkAllowedHtml,
 } from "../lib/markdownPlugins";
+import { type Citations, followCitation, remarkCitations } from "../lib/citations";
+import { NotDrawn, readSource } from "../lib/chartSpec";
 import { Block } from "./Block";
 import { MathFormula } from "./MathFormula";
 import { MermaidDiagram } from "./MermaidDiagram";
+import { Structured } from "./Structured";
+
+/** A `chart` fence: drawn, or its source saying why not. Memoised on its source. */
+const ChartBlock = memo(function ChartBlock({ source }: { source: string }) {
+  const read = useMemo(() => {
+    try {
+      return { ok: true as const, spec: readSource(source) };
+    } catch (error) {
+      return {
+        ok: false as const,
+        reason: error instanceof NotDrawn ? error.message : String(error),
+      };
+    }
+  }, [source]);
+  if (read.ok) return <Structured spec={read.spec} source={source} />;
+  return (
+    <Block language="chart" source={source} open={false} note={`Chart not shown: ${read.reason}`} />
+  );
+});
 
 const SAFE = /^(https?:|mailto:)/i;
 
@@ -84,6 +105,8 @@ function CodeBlock({ children }: { children: ReactNode }) {
   }
   // A diagram, once its fence has closed; until then it is the code it is.
   if (language === "mermaid" && !open) return <MermaidDiagram source={source} />;
+  // A chart or table asked for in so many words (lib/chartSpec.ts).
+  if (language === "chart" && !open) return <ChartBlock source={source} />;
   return <Block language={language} source={source} open={open} />;
 }
 
@@ -135,6 +158,27 @@ const components: Components = {
     );
   },
   a({ href, children, id, className, ...rest }) {
+    // A citation's number (lib/citations.ts): only that plugin makes one.
+    const cited = (rest as { "data-cite"?: string })["data-cite"];
+    const n = (rest as { "data-n"?: string })["data-n"];
+    if ((cited === "web" || cited === "passage") && href?.startsWith("#")) {
+      return (
+        <sup className="cite">
+          <a
+            href={href}
+            data-cite={cited}
+            data-n={n}
+            aria-label={cited === "web" ? `Source ${n}` : `Passage ${n}`}
+            onClick={(event) => {
+              event.preventDefault();
+              followCitation(event.currentTarget);
+            }}
+          >
+            {children}
+          </a>
+        </sup>
+      );
+    }
     const footnote = rest as FootnoteProps;
     const isRef = footnote["data-footnote-ref"] != null;
     const isBack = footnote["data-footnote-backref"] != null;
@@ -228,9 +272,13 @@ const remarkPlugins = [remarkGfm, remarkMath, remarkAllowedHtml, remarkAlerts, r
 export const Markdown = memo(function Markdown({
   text,
   quiet = false,
+  citations,
 }: {
   text: string;
   quiet?: boolean;
+  /** What the answer cites, in this text's places (lib/citations.ts). Pass the
+   * same object while it is the same, or every token parses the plugins anew. */
+  citations?: Citations;
 }) {
   const scope = `md${useId().replace(/[^\w-]/g, "")}-`;
   const { rehypePlugins, remarkRehypeOptions } = useMemo(
@@ -240,10 +288,14 @@ export const Markdown = memo(function Markdown({
     }),
     [scope],
   );
+  const plugins = useMemo(
+    () => (citations ? [...remarkPlugins, remarkCitations(citations)] : remarkPlugins),
+    [citations],
+  );
   return (
     <div className={quiet ? "answer answer-quiet" : "answer"} data-md-scope={scope}>
       <ReactMarkdown
-        remarkPlugins={remarkPlugins}
+        remarkPlugins={plugins}
         rehypePlugins={rehypePlugins}
         remarkRehypeOptions={remarkRehypeOptions}
         components={components}

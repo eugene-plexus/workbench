@@ -792,6 +792,189 @@ textarea {
   font-size: 0.8125rem;
 }
 
+/* Citations (rich-content RC4): a small number after what the answer cites,
+   which moves to its source. */
+.answer sup.cite {
+  margin-inline-start: 0.1em;
+  font-size: 0.75em;
+  line-height: 0;
+}
+.answer sup.cite a {
+  padding: 0 0.1em;
+  text-decoration: none;
+}
+
+/* Charts and tables asked for in so many words (rich-content RC4): drawn in
+   the page's colours, so they follow its theme; numbers a click away. */
+.structured {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0.5rem 0.75rem 0.75rem;
+  border: 1px solid var(--rule);
+  border-radius: calc(var(--radius) + 2px);
+  background: var(--panel);
+}
+.structured-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.25rem 0.75rem;
+  font-size: 0.8125rem;
+}
+.structured-title {
+  color: var(--heading);
+  font-weight: 600;
+}
+.structured-source {
+  margin: 0;
+  max-height: 20rem;
+  overflow: auto;
+  font-family: var(--font-code);
+  font-size: 0.8125rem;
+}
+.chart {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-width: 48rem;
+}
+.chart text {
+  fill: var(--muted);
+  font-family: var(--font-ui);
+  font-size: 12px;
+}
+.chart .chart-label {
+  fill: var(--foreground);
+  font-size: 13px;
+}
+.chart-grid {
+  stroke: var(--rule);
+  stroke-width: 1;
+}
+.chart-axis {
+  stroke: var(--border-control);
+  stroke-width: 1;
+}
+.chart-s0 {
+  --series: var(--accent-left);
+}
+.chart-s1 {
+  --series: var(--accent-right);
+}
+.chart-s2 {
+  --series: var(--status-ok-fg);
+}
+.chart-s3 {
+  --series: var(--status-warn-fg);
+}
+.chart-s4 {
+  --series: var(--status-error-fg);
+}
+.chart-s5 {
+  --series: var(--heading);
+}
+.chart-s6 {
+  --series: var(--accent-active);
+}
+.chart-s7 {
+  --series: var(--muted);
+}
+.chart-s8 {
+  --series: var(--tint-edge);
+}
+.chart-s9 {
+  --series: var(--link-hover);
+}
+.chart-s10 {
+  --series: var(--status-info-border);
+}
+.chart-s11 {
+  --series: var(--border-hover);
+}
+.chart [class^="chart-s"] rect,
+.chart [class^="chart-s"] circle {
+  fill: var(--series);
+}
+.chart .chart-line {
+  fill: none;
+  stroke: var(--series);
+  stroke-width: 2;
+}
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.8125rem;
+}
+.chart-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+.chart-swatch {
+  display: inline-block;
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 2px;
+  background: var(--series);
+}
+.data-table {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  min-width: 0;
+}
+.data-table-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.25rem 0.75rem;
+  font-size: 0.8125rem;
+}
+.data-table-scroll {
+  max-height: 24rem;
+  overflow: auto;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+}
+.data-table-scroll:focus-visible {
+  outline-offset: -2px;
+}
+.data-table table {
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+}
+.data-table th,
+.data-table td {
+  padding: 0.3rem 0.6rem;
+  border-bottom: 1px solid var(--rule);
+  text-align: start;
+  white-space: nowrap;
+}
+.data-table td.num {
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+}
+.data-table th {
+  position: sticky;
+  top: 0;
+  background: var(--panel-hover);
+  color: var(--foreground-strong);
+}
+.data-table th button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-weight: 600;
+}
+
 /* Diagrams (rich-content RC2): the picture under the code block's head, as
    wide as the column at most; its own size in a dialog. The head's tools
    wrap on a phone. */
@@ -1847,4 +2030,15 @@ textarea {
     }
   }
   /* ---- end MR1 ---- */
+}
+
+/* On a phone a chart is drawn smaller: its words are drawn larger to stay
+   readable (12px at a 640-wide chart is 6.5px on a 360px screen). */
+@media (max-width: 480px) {
+  .chart text {
+    font-size: 20px;
+  }
+  .chart .chart-label {
+    font-size: 20px;
+  }
 }
