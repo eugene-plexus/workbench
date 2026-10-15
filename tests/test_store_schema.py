@@ -107,7 +107,7 @@ def test_a_v0_1_store_keeps_its_messages_and_takes_the_marks(tmp_path: Path) -> 
     assert message.answer_from == 4 and message.reasoning_from == 0
     with sqlite3.connect(path) as db:
         (version,) = db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
-    assert int(version) == SCHEMA_VERSION == 16
+    assert int(version) == SCHEMA_VERSION == 17
 
 
 def test_schema_3_http_connections_survive_local_server_migration(tmp_path: Path) -> None:
@@ -188,7 +188,7 @@ def test_a_schema_6_store_keeps_its_attachments_and_gains_media(tmp_path: Path) 
     assert [(f.id, f.chat_id, f.width) for f in made] == [("f2", None, 512)]
     with sqlite3.connect(path) as db:
         (version,) = db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
-    assert int(version) == SCHEMA_VERSION == 16
+    assert int(version) == SCHEMA_VERSION == 17
 
 
 def test_a_new_store_starts_at_the_current_schema(tmp_path: Path) -> None:
@@ -240,8 +240,48 @@ def test_schema_15_is_backed_up_before_interaction_tables_are_added(tmp_path: Pa
             is None
         )
     with sqlite3.connect(path) as db:
-        assert db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0] == "16"
+        assert db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0] == "17"
         assert db.execute("SELECT count(*) FROM interaction_surfaces").fetchone()[0] == 0
+
+
+def test_schema_16_keeps_interactions_and_adds_agui_tables(tmp_path: Path) -> None:
+    path = tmp_path / "schema16.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.executescript(_V2_STORE)
+        for target in range(3, 17):
+            for statement in storage._MIGRATIONS[target]:
+                if callable(statement):
+                    db.row_factory = sqlite3.Row
+                    statement(db)
+                else:
+                    db.execute(statement)
+        db.execute("UPDATE meta SET value='16' WHERE key='schema'")
+        db.execute("INSERT INTO interaction_cursors VALUES ('c1', 17)")
+
+    async def migrate() -> None:
+        store = Store(path)
+        await store.open()
+        try:
+            assert (await store.message("m1")).content == "An answer from before."
+            assert await store.agui.agents() == []
+            assert store.backup is not None
+            with sqlite3.connect(store.backup) as db:
+                assert db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0] == "16"
+                assert (
+                    db.execute("SELECT name FROM sqlite_master WHERE name='agui_runs'").fetchone()
+                    is None
+                )
+        finally:
+            await store.close()
+
+    asyncio.run(migrate())
+    with sqlite3.connect(path) as db:
+        assert (
+            db.execute("SELECT value FROM interaction_cursors WHERE chat_id='c1'").fetchone()[0]
+            == 17
+        )
+        assert db.execute("SELECT count(*) FROM agui_runs").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM agui_events").fetchone()[0] == 0
 
 
 def test_failed_migration_rolls_back_columns_and_version(tmp_path: Path, monkeypatch) -> None:
