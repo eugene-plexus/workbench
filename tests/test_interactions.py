@@ -172,7 +172,8 @@ def test_production_advertises_no_protocol_and_has_no_publisher(world: World) ->
     ada = world.browser()
     ada.sign_in("p-ada")
     response = ada.get("/api/v1/interactions/capabilities")
-    assert response.json() == {"version": 1, "supportedProtocols": []}
+    assert response.json()["supportedProtocols"] == []
+    assert response.json()["backendProtocols"][0]["renderer"] is False
     assert ada.post(root(ada.new_chat()) + "/surfaces", json={}).status_code in (404, 405)
 
 

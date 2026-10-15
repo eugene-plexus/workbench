@@ -12,9 +12,11 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from . import mcp_ui
 from .api import _own_chat, _person, _readable_chat, _state, hidden_from_owner, install_mode
 from .interaction_store import InteractionError, encoded
 from .interactions import Interactions
+from .mcp_apps import McpApps
 
 router = APIRouter(prefix="/api/v1")
 
@@ -80,6 +82,13 @@ class Decision(BaseModel):
     approve: bool
 
 
+class AppRead(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    revision: int = Field(ge=1)
+    method: str = Field(max_length=80)
+    params: dict[str, Any]
+
+
 async def problem(request: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, InteractionError)
     return JSONResponse(status_code=exc.status, content={"detail": {"message": exc.message}})
@@ -98,7 +107,18 @@ async def capabilities(request: Request) -> dict[str, Any]:
         "supportedProtocols": [
             {"protocol": protocol, "version": version}
             for protocol, version in sorted(service(request).adapters)
+            if protocol != mcp_ui.PROTOCOL
         ],
+        "backendProtocols": [
+            {
+                "protocol": mcp_ui.PROTOCOL,
+                "version": mcp_ui.VERSION,
+                "renderer": False,
+                "methods": [*mcp_ui.READS, *mcp_ui.ACTIONS],
+            }
+        ]
+        if (mcp_ui.PROTOCOL, mcp_ui.VERSION) in service(request).adapters
+        else [],
     }
 
 
@@ -155,6 +175,26 @@ async def propose(
     person = await _person(request)
     await _own_chat(request, person, chat_id)
     return await service(request).propose(person, chat_id, surface_id, body.model_dump())
+
+
+@router.post("/chats/{chat_id}/interactions/surfaces/{surface_id}/mcp-apps/read")
+async def app_read(request: Request, chat_id: str, surface_id: str, body: AppRead) -> JSONResponse:
+    person = await _person(request)
+    await _own_chat(request, person, chat_id)
+    adapter = service(request).adapters.get((mcp_ui.PROTOCOL, mcp_ui.VERSION))
+    if not isinstance(adapter, McpApps):
+        raise InteractionError("MCP Apps backend is unavailable.", 503)
+    result = await adapter.read(
+        person, chat_id, surface_id, body.revision, body.method, body.params
+    )
+    return JSONResponse(
+        result,
+        headers={
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
+        },
+    )
 
 
 @router.post("/chats/{chat_id}/interactions/actions/{action_id}/decision")
