@@ -1,0 +1,14 @@
+{
+  "upstreamCommit": "c07134caf2f63e3356c4439d248afc9eb04f310e",
+  "license": "Apache-2.0",
+  "files": {
+    "basic_catalog.json": "8cc94d0a482e67048f9fc989964ca5da56fe42f531d919315a508989fb22e13e",
+    "client_to_server.json": "f049f8a554296a603cd3c1cef37dd6811006dc90e3ff52ce845d1674cd00a6b7",
+    "common_types.json": "a13897d7dbe14c37512c5cbc9b8561782fc3b01e3a6ff114c1f12c82275b5884",
+    "forms-v1.json": "c68c326dfef4138c15278a09f8ac8a189e47832148ad72177e87f116550b9f9a",
+    "interactive_button.json": "19d990117be8d66ffed20d5bb21127c9d153f90b8e3b2670f80c72d34aad0fb5",
+    "LICENSE": "8c8b5b632d56c4c1658296963c693db5396772a33caaddb9a22593c4155c437a",
+    "server_to_client.json": "21693ba612f029940222ac788ff381c5fe0ef08f612312ff934db7a2daaca289",
+    "simple_text.json": "130ae3b46fa16b24246fb5bcd5d14d9707abbae8adda5fbd047ad98d1b13a56b"
+  }
+}

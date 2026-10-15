@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 
 from . import (
+    a2ui_state,
     api,
     artifacts_api,
     config,
@@ -28,6 +29,7 @@ from . import (
 )
 from ._build import commit
 from ._http import ssl_context
+from .a2ui import A2UI
 from .answers import Answers
 from .hub import Hub
 from .interaction_store import InteractionError
@@ -197,6 +199,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.interactions = Interactions(store, app.state.sessions)
         tools.apps = McpApps(tools, app.state.interactions)
         app.state.interactions.adapters[(MCP_APPS_PROTOCOL, MCP_APPS_VERSION)] = tools.apps
+        tools.a2ui = A2UI(tools, app.state.interactions, tools.apps)
+        app.state.interactions.adapters[(a2ui_state.PROTOCOL, a2ui_state.VERSION)] = tools.a2ui
         await store.interactions.sweep(restart=True)
         for problem in (provider.why_not(), hub.why_not()):
             if problem:
