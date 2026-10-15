@@ -366,6 +366,64 @@ class InteractionStore:
     async def surface(self, chat: str, surface: str) -> dict[str, Any]:
         return await self._run(lambda db: _surface(db, chat, surface))
 
+    async def authorized_surface(
+        self, person: Person, chat: str, surface: str, revision: int
+    ) -> dict[str, Any]:
+        def read(db: sqlite3.Connection) -> dict[str, Any]:
+            _own(db, chat, person)
+            saved = _surface(db, chat, surface)
+            if not _valid(
+                db,
+                saved,
+                {
+                    "sessionId": person.session_id,
+                    "expiresAt": saved["expires_at"],
+                    "revision": revision,
+                },
+            ):
+                raise InteractionError("This app is no longer available at this revision.")
+            return saved
+
+        return await self._run(read)
+
+    async def model_context(self, chat: str) -> list[dict[str, str]]:
+        """Only explicit, approved projections enter the next user-requested turn."""
+
+        def read(db: sqlite3.Connection) -> list[dict[str, str]]:
+            branch = selected(db, chat)
+            items: dict[tuple[str, str], str] = {}
+            for row in db.execute(
+                "SELECT a.* FROM interaction_actions a WHERE a.chat_id=? "
+                "AND a.status='completed' "
+                "ORDER BY COALESCE(json_extract(a.data,'$.completedOrder'),0),a.rowid",
+                (chat,),
+            ).fetchall():
+                action = action_row(row)
+                surface = _surface(db, chat, action["surfaceId"])
+                if surface["protocol"] != "mcp-apps" or surface["message_id"] not in branch:
+                    continue
+                text = action.get("modelText")
+                if not text:
+                    continue
+                key = (
+                    ("context", surface["id"])
+                    if action["name"] == "ui/update-model-context"
+                    else ("action", action["id"])
+                )
+                items.pop(key, None)
+                items[key] = text
+            result: list[dict[str, str]] = []
+            size = 0
+            for text in reversed(list(items.values())):
+                message = {"role": "user", "content": "Approved MCP app context:\n" + text}
+                size += len(encoded(message, 128 * 1024).encode("utf-8")) + 1
+                if size > 64 * 1024:
+                    break
+                result.append(message)
+            return list(reversed(result))
+
+        return await self._run(read)
+
     async def propose(
         self, person: Person, chat: str, surface_id: str, proposal: dict[str, Any]
     ) -> dict[str, Any]:
@@ -481,6 +539,11 @@ class InteractionStore:
                 - 144 * 1024,
             )
             action.update(status=status, result=result, modelText=model_text, error=error)
+            if status == "completed":
+                cursor = db.execute(
+                    "SELECT value FROM interaction_cursors WHERE chat_id=?", (chat,)
+                ).fetchone()
+                action["completedOrder"] = (cursor[0] if cursor else 0) + 1
             _save(db, chat, action)
 
         await self._run(write)

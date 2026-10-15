@@ -14,17 +14,18 @@ import json
 import ssl
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 import httpx2
 from jsonschema import Draft202012Validator
 from mcp import Client
+from mcp.client.extension import advertise
 from mcp.client.streamable_http import streamable_http_client
 from referencing import Registry
 from referencing.exceptions import NoSuchResource
 
-from . import folder_io, folders
+from . import folder_io, folders, mcp_ui
 from .content import CONTENT_VERSION, Keeper, normalize
 from .local_tools import LocalProcesses, LocalToolError, unavailable
 from .node_folders import FILES as SITE_FILES
@@ -32,6 +33,9 @@ from .node_folders import PREFIX as NODE_FOLDER_PREFIX
 from .node_folders import SITE_PREFIX, Held, NodeFolders, site_server_id
 from .settings import Settings
 from .store import Person, Store
+
+if TYPE_CHECKING:
+    from .mcp_apps import McpApps
 
 MAX_TOOLS = 64
 #: Where a job site's tool listing says a call must be asked about (2b.3b):
@@ -203,6 +207,7 @@ class Tools:
         self.folders = folders.Folders(store, settings)
         self.node_folders: NodeFolders | None = None
         self.tls = ssl.create_default_context()
+        self.apps: McpApps | None = None
 
     @asynccontextmanager
     async def connect(
@@ -263,6 +268,7 @@ class Tools:
                             transport,
                             read_timeout_seconds=30,
                             cache=None,
+                            extensions=[advertise(mcp_ui.EXTENSION, {"mimeTypes": [mcp_ui.MIME]})],
                         )
                     )
                     cursor = None
@@ -277,7 +283,17 @@ class Tools:
                                     "A tool has an unsupported input schema. "
                                     "Ask the server owner to check it."
                                 )
-                            session.add(server, client, tool.name, schema, tool.description or "")
+                            session.add(
+                                server,
+                                client,
+                                tool.name,
+                                schema,
+                                tool.description or "",
+                                meta=tool.meta or {},
+                            )
+                            session.descriptors[(server_id, tool.name)] = tool.model_dump(
+                                mode="json", by_alias=True, exclude_none=True
+                            )
                         cursor = page.next_cursor
                         if cursor is None:
                             break
@@ -466,6 +482,10 @@ class ToolSession:
         self.folders = tools.folders
         self.node_folders = tools.node_folders
         self.person = person
+        self.apps = tools.apps
+        self.metadata: dict[str, dict[str, Any]] = {}
+        self.descriptors: dict[tuple[str, str], dict[str, Any]] = {}
+        self.model_names: set[str] = set()
         self.definitions: list[dict[str, Any]] = []
         self.tools: dict[str, tuple[dict[str, Any], Any, str, dict[str, Any]]] = {}
         #: Each job-site tool's rule for asking (`_ask_rule`); absent for every
@@ -484,6 +504,7 @@ class ToolSession:
         *,
         ask: frozenset[str] | bool | None = None,
         signed: bool = False,
+        meta: dict[str, Any] | None = None,
     ) -> None:
         files = server["transport"] == "folder" or server.get("server") == SITE_FILES
         prefix = "files_" if files else "mcp_"
@@ -494,8 +515,16 @@ class ToolSession:
             )
         self.tools[name] = (server, client, tool, schema)
         self.asks[name] = ask
+        self.metadata[name] = meta or {}
+        try:
+            visible = mcp_ui.visibility(self.metadata[name])
+        except ValueError:
+            raise ToolError("The tool server supplied invalid UI visibility.") from None
         if signed:
             self.signed.add(name)
+        if "model" not in visible:
+            return
+        self.model_names.add(name)
         self.definitions.append(
             {
                 "type": "function",
@@ -509,7 +538,7 @@ class ToolSession:
 
     def prepare(self, call: dict[str, Any]) -> dict[str, Any]:
         name = call["function"]["name"]
-        if name not in self.tools:
+        if name not in self.model_names:
             raise ToolError("The model asked for a tool that was not offered. Try another model.")
         server, _, tool, schema = self.tools[name]
         try:
@@ -670,6 +699,10 @@ class ToolSession:
                 result=f"{reason} The tool call did not return a result. "
                 "It may have acted. Check the server before trying again.",
             )
+            return
+        # UI publication cannot turn a confirmed tool result into an uncertain call.
+        if self.apps is not None and keeper is not None:
+            await self.apps.capture(self, call, result, keeper)
 
     @staticmethod
     async def _settle(

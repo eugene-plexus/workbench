@@ -36,6 +36,9 @@ from .knowledge.folder_sync import FolderSync
 from .knowledge.index import IndexUnavailable
 from .knowledge.reader import Reader
 from .knowledge.saved import SavedDocuments
+from .mcp_apps import McpApps
+from .mcp_ui import PROTOCOL as MCP_APPS_PROTOCOL
+from .mcp_ui import VERSION as MCP_APPS_VERSION
 from .media import MediaJobs
 from .node_folders import NodeFolders
 from .sessions import Sessions
@@ -192,6 +195,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.folder_sync = folder_sync
         app.state.sessions = Sessions(store, provider)
         app.state.interactions = Interactions(store, app.state.sessions)
+        tools.apps = McpApps(tools, app.state.interactions)
+        app.state.interactions.adapters[(MCP_APPS_PROTOCOL, MCP_APPS_VERSION)] = tools.apps
         await store.interactions.sweep(restart=True)
         for problem in (provider.why_not(), hub.why_not()):
             if problem:

@@ -424,6 +424,10 @@ class Answers:
                     m.status = "done"
                     return
             body = await asyncio.to_thread(build)
+            context = await self._store.interactions.model_context(chat_id)
+            if context:
+                # Ordinary user context, before the current explicit request.
+                body["messages"][-1:-1] = context
             if tool_servers or folder_grants:
                 await self._with_tools(running, body, tool_servers, folder_grants)
             else:

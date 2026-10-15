@@ -1,4 +1,4 @@
-"""Durable interaction coordinator. Production registers no adapters until G2-G4.
+"""Durable interaction coordinator for trusted backend protocol adapters.
 
 Adapters are trusted server code, never loaded from a message, URL or browser.
 Approval belongs to the host, not to an embedded app's bridge.
