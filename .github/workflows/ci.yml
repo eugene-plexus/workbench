@@ -48,6 +48,8 @@ jobs:
         run: mypy src/
       - name: Pytest
         run: pytest
+      - name: Durable interaction acceptance detects broken guards
+        run: python scripts/check-interactions-sabotage.py
 
   page:
     name: Page — type-check, lint, test, build

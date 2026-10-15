@@ -100,6 +100,16 @@ To make a `dist` commit from a `main` commit:
 
 The config-trio shapes are generated from [`eugene-plexus/specs`](https://github.com/eugene-plexus/specs) at the commit in `SPECS_REF`. Run `python scripts/codegen.py` to regenerate them.
 
+The backend's [interaction API v1](https://github.com/eugene-plexus/specs/blob/62d2d74214ab9a6911259f5ed6b42c3d60406d6c/docs/design/workbench-interactions-v1.md)
+keeps versioned surfaces and approved action intent through restart. It reuses
+chat ownership, answer branches and sign-in checks, and never retries an uncertain
+external call. Schema 16 adds these records after backing up an older database.
+No AG-UI, A2UI or MCP Apps adapter is enabled yet; the capability list is empty
+until each adapter passes its own acceptance. There is no production renderer or
+embedded bridge for these protocols yet. `tests/test_interactions.py` exercises
+the foundation over HTTP, including killing and restarting a Workbench process;
+`scripts/check-interactions-sabotage.py` proves its guards are tested.
+
 ## Licence
 
 Apache 2.0. Eugene's mascot and logo come from the project's website and are under the same licence, as are the working scenes drawn from them.

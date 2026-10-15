@@ -1063,6 +1063,7 @@ async def choose(request: Request, chat_id: str, message_id: str) -> dict[str, A
 async def stop(request: Request, chat_id: str) -> Response:
     person = await _person(request)
     chat = await _own_chat(request, person, chat_id)
+    await _state(request).interactions.stop(chat.id)
     await _answers(request).stop(chat.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

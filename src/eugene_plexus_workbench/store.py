@@ -1,8 +1,8 @@
 """Where Workbench keeps people's chats, its sessions and its settings.
 
 **One interface, SQLite behind it** (`workbench-v1.md` W8). Every read and
-write goes through `Store`'s methods and nothing else names a table, so a
-Postgres store for a business that outgrows SQLite implements this class
+write goes through `Store` and its transactional `interactions` storage helper;
+nothing outside storage code names a table. A Postgres store implements this interface
 and nothing else changes. No migration tool: `SCHEMA_VERSION`, the statements
 under it and `_MIGRATIONS` are the whole history, from `OLDEST_SCHEMA` (what
 Workbench v0.1 wrote) on. A store older than that, or newer than this knows, is
@@ -84,7 +84,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 15
+from .interaction_store import SCHEMA as INTERACTION_SCHEMA
+from .interaction_store import InteractionStore
+
+SCHEMA_VERSION = 16
 
 #: The oldest schema this migrates from: what Workbench v0.1.0 wrote. Schema 1 predates
 #: it, and nobody holds one.
@@ -454,6 +457,8 @@ _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
         "author TEXT NOT NULL CHECK (author IN ('answer', 'person')), created_at REAL NOT NULL, "
         "PRIMARY KEY (artifact_id, number))",
     ],
+    # Interactive surfaces and durable action intent; no existing chat data changes.
+    16: [*INTERACTION_SCHEMA],
 }
 
 
@@ -579,7 +584,7 @@ def _initialize_schema(
         for statement in _SCHEMA.split(";"):
             if statement.strip():
                 db.execute(statement)
-        for statement in _MEMORY_SCHEMA:
+        for statement in [*_MEMORY_SCHEMA, *INTERACTION_SCHEMA]:
             db.execute(statement)
         db.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?)",
@@ -1269,6 +1274,8 @@ def _choose(db: sqlite3.Connection, chat_id: str, message_id: str) -> bool:
                 (node, chat_id, above),
             )
         node = above
+    db.execute("UPDATE interaction_cursors SET value=value+1 WHERE chat_id=?", (chat_id,))
+    InteractionStore.sweep_in_transaction(db, chat_id)
     return True
 
 
@@ -1279,6 +1286,7 @@ class Store:
         self._path = path
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="workbench-store")
         self._db: sqlite3.Connection | None = None
+        self.interactions = InteractionStore(self)
         #: The copy that holds this store as it was before it was migrated, if it was: a
         #: new one, or the one an earlier start kept of the same content. What a failure
         #: after the copy points the person to.
@@ -1439,6 +1447,7 @@ class Store:
         await self._run(
             lambda: self._conn().execute("DELETE FROM sessions WHERE id_hash = ?", (id_hash,))
         )
+        await self.interactions.sweep()
 
     async def sweep_sessions(self, now: float) -> None:
         await self._run(
@@ -2679,6 +2688,7 @@ class Store:
         await self._run(
             lambda: self._conn().execute("DELETE FROM tool_servers WHERE id = ?", (server_id,))
         )
+        await self.interactions.sweep()
 
     async def folder_grants(self) -> list[dict[str, Any]]:
         return await self._run(
