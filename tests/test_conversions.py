@@ -127,7 +127,7 @@ def test_the_store_v0_1_wrote_is_migrated_and_every_chat_comes_through(tmp_path:
     store = open_store(path)
     try:
         # The version is recorded.
-        assert schema_of(path) == str(SCHEMA_VERSION) == "15"
+        assert schema_of(path) == str(SCHEMA_VERSION) == "16"
         # Everything v0.1 held is there, column for column.
         for table, columns in {
             "people": "sub, name, username, role, first_seen, last_seen",
@@ -261,7 +261,7 @@ def test_a_second_start_changes_nothing_and_keeps_no_second_copy(tmp_path: Path)
 
     assert second.backup is None
     assert backups_of(path) == [copy] and (copy.read_bytes(), copy.stat().st_mtime_ns) == kept
-    assert everything(path) == after_first and schema_of(path) == "15"
+    assert everything(path) == after_first and schema_of(path) == "16"
 
 
 # --- a start that stopped midway -----------------------------------------------------------------
@@ -291,7 +291,7 @@ def test_a_migration_that_stopped_part_way_changed_nothing_and_reruns_cleanly(
     again = open_store(path)
     close(again)
 
-    assert schema_of(path) == "15" and again.backup == copy
+    assert schema_of(path) == "16" and again.backup == copy
     assert backups_of(path) == [copy] and everything(copy) == before
 
 
@@ -318,7 +318,7 @@ def test_a_start_that_stopped_after_the_copy_and_before_the_migration_reruns_cle
     again = open_store(path)
     close(again)
 
-    assert schema_of(path) == "15" and backups_of(path) == [copy]
+    assert schema_of(path) == "16" and backups_of(path) == [copy]
     assert everything(copy) == before
 
 
@@ -358,7 +358,7 @@ def test_a_copy_that_is_already_there_is_kept_not_replaced(tmp_path: Path) -> No
     assert (earlier.read_bytes(), earlier.stat().st_mtime_ns) == kept
     assert rows(earlier, "older") == [("an earlier start kept this",)]
     assert schema_of(beside) == "2" and everything(beside) == before
-    assert schema_of(path) == "15"
+    assert schema_of(path) == "16"
 
 
 def test_a_store_that_changed_after_a_failed_start_gets_a_copy_of_its_own(
@@ -384,7 +384,7 @@ def test_a_store_that_changed_after_a_failed_start_gets_a_copy_of_its_own(
     assert (first.read_bytes(), first.stat().st_mtime_ns) == kept, "the first copy is as it was"
     assert "written-after" not in chat_ids(first)
     assert "written-after" in chat_ids(second) and schema_of(second) == "2"
-    assert schema_of(path) == "15" and "written-after" in chat_ids(path)
+    assert schema_of(path) == "16" and "written-after" in chat_ids(path)
     assert list(tmp_path.glob("*.part")) == []
 
 
@@ -406,7 +406,7 @@ def test_a_store_that_has_not_changed_makes_no_second_copy_however_often_it_star
 
     assert store.backup == copy and backups_of(path) == [copy]
     assert (copy.read_bytes(), copy.stat().st_mtime_ns) == kept and everything(copy) == before
-    assert schema_of(path) == "15"
+    assert schema_of(path) == "16"
 
 
 def test_a_store_is_compared_with_the_newest_copy_and_every_earlier_one_is_kept(
@@ -725,7 +725,7 @@ def test_a_workbench_that_starts_degraded_starts_again_when_the_cause_is_gone(
         assert client.get("/healthz").json()["status"] == "ok"
         assert client.get("/api/status").status_code == 200
 
-    assert schema_of(path) == "15"
+    assert schema_of(path) == "16"
     assert len(backups_of(path)) == 1, "the retry reused the copy the first start kept"
 
 

@@ -18,6 +18,7 @@ from . import (
     documents_api,
     folder_docs_api,
     folders_api,
+    interactions_api,
     job_sites_api,
     media_api,
     memory_api,
@@ -29,6 +30,8 @@ from ._build import commit
 from ._http import ssl_context
 from .answers import Answers
 from .hub import Hub
+from .interaction_store import InteractionError
+from .interactions import Interactions
 from .knowledge.folder_sync import FolderSync
 from .knowledge.index import IndexUnavailable
 from .knowledge.reader import Reader
@@ -188,6 +191,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.saved = saved
         app.state.folder_sync = folder_sync
         app.state.sessions = Sessions(store, provider)
+        app.state.interactions = Interactions(store, app.state.sessions)
+        await store.interactions.sweep(restart=True)
         for problem in (provider.why_not(), hub.why_not()):
             if problem:
                 log.warning("%s", problem)
@@ -201,6 +206,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             yield
         finally:
+            await app.state.interactions.aclose()
             await answers.aclose()
             await folder_sync.aclose()
             await saved.aclose()
@@ -215,6 +221,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.degraded = None
     # Innermost: the headers and the canonical origin wrap what a degraded Workbench says.
     app.add_middleware(web.Degraded)
+    app.add_middleware(interactions_api.BodyLimit)
     app.add_middleware(web.SecurityHeaders)
     if settings.public_origin:
         from .public_origin import CanonicalOrigin
@@ -223,6 +230,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(config.router)
     app.include_router(api.router)
     app.include_router(artifacts_api.router)
+    app.include_router(interactions_api.router)
     app.include_router(media_api.router)
     app.include_router(memory_api.router)
     app.include_router(documents_api.router)
@@ -235,5 +243,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_exception_handler(job_sites_api.HeldAtTheMachine, job_sites_api.held_response)
     app.add_exception_handler(IndexUnavailable, saved_api.index_unavailable)
     app.add_exception_handler(RequestValidationError, web.invalid_request)
+    app.add_exception_handler(InteractionError, interactions_api.problem)
     web.mount(app, web.static_dir(settings.static_dir))
     return app

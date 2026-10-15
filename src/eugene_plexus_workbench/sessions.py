@@ -178,6 +178,18 @@ class Sessions:
                 row.id_hash, identity.refresh_token, time.time() + identity.expires_in
             )
 
+    async def current(self, session_id: str | None, sub: str) -> Person:
+        """Recheck an already authenticated action's sign-in before dispatch."""
+        row = await self._store.session(session_id) if session_id else None
+        if row is None or row.sub != sub or time.time() >= row.expires_at:
+            raise SignedOut("revoked", _REVOKED)
+        if time.time() >= row.access_expires_at - _EARLY:
+            await self._refresh(row)
+        person = await self._store.person(sub)
+        if person is None:
+            raise SignedOut("revoked", _REVOKED)
+        return replace(person, session_id=row.id_hash)
+
 
 _REVOKED = (
     "Eugene no longer accepts this sign-in. The owner may have turned your account off or "

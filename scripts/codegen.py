@@ -32,8 +32,9 @@ WORKING_DIR = REPO_ROOT / ".codegen-cache"
 
 SPECS_TARBALL_URL_TEMPLATE = "https://github.com/eugene-plexus/specs/archive/{ref}.tar.gz"
 
-# Workbench is an app, not a component: it serves no contract of its own.
-# What it shares with the hub is the config trio's shapes (common.yaml),
+# Workbench's application interaction API is specified separately in specs;
+# its host request models are implemented in interactions_api.py. What it
+# shares with the hub is the config trio's shapes (common.yaml),
 # which the console renders and the agent checks every answer against.
 # Its calls to the gateway are an ordinary OpenAI client's, made the way
 # any other app makes them.
