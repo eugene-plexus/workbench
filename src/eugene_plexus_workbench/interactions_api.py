@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from . import a2ui_state, mcp_ui
+from . import a2ui_state, agui_protocol, mcp_ui
 from .a2ui import A2UI
 from .api import _own_chat, _person, _readable_chat, _state, hidden_from_owner, install_mode
 from .interaction_store import InteractionError, encoded
@@ -29,11 +29,12 @@ class BodyLimit:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        agui = scope["type"] == "http" and "ag-ui" in scope.get("path", "").split("/")
         if (
             scope["type"] != "http"
             or scope["method"] != "POST"
-            or not scope["path"].startswith("/api/v1/chats/")
-            or "/interactions/" not in scope["path"]
+            or not scope["path"].startswith("/api/v1/")
+            or ("/interactions/" not in scope["path"] and not agui)
         ):
             await self.app(scope, receive, send)
             return
@@ -44,11 +45,12 @@ class BodyLimit:
                 if message["type"] == "http.disconnect":
                     return
                 data.extend(message.get("body", b""))
-                if len(data) > 24 * 1024:
+                if len(data) > (512 * 1024 if agui else 24 * 1024):
                     raise InteractionError("The action request is too large.", 413)
                 if not message.get("more_body", False):
                     break
-            encoded(json.loads(data), 20 * 1024)
+            if data:
+                encoded(json.loads(data), 512 * 1024 if agui else 20 * 1024)
         except (ValueError, RecursionError, UnicodeError, InteractionError) as exc:
             code = exc.status if isinstance(exc, InteractionError) else 422
             response = JSONResponse(
@@ -141,7 +143,8 @@ async def capabilities(request: Request) -> dict[str, Any]:
             ]
             if (a2ui_state.PROTOCOL, a2ui_state.VERSION) in service(request).adapters
             else []
-        ),
+        )
+        + [agui_protocol.capability()],
     }
 
 

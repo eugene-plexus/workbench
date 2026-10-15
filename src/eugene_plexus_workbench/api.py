@@ -437,7 +437,14 @@ async def list_chats(request: Request) -> dict[str, Any]:
     person = await _person(request)
     answers = _answers(request)
     chats = await _state(request).store.chats(person.sub)
-    return {"chats": [chat_view(c, running=answers.running(c.id) is not None) for c in chats]}
+    return {
+        "chats": [
+            chat_view(
+                c, running=answers.running(c.id) is not None or _state(request).agui.busy(c.id)
+            )
+            for c in chats
+        ]
+    }
 
 
 @router.post("/api/chats", status_code=status.HTTP_201_CREATED)
@@ -516,7 +523,11 @@ async def _chat_detail(
             views, hidden_from_owner(tree, (await install_mode(request))["mode"])
         )
     return {
-        "chat": chat_view(chat, running=running is not None, read_only=read_only),
+        "chat": chat_view(
+            chat,
+            running=running is not None or _state(request).agui.busy(chat.id),
+            read_only=read_only,
+        ),
         "messages": views,
         "ownerName": owner.name if owner else None,
     }
@@ -686,7 +697,11 @@ async def update_chat(request: Request, chat_id: str, body: ChatUpdate) -> dict[
     values["updated_at"] = time.time()
     await _state(request).store.update_chat(chat.id, **values)
     fresh = await _own_chat(request, person, chat_id)
-    return chat_view(fresh, running=_answers(request).running(chat.id) is not None)
+    return chat_view(
+        fresh,
+        running=_answers(request).running(chat.id) is not None
+        or _state(request).agui.busy(chat.id),
+    )
 
 
 @router.delete("/api/chats/{chat_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -694,6 +709,7 @@ async def delete_chat(request: Request, chat_id: str) -> Response:
     person = await _person(request)
     chat = await _own_chat(request, person, chat_id)
     store: Store = _state(request).store
+    await _state(request).agui.stop(chat.id)
     await _answers(request).stop(chat.id)
     records = await store.files_for_chat(chat.id)
     await store.delete_chat(chat.id)
@@ -748,7 +764,11 @@ async def person_chats(request: Request, sub: str) -> dict[str, Any]:
     answers = _answers(request)
     return {
         "chats": [
-            chat_view(c, running=answers.running(c.id) is not None, read_only=True)
+            chat_view(
+                c,
+                running=answers.running(c.id) is not None or _state(request).agui.busy(c.id),
+                read_only=True,
+            )
             for c in await store.chats(sub)
         ]
     }
@@ -800,6 +820,7 @@ async def _ask(
             model=model,
         ),
         parent_id=parent_id,
+        agui_run_id=getattr(request.state, "agui_run", None),
     )
     history = (await store.messages(chat.id, via=answer.id))[:-1]
     root = _state(request).settings.data_dir
@@ -869,7 +890,9 @@ async def _ask(
 
 
 def _no_running(request: Request, chat: Chat) -> None:
-    if _answers(request).running(chat.id) is not None:
+    if _answers(request).running(chat.id) is not None or _state(request).agui.busy(
+        chat.id, getattr(request.state, "agui_run", None)
+    ):
         raise _problem(
             status.HTTP_409_CONFLICT,
             "An answer is still being written in this chat. Wait for it, or stop it.",
@@ -922,6 +945,7 @@ async def send(request: Request, chat_id: str, body: Send) -> dict[str, Any]:
             ),
             # Sending continues from the end of the path shown.
             parent_id=shown[-1].id if shown else None,
+            agui_run_id=getattr(request.state, "agui_run", None),
         )
     except AttachmentGone:
         # Removed in another tab while this send was being checked.
@@ -1063,6 +1087,7 @@ async def choose(request: Request, chat_id: str, message_id: str) -> dict[str, A
 async def stop(request: Request, chat_id: str) -> Response:
     person = await _person(request)
     chat = await _own_chat(request, person, chat_id)
+    await _state(request).agui.stop(chat.id)
     await _state(request).interactions.stop(chat.id)
     await _answers(request).stop(chat.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

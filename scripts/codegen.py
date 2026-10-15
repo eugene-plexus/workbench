@@ -147,6 +147,11 @@ def main() -> None:
             REPO_ROOT / "src" / "eugene_plexus_workbench" / "a2ui_schema",
             dirs_exist_ok=True,
         )
+        shutil.copytree(
+            specs_root / "protocols" / "ag-ui",
+            REPO_ROOT / "src" / "eugene_plexus_workbench" / "agui_schema",
+            dirs_exist_ok=True,
+        )
     finally:
         if WORKING_DIR.exists():
             shutil.rmtree(WORKING_DIR)

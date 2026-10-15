@@ -1,0 +1,24 @@
+{
+  "upstreamCommit": "b3f61a96fa3c755f37558ac44f4acc5b1c3828f1",
+  "protocolVersion": "1.0",
+  "license": "MIT",
+  "files": {
+    "LICENSE": "06dcddbb6908a0c6dd4a9e8ec822eea41d5a460a53089fecccc8a68049e99241",
+    "schema.json": "4b5c93226838a0e72d88e6c5df20633c686c49fcb75d9be2815c6cbf9e48e71a",
+    "streams/triad-assembles-message.json": "6894e7aabdb33ac935a75324e8470cc61189d0537f3ec472044643a6b5405f5e",
+    "streams/tool-call-triad-assembles.json": "70879cec59ec4229a36367a718c27b20f4a432b111725fff312d3bb269f3229a",
+    "streams/state-delta-applies.json": "af7c6ac7375f37064762a5737855d732b077921c0448579dde6bd718b437d357",
+    "streams/state-snapshot-replaces.json": "d53eae74f426b2e9c43d17a40fb92e2c0c71facebfb0bf0809b6a46ffca56b20",
+    "streams/state-falsy-snapshot-applies.json": "f28cc0884eb06f15c0aae73296546263f180c240fa6f4b90368281ebacbc80ec",
+    "streams/state-null-snapshot-applies.json": "267c92c3c6475f72a09c6a8c434ec9eff1ccdde6466e6569f00b690126f62540",
+    "streams/messages-snapshot-reconciles-by-id.json": "5a6aaf72e10a19c9b05d4ecb92945c890692e11dc8f7497ae6084c0f85744f48",
+    "streams/content-without-start-fatal.json": "fe881c0e5a1e3d853baeec000598e4a1f43e3bf2f1def3e165d9ad39c5eb9ed5",
+    "streams/nested-run-started-fatal.json": "765216d58b9523faed91eef77e88c1649361b5629d851739d3aa4b8a69775fc9",
+    "streams/open-message-at-run-finished-fatal.json": "239de7e76cc3ae7b0028866170348cba6af36bf2c4c51a3194cfc9900a15d026",
+    "streams/event-after-run-finished-fatal.json": "2f1cef66b153713c362f9be70a18b67d4acaa7c62455ccb71494584daae226c0",
+    "streams/step-finished-without-start-fatal.json": "3d0de1ae9ff5a1a989a15cdbcd56888ac6d91eee6d0d5b781c348f786b5b17cf",
+    "streams/reopen-closed-message-appends.json": "f183d68694df4ca5536bfbcd76c29e671b333e7ebe9d9872d8e8f48ae2fb5e92",
+    "streams/run-finished-cancelled-outcome-accepted.json": "9f8326ef26d1b1b77b5a81107a3e88a56a069ddcc79bc4bc6a74b8583b05275c",
+    "streams/run-finished-interrupt-outcome-accepted.json": "95a4e83c4bbfc430312520e84d86ae5dd310a788ddd769b75a2dc95e53c851ef"
+  }
+}

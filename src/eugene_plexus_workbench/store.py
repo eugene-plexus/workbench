@@ -84,10 +84,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .agui_store import SCHEMA as AGUI_SCHEMA
+from .agui_store import AGUIStore, allow_chat_write
 from .interaction_store import SCHEMA as INTERACTION_SCHEMA
 from .interaction_store import InteractionStore
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 #: The oldest schema this migrates from: what Workbench v0.1.0 wrote. Schema 1 predates
 #: it, and nobody holds one.
@@ -459,6 +461,7 @@ _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
     ],
     # Interactive surfaces and durable action intent; no existing chat data changes.
     16: [*INTERACTION_SCHEMA],
+    17: [*AGUI_SCHEMA],
 }
 
 
@@ -584,7 +587,7 @@ def _initialize_schema(
         for statement in _SCHEMA.split(";"):
             if statement.strip():
                 db.execute(statement)
-        for statement in [*_MEMORY_SCHEMA, *INTERACTION_SCHEMA]:
+        for statement in [*_MEMORY_SCHEMA, *INTERACTION_SCHEMA, *AGUI_SCHEMA]:
             db.execute(statement)
         db.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?)",
@@ -1287,6 +1290,7 @@ class Store:
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="workbench-store")
         self._db: sqlite3.Connection | None = None
         self.interactions = InteractionStore(self)
+        self.agui = AGUIStore(self)
         #: The copy that holds this store as it was before it was migrated, if it was: a
         #: new one, or the one an earlier start kept of the same content. What a failure
         #: after the copy points the person to.
@@ -1528,7 +1532,9 @@ class Store:
 
     # --- messages -------------------------------------------------------
 
-    async def add_message(self, message: Message, *, parent_id: str | None) -> Message:
+    async def add_message(
+        self, message: Message, *, parent_id: str | None, agui_run_id: str | None = None
+    ) -> Message:
         """Add `message` after `parent_id`, numbered after the chat's last row.
 
         It becomes the chosen version among those that follow its parent, so
@@ -1543,6 +1549,7 @@ class Store:
             db = self._conn()
             db.execute("BEGIN IMMEDIATE")
             try:
+                allow_chat_write(db, message.chat_id, agui_run_id)
                 if message.attachments:
                     marks = ", ".join("?" for _ in message.attachments)
                     found = {
@@ -1617,6 +1624,7 @@ class Store:
             db = self._conn()
             db.execute("BEGIN IMMEDIATE")
             try:
+                allow_chat_write(db, chat_id)
                 found = _choose(db, chat_id, message_id)
                 db.execute("COMMIT")
             except BaseException:

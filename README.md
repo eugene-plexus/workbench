@@ -103,12 +103,15 @@ The config-trio shapes are generated from [`eugene-plexus/specs`](https://github
 The backend's [interaction API v1](https://github.com/eugene-plexus/specs/blob/62d2d74214ab9a6911259f5ed6b42c3d60406d6c/docs/design/workbench-interactions-v1.md)
 keeps versioned surfaces and approved action intent through restart. It reuses
 chat ownership, answer branches and sign-in checks, and never retries an uncertain
-external call. Schema 16 adds these records after backing up an older database.
-No AG-UI, A2UI or MCP Apps adapter is enabled yet; the capability list is empty
-until each adapter passes its own acceptance. There is no production renderer or
-embedded bridge for these protocols yet. `tests/test_interactions.py` exercises
-the foundation over HTTP, including killing and restarting a Workbench process;
-`scripts/check-interactions-sabotage.py` proves its guards are tested.
+external call. Schema 17 adds durable AG-UI runs and event projections after
+backing up an older database. Headless backends support MCP Apps 2026-01-26,
+A2UI 0.9.1 with the forms catalog, and AG-UI 1.0 in both serve and connect directions.
+The [AG-UI contract](https://github.com/eugene-plexus/specs/blob/d1bd751695b3d788c69073c383ad4ca3b2883e41/docs/design/workbench-ag-ui-v1.md)
+defines the supported event subset, configured agents, continuation and replay.
+Backend capabilities are separate from production renderer capabilities, which
+remain empty until browser acceptance. The `test_interactions`, `test_mcp_apps`,
+`test_a2ui` and `test_agui*` suites use real HTTP and persisted state; their
+`check-*-sabotage.py` scripts prove the corresponding guards are tested.
 
 ## Licence
 

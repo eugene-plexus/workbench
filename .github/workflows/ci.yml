@@ -54,6 +54,8 @@ jobs:
         run: python scripts/check-mcp-apps-sabotage.py
       - name: A2UI acceptance detects broken guards
         run: python scripts/check-a2ui-sabotage.py
+      - name: AG-UI acceptance detects broken guards
+        run: python scripts/check-agui-sabotage.py
 
   page:
     name: Page — type-check, lint, test, build
@@ -100,7 +102,7 @@ jobs:
       - name: Assert no diff
         shell: bash
         run: |
-          if ! git diff --exit-code src/eugene_plexus_workbench/_generated/ src/eugene_plexus_workbench/a2ui_schema/; then
+          if ! git diff --exit-code src/eugene_plexus_workbench/_generated/ src/eugene_plexus_workbench/a2ui_schema/ src/eugene_plexus_workbench/agui_schema/; then
             echo "::error::Generated models are out of sync with SPECS_REF."
             exit 1
           fi

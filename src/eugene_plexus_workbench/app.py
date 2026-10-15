@@ -12,6 +12,7 @@ from fastapi.exceptions import RequestValidationError
 
 from . import (
     a2ui_state,
+    agui_api,
     api,
     artifacts_api,
     config,
@@ -30,6 +31,7 @@ from . import (
 from ._build import commit
 from ._http import ssl_context
 from .a2ui import A2UI
+from .agui import AGUI
 from .answers import Answers
 from .hub import Hub
 from .interaction_store import InteractionError
@@ -196,6 +198,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.saved = saved
         app.state.folder_sync = folder_sync
         app.state.sessions = Sessions(store, provider)
+        app.state.agui = AGUI(store, app.state.sessions, answers)
+        await store.agui.recover()
         app.state.interactions = Interactions(store, app.state.sessions)
         tools.apps = McpApps(tools, app.state.interactions)
         app.state.interactions.adapters[(MCP_APPS_PROTOCOL, MCP_APPS_VERSION)] = tools.apps
@@ -215,6 +219,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             yield
         finally:
+            await app.state.agui.aclose()
             await app.state.interactions.aclose()
             await answers.aclose()
             await folder_sync.aclose()
@@ -240,6 +245,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(api.router)
     app.include_router(artifacts_api.router)
     app.include_router(interactions_api.router)
+    app.include_router(agui_api.router)
     app.include_router(media_api.router)
     app.include_router(memory_api.router)
     app.include_router(documents_api.router)
