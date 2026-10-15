@@ -25,7 +25,7 @@ from mcp.client.streamable_http import streamable_http_client
 from referencing import Registry
 from referencing.exceptions import NoSuchResource
 
-from . import folder_io, folders, mcp_ui
+from . import a2ui_state, folder_io, folders, mcp_ui
 from .content import CONTENT_VERSION, Keeper, normalize
 from .local_tools import LocalProcesses, LocalToolError, unavailable
 from .node_folders import FILES as SITE_FILES
@@ -35,6 +35,7 @@ from .settings import Settings
 from .store import Person, Store
 
 if TYPE_CHECKING:
+    from .a2ui import A2UI
     from .mcp_apps import McpApps
 
 MAX_TOOLS = 64
@@ -208,6 +209,7 @@ class Tools:
         self.node_folders: NodeFolders | None = None
         self.tls = ssl.create_default_context()
         self.apps: McpApps | None = None
+        self.a2ui: A2UI | None = None
 
     @asynccontextmanager
     async def connect(
@@ -268,7 +270,16 @@ class Tools:
                             transport,
                             read_timeout_seconds=30,
                             cache=None,
-                            extensions=[advertise(mcp_ui.EXTENSION, {"mimeTypes": [mcp_ui.MIME]})],
+                            extensions=[
+                                advertise(mcp_ui.EXTENSION, {"mimeTypes": [mcp_ui.MIME]}),
+                                advertise(
+                                    a2ui_state.EXTENSION,
+                                    {
+                                        "version": a2ui_state.VERSION,
+                                        "catalogIds": [a2ui_state.CATALOG],
+                                    },
+                                ),
+                            ],
                         )
                     )
                     cursor = None
@@ -483,6 +494,7 @@ class ToolSession:
         self.node_folders = tools.node_folders
         self.person = person
         self.apps = tools.apps
+        self.a2ui = tools.a2ui
         self.metadata: dict[str, dict[str, Any]] = {}
         self.descriptors: dict[tuple[str, str], dict[str, Any]] = {}
         self.model_names: set[str] = set()
@@ -703,6 +715,8 @@ class ToolSession:
         # UI publication cannot turn a confirmed tool result into an uncertain call.
         if self.apps is not None and keeper is not None:
             await self.apps.capture(self, call, result, keeper)
+        if self.a2ui is not None and keeper is not None:
+            await self.a2ui.capture(self, call, result, keeper)
 
     @staticmethod
     async def _settle(

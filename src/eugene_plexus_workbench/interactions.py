@@ -36,9 +36,17 @@ class Surface(BaseModel):
 
 
 @dataclass(frozen=True)
+class Update:
+    surface: Surface
+    base: int
+    state: Literal["active", "disabled", "deleted"] = "active"
+
+
+@dataclass(frozen=True)
 class Result:
     ui: dict[str, Any]
     model_text: str = ""
+    updates: tuple[Update, ...] = ()
 
 
 class NoEffect(Exception):
@@ -82,11 +90,43 @@ class Interactions:
         *,
         base: int = 0,
         state: Literal["active", "disabled", "deleted"] = "active",
+        person: Person | None = None,
     ) -> dict[str, Any]:
         encoded(surface.model_dump(), 256 * 1024)
         encoded(surface.model_text, 64 * 1024)
         self.adapter(surface).validate_surface(surface)
-        return await self.store.interactions.publish(surface.model_dump(), base, state)
+        return await self.store.interactions.publish(surface.model_dump(), base, state, person)
+
+    def updates(
+        self, updates: tuple[Update, ...], origin: Surface | None = None
+    ) -> list[dict[str, Any]]:
+        if len(updates) > 2:
+            raise InteractionError("Too many atomic surface updates.", 413)
+        result = []
+        for update in updates:
+            surface = update.surface
+            if origin is not None and any(
+                getattr(surface, k) != getattr(origin, k)
+                for k in (
+                    "owner",
+                    "chat_id",
+                    "message_id",
+                    "run_id",
+                    "protocol",
+                    "version",
+                    "connection_id",
+                )
+            ):
+                raise InteractionError("An action cannot update another origin.")
+            encoded(surface.model_dump(), 256 * 1024)
+            self.adapter(surface).validate_surface(surface)
+            result.append(
+                {"data": surface.model_dump(), "base": update.base, "state": update.state}
+            )
+        return result
+
+    async def publish_updates(self, updates: tuple[Update, ...]) -> None:
+        await self.store.interactions.publish_batch(self.updates(updates))
 
     async def propose(
         self, person: Person, chat: str, surface_id: str, proposal: dict[str, Any]
@@ -149,7 +189,12 @@ class Interactions:
                 result = await self._dispatch(adapter, current, description(saved), action)
                 await self.store.interactions.sweep()
                 await self.store.interactions.finish(
-                    chat, action_id, "completed", result.ui, result.model_text
+                    chat,
+                    action_id,
+                    "completed",
+                    result.ui,
+                    result.model_text,
+                    updates=self.updates(result.updates, surface),
                 )
         except NoEffect:
             await self.store.interactions.finish(

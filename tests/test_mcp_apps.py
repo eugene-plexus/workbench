@@ -19,7 +19,7 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 from mcp.types import CallToolResult, TextContent
 
-from eugene_plexus_workbench import mcp_ui, tools
+from eugene_plexus_workbench import a2ui_state, mcp_ui, tools
 from eugene_plexus_workbench.interaction_store import InteractionError
 
 from .conftest import Browser, ServerThread, World
@@ -176,7 +176,15 @@ def test_discovery_resources_approval_restart_and_isolation(
     offered_names = json.dumps(world.gateway.requests[0]["tools"])
     assert "increment" not in offered_names, "app-only tool leaked to model"
     assert "model_only" in offered_names
-    assert app_server.capabilities == [{mcp_ui.EXTENSION: {"mimeTypes": [mcp_ui.MIME]}}]
+    assert app_server.capabilities == [
+        {
+            mcp_ui.EXTENSION: {"mimeTypes": [mcp_ui.MIME]},
+            a2ui_state.EXTENSION: {
+                "version": a2ui_state.VERSION,
+                "catalogIds": [a2ui_state.CATALOG],
+            },
+        }
+    ]
     assert surface["view"]["toolResult"]["_meta"]["uiOnly"] == "private-display-state"
     assert "private-display-state" not in json.dumps(world.gateway.requests)
     assert "resourceUri" not in json.dumps(world.gateway.requests)
@@ -311,7 +319,9 @@ def test_approved_context_replaces_previous_and_message_is_deferred(
     text = json.dumps(messages)
     assert "new-context" in text and "approved-app-message" in text and "old-context" not in text
     assert all(
-        m["role"] == "user" for m in messages if "Approved MCP app context:" in str(m["content"])
+        m["role"] == "user"
+        for m in messages
+        if "Approved interaction context:" in str(m["content"])
     )
 
 

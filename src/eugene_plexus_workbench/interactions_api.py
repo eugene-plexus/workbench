@@ -12,7 +12,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from . import mcp_ui
+from . import a2ui_state, mcp_ui
+from .a2ui import A2UI
 from .api import _own_chat, _person, _readable_chat, _state, hidden_from_owner, install_mode
 from .interaction_store import InteractionError, encoded
 from .interactions import Interactions
@@ -89,6 +90,13 @@ class AppRead(BaseModel):
     params: dict[str, Any]
 
 
+class FormInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    revision: int = Field(ge=1)
+    componentId: str = Field(min_length=1, max_length=80)
+    value: str | bool
+
+
 async def problem(request: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, InteractionError)
     return JSONResponse(status_code=exc.status, content={"detail": {"message": exc.message}})
@@ -107,18 +115,33 @@ async def capabilities(request: Request) -> dict[str, Any]:
         "supportedProtocols": [
             {"protocol": protocol, "version": version}
             for protocol, version in sorted(service(request).adapters)
-            if protocol != mcp_ui.PROTOCOL
+            if protocol not in {mcp_ui.PROTOCOL, a2ui_state.PROTOCOL}
         ],
-        "backendProtocols": [
-            {
-                "protocol": mcp_ui.PROTOCOL,
-                "version": mcp_ui.VERSION,
-                "renderer": False,
-                "methods": [*mcp_ui.READS, *mcp_ui.ACTIONS],
-            }
-        ]
-        if (mcp_ui.PROTOCOL, mcp_ui.VERSION) in service(request).adapters
-        else [],
+        "backendProtocols": (
+            [
+                {
+                    "protocol": mcp_ui.PROTOCOL,
+                    "version": mcp_ui.VERSION,
+                    "renderer": False,
+                    "methods": [*mcp_ui.READS, *mcp_ui.ACTIONS],
+                }
+            ]
+            if (mcp_ui.PROTOCOL, mcp_ui.VERSION) in service(request).adapters
+            else []
+        )
+        + (
+            [
+                {
+                    "protocol": a2ui_state.PROTOCOL,
+                    "version": a2ui_state.VERSION,
+                    "renderer": False,
+                    "catalogIds": [a2ui_state.CATALOG],
+                    "methods": ["a2ui/input", "a2ui/action"],
+                }
+            ]
+            if (a2ui_state.PROTOCOL, a2ui_state.VERSION) in service(request).adapters
+            else []
+        ),
     }
 
 
@@ -202,3 +225,19 @@ async def decide(request: Request, chat_id: str, action_id: str, body: Decision)
     person = await _person(request)
     await _own_chat(request, person, chat_id)
     return await service(request).decide(person, chat_id, action_id, body.approve)
+
+
+@router.post("/chats/{chat_id}/interactions/surfaces/{surface_id}/a2ui/input")
+async def form_input(
+    request: Request, chat_id: str, surface_id: str, body: FormInput
+) -> dict[str, int]:
+    person = await _person(request)
+    await _own_chat(request, person, chat_id)
+    adapter = service(request).adapters.get((a2ui_state.PROTOCOL, a2ui_state.VERSION))
+    if not isinstance(adapter, A2UI):
+        raise InteractionError("A2UI backend is unavailable.", 503)
+    return {
+        "revision": await adapter.input(
+            person, chat_id, surface_id, body.revision, body.componentId, body.value
+        )
+    }

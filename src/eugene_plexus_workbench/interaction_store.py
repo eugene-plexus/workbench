@@ -202,65 +202,106 @@ class InteractionStore:
         return await self.store._run(transaction)
 
     async def publish(
-        self, data: dict[str, Any], base: int, state: str = "active"
+        self, data: dict[str, Any], base: int, state: str = "active", person: Person | None = None
     ) -> dict[str, Any]:
-        packed = encoded(data, 256 * 1024)
-
         def write(db: sqlite3.Connection) -> dict[str, Any]:
-            chat = data["chat_id"]
-            message = db.execute(
-                "SELECT m.role, c.owner FROM messages m JOIN chats c ON c.id=m.chat_id "
-                "WHERE m.id=? AND m.chat_id=?",
-                (data["message_id"], chat),
-            ).fetchone()
-            if (
-                message is None
-                or message["role"] != "assistant"
-                or message["owner"] != data["owner"]
-            ):
-                raise InteractionError("There is no such answer.", 404)
-            old = db.execute(
-                "SELECT * FROM interaction_surfaces WHERE id=?", (data["id"],)
-            ).fetchone()
-            if old is not None:
-                saved = surface_row(old)
-                if any(
-                    saved[k] != data[k]
-                    for k in (
-                        "owner",
-                        "chat_id",
-                        "message_id",
-                        "run_id",
-                        "protocol",
-                        "version",
-                        "connection_id",
-                    )
+            if person is not None:
+                _own(db, data["chat_id"], person)
+                saved = _surface(db, data["chat_id"], data["id"])
+                if not _valid(
+                    db,
+                    saved,
+                    {
+                        "sessionId": person.session_id,
+                        "revision": base,
+                        "expiresAt": saved["expires_at"],
+                    },
                 ):
-                    raise InteractionError("A surface cannot change its origin.")
-                if old["revision"] != base or old["state"] != "active":
-                    raise InteractionError("This surface revision is no longer active.")
-            elif base != 0:
-                raise InteractionError("There is no such surface revision.")
-            elif (
-                db.execute(
-                    "SELECT count(*) FROM interaction_surfaces WHERE chat_id=?", (chat,)
-                ).fetchone()[0]
-                >= 64
-            ):
-                raise InteractionError("This chat has reached its surface limit.", 413)
-            _quota(
-                db, data["owner"], len(packed.encode()) - (len(old["data"].encode()) if old else 0)
-            )
-            db.execute(
-                "INSERT INTO interaction_surfaces VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE "
-                "SET revision=excluded.revision,state=excluded.state,data=excluded.data",
-                (data["id"], chat, data["message_id"], data["owner"], base + 1, state, packed),
-            )
-            touch(db, chat)
-            self.sweep_in_transaction(db, chat)
-            return _surface(db, chat, data["id"])
+                    raise InteractionError("This form is no longer available.")
+            self.publish_in_transaction(db, data, base, state)
+            self.sweep_in_transaction(db, data["chat_id"])
+            return _surface(db, data["chat_id"], data["id"])
 
         return await self._run(write)
+
+    async def publish_batch(self, updates: list[dict[str, Any]]) -> None:
+        def write(db: sqlite3.Connection) -> None:
+            for update in updates:
+                self.publish_in_transaction(db, update["data"], update["base"], update["state"])
+            for chat in {u["data"]["chat_id"] for u in updates}:
+                self.sweep_in_transaction(db, chat)
+
+        await self._run(write)
+
+    async def latest_a2ui(self, chat: str, namespace: str, wire: str) -> dict[str, Any] | None:
+        def read(db: sqlite3.Connection) -> dict[str, Any] | None:
+            found = [
+                surface_row(row)
+                for row in db.execute(
+                    "SELECT * FROM interaction_surfaces WHERE chat_id=?", (chat,)
+                ).fetchall()
+            ]
+            candidates = [
+                s
+                for s in found
+                if s["protocol"] == "a2ui"
+                and s["binding"].get("namespace") == namespace
+                and s["binding"].get("wire") == wire
+            ]
+            return (
+                max(candidates, key=lambda s: s["binding"]["incarnation"]) if candidates else None
+            )
+
+        return await self._run(read)
+
+    @staticmethod
+    def publish_in_transaction(
+        db: sqlite3.Connection, data: dict[str, Any], base: int, state: str
+    ) -> dict[str, Any]:
+        packed = encoded(data, 256 * 1024)
+        chat = data["chat_id"]
+        message = db.execute(
+            "SELECT m.role, c.owner FROM messages m JOIN chats c ON c.id=m.chat_id "
+            "WHERE m.id=? AND m.chat_id=?",
+            (data["message_id"], chat),
+        ).fetchone()
+        if message is None or message["role"] != "assistant" or message["owner"] != data["owner"]:
+            raise InteractionError("There is no such answer.", 404)
+        old = db.execute("SELECT * FROM interaction_surfaces WHERE id=?", (data["id"],)).fetchone()
+        if old is not None:
+            saved = surface_row(old)
+            if any(
+                saved[k] != data[k]
+                for k in (
+                    "owner",
+                    "chat_id",
+                    "message_id",
+                    "run_id",
+                    "protocol",
+                    "version",
+                    "connection_id",
+                )
+            ):
+                raise InteractionError("A surface cannot change its origin.")
+            if old["revision"] != base or old["state"] != "active":
+                raise InteractionError("This surface revision is no longer active.")
+        elif base != 0:
+            raise InteractionError("There is no such surface revision.")
+        elif (
+            db.execute(
+                "SELECT count(*) FROM interaction_surfaces WHERE chat_id=?", (chat,)
+            ).fetchone()[0]
+            >= 64
+        ):
+            raise InteractionError("This chat has reached its surface limit.", 413)
+        _quota(db, data["owner"], len(packed.encode()) - (len(old["data"].encode()) if old else 0))
+        db.execute(
+            "INSERT INTO interaction_surfaces VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE "
+            "SET revision=excluded.revision,state=excluded.state,data=excluded.data",
+            (data["id"], chat, data["message_id"], data["owner"], base + 1, state, packed),
+        )
+        touch(db, chat)
+        return _surface(db, chat, data["id"])
 
     @staticmethod
     def sweep_in_transaction(
@@ -400,7 +441,10 @@ class InteractionStore:
             ).fetchall():
                 action = action_row(row)
                 surface = _surface(db, chat, action["surfaceId"])
-                if surface["protocol"] != "mcp-apps" or surface["message_id"] not in branch:
+                if (
+                    surface["protocol"] not in {"mcp-apps", "a2ui"}
+                    or surface["message_id"] not in branch
+                ):
                     continue
                 text = action.get("modelText")
                 if not text:
@@ -415,7 +459,7 @@ class InteractionStore:
             result: list[dict[str, str]] = []
             size = 0
             for text in reversed(list(items.values())):
-                message = {"role": "user", "content": "Approved MCP app context:\n" + text}
+                message = {"role": "user", "content": "Approved interaction context:\n" + text}
                 size += len(encoded(message, 128 * 1024).encode("utf-8")) + 1
                 if size > 64 * 1024:
                     break
@@ -523,6 +567,7 @@ class InteractionStore:
         result: dict[str, Any] | None = None,
         model_text: str | None = None,
         error: str | None = None,
+        updates: list[dict[str, Any]] | None = None,
     ) -> None:
         encoded(result, 64 * 1024)
         encoded(model_text, 64 * 1024)
@@ -530,6 +575,9 @@ class InteractionStore:
         def write(db: sqlite3.Connection) -> None:
             action = _action(db, chat, action_id)
             if action is None or action["status"] not in LIVE:
+                return
+            if updates and not _valid(db, _surface(db, chat, action["surfaceId"]), action):
+                self.sweep_in_transaction(db, chat)
                 return
             _quota(
                 db,
@@ -545,6 +593,13 @@ class InteractionStore:
                 ).fetchone()
                 action["completedOrder"] = (cursor[0] if cursor else 0) + 1
             _save(db, chat, action)
+
+            # Completion and the response's state changes are one transaction.
+            # Mark this action terminal before sweeping proposals at old revisions.
+            for update in updates or []:
+                self.publish_in_transaction(db, update["data"], update["base"], update["state"])
+            if updates:
+                self.sweep_in_transaction(db, chat)
 
         await self._run(write)
 

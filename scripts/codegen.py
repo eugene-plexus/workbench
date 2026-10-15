@@ -141,6 +141,12 @@ def main() -> None:
 
     try:
         run_codegen(specs_root, ref)
+        # Data-only protocol schemas/catalogs are pinned with the HTTP contracts.
+        shutil.copytree(
+            specs_root / "protocols" / "a2ui",
+            REPO_ROOT / "src" / "eugene_plexus_workbench" / "a2ui_schema",
+            dirs_exist_ok=True,
+        )
     finally:
         if WORKING_DIR.exists():
             shutil.rmtree(WORKING_DIR)
