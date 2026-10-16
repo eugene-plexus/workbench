@@ -30,6 +30,9 @@ from .test_agui import (
     wait,
 )
 from .test_agui import agent as agent_fixture
+from .test_node_folders import remote_world as signed_fixture
+from .test_node_folders import select
+from .test_signed_calls import WRITE, signing
 from .test_tools import decide
 from .test_tools import remote as tool_fixture
 from .test_tools import setup as setup_tools
@@ -37,6 +40,37 @@ from .test_tools import setup as setup_tools
 agent = agent_fixture
 mcp_remote = tool_fixture
 producer = form_fixture
+signed_world = signed_fixture
+
+
+def test_native_signing_does_not_emit_a_premature_tool_result(signed_world: Any) -> None:
+    world, remote = signed_world
+    remote["signed"] = True
+    ada, _, chat = select(world)
+    world.gateway.tool_name = "write_text"
+    world.gateway.tool_arguments = json.dumps(WRITE)
+    disconnect(ada, root(chat) + "/run", body(chat))
+    deadline = time.perf_counter() + 10
+    while not ada.get(f"/api/chats/{chat}").json()["messages"] and time.perf_counter() < deadline:
+        time.sleep(0.02)
+    message = signing(ada, chat)
+    # Wait until the adapter has observed the outstanding signature.
+    deadline = time.perf_counter() + 10
+    while time.perf_counter() < deadline:
+        saved = ada.get(root(chat)).json()
+        if saved["state"].get("pendingApprovals"):
+            break
+        time.sleep(0.02)
+    assert saved["state"]["pendingApprovals"]
+    assert decide(ada, chat, message, False).status_code == 204
+    assert wait(ada, chat)["status"] == "done"
+    results = [
+        e
+        for e in decode(ada.get(root(chat) + "/runs/r1/events"))[1]
+        if e["type"] == "TOOL_CALL_RESULT"
+    ]
+    assert len(results) == 1 and "did not sign" in results[0]["content"]
+    assert remote["calls"] == []
 
 
 def test_native_tools_require_existing_approval_and_saved_trace(
@@ -76,6 +110,7 @@ def test_native_disconnect_and_explicit_stop(world: World) -> None:
     ada.sign_in("p-ada")
     chat = ada.new_chat()
     world.gateway.mode = "slow"
+    world.gateway.delay = 1
     disconnect(ada, root(chat) + "/run", body(chat))
     assert ada.get(f"/api/chats/{chat}").json()["chat"]["running"]
     assert ada.post(root(chat) + "/runs/r1/stop").status_code == 204

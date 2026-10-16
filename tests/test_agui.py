@@ -23,6 +23,7 @@ from .conftest import Browser, ServerThread, World
 class Remote:
     url: str = ""
     mode: str = "normal"
+    by_message: bool = False
     calls: list[dict[str, Any]] = field(default_factory=list)
     headers: list[dict[str, str]] = field(default_factory=list)
     closed: int = 0
@@ -39,6 +40,8 @@ def agent() -> Iterator[Remote]:
         remote.calls.append(body)
         remote.headers.append(dict(request.headers))
         mode = remote.mode
+        if remote.by_message:
+            mode = "normal" if body.get("resume") else body["messages"][-1]["content"]
         if mode == "redirect":
             return Response(status_code=307, headers={"location": remote.url})
         if mode == "http-error":

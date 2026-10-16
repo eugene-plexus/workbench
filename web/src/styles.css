@@ -11,6 +11,68 @@
 @source not "./**/*.test.tsx";
 @source not "./fontGate.ts";
 
+.a2ui-layout {
+  display: flex;
+  gap: 0.75rem;
+}
+.a2ui-column {
+  flex-direction: column;
+}
+.a2ui-row {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+.a2ui-align-start {
+  align-items: flex-start;
+}
+.a2ui-align-end {
+  align-items: flex-end;
+}
+.a2ui-align-center {
+  align-items: center;
+}
+.a2ui-align-stretch {
+  align-items: stretch;
+}
+.a2ui-justify-start {
+  justify-content: flex-start;
+}
+.a2ui-justify-end {
+  justify-content: flex-end;
+}
+.a2ui-justify-center {
+  justify-content: center;
+}
+.a2ui-justify-spaceBetween {
+  justify-content: space-between;
+}
+.a2ui-justify-spaceAround {
+  justify-content: space-around;
+}
+.a2ui-justify-spaceEvenly {
+  justify-content: space-evenly;
+}
+.a2ui-justify-stretch {
+  justify-content: stretch;
+}
+.a2ui-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.a2ui-text--h1,
+.a2ui-text--h2,
+.a2ui-text--h3 {
+  font-size: 1.25em;
+  font-weight: 600;
+}
+.a2ui-text--h4,
+.a2ui-text--h5 {
+  font-weight: 600;
+}
+.a2ui-text--caption {
+  font-size: 0.875em;
+}
+
 /* Tokens (workbench-reading.md 3). Plexus, copied from the console
    (ui/src/app/globals.css), not shared: components share schemas, never
    code. Dark is Plexus; light is the console's "modern" palette. Blue is you,

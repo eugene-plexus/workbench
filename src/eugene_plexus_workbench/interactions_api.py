@@ -1,4 +1,4 @@
-"""Authenticated host API for interactions, version 1. No embedded bridge yet."""
+"""Authenticated host API for durable, reviewed browser interactions, version 1."""
 
 from __future__ import annotations
 
@@ -112,19 +112,24 @@ def service(request: Request) -> Interactions:
 @router.get("/interactions/capabilities")
 async def capabilities(request: Request) -> dict[str, Any]:
     await _person(request)
+    renderer = bool(getattr(_state(request), "ui_renderers", False))
     return {
         "version": 1,
         "supportedProtocols": [
             {"protocol": protocol, "version": version}
             for protocol, version in sorted(service(request).adapters)
-            if protocol not in {mcp_ui.PROTOCOL, a2ui_state.PROTOCOL}
-        ],
+            if renderer or protocol not in {mcp_ui.PROTOCOL, a2ui_state.PROTOCOL}
+        ]
+        + ([{"protocol": "ag-ui", "version": agui_protocol.VERSION}] if renderer else []),
         "backendProtocols": (
             [
                 {
                     "protocol": mcp_ui.PROTOCOL,
                     "version": mcp_ui.VERSION,
-                    "renderer": False,
+                    "renderer": renderer,
+                    "rendererProfile": "opaque-offline",
+                    "browserConformance": "constrained",
+                    "limits": ["no-network", "no-devices", "opaque-proxy-origin"],
                     "methods": [*mcp_ui.READS, *mcp_ui.ACTIONS],
                 }
             ]
@@ -136,7 +141,7 @@ async def capabilities(request: Request) -> dict[str, Any]:
                 {
                     "protocol": a2ui_state.PROTOCOL,
                     "version": a2ui_state.VERSION,
-                    "renderer": False,
+                    "renderer": renderer,
                     "catalogIds": [a2ui_state.CATALOG],
                     "methods": ["a2ui/input", "a2ui/action"],
                 }
@@ -144,7 +149,7 @@ async def capabilities(request: Request) -> dict[str, Any]:
             if (a2ui_state.PROTOCOL, a2ui_state.VERSION) in service(request).adapters
             else []
         )
-        + [agui_protocol.capability()],
+        + [agui_protocol.capability(renderer=renderer)],
     }
 
 

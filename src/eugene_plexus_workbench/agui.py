@@ -267,7 +267,10 @@ class AGUI:
                         sent.add(cid)
                 for call in turn["calls"]:
                     cid = answer_id + ":" + call["id"]
-                    if call["status"] not in {"pending", "running"} and cid not in results:
+                    if (
+                        call["status"] not in {"pending", "running", "signing"}
+                        and cid not in results
+                    ):
                         text = str(call.get("result") or "")
                         if len(text) > 16000:
                             text = (

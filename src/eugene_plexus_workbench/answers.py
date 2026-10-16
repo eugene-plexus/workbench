@@ -649,7 +649,9 @@ class Answers:
             }
             shown["message"] = held.message
             future = running.approvals.get(step["id"])
-            if step.get("held") != shown or future is None or future.done():
+            # A decision can arrive while the site is being polled. Consume that
+            # completed future; replacing it would lose the person's refusal.
+            if future is None or (step.get("held") != shown and not future.done()):
                 step["held"] = shown
                 step["status"] = "signing"
                 started.setdefault(step["id"], time.perf_counter())

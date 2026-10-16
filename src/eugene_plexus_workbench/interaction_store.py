@@ -362,12 +362,16 @@ class InteractionStore:
                 s = surface_row(row)
                 if s["message_id"] not in visible:
                     continue
+                connection = db.execute(
+                    "SELECT name FROM tool_servers WHERE id=?", (s["connection_id"],)
+                ).fetchone()
                 surfaces.append(
                     {
                         "id": s["id"],
                         "messageId": s["message_id"],
                         "runId": s["run_id"],
                         "protocol": s["protocol"],
+                        "sourceName": connection[0] if connection else None,
                         "version": s["version"],
                         "revision": s["revision"],
                         "state": s["state"],
