@@ -1,6 +1,8 @@
 import { CircleAlert, Eye, LogOut, Plus, Search, X } from "lucide-react";
 import { useState } from "react";
 
+import { consolePage } from "../lib/documentMeaning";
+
 import { api } from "../lib/api";
 import { chatGroups } from "../lib/conveniences";
 import type { Chat, Me, Person } from "../lib/types";
@@ -202,7 +204,15 @@ export function Sidebar({
       </ul>
       {me.owner && me.ownerReadsChats && <PeoplesChats onOpen={onOpen} onOpenMedia={onOpenMedia} />}
       {me.owner && me.consoleUrl && (
-        <div className="border-t border-line px-4 py-3 text-sm">
+        <div className="flex flex-col gap-2 border-t border-line px-4 py-3 text-sm">
+          <a
+            href={consolePage(me.consoleUrl, "people")}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="link inline-flex min-h-7 items-center"
+          >
+            Manage accounts and groups ↗
+          </a>
           <a
             href={me.consoleUrl}
             target="_blank"
