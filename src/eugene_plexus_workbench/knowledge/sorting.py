@@ -739,7 +739,10 @@ class Sorting:
         a question, the Documents screen and the two settings, so that they cannot disagree.
         Never waits: a speed that is not known is measured behind whoever asks (`measuring`), and
         one that is old is measured again behind them."""
-        self._measure_if_due(model, budget)
+        from ..person_context import catalog_only
+
+        if not catalog_only.get():
+            self._measure_if_due(model, budget)
         now = self._clock()
         failed = self._failed.get(model.id)
         if failed is not None and failed.gave_up is not None and failed.gave_up.holds(budget):
@@ -1018,6 +1021,8 @@ class Sorting:
         whether it is sorting, or why none; and what the second does with the sorter's speed. Both
         are read from the standing the Documents screen is told, so a setting and the screen say
         one thing."""
+        from ..person_context import catalog_only
+
         standing = await self.standing()
         if standing.choice.code == OFF:
             # Off asks the gateway nothing: the models are those of the last look, if there was one.
@@ -1033,7 +1038,13 @@ class Sorting:
             model = ConfigFieldStatus(level=info, text=f"In use: {found.id}{tail}.")
         elif found is not None:
             # Chosen, and not in use: the setting says what the screen says, with its reason.
-            said = measuring_words(found.id) if standing.code == "measuring" else standing.message
+            said = (
+                "speed will be measured when someone uses Documents while signed in."
+                if standing.code == "measuring" and catalog_only.get()
+                else measuring_words(found.id)
+                if standing.code == "measuring"
+                else standing.message
+            )
             model = ConfigFieldStatus(
                 level=info if standing.code in ("measuring", "over_budget") else warning,
                 text=f"Chosen: {found.id}{tail}, not sorting now: {reason_of(said)}",
@@ -1054,7 +1065,11 @@ class Sorting:
         elif standing.code == "measuring":
             seconds = ConfigFieldStatus(
                 level=info,
-                text=f"Measuring how fast {found.id} sorts, to tell whether it is quick enough.",
+                text=(
+                    "Speed will be measured when someone uses Documents while signed in."
+                    if catalog_only.get()
+                    else f"Measuring how fast {found.id} sorts, to tell whether it is quick enough."
+                ),
             )
         elif standing.rate is None:
             # No speed: it did not answer, or could not be asked. Said as that, and not as a speed.

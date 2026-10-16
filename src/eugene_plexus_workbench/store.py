@@ -89,7 +89,7 @@ from .agui_store import AGUIStore, allow_chat_write
 from .interaction_store import SCHEMA as INTERACTION_SCHEMA
 from .interaction_store import InteractionStore
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 #: The oldest schema this migrates from: what Workbench v0.1.0 wrote. Schema 1 predates
 #: it, and nobody holds one.
@@ -141,6 +141,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     secret_hash TEXT NOT NULL,
     sub TEXT NOT NULL,
     refresh_token TEXT,
+    access_token TEXT,
     access_expires_at REAL NOT NULL,
     created_at REAL NOT NULL,
     expires_at REAL NOT NULL
@@ -462,6 +463,7 @@ _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
     # Interactive surfaces and durable action intent; no existing chat data changes.
     16: [*INTERACTION_SCHEMA],
     17: [*AGUI_SCHEMA],
+    18: ["ALTER TABLE sessions ADD COLUMN access_token TEXT"],
 }
 
 
@@ -625,6 +627,7 @@ class SessionRow:
     access_expires_at: float
     created_at: float
     expires_at: float
+    access_token: str | None = None
 
 
 @dataclass
@@ -1402,7 +1405,8 @@ class Store:
         def go() -> None:
             self._conn().execute(
                 "INSERT INTO sessions (id_hash, secret_hash, sub, refresh_token, "
-                "access_expires_at, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "access_expires_at, created_at, expires_at, access_token) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     row.id_hash,
                     row.secret_hash,
@@ -1411,6 +1415,7 @@ class Store:
                     row.access_expires_at,
                     row.created_at,
                     row.expires_at,
+                    row.access_token,
                 ),
             )
 
@@ -1433,19 +1438,44 @@ class Store:
                 access_expires_at=r["access_expires_at"],
                 created_at=r["created_at"],
                 expires_at=r["expires_at"],
+                access_token=r["access_token"],
             )
 
         return await self._run(go)
 
-    async def refreshed(self, id_hash: str, refresh_token: str | None, expires_at: float) -> None:
+    async def refreshed(
+        self,
+        id_hash: str,
+        refresh_token: str | None,
+        expires_at: float,
+        access_token: str | None = None,
+    ) -> None:
         def go() -> None:
             self._conn().execute(
                 "UPDATE sessions SET refresh_token = COALESCE(?, refresh_token), "
-                "access_expires_at = ? WHERE id_hash = ?",
-                (refresh_token, expires_at, id_hash),
+                "access_expires_at = ?, access_token = ? WHERE id_hash = ?",
+                (refresh_token, expires_at, access_token, id_hash),
             )
 
         await self._run(go)
+
+    async def latest_session(self, sub: str, now: float) -> SessionRow | None:
+        """A background job may use only an unexpired sign-in of its owner."""
+
+        def go() -> str | None:
+            row = (
+                self._conn()
+                .execute(
+                    "SELECT id_hash FROM sessions WHERE sub = ? AND expires_at > ? "
+                    "ORDER BY created_at DESC, id_hash DESC LIMIT 1",
+                    (sub, now),
+                )
+                .fetchone()
+            )
+            return str(row[0]) if row else None
+
+        ident = await self._run(go)
+        return await self.session(ident) if ident else None
 
     async def delete_session(self, id_hash: str) -> None:
         await self._run(

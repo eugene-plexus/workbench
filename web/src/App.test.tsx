@@ -173,6 +173,28 @@ it("says it is loading until it knows who is here", async () => {
   expect(screen.getByRole("status")).toHaveTextContent("Loading Workbench…");
 });
 
+it("opens a new chat with the model handed off by Eugene, only after a click", async () => {
+  vi.mocked(post).mockResolvedValue(chat);
+  await open("/?model=local");
+  expect(screen.getByText(/New chat with/)).toHaveTextContent("local");
+  expect(post).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByTestId("new-chat-empty"));
+  await waitFor(() => expect(post).toHaveBeenCalledWith("/api/chats", { model: "local" }));
+  expect(sessionStorage.getItem("workbench-requested-model")).toBeNull();
+});
+
+it("keeps the handed-off model through sign-in and refuses a model absent from the person's list", async () => {
+  sessionStorage.setItem("workbench-requested-model", "not-permitted");
+  await open("/");
+  fireEvent.click(screen.getByTestId("new-chat-empty"));
+  expect(await screen.findByText(/not available to your account/)).toBeVisible();
+  expect(post).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Use the default model instead" }));
+  vi.mocked(post).mockResolvedValue(chat);
+  fireEvent.click(screen.getByTestId("new-chat-empty"));
+  await waitFor(() => expect(post).toHaveBeenCalledWith("/api/chats", {}));
+});
+
 describe("the top bar", () => {
   it("shows every page, always, as plain labels with a glyph that is only a glyph", async () => {
     await open();

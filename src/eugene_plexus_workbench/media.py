@@ -267,7 +267,12 @@ class MediaJobs:
         row = running.row
         kept = False
         try:
-            await work
+            from .person_context import acting_as, current
+
+            inherited = current.get()
+            session_id = inherited[1] if inherited and inherited[0] == row.owner else None
+            with acting_as(row.owner, session_id):
+                await work
             row.status = "done"
         except asyncio.CancelledError:
             # M11: the provider keeps working, and billing, on a job it

@@ -728,7 +728,12 @@ class Meaning:
         with a search model, or one is running now to build it with."""
         if await index.embedder() is not None:
             return True
-        return (await self.resolve(None)).model is not None
+        from ..person_context import acting_as, current
+
+        inherited = current.get()
+        session_id = inherited[1] if inherited and inherited[0] == index.sub else None
+        with acting_as(index.sub, session_id):
+            return (await self.resolve(None)).model is not None
 
     async def owed(self, index: Index, doc: Document) -> bool:
         """Whether a document that can be found by words is owed its meaning before it is
@@ -831,12 +836,17 @@ class Meaning:
         soonest: float | None = None
         for sub in list(self._owing):
             wait = self._until.get(sub, 0.0) - now
-            if wait > 0 and await self._model_is_back(sub):
+            from ..person_context import acting_as
+
+            with acting_as(sub):
+                back = wait > 0 and await self._model_is_back(sub)
+            if back:
                 wait = 0.0
             if wait > 0:
                 soonest = wait if soonest is None else min(soonest, wait)
                 continue
-            outcome = await self._work(sub, settings)
+            with acting_as(sub):
+                outcome = await self._work(sub, settings)
             if sub in self._owing:
                 self._owing.pop(sub)
                 self._owing[sub] = None  # to the back of the turn

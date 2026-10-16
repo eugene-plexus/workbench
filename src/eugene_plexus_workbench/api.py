@@ -171,7 +171,9 @@ async def sign_in_callback(request: Request) -> Response:
     await store.upsert_person(
         Person(sub=identity.sub, name=identity.name, role=identity.role, username=identity.username)
     )
-    created = await sessions.create(identity.sub, identity.refresh_token, identity.expires_in)
+    created = await sessions.create(
+        identity.sub, identity.refresh_token, identity.expires_in, identity.access_token
+    )
     log.info("%s signed in", identity.name)
     # The secret goes in the fragment, which no server is ever sent (W3).
     response = _to_page("signin=" + created.secret)

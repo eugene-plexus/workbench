@@ -96,6 +96,20 @@ def seconds_status(world: World) -> dict[str, Any]:
     return dict(until(done, seconds=30))
 
 
+def test_opening_owner_settings_lists_models_but_only_a_person_can_start_sorter_measurement(
+    world: World,
+    quick_sorting: None,  # noqa: F811
+) -> None:
+    sorter_world(world)
+    fields = schema(world)
+    assert SORTER in json.dumps(fields["documentsSortModel"])
+    assert "Documents" in fields["documentsSortSeconds"]["status"]["text"]
+    assert world.gateway.probes() == []
+    ada = start(world)
+    assert measured(ada)["ratePerSecond"] > 0
+    assert len(world.gateway.probes()) == 1
+
+
 # --------------------------------------------------------------------------- #
 # a question is sorted (design calls 1, 2, 3 and 6)
 # --------------------------------------------------------------------------- #
@@ -943,7 +957,7 @@ def test_the_budget_setting_says_when_the_sorter_is_too_slow_for_it(
     world.gateway.rerank_rate = 400.0
     ada = start(world)
     keep(ada, *corpus())
-    schema(world)  # looking at the settings measures the sorter, behind the look
+    measured(ada)  # Measuring uses a person's sign-in; settings only read the catalog.
     over = seconds_status(world)
     assert over["level"] == "warning"
     assert over["text"].startswith(f"{SORTER} sorts about ")

@@ -21,6 +21,7 @@ import { saveDraft } from "./lib/conveniences";
 import { forget, takeFragment } from "./lib/session";
 import type { Chat, Me, Models } from "./lib/types";
 import { modeChanged } from "./lib/words";
+import { requestedModel, clearRequestedModel } from "./lib/modelHandoff";
 
 /** The chat an address names: `/chats/<id>`, or none. */
 export function chatFromPath(path: string): string | null {
@@ -72,6 +73,7 @@ type Phase =
   | { kind: "ready"; me: Me };
 
 export default function App() {
+  const [preferredModel, setPreferredModel] = useState(requestedModel);
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   const [chatId, setChatId] = useState<string | null>(() => chatFromPath(window.location.pathname));
   const [media, setMedia] = useState(() => mediaFromPath(window.location.pathname));
@@ -318,7 +320,15 @@ export default function App() {
     setCreating(true);
     setActionError(null);
     try {
-      const chat = await post<Chat>("/api/chats", {});
+      const available = preferredModel ? await api<Models>("/api/models") : null;
+      if (preferredModel && !available?.models.some((model) => model.id === preferredModel)) {
+        throw new Error(
+          `The requested model ${preferredModel} is not available to your account. Choose another model or wait for it to become available.`,
+        );
+      }
+      const chat = await post<Chat>("/api/chats", preferredModel ? { model: preferredModel } : {});
+      clearRequestedModel();
+      setPreferredModel(null);
       setChats((current) => [chat, ...current]);
       open(chat.id);
     } catch (error) {
@@ -327,7 +337,7 @@ export default function App() {
       newPending.current = false;
       setCreating(false);
     }
-  }, [open]);
+  }, [open, preferredModel]);
 
   /** A new chat with Documents on, for asking about the person's own documents. */
   const askAboutDocuments = useCallback(async () => {
@@ -650,6 +660,11 @@ export default function App() {
             />
           ) : (
             <Empty
+              preferredModel={preferredModel}
+              onClearModel={() => {
+                clearRequestedModel();
+                setPreferredModel(null);
+              }}
               hasChats={chats.length > 0}
               modelsError={modelsError}
               noModels={models !== null && models.models.length === 0}
@@ -751,12 +766,16 @@ function Shortcuts() {
 }
 
 function Empty({
+  preferredModel,
+  onClearModel,
   hasChats,
   modelsError,
   noModels,
   onNew,
   creating,
 }: {
+  preferredModel: string | null;
+  onClearModel: () => void;
   hasChats: boolean;
   modelsError: string | null;
   noModels: boolean;
@@ -770,6 +789,14 @@ function Empty({
         <h1 className="text-balance text-2xl font-semibold tracking-[-0.015em]">
           {hasChats ? "Pick a chat, or start one" : "Start your first chat"}
         </h1>
+        {preferredModel && (
+          <p className="text-muted">
+            New chat with <strong className="text-fg">{preferredModel}</strong>.{" "}
+            <button type="button" className="underline" onClick={onClearModel}>
+              Use the default model instead
+            </button>
+          </p>
+        )}
         {modelsError ? (
           <p role="alert" className="notice notice--error text-left">
             <CircleAlert size={16} aria-hidden />

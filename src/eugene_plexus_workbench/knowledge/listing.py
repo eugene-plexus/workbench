@@ -1,8 +1,9 @@
-"""The gateway's list of models, looked at once for everyone who asks (MR5, MR6b).
+"""The gateway's list of models, shared only within one person's session (MR5, MR6b, U3).
 
 Search by meaning needs to know which search models there are and whether one is running, and
 sorting needs the same of result sorters. Both are read from one `GET /v1/models`, so they are one
-look: kept for a few seconds, made by one asker at a time, and shared. Each kept its own copy at
+look: kept for a few seconds, made by one asker at a time, and shared within that identity.
+Owner configuration uses a separate app-catalog scope. Each kept its own copy at
 first, and the Documents screen asked both, so a gateway that does not answer its list of models
 held `GET /api/documents` for the 8 seconds a look may take twice, one after the other (MR6b
 review). With one look, the second asker finds the first's failure kept for a moment and does
@@ -22,6 +23,8 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from ..hub import HubError
+from ..person_context import catalog_only
+from ..person_context import current as person_context
 from . import embedders
 from .embedders import SearchModel
 
@@ -91,6 +94,7 @@ class Listing:
         self._clock = clock
         self._last: Look | None = None
         self._lock = asyncio.Lock()
+        self._identity: tuple[tuple[str, str | None] | None, bool] = (None, False)
         #: What each surface makes of the look that is kept, so that an asker that asks every
         #: second does not pick through the list every second.
         self._probes: dict[str, tuple[Look, Probe]] = {}
@@ -98,7 +102,7 @@ class Listing:
     @property
     def last(self) -> Look | None:
         """The look that was made last, however old it is; None before there was one."""
-        return self._last
+        return self._last if self._identity == (person_context.get(), catalog_only.get()) else None
 
     def forget(self) -> None:
         """What was last seen is not trusted any more (a request that used it just failed): the
@@ -114,13 +118,14 @@ class Listing:
         """The gateway's models: the look that is kept, or a new one (always, when `fresh`).
         Never raises: a gateway that cannot be asked, does not answer within `TIMEOUT` seconds or
         answers with something that is not a list of models is a look that says so."""
-        kept = self._last
+        identity = (person_context.get(), catalog_only.get())
+        kept = self._last if self._identity == identity else None
         if not fresh and kept is not None and self._good(kept):
             return kept
         async with self._lock:
-            current = self._last
+            current = self._last if self._identity == identity else None
             # Somebody else looked while this one waited its turn: that look is as new as one
-            # made now (and one that is kept is good for any asker), so no second request is
+            # made now for this same identity, so no second request is
             # made behind it.
             if current is not None and (
                 (fresh and current is not kept) or (not fresh and self._good(current))
@@ -128,6 +133,7 @@ class Listing:
                 return current
             found = await self._ask()
             self._last = found
+            self._identity = identity
             return found
 
     async def probe(self, surface: str, *, fresh: bool = False) -> Probe:
