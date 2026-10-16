@@ -183,6 +183,8 @@ def install(server: FastAPI, fake: Any, state: dict[str, Any]) -> None:
             approval = body.get("approval") or {}
             state.setdefault("tries", []).append(body)
             if approval.get("held") not in state.setdefault("signed_ids", set()):
+                if before_reply := state.get("before_held_reply"):
+                    await before_reply(body)
                 return {
                     "status": "held",
                     "message": "This call runs once you sign it with your key.",

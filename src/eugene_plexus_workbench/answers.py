@@ -667,9 +667,11 @@ class Answers:
             }
             shown["message"] = held.message
             future = running.approvals.get(step["id"])
-            # A decision can arrive while the site is being polled. Consume that
-            # completed future; replacing it would lose the person's refusal.
-            if future is None or (step.get("held") != shown and not future.done()):
+            # A decision can arrive while the site is being polled. Keep it for
+            # the same request, but never reuse approval for changed content.
+            # A refusal cancels the tool call even if its held request changed.
+            declined = future is not None and future.done() and not future.result()
+            if future is None or (step.get("held") != shown and not declined):
                 step["held"] = shown
                 step["status"] = "signing"
                 started.setdefault(step["id"], time.perf_counter())

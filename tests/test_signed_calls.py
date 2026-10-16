@@ -5,7 +5,9 @@ declines (`person-held-keys.md` §13)."""
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -27,7 +29,10 @@ remote_world = test_node_folders.remote_world
 WRITE = {"folder": "Notes", "path": "note.txt", "text": "Changed", "expectedSha256": "a" * 64}
 
 
-async def test_decline_during_site_poll_is_consumed_not_replaced(monkeypatch: Any) -> None:
+@pytest.mark.parametrize("allow", [False, True], ids=["decline", "approve"])
+async def test_decision_during_site_poll_is_consumed_not_replaced(
+    monkeypatch: Any, allow: bool
+) -> None:
     monkeypatch.setattr(answers, "_SIGN_POLL_SECONDS", 0.001)
     monkeypatch.setattr(answers.Answers, "_checkpoint", AsyncMock())
     host = answers.Answers.__new__(answers.Answers)
@@ -36,9 +41,43 @@ async def test_decline_during_site_poll_is_consumed_not_replaced(monkeypatch: An
     step: dict[str, Any] = {"id": "call", "tool": "write"}
     held = Held({"id": "held"}, "Sign this", None)
     assert await sign(step, held) == {"held": "held"}
-    running.approvals["call"].set_result(False)
-    assert await sign(step, held) is None
+    running.approvals["call"].set_result(allow)
+    assert await sign(step, held) == ({"held": "held"} if allow else None)
     assert "call" not in running.approvals
+
+
+@pytest.mark.parametrize("change", ["id", "words"])
+@pytest.mark.parametrize("decision", [None, False, True], ids=["pending", "decline", "approve"])
+async def test_changed_held_request_needs_its_own_approval(
+    monkeypatch: Any, change: str, decision: bool | None
+) -> None:
+    monkeypatch.setattr(answers, "_SIGN_POLL_SECONDS", 0.001)
+    monkeypatch.setattr(answers.Answers, "_checkpoint", AsyncMock())
+    host = answers.Answers.__new__(answers.Answers)
+    running: Any = SimpleNamespace(approvals={}, progress=None)
+    sign = host._signer(running)
+    step: dict[str, Any] = {"id": "call", "tool": "write"}
+    held = Held({"id": "held", "words": ["First request"]}, "Sign this", None)
+    assert await sign(step, held) == {"held": "held"}
+    previous = running.approvals["call"]
+    if decision is not None:
+        previous.set_result(decision)
+    changed = Held(
+        {**held.held, change: "replacement" if change == "id" else ["Different request"]},
+        held.message,
+        None,
+    )
+    result = await sign(step, changed)
+    if decision is False:
+        # Declining cancels the tool call even if the site's held request changed.
+        assert result is None
+        assert "call" not in running.approvals
+    else:
+        assert result == {"held": changed.held["id"]}
+        assert step["status"] == "signing"
+        assert step["held"][change] == changed.held[change]
+        assert running.approvals["call"] is not previous
+        assert not running.approvals["call"].done()
 
 
 def signing(browser: Any, chat: str) -> dict[str, Any]:
@@ -66,6 +105,40 @@ def start(world: World, remote: dict[str, Any]) -> tuple[Any, str, dict[str, Any
     world.gateway.tool_arguments = json.dumps(WRITE)
     assert ada.post(f"/api/chats/{chat}/messages", json={"content": "Write."}).status_code == 201
     return ada, chat, signing(ada, chat)
+
+
+@pytest.mark.parametrize("allow", [False, True], ids=["decline", "approve"])
+def test_decision_while_http_poll_is_in_flight(
+    remote_world: tuple[World, dict[str, Any]], quick: None, allow: bool
+) -> None:
+    """Hold an actual HTTP poll reply until the decision API has accepted the click."""
+    world, remote = remote_world
+    poll_started, release_reply = threading.Event(), threading.Event()
+
+    async def hold_reply(body: dict[str, Any]) -> None:
+        if body.get("approval") and not poll_started.is_set():
+            poll_started.set()
+            assert await asyncio.to_thread(release_reply.wait, 15), "poll was never released"
+
+    remote["before_held_reply"] = hold_reply
+    try:
+        ada, chat, message = start(world, remote)
+        assert poll_started.wait(10), "the site never received the second poll"
+        assert remote["calls"] == [] and remote["content"] == "Desktop notes"
+        if allow:
+            remote["signed_ids"].add(message["toolRounds"][0]["calls"][0]["held"]["id"])
+        assert decide(ada, chat, message, allow).status_code == 204
+        release_reply.set()
+        answer = ada.wait_answer(chat, seconds=10)
+        call = answer["toolRounds"][0]["calls"][0]
+        assert answer["status"] == "done", answer
+        assert "held" not in call
+        assert call["status"] == ("done" if allow else "declined")
+        assert len(remote["calls"]) == (1 if allow else 0)
+        assert remote["content"] == ("Changed" if allow else "Desktop notes")
+        assert len(remote["tries"]) == (3 if allow else 2)
+    finally:
+        release_reply.set()
 
 
 def test_a_held_call_shows_the_sites_words_and_runs_once_signed_at_the_machine(

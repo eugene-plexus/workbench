@@ -16,10 +16,26 @@ CASES = [
     (
         "signature decision race",
         "answers.py",
-        'if future is None or (step.get("held") != shown and not future.done()):',
+        'if future is None or (step.get("held") != shown and not declined):',
         'if step.get("held") != shown or future is None or future.done():',
-        "tests/test_signed_calls.py::test_decline_during_site_poll_is_consumed_not_replaced",
-        "is None",
+        "tests/test_signed_calls.py::test_decision_during_site_poll_is_consumed_not_replaced",
+        "AssertionError",
+    ),
+    (
+        "signature HTTP poll race",
+        "answers.py",
+        'if future is None or (step.get("held") != shown and not declined):',
+        'if step.get("held") != shown or future is None or future.done():',
+        "tests/test_signed_calls.py::test_decision_while_http_poll_is_in_flight[decline]",
+        "the answer did not finish",
+    ),
+    (
+        "changed signing request",
+        "answers.py",
+        'if future is None or (step.get("held") != shown and not declined):',
+        'if future is None or (step.get("held") != shown and not future.done()):',
+        "tests/test_signed_calls.py::test_changed_held_request_needs_its_own_approval[approve-id]",
+        "signing",
     ),
     (
         "pending signature projection",
@@ -43,8 +59,14 @@ BROWSER = (
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--browser", action="store_true")
+    parser.add_argument("--labels", nargs="+", help="Run only the named mutations.")
     args = parser.parse_args()
     cases = [BROWSER] if args.browser else CASES
+    if args.labels:
+        unknown = set(args.labels) - {case[0] for case in cases}
+        if unknown:
+            parser.error("Unknown mutation labels: " + ", ".join(sorted(unknown)))
+        cases = [case for case in cases if case[0] in args.labels]
     if args.browser and not os.getenv("WORKBENCH_PLAYWRIGHT"):
         raise SystemExit("Set WORKBENCH_PLAYWRIGHT for Chrome.")
     before = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in (ROOT / "src").rglob("*.py")}
@@ -60,6 +82,7 @@ def main() -> None:
                 k: v for k, v in os.environ.items() if not k.upper().startswith("EUGENE_PLEXUS_")
             }
             env["PYTHONPATH"] = str(target / "src")
+            env["PYTHONIOENCODING"] = "utf-8"
             subprocess.run(
                 [
                     sys.executable,
