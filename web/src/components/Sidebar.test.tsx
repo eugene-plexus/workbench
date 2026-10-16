@@ -52,6 +52,14 @@ function sidebar(
 
 beforeEach(() => vi.mocked(api).mockReset());
 
+it("links a member to their shared sign-in controls", () => {
+  sidebar({ ...me, accountUrl: "https://eugene.example/oidc/account" }, true);
+  expect(screen.getByRole("link", { name: /My sign-in and sessions/ })).toHaveAttribute(
+    "href",
+    "https://eugene.example/oidc/account",
+  );
+});
+
 it("says Loading chats before the first list, and never No chats yet", () => {
   sidebar(me, false);
   expect(screen.getByRole("status")).toHaveTextContent("Loading chats…");

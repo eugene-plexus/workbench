@@ -21,6 +21,14 @@ def test_the_owner_signs_in_with_eugene_and_is_the_owner(world: World) -> None:
     me = browser.get("/api/me")
     assert me.status_code == 200, me.text
     assert me.json()["name"] == "Owner" and me.json()["owner"] is True
+    assert me.json()["accountUrl"] is None
+
+
+def test_member_has_a_link_to_eugenes_shared_sign_in_controls(world: World) -> None:
+    browser = world.browser()
+    browser.sign_in("p-ada")
+    me = browser.get("/api/me").json()
+    assert me["accountUrl"] == world.eugene.issuer.rstrip("/") + "/account"
 
 
 def test_the_request_asks_for_the_code_flow_with_pkce_state_and_nonce(world: World) -> None:

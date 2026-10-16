@@ -251,6 +251,11 @@ async def me(request: Request) -> dict[str, Any]:
         "name": person.name,
         "username": person.username,
         "owner": person.is_owner,
+        "accountUrl": (
+            str(_state(request).settings.oidc_issuer).rstrip("/") + "/account"
+            if not person.is_owner and _state(request).settings.oidc_issuer
+            else None
+        ),
         "consoleUrl": (
             str(_state(request).settings.oidc_issuer).removesuffix("/oidc")
             if person.is_owner and _state(request).settings.oidc_issuer

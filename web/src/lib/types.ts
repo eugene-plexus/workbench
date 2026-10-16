@@ -328,6 +328,7 @@ export interface Me {
   owner: boolean;
   ownerReadsChats: boolean;
   consoleUrl?: string | null;
+  accountUrl?: string | null;
   installMode?: "production" | "dev";
   installModeChangedAt?: string | null;
   installModeNotice?: boolean;

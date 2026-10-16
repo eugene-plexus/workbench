@@ -223,6 +223,16 @@ export function Sidebar({
           </a>
         </div>
       )}
+      {me.accountUrl && (
+        <a
+          href={me.accountUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="link border-t border-line px-4 py-3 text-sm"
+        >
+          My sign-in and sessions ↗
+        </a>
+      )}
       {onRunPreviews && (
         <RunPreviewsSwitch on={me.runPreviews !== false} onChange={onRunPreviews} />
       )}
