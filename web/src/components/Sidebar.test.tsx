@@ -228,3 +228,21 @@ describe("the search box and the list's failure", () => {
     expect(retry).toHaveBeenCalledOnce();
   });
 });
+
+it("opens the central account directory for the owner independently of chat oversight", () => {
+  sidebar(
+    { ...owner, ownerReadsChats: false, consoleUrl: "https://eugene.example/console/" },
+    true,
+  );
+  expect(screen.getByRole("link", { name: /Manage accounts and groups/ })).toHaveAttribute(
+    "href",
+    "https://eugene.example/console/people/",
+  );
+});
+
+it("never offers account administration to a member", () => {
+  sidebar({ ...me, consoleUrl: "https://eugene.example/" }, true);
+  expect(
+    screen.queryByRole("link", { name: /Manage accounts and groups/ }),
+  ).not.toBeInTheDocument();
+});
