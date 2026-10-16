@@ -231,11 +231,17 @@ def test_a_graceful_restart_keeps_the_job_running_and_polls_it_again(world: Worl
     assert item["status"] == "done" and item["files"][0]["mediaType"] == "video/mp4"
 
 
-def test_a_job_a_crash_left_running_is_polled_again_and_kept(world: World) -> None:
+@pytest.mark.parametrize("owner_signed_in", [True, False])
+def test_a_job_a_crash_left_running_requires_its_owners_session(
+    world: World, owner_signed_in: bool
+) -> None:
     """The check that matters most (§5, M11). A crash leaves the row
     running with its handle; the next start must poll it and keep the video.
     A graceful stop would not test this: the row is written here while
-    Workbench is down, as a crash leaves it."""
+    Workbench is down, as a crash leaves it. U3 requires the owner's persisted
+    session; another person's session cannot authorize the resumed job."""
+    signed_in = world.browser()
+    signed_in.sign_in("p-ada" if owner_signed_in else "p-bo")
     world.server.stop()
     world.gateway.video_jobs["video_resumed"] = {
         "model": GROK,
@@ -252,8 +258,27 @@ def test_a_job_a_crash_left_running_is_polled_again_and_kept(world: World) -> No
             (GROK, json.dumps({"model": GROK, "prompt": "a red ball"}), json.dumps(job)),
         )
     world.restart_workbench()
+
+    def settled() -> bool:
+        with sqlite3.connect(world.data / "workbench.sqlite3") as db:
+            return (
+                db.execute("SELECT status FROM media WHERE id = 'crashed'").fetchone()[0]
+                != "running"
+            )
+
+    # Observe recovery before signing in again, so the missing-owner case
+    # cannot accidentally acquire a fresh session while its task starts.
+    _until(settled, "the resumed job did not settle")
     ada = _ada(world)
     item = _wait(ada, "crashed")
+    if not owner_signed_in:
+        assert item["status"] == "failed", item
+        assert item["error"]["status"] == 401
+        assert "Sign in again" in item["error"]["message"]
+        assert item["files"] == []
+        assert world.gateway.video_polls == []
+        assert world.gateway.video_requests == []
+        return
     assert item["status"] == "done", item
     assert world.gateway.video_polls == ["video_resumed", "video_resumed"]
     assert world.gateway.video_requests == [], "the job is polled, never sent again"
