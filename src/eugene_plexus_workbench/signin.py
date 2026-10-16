@@ -72,6 +72,7 @@ class Identity:
     role: str
     refresh_token: str | None
     expires_in: float
+    access_token: str | None = None
 
 
 def _secret(path: Path | None) -> str | None:
@@ -349,4 +350,7 @@ def _identity(claims: dict[str, Any], token: dict[str, Any]) -> Identity:
         role=role,
         refresh_token=str(refresh) if refresh else None,
         expires_in=float(expires) if isinstance(expires, int | float) and expires > 0 else 600.0,
+        access_token=token.get("access_token")
+        if isinstance(token.get("access_token"), str)
+        else None,
     )

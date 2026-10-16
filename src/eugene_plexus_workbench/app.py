@@ -128,7 +128,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             http=http,
             backchannel=settings.oidc_backchannel,
         )
-        hub = Hub(settings.gateway_url, settings.key_file)
+        sessions = Sessions(store, provider)
+        hub = Hub(settings.gateway_url, settings.key_file, person_token=sessions.gateway_token)
         tools = Tools(store, settings)
         tools.node_folders = NodeFolders(store, provider, http)
         answers = Answers(store, hub, tools)
@@ -197,7 +198,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.reader = reader
         app.state.saved = saved
         app.state.folder_sync = folder_sync
-        app.state.sessions = Sessions(store, provider)
+        app.state.sessions = sessions
         app.state.agui = AGUI(store, app.state.sessions, answers)
         await store.agui.recover()
         app.state.interactions = Interactions(store, app.state.sessions)
@@ -234,6 +235,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.degraded = None
     # Innermost: the headers and the canonical origin wrap what a degraded Workbench says.
+    from .person_context import PersonContextMiddleware
+
+    app.add_middleware(PersonContextMiddleware)
     app.add_middleware(web.Degraded)
     app.add_middleware(interactions_api.BodyLimit)
     app.add_middleware(web.SecurityHeaders)

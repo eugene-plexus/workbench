@@ -183,10 +183,10 @@ FIELDS = [
     ),
     ConfigField(
         key=DOCUMENTS_MAX_FILE_MB,
-        label="Largest file Workbench reads (MB)",
+        label="Largest file Workbench reads (MiB)",
         description=(
-            "The biggest file, in mebibytes, Workbench takes to read (default 50). A bigger "
-            "one is refused when it is attached, naming this limit. A file is read in a child "
+            "The largest file Workbench will read (default: 50 MiB). Larger files are "
+            "refused when attached, with this limit shown. A file is read in a child "
             "process that is ended after two minutes and held to two gibibytes of memory, so "
             "a large or broken file fails by itself and never stops Workbench."
         ),
@@ -574,9 +574,16 @@ router = APIRouter(dependencies=[Depends(_admin)])
 
 @router.get("/v1/config/schema", response_model=ConfigSchema, response_model_exclude_none=True)
 async def get_schema(request: Request) -> ConfigSchema:
+    from .person_context import catalog_only
+
+    context = catalog_only.set(True)
+    try:
+        fields = await _fields(request)
+    finally:
+        catalog_only.reset(context)
     return ConfigSchema(
         component="workbench",
-        fields=await _fields(request),
+        fields=fields,
         categories={
             "people": "People and their chats",
             "memory": "Memory",

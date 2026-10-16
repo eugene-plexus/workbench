@@ -29,6 +29,7 @@ from dataclasses import dataclass, replace
 
 from fastapi import HTTPException, Request, status
 
+from .person_context import current as person_context
 from .signin import Provider, SignInRefused, SignInUnavailable
 from .store import Person, SessionRow, Store
 
@@ -85,7 +86,13 @@ class Sessions:
         self._provider = provider
         self._locks: dict[str, asyncio.Lock] = {}
 
-    async def create(self, sub: str, refresh_token: str | None, expires_in: float) -> NewSession:
+    async def create(
+        self,
+        sub: str,
+        refresh_token: str | None,
+        expires_in: float,
+        access_token: str | None = None,
+    ) -> NewSession:
         cookie, secret = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
         now = time.time()
         await self._store.put_session(
@@ -97,6 +104,7 @@ class Sessions:
                 access_expires_at=now + expires_in,
                 created_at=now,
                 expires_at=now + SESSION_SECONDS,
+                access_token=access_token,
             )
         )
         return NewSession(cookie=cookie, secret=secret)
@@ -135,15 +143,18 @@ class Sessions:
         person = await self._store.person(row.sub)
         if person is None:
             raise SignedOut("none", "Sign in with Eugene to use Workbench.")
+        person_context.set((person.sub, row.id_hash))
         return replace(person, session_id=row.id_hash)
 
-    async def _refresh(self, row: SessionRow) -> None:
+    async def _refresh(self, row: SessionRow, *, need_access: bool = False) -> None:
         lock = self._locks.setdefault(row.id_hash, asyncio.Lock())
         async with lock:
             current = await self._store.session(row.id_hash)
             if current is None:
                 raise SignedOut("revoked", _REVOKED)
-            if time.time() < current.access_expires_at - _EARLY:
+            if time.time() < current.access_expires_at - _EARLY and (
+                not need_access or current.access_token
+            ):
                 return  # another request refreshed it while this one waited
             if not current.refresh_token:
                 await self._store.delete_session(row.id_hash)
@@ -175,8 +186,44 @@ class Sessions:
                 )
             )
             await self._store.refreshed(
-                row.id_hash, identity.refresh_token, time.time() + identity.expires_in
+                row.id_hash,
+                identity.refresh_token,
+                time.time() + identity.expires_in,
+                identity.access_token,
             )
+
+    async def gateway_token(self) -> str:
+        """Only a current owner's sign-in, never a process-wide service fallback."""
+        from .hub import HubError
+
+        identity = person_context.get()
+        if identity is None:
+            raise HubError(
+                "Sign in to use models. Background work waits for its owner's sign-in.", status=401
+            )
+        sub, session_id = identity
+        row = (
+            await self._store.session(session_id)
+            if session_id
+            else await self._store.latest_session(sub, time.time())
+        )
+        if row is None or row.sub != sub or time.time() >= row.expires_at:
+            raise HubError("Your sign-in has ended. Sign in again to use models.", status=401)
+        try:
+            if not row.access_token or time.time() >= row.access_expires_at - _EARLY:
+                await self._refresh(row, need_access=True)
+                row = await self._store.session(row.id_hash)
+        except HTTPException as exc:
+            raise HubError(
+                "Workbench could not renew your model access. Sign in again if your session ended.",
+                status=exc.status_code,
+            ) from None
+        if row is None or not row.access_token:
+            raise HubError(
+                "Eugene did not provide a person token. Update Eugene and sign in again.",
+                status=401,
+            )
+        return row.access_token
 
     async def current(self, session_id: str | None, sub: str) -> Person:
         """Recheck an already authenticated action's sign-in before dispatch."""
@@ -188,6 +235,7 @@ class Sessions:
         person = await self._store.person(sub)
         if person is None:
             raise SignedOut("revoked", _REVOKED)
+        person_context.set((person.sub, row.id_hash))
         return replace(person, session_id=row.id_hash)
 
 

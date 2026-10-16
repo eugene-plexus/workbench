@@ -392,6 +392,24 @@ class Answers:
         folder_grants: list[str],
         prepare: Prepare | None = None,
     ) -> None:
+        from .person_context import acting_as
+
+        person = running.person
+        chat = await self._store.chat(running.chat_id) if person is None else None
+        with acting_as(
+            person.sub if person else (chat.owner if chat else ""),
+            person.session_id if person else None,
+        ):
+            await self._run_answer(running, build, tool_servers, folder_grants, prepare)
+
+    async def _run_answer(
+        self,
+        running: Running,
+        build: Callable[[], Any],
+        tool_servers: list[str],
+        folder_grants: list[str],
+        prepare: Prepare | None = None,
+    ) -> None:
         m = running.message
         chat_id = running.chat_id
 

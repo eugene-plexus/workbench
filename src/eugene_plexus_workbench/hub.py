@@ -19,7 +19,7 @@ import email.utils
 import json
 import math
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -299,9 +299,15 @@ def refusal(
 class Hub:
     """The gateway, with the app's key. One HTTP client for the process."""
 
-    def __init__(self, gateway_url: str | None, key_file: Path | None) -> None:
+    def __init__(
+        self,
+        gateway_url: str | None,
+        key_file: Path | None,
+        person_token: Callable[[], Awaitable[str]] | None = None,
+    ) -> None:
         self.gateway_url = gateway_url.rstrip("/") if gateway_url else None
         self._key_file = key_file
+        self._person_token = person_token
         self._key: tuple[float, str] | None = None
         # The gateway is this install's, on loopback or the LAN: never
         # through a proxy the person's environment names. A stream may go
@@ -344,8 +350,11 @@ class Hub:
             ) from exc
         return self._key[1]
 
-    def _headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self._token()}"}
+    async def _headers(self) -> dict[str, str]:
+        headers = {"Authorization": f"Bearer {self._token()}"}
+        if self._person_token is not None:
+            headers["X-Eugene-Person-Token"] = await self._person_token()
+        return headers
 
     def _unreachable(self, exc: Exception) -> HubError:
         return HubError(
@@ -356,7 +365,13 @@ class Hub:
         )
 
     async def models(self) -> dict[str, Any]:
-        headers = self._headers()
+        from .person_context import catalog_only
+
+        headers = (
+            {"Authorization": f"Bearer {self._token()}", "X-Eugene-App-Operation": "catalog"}
+            if catalog_only.get()
+            else await self._headers()
+        )
         try:
             response = await self._http.get(f"{self.gateway_url}/v1/models", headers=headers)
         except httpx.HTTPError as exc:
@@ -374,7 +389,7 @@ class Hub:
         the gateway ignores `dimensions` and `user`, and says so. An alias embeds with its
         first target only, and a stopped model is not woken (503): both are the gateway's.
         Raises `HubError`, with `retry_after` when the gateway asked us to wait."""
-        headers = self._headers()
+        headers = await self._headers()
         body = {"model": model, "input": list(inputs), "encoding_format": "float"}
         started = time.perf_counter()
         try:
@@ -412,7 +427,7 @@ class Hub:
         passage longer than the sorter reads is the gateway's 400, not cut. The request is
         given up on after `seconds`. Raises `HubError`, with `retry_after` when the gateway
         asked us to wait."""
-        headers = self._headers()
+        headers = await self._headers()
         body = {"model": model, "query": query, "documents": list(documents)}
         started = time.perf_counter()
         try:
@@ -446,7 +461,7 @@ class Hub:
         """One image request (P4), and the gateway's request id. A request
         with reference images goes to `/edits` as JSON with `data:` URLs,
         the shape the gateway takes from a server. Raises `HubError`."""
-        headers = self._headers()
+        headers = await self._headers()
         url = f"{self.gateway_url}/v1/images/{'edits' if edit else 'generations'}"
         try:
             response = await self._http.post(url, json=body, headers=headers)
@@ -469,7 +484,7 @@ class Hub:
     async def speech(self, body: dict[str, Any]) -> tuple[bytes, dict[str, str]]:
         """One spoken clip (P3a): its bytes, and the response's headers, which
         carry what served it (`x-eugene-plexus-*`). Raises `HubError`."""
-        headers = self._headers()
+        headers = await self._headers()
         try:
             response = await self._http.post(
                 f"{self.gateway_url}/v1/audio/speech", json=body, headers=headers
@@ -489,7 +504,7 @@ class Hub:
     ) -> tuple[dict[str, Any], dict[str, str]]:
         """One transcription (P3b), or translation into English (P3-4), as
         the OpenAI SDK sends it: a multipart form. Raises `HubError`."""
-        headers = self._headers()
+        headers = await self._headers()
         door = "translations" if translate else "transcriptions"
         try:
             response = await self._http.post(
@@ -517,7 +532,7 @@ class Hub:
     async def video(self, body: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
         """Submit one video job (P5): the gateway's `VideoResource`, whose
         `id` is the handle to poll, and the request id. Raises `HubError`."""
-        headers = self._headers()
+        headers = await self._headers()
         try:
             response = await self._http.post(
                 f"{self.gateway_url}/v1/videos", json=body, headers=headers
@@ -532,7 +547,7 @@ class Hub:
     async def video_job(self, handle: str) -> dict[str, Any]:
         """One poll of a video job. Raises `HubError`, whose `status` says
         whether polling again can help (a 503 says it can)."""
-        headers = self._headers()
+        headers = await self._headers()
         try:
             response = await self._http.get(
                 f"{self.gateway_url}/v1/videos/{handle}", headers=headers
@@ -547,7 +562,7 @@ class Hub:
         """A finished job's MP4, handed to `write` a chunk at a time as it
         arrives (a long video is not held in memory). Returns the bytes
         written. Raises `HubError`."""
-        headers = self._headers()
+        headers = await self._headers()
         url = f"{self.gateway_url}/v1/videos/{handle}/content"
         written = 0
         try:
@@ -566,7 +581,7 @@ class Hub:
 
     async def stream_chat(self, body: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         """The chunks of one streamed answer, parsed. Raises `HubError`."""
-        headers = self._headers()
+        headers = await self._headers()
         body = dict(body)
         repetition_mode = body.pop("_repetition_mode", None)
         if repetition_mode is not None:
