@@ -12,6 +12,7 @@ import type { Chat, ChatDetail, ChatDocumentsView, Me, Message, Models } from ".
 import { sending as notesSending } from "../test-memory";
 import { chatDocuments, held, off, owners, record } from "../test-saved";
 import { ChatView } from "./ChatView";
+vi.mock("./AGUIConversation", () => ({ AGUIConversation: () => null }));
 
 vi.mock("../lib/api", () => ({
   api: vi.fn(),

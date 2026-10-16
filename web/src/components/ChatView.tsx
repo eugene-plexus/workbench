@@ -11,6 +11,12 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { Fragment } from "react";
+
+import { useAGUI } from "../lib/agui";
+import { useInteractions } from "../lib/interactions";
+import { AGUIConversation } from "./AGUIConversation";
+import { InteractionSurfaces } from "./InteractionSurfaces";
 
 import { del, patch } from "../lib/api";
 import { exportChat, saveDraft } from "../lib/conveniences";
@@ -55,6 +61,17 @@ export function ChatView({
   onOpenDocuments: () => void;
 }) {
   const { detail, update, progress, error, reload, look } = useChat(chatId);
+  const interactive = useInteractions(
+    chatId,
+    detail?.chat.readOnly ? detail.messages.at(-1)?.id : undefined,
+  );
+  const agui = useAGUI(chatId, detail !== null && !detail.chat.readOnly, me.sub);
+  const [agentSource, setAgentSource] = useState("ordinary");
+  const agentMode = agui.run !== null || agentSource !== "ordinary";
+  const agentCursor = agui.run ? `${agui.run.runId}:${agui.run.cursor}:${agui.run.status}` : "";
+  useEffect(() => {
+    if (agentCursor) void reload();
+  }, [agentCursor, reload]);
   // The settings, the memory drawer and the documents drawer are all panels above
   // the chat, and only one is open at a time (on a phone each covers the whole window).
   const [panel, setPanel] = useState<"settings" | "memory" | "documents" | null>(null);
@@ -90,7 +107,9 @@ export function ChatView({
   // image loading late, moves the bottom without the reader doing anything.
   const pinned = useRef(true);
   const lastTop = useRef(0);
-  const running = detail?.messages.some((m) => m.status === "running") ?? false;
+  const running =
+    (detail?.messages.some((m) => m.status === "running") ?? false) ||
+    agui.run?.status === "running";
   const wasRunning = useRef(running);
   const loaded = detail !== null;
 
@@ -480,22 +499,35 @@ export function ChatView({
               <p className="py-10 text-center text-muted">Ask anything to start.</p>
             )}
             {messages.map((message: Message) => (
-              <MessageView
-                key={message.id}
-                chatId={chat.id}
-                message={message}
-                progress={message.status === "running" ? progress : null}
-                busy={running}
-                readOnly={chat.readOnly}
-                onChanged={() => {
-                  void reload();
-                  onChanged();
-                }}
-                onLook={chat.readOnly ? look : undefined}
-                memory={remember}
-                documents={chat.readOnly ? undefined : { onManage: onOpenDocuments }}
-              />
+              <Fragment key={message.id}>
+                <MessageView
+                  key={message.id}
+                  chatId={chat.id}
+                  message={message}
+                  progress={message.status === "running" ? progress : null}
+                  busy={running}
+                  readOnly={chat.readOnly}
+                  onChanged={() => {
+                    void reload();
+                    onChanged();
+                  }}
+                  onLook={chat.readOnly ? look : undefined}
+                  memory={remember}
+                  documents={chat.readOnly ? undefined : { onManage: onOpenDocuments }}
+                />
+                <InteractionSurfaces
+                  chat={chat.id}
+                  message={message.id}
+                  snapshot={interactive.snapshot}
+                  refresh={interactive.refresh}
+                />
+              </Fragment>
             ))}
+            {interactive.error && (
+              <p className="text-sm text-muted" role="status">
+                Interactive content is unavailable: {interactive.error}
+              </p>
+            )}
           </div>
         </div>
         {away && (
@@ -528,51 +560,69 @@ export function ChatView({
         )}
       </div>
       {!chat.readOnly && (
-        <Composer
-          chat={chat}
-          initialAttachments={attachments}
+        <AGUIConversation
+          chat={chat.id}
           me={me}
+          empty={messages.length === 0}
+          selected={agentSource}
+          onSelect={setAgentSource}
+          controller={agui}
+          model={chat.model}
           models={models}
-          modelsError={modelsError}
-          running={running}
-          documentsHint={
-            aboutDocuments === null ? undefined : (
-              <DocumentsHint
-                documents={aboutDocuments}
-                busy={turningOn}
-                problem={hintProblem}
-                onTurnOn={() => void turnOnDocuments()}
-                onHide={() => {
-                  hideHint(me.sub);
-                  setHintGone(true);
-                }}
-              />
-            )
-          }
-          onSent={(user, answer, notes) => {
-            pinned.current = true;
-            setAway(false);
-            update((shown) => ({
-              ...shown,
-              chat: { ...shown.chat, running: true },
-              // The answer's own events may already have put it here.
-              messages: [
-                ...shown.messages.filter((m) => m.id !== user.id && m.id !== answer.id),
-                user,
-                shown.messages.find((m) => m.id === answer.id) ?? answer,
-              ],
-            }));
+          onChanged={() => {
+            void reload();
             onChanged();
-            // "Remember that ..." has kept a note by now, and the request has
-            // taken the chat's copy of them: the toast and the chip say so.
-            say(outcomeOf(notes));
-            void memory.reload();
-            void documents.reload();
           }}
-          onChat={(next) =>
-            update((shown) => ({ ...shown, chat: { ...next, running: shown.chat.running } }))
-          }
         />
+      )}
+      {!chat.readOnly && !agentMode && (
+        <div className="contents" inert={!agui.loaded}>
+          <Composer
+            chat={chat}
+            initialAttachments={attachments}
+            me={me}
+            models={models}
+            modelsError={modelsError}
+            running={running}
+            documentsHint={
+              aboutDocuments === null ? undefined : (
+                <DocumentsHint
+                  documents={aboutDocuments}
+                  busy={turningOn}
+                  problem={hintProblem}
+                  onTurnOn={() => void turnOnDocuments()}
+                  onHide={() => {
+                    hideHint(me.sub);
+                    setHintGone(true);
+                  }}
+                />
+              )
+            }
+            onSent={(user, answer, notes) => {
+              pinned.current = true;
+              setAway(false);
+              update((shown) => ({
+                ...shown,
+                chat: { ...shown.chat, running: true },
+                // The answer's own events may already have put it here.
+                messages: [
+                  ...shown.messages.filter((m) => m.id !== user.id && m.id !== answer.id),
+                  user,
+                  shown.messages.find((m) => m.id === answer.id) ?? answer,
+                ],
+              }));
+              onChanged();
+              // "Remember that ..." has kept a note by now, and the request has
+              // taken the chat's copy of them: the toast and the chip say so.
+              say(outcomeOf(notes));
+              void memory.reload();
+              void documents.reload();
+            }}
+            onChat={(next) =>
+              update((shown) => ({ ...shown, chat: { ...next, running: shown.chat.running } }))
+            }
+          />
+        </div>
       )}
     </div>
   );

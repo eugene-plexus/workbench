@@ -414,13 +414,13 @@ class SSE:
         return result
 
 
-def capability() -> dict[str, Any]:
+def capability(*, renderer: bool = False) -> dict[str, Any]:
     return {
         "protocol": "ag-ui",
         "version": VERSION,
         "sourceRevision": REVISION,
         "directions": ["serve", "connect"],
-        "renderer": False,
+        "renderer": renderer,
         "events": list(EVENTS),
         "methods": ["run", "events", "snapshot", "stop", "resume"],
     }

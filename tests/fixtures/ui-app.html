@@ -1,0 +1,26 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Fixture counter</title>
+<style>body{font:16px system-ui;padding:16px;background:#141619;color:#e6e8ea}button{padding:8px}body.light{background:white;color:#141619}</style></head>
+<body><h1>Fixture counter</h1><button id="increment">Increment</button><p id="status">Opening</p><p id="theme"></p>
+<script>
+window.results = {}; window.notices = []; window.violations = [];
+addEventListener('securitypolicyviolation', e => violations.push(e.violatedDirective));
+const send = (method, params, id) => parent.postMessage({jsonrpc:'2.0', method, params, ...(id === undefined ? {} : {id})}, '*');
+window.request = send;
+function theme(value) {document.body.className=value; document.getElementById('theme').textContent=value;}
+addEventListener('message', e => {
+  if (e.source !== parent) return;
+  const msg=e.data;
+  if (msg.method === 'ping') {parent.postMessage({jsonrpc:'2.0',id:msg.id,result:{}}, '*'); return;}
+  if (msg.id !== undefined) results[msg.id]=msg;
+  if (msg.id === 1 && msg.result) {
+    theme(msg.result.hostContext.theme);
+    send('ui/notifications/initialized', {});
+  }
+  if (msg.method) notices.push(msg.method);
+  if (msg.method === 'ui/notifications/tool-result') document.getElementById('status').textContent='Ready';
+  if (msg.method === 'ui/notifications/host-context-changed') theme(msg.params.theme);
+  if (msg.id === 2) document.getElementById('status').textContent=msg.error ? msg.error.message : 'Increment completed';
+});
+document.getElementById('increment').onclick=()=>send('tools/call', {name:'increment',arguments:{value:2}}, 2);
+send('ui/initialize', {protocolVersion:'2026-01-26', appInfo:{name:'fixture',version:'1'},appCapabilities:{}}, 1);
+</script></body></html>

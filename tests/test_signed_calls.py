@@ -7,11 +7,14 @@ from __future__ import annotations
 
 import json
 import time
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
 from eugene_plexus_workbench import answers
+from eugene_plexus_workbench.node_folders import Held
 
 from . import test_node_folders
 from .conftest import World
@@ -22,6 +25,20 @@ from .test_tools import decide
 remote_world = test_node_folders.remote_world
 
 WRITE = {"folder": "Notes", "path": "note.txt", "text": "Changed", "expectedSha256": "a" * 64}
+
+
+async def test_decline_during_site_poll_is_consumed_not_replaced(monkeypatch: Any) -> None:
+    monkeypatch.setattr(answers, "_SIGN_POLL_SECONDS", 0.001)
+    monkeypatch.setattr(answers.Answers, "_checkpoint", AsyncMock())
+    host = answers.Answers.__new__(answers.Answers)
+    running: Any = SimpleNamespace(approvals={}, progress=None)
+    sign = host._signer(running)
+    step: dict[str, Any] = {"id": "call", "tool": "write"}
+    held = Held({"id": "held"}, "Sign this", None)
+    assert await sign(step, held) == {"held": "held"}
+    running.approvals["call"].set_result(False)
+    assert await sign(step, held) is None
+    assert "call" not in running.approvals
 
 
 def signing(browser: Any, chat: str) -> dict[str, Any]:

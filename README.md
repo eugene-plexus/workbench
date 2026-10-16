@@ -25,6 +25,17 @@ Workbench's settings are on its page in the console. One controls whether the ow
 
 ## What it does
 
+Interactive results appear beside their answers. **Open app** runs a self-contained
+MCP App in an isolated view; forms use the local A2UI forms catalog. Both show
+requested server actions in a separate review with **Allow once** and **Decline**.
+Network/device-dependent apps keep their text fallback. This is a constrained
+MCP Apps renderer, not full browser conformance with the upstream sandbox model.
+
+In an empty chat, **Answer with** selects normal chat, Workbench through AG-UI,
+or an authorized connected agent. Owners add connections and choose people in
+**Manage agent connections**. Runs support Stop, saved continuation and interrupt
+responses; reloading never resends a run. See the [capability matrix and limits](https://github.com/eugene-plexus/specs/blob/main/docs/design/workbench-ui-browser-v1.md).
+
 - **Chats**: answers stream as they arrive. You can Stop an answer, Try again on any answer, or edit any message. Each try and each edit is kept as a version: arrows on the message step between them, and every earlier version keeps the conversation that followed it.
 - **Finding chats**: search chat names and browse Today, Yesterday, Previous 7 days and Older groups.
 - **Text drafts**: unsent text survives chat switches and refreshes in the same tab. Drafts belong to the signed-in person and clear on send, deletion or sign-out. Attachments must be selected again after leaving a chat.

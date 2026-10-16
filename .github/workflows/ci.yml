@@ -56,6 +56,8 @@ jobs:
         run: python scripts/check-a2ui-sabotage.py
       - name: AG-UI acceptance detects broken guards
         run: python scripts/check-agui-sabotage.py
+      - name: Browser integration regressions detect broken guards
+        run: python scripts/check-ui-backend-sabotage.py
 
   page:
     name: Page — type-check, lint, test, build
@@ -75,6 +77,8 @@ jobs:
       - run: npm run lint
       - run: npm run format:check
       - run: npm test
+      - name: Interactive UI tests detect broken guards
+        run: node ../scripts/check-ui-sabotage.mjs
       - run: npm run build
       # The page is copied from the website byte for byte (workbench.md §6).
       - name: Mascots are the website's own

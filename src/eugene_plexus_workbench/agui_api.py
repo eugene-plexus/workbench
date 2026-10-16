@@ -1,4 +1,4 @@
-"""Authenticated AG-UI HTTP routes. No protocol renderer is advertised here."""
+"""Authenticated AG-UI runs, configuration and installed renderer capabilities."""
 
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ class Agent(BaseModel):
 @router.get("/ag-ui/capabilities")
 async def capabilities(request: Request) -> dict[str, Any]:
     await _person(request)
-    return protocol.capability()
+    return protocol.capability(renderer=bool(getattr(_state(request), "ui_renderers", False)))
 
 
 @router.get("/ag-ui/agents")
@@ -73,6 +73,14 @@ async def agents(request: Request) -> list[dict[str, Any]]:
         for a in await service(request).store.agui.agents()
         if person.is_owner or person.sub in a["subjects"]
     ]
+
+
+@router.get("/ag-ui/people")
+async def people(request: Request) -> list[dict[str, str]]:
+    person = await _person(request)
+    if not person.is_owner:
+        raise InteractionError("Only the install owner can configure AG-UI agents.", 403)
+    return [{"sub": p.sub, "name": p.name} for p, _, _ in await service(request).store.people()]
 
 
 @router.post("/ag-ui/agents", status_code=201)

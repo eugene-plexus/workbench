@@ -27,6 +27,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from . import mcp_sandbox
+
 CSP = "; ".join(
     [
         "default-src 'self'",
@@ -154,13 +156,18 @@ class SecurityHeaders:
         path = str(scope.get("path", ""))
         api = path.startswith("/api/")
         # Only an artifact's preview is framed, and only by Workbench's page.
-        framed = path == PREVIEW_PATH
+        framed = path in {PREVIEW_PATH, mcp_sandbox.PATH}
 
         async def with_headers(message: Message) -> None:
             if message["type"] == "http.response.start":
                 headers = MutableHeaders(scope=message)
                 if framed:
-                    headers["Content-Security-Policy"] = PREVIEW_CSP
+                    headers["Content-Security-Policy"] = (
+                        mcp_sandbox.CSP if path == mcp_sandbox.PATH else PREVIEW_CSP
+                    )
+                    headers["Permissions-Policy"] = (
+                        "camera=(), microphone=(), geolocation=(), clipboard-write=()"
+                    )
                 elif "content-security-policy" not in headers:
                     headers["Content-Security-Policy"] = CSP
                 headers["X-Content-Type-Options"] = "nosniff"
@@ -212,6 +219,11 @@ def mount(app: FastAPI, root: Path | None) -> None:
     """Serve the page, its files, and `index.html` for every other path."""
 
     built = root.resolve() if root is not None else None
+    app.state.ui_renderers = built is not None and (built / "ui-capabilities.json").is_file()
+
+    @app.get(mcp_sandbox.PATH, include_in_schema=False)
+    def app_proxy() -> Response:
+        return HTMLResponse(mcp_sandbox.PAGE, headers={"Cache-Control": "no-store, no-transform"})
 
     # An artifact's preview: its headers are `SecurityHeaders`' (PREVIEW_CSP).
     @app.get(PREVIEW_PATH, include_in_schema=False)
