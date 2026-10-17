@@ -91,7 +91,11 @@ def test_a_new_store_and_a_migrated_one_have_the_same_messages_and_prefs_tables(
 
     for table in ("messages", "documents_prefs"):
         assert shape(old, table) == shape(new, table), table
-    assert shape(new, "messages")[-1] == ("retrieval", "TEXT")
+    assert shape(new, "messages")[-3:] == [
+        ("retrieval", "TEXT"),
+        ("reasoning_tokens", "INTEGER"),
+        ("reasoning_seconds", "REAL"),
+    ]
 
 
 def test_a_messages_retrieval_is_kept_and_read_back_and_none_is_none(tmp_path: Path) -> None:
