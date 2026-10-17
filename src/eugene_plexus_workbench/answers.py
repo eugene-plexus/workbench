@@ -45,6 +45,7 @@ _SIGN_POLL_SECONDS = 4.0
 MAX_CALLS = 200
 MAX_ROUNDS = 50
 MAX_ASKED = 16
+_MAX_REASONING_TOKENS = 2**53 - 1
 
 
 class Refused(Exception):
@@ -212,6 +213,8 @@ def message_view(message: Message) -> dict[str, Any]:
         "role": message.role,
         "content": message.content,
         "reasoning": message.reasoning,
+        "reasoningTokens": message.reasoning_tokens,
+        "reasoningSeconds": message.reasoning_seconds,
         "attachments": message.attachments,
         "status": message.status,
         "error": message.error,
@@ -246,6 +249,10 @@ class Running:
     keepers: list[Keeper] = field(default_factory=list)
     #: Where the text of the request being streamed begins in the message.
     request_from: int = 0
+    reasoning_at: float | None = None
+    request_reasoning_tokens: int | None = None
+    prior_reasoning_tokens: int = 0
+    reasoning_tokens_complete: bool = True
 
 
 class Watch:
@@ -360,10 +367,13 @@ class Answers:
         await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _save(self, running: Running, *, final: bool = False) -> None:
+        self._reasoning_tick(running, end=final)
         m = running.message
         values: dict[str, Any] = {
             "content": m.content,
             "reasoning": m.reasoning,
+            "reasoning_tokens": m.reasoning_tokens,
+            "reasoning_seconds": m.reasoning_seconds,
             "sources": m.sources,
             "searches": m.searches,
             "search_suggestions": m.search_suggestions,
@@ -489,25 +499,38 @@ class Answers:
                 self.publish(chat_id, {"type": "done", "message": message_view(m)})
 
     async def _stream(self, running: Running, body: dict[str, Any]) -> list[dict[str, Any]]:
+        body = {
+            **body,
+            "stream_options": {**body.get("stream_options", {}), "include_usage": True},
+        }
         calls = Calls()
         running.message.finish = None
         prior_searches = running.message.searches
         # Where this request's text begins: its citations count from here.
         running.request_from = len(running.message.content)
-        async for chunk in self._hub.stream_chat(body):
-            extension = chunk.get("x_eugene_plexus") or {}
-            if isinstance(extension.get("web_searches"), int):
-                chunk = {
-                    **chunk,
-                    "x_eugene_plexus": {
-                        **extension,
-                        "web_searches": prior_searches + extension["web_searches"],
-                    },
-                }
-            calls.take(chunk)
-            self._take(running, chunk)
-            if time.perf_counter() - running.saved_at >= _SAVE_EVERY:
-                await self._save(running)
+        running.prior_reasoning_tokens = running.message.reasoning_tokens or 0
+        running.message.reasoning_tokens = None
+        running.request_reasoning_tokens = None
+        try:
+            async for chunk in self._hub.stream_chat(body):
+                extension = chunk.get("x_eugene_plexus") or {}
+                if isinstance(extension.get("web_searches"), int):
+                    chunk = {
+                        **chunk,
+                        "x_eugene_plexus": {
+                            **extension,
+                            "web_searches": prior_searches + extension["web_searches"],
+                        },
+                    }
+                calls.take(chunk)
+                self._take(running, chunk)
+                if time.perf_counter() - running.saved_at >= _SAVE_EVERY:
+                    await self._save(running)
+        finally:
+            self._reasoning_tick(running, end=True)
+            if running.request_reasoning_tokens is None:
+                running.reasoning_tokens_complete = False
+                running.message.reasoning_tokens = None
         result = calls.finish()
         if not result and running.message.finish == "tool_calls":
             raise ToolError("The model ended with no tool call. Try another model.")
@@ -702,10 +725,33 @@ class Answers:
 
         return sign
 
+    def _reasoning_tick(self, running: Running, *, end: bool = False) -> None:
+        if running.reasoning_at is None:
+            return
+        now = time.perf_counter()
+        running.message.reasoning_seconds = (running.message.reasoning_seconds or 0) + max(
+            0, now - running.reasoning_at
+        )
+        running.reasoning_at = None if end else now
+
     def _take(self, running: Running, chunk: dict[str, Any]) -> None:
         """One chunk of the gateway's stream into the answer, and out to every
         tab watching."""
         m = running.message
+        self._reasoning_tick(running)
+        usage = chunk.get("usage")
+        details = usage.get("completion_tokens_details") if isinstance(usage, dict) else None
+        tokens = details.get("reasoning_tokens") if isinstance(details, dict) else None
+        if (
+            type(tokens) is int
+            and 0 <= tokens <= _MAX_REASONING_TOKENS - running.prior_reasoning_tokens
+        ):
+            running.request_reasoning_tokens = tokens
+            if running.reasoning_tokens_complete:
+                m.reasoning_tokens = running.prior_reasoning_tokens + tokens
+        elif isinstance(details, dict) and "reasoning_tokens" in details:
+            running.request_reasoning_tokens = None
+            m.reasoning_tokens = None
         extension = chunk.get("x_eugene_plexus") or {}
         searches = extension.get("web_searches")
         if isinstance(searches, int):
@@ -725,6 +771,8 @@ class Answers:
         if not choices:
             progress = extension.get("progress")
             if isinstance(progress, dict):
+                if progress.get("stage") in ("tool", "prompt"):
+                    self._reasoning_tick(running, end=True)
                 running.progress = progress
                 said: dict[str, Any] = {"type": "progress", "id": m.id, "progress": progress}
                 if progress.get("stage") == "tool" and progress.get("tool") == "web_search":
@@ -735,6 +783,16 @@ class Answers:
                     said["answerFrom"] = _js_length(m.content)
                     said["reasoningFrom"] = _js_length(m.reasoning)
                 self.publish(running.chat_id, said)
+            if m.reasoning_seconds is not None:
+                self.publish(
+                    running.chat_id,
+                    {
+                        "type": "delta",
+                        "id": m.id,
+                        "reasoningTokens": m.reasoning_tokens,
+                        "reasoningSeconds": m.reasoning_seconds,
+                    },
+                )
             return
         choice = choices[0] or {}
         delta = choice.get("delta") or {}
@@ -744,10 +802,15 @@ class Answers:
         # missed some can tell that too and reload rather than show a gap.
         reasoning = delta.get("reasoning_content")
         if isinstance(reasoning, str) and reasoning:
+            if running.reasoning_at is None:
+                running.reasoning_at = time.perf_counter()
+                m.reasoning_seconds = m.reasoning_seconds or 0.0
             event["reasoningAt"] = _js_length(m.reasoning)
             m.reasoning += reasoning
             event["reasoning"] = reasoning
         content = delta.get("content")
+        if content or delta.get("tool_calls") or choice.get("finish_reason"):
+            self._reasoning_tick(running, end=True)
         if isinstance(content, str) and content:
             event["contentAt"] = _js_length(m.content)
             m.content += content
@@ -783,4 +846,6 @@ class Answers:
         ):
             running.progress = None
         if set(event) - {"type", "id"}:
+            event["reasoningTokens"] = m.reasoning_tokens
+            event["reasoningSeconds"] = m.reasoning_seconds
             self.publish(running.chat_id, event)

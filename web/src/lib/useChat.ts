@@ -64,6 +64,10 @@ export function applyEvent(detail: ChatDetail, event: ChatEvent): Outcome {
           ...m,
           content: content.text,
           reasoning: reasoning.text,
+          reasoningTokens:
+            event.reasoningTokens === undefined ? m.reasoningTokens : event.reasoningTokens,
+          reasoningSeconds:
+            event.reasoningSeconds === undefined ? m.reasoningSeconds : event.reasoningSeconds,
           sources: event.sources ?? m.sources,
           searchSuggestions: event.searchSuggestions ?? m.searchSuggestions,
           // What searching the person's documents came to arrives with the passages,
