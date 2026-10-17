@@ -311,8 +311,36 @@ export function MessageView({
   const working = waiting ? splitWorking(workingWords(progress, message, now)) : null;
   return (
     <article className="msg flex flex-col gap-3" data-testid="answer" data-status={message.status}>
-      {message.reasoning && (
-        <Fold label="Reasoning" boxLabel="Reasoning text" follow={running}>
+      {(message.reasoning || (message.reasoningTokens ?? 0) > 0) && (
+        <Fold
+          label="Reasoning"
+          metrics={
+            <span className="inline-flex flex-wrap gap-x-2 tabular-nums">
+              <span
+                title={
+                  message.reasoningTokens == null
+                    ? "Estimated from reasoning text; the model did not report a reasoning token count."
+                    : "Reasoning tokens reported by the model."
+                }
+              >
+                {message.reasoningTokens == null ? "~" : ""}
+                {(
+                  message.reasoningTokens ?? Math.ceil(message.reasoning.length / 4)
+                ).toLocaleString()}{" "}
+                tokens
+                {message.reasoningTokens == null ? " (estimated)" : ""}
+              </span>
+              {message.reasoningSeconds != null && (
+                <span title="Observed time streaming reasoning, excluding tool waits.">
+                  {message.reasoningSeconds.toFixed(1)}s
+                </span>
+              )}
+            </span>
+          }
+          boxLabel="Reasoning text"
+          follow={running}
+        >
+          {!message.reasoning && <p>The model did not share its reasoning text.</p>}
           {thoughts.map((thought, i) => (
             <div key={i}>
               {i > 0 && (
@@ -569,6 +597,7 @@ function statusLook(message: Message): { className: string; glyph: ReactNode } {
  * to the console's dashed box. It is plain text in a box that scrolls. */
 function Fold({
   label,
+  metrics,
   boxLabel,
   title,
   testId,
@@ -576,6 +605,7 @@ function Fold({
   children,
 }: {
   label: string;
+  metrics?: ReactNode;
   boxLabel: string;
   title?: string;
   testId?: string;
@@ -587,7 +617,7 @@ function Fold({
     <details className="group/r max-w-measure text-sm text-muted" data-testid={testId}>
       <summary
         title={title}
-        className="disclosure flex w-fit list-none items-center gap-1.5 rounded-plexus pl-1 pr-2 hover:bg-hover hover:text-fg [&::-webkit-details-marker]:hidden"
+        className="disclosure flex w-fit max-w-full list-none flex-wrap items-center gap-1.5 rounded-plexus pl-1 pr-2 hover:bg-hover hover:text-fg [&::-webkit-details-marker]:hidden"
       >
         <ChevronRight
           size={14}
@@ -595,6 +625,7 @@ function Fold({
           className="transition-transform group-open/r:rotate-90"
         />
         {label}
+        {metrics}
       </summary>
       <FoldText label={boxLabel} follow={follow}>
         {children}

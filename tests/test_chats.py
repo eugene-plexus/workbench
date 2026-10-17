@@ -5,6 +5,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
+import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -81,6 +84,159 @@ def test_an_answer_keeps_going_with_no_tab_open(world: World) -> None:
     assert seen and seen[-1]["type"] == "delta", "the tab saw the start, then closed"
     answer = ada.wait_answer(chat)
     assert answer["status"] == "done" and answer["content"] == "Hello from the model."
+
+
+def test_reasoning_metrics_measure_only_reasoning(monkeypatch: Any) -> None:
+    from eugene_plexus_workbench import answers as module
+
+    clock = [10.0]
+    monkeypatch.setattr(module.time, "perf_counter", lambda: clock[0])
+    message = Message("a", "c", 1, "assistant", "running", 0)
+    running = module.Running("c", message)
+    events: list[dict[str, Any]] = []
+    answers = object.__new__(module.Answers)
+    monkeypatch.setattr(answers, "publish", lambda chat, event: events.append(event))
+
+    def take(delta: dict[str, Any]) -> None:
+        answers._take(running, {"choices": [{"delta": delta}]})
+
+    take({"reasoning_content": "Think"})
+    clock[0] = 12.5
+    take({"content": "Answer"})
+    clock[0] = 80
+    take({"content": " continues"})
+    assert message.reasoning_seconds == 2.5
+    take({"reasoning_content": "Think again"})
+    clock[0] = 81
+    answers._take(
+        running,
+        {"choices": [], "x_eugene_plexus": {"progress": {"stage": "tool"}}},
+    )
+    clock[0] = 120
+    answers._reasoning_tick(running, end=True)
+    assert message.reasoning_seconds == 3.5
+    usage = {"completion_tokens_details": {"reasoning_tokens": 42}}
+    answers._take(running, {"choices": [], "usage": usage})
+    answers._take(running, {"choices": [], "usage": usage})
+    assert message.reasoning_tokens == 42
+    assert events[-1]["reasoningTokens"] == 42
+    assert events[-1]["reasoningSeconds"] == 3.5
+
+
+def test_reasoning_metrics_survive_a_restart(world: World) -> None:
+    world.gateway.reasoning = ["Think", " carefully."]
+    ada = world.browser()
+    ada.sign_in("p-ada")
+    chat = ada.new_chat()
+    ada.post(f"/api/chats/{chat}/messages", json={"content": "Think hard."})
+    answer = ada.wait_answer(chat)
+    assert answer["reasoning"]
+    assert world.gateway.requests[-1]["stream_options"]["include_usage"] is True
+    assert answer["reasoningSeconds"] is not None
+    assert answer["reasoningSeconds"] >= 0
+    assert answer["reasoningTokens"] is None
+    world.restart_workbench()
+    ada.sign_in("p-ada")
+    saved = ada.get(f"/api/chats/{chat}").json()["messages"][-1]
+    assert saved["reasoningSeconds"] == answer["reasoningSeconds"]
+    assert saved["reasoningTokens"] is None
+
+
+@pytest.mark.parametrize(
+    ("counts", "expected"),
+    [
+        ([5, 7], 12),
+        ([5, None], None),
+        ([None, 7], None),
+        ([5, -1], None),
+        ([5, True], None),
+        ([5, "7"], None),
+        ([2**53 - 1, 1], None),
+        ([2**63], None),
+    ],
+)
+def test_reasoning_metrics_count_all_requests(
+    monkeypatch: Any, counts: list[Any], expected: Any
+) -> None:
+    from types import SimpleNamespace
+
+    from eugene_plexus_workbench import answers as module
+
+    message = Message("a", "c", 1, "assistant", "running", 0)
+    running = module.Running("c", message)
+    answers = object.__new__(module.Answers)
+    monkeypatch.setattr(answers, "publish", lambda chat, event: None)
+
+    async def save(*args: Any, **kwargs: Any) -> None:
+        pass
+
+    monkeypatch.setattr(answers, "_save", save)
+
+    async def go() -> None:
+        for count in counts:
+
+            async def stream(body: Any, count: Any = count) -> Any:
+                yield {"choices": [{"delta": {"content": "Answer"}, "finish_reason": "stop"}]}
+                if count is not None:
+                    yield {
+                        "choices": [],
+                        "usage": {"completion_tokens_details": {"reasoning_tokens": count}},
+                    }
+
+            monkeypatch.setattr(answers, "_hub", SimpleNamespace(stream_chat=stream), raising=False)
+            await answers._stream(running, {})
+
+    asyncio.run(go())
+    assert message.reasoning_tokens == expected
+
+
+@pytest.mark.skipif(not os.getenv("WORKBENCH_PLAYWRIGHT"), reason="opt-in system Chrome acceptance")
+def test_reasoning_metrics_in_chrome(world: World, tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[1]
+    assert world.settings.static_dir is not None
+    shutil.copytree(
+        root / "src/eugene_plexus_workbench/static", world.settings.static_dir, dirs_exist_ok=True
+    )
+    world.restart_workbench()
+    world.gateway.reasoning = ["Let me think.", " More reasoning.", " Still thinking."]
+    world.gateway.words = ["Final answer."]
+    world.gateway.delay = 0.2
+    person = world.browser()
+    person.sign_in("p-ada")
+    config = tmp_path / "reasoning-browser.json"
+    config.write_text(
+        json.dumps(
+            {
+                "url": world.workbench,
+                "secret": person.secret,
+                "cookies": [
+                    {
+                        "name": c.name,
+                        "value": c.value,
+                        "url": world.workbench,
+                        "httpOnly": True,
+                        "sameSite": "Lax",
+                    }
+                    for c in person.http.cookies.jar
+                ],
+                "playwright": os.environ["WORKBENCH_PLAYWRIGHT"],
+                "chrome": os.getenv(
+                    "WORKBENCH_CHROME", "C:/Program Files/Google/Chrome/Application/chrome.exe"
+                ),
+                "shots": os.getenv("WORKBENCH_SHOTS", str(tmp_path)),
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["node", str(root / "web/scripts/reasoning-browser.mjs"), str(config)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PASS:" in result.stdout
 
 
 def test_a_tab_opened_mid_answer_gets_what_has_arrived_then_the_rest(world: World) -> None:

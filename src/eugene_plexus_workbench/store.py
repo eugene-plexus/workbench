@@ -89,7 +89,7 @@ from .agui_store import AGUIStore, allow_chat_write
 from .interaction_store import SCHEMA as INTERACTION_SCHEMA
 from .interaction_store import InteractionStore
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 #: The oldest schema this migrates from: what Workbench v0.1.0 wrote. Schema 1 predates
 #: it, and nobody holds one.
@@ -182,7 +182,9 @@ CREATE TABLE IF NOT EXISTS messages (
     chosen INTEGER NOT NULL DEFAULT 1,
     search_suggestions TEXT NOT NULL DEFAULT '[]',
     output_cap TEXT,
-    retrieval TEXT
+    retrieval TEXT,
+    reasoning_tokens INTEGER,
+    reasoning_seconds REAL
 );
 CREATE INDEX IF NOT EXISTS messages_by_chat ON messages (chat_id, seq);
 CREATE TABLE IF NOT EXISTS files (
@@ -464,6 +466,10 @@ _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
     16: [*INTERACTION_SCHEMA],
     17: [*AGUI_SCHEMA],
     18: ["ALTER TABLE sessions ADD COLUMN access_token TEXT"],
+    19: [
+        "ALTER TABLE messages ADD COLUMN reasoning_tokens INTEGER",
+        "ALTER TABLE messages ADD COLUMN reasoning_seconds REAL",
+    ],
 }
 
 
@@ -749,6 +755,9 @@ class Message:
     #: (`saved_api.retrieval_view`); None when none was searched.
     retrieval: dict[str, Any] | None = None
 
+    reasoning_tokens: int | None = None
+    reasoning_seconds: float | None = None
+
 
 @dataclass
 class FileRecord:
@@ -944,6 +953,8 @@ def _message(row: sqlite3.Row) -> Message:
         search_suggestions=json.loads(row["search_suggestions"] or "[]"),
         output_cap=json.loads(row["output_cap"]) if row["output_cap"] else None,
         retrieval=_snapshot(row["retrieval"]),
+        reasoning_tokens=row["reasoning_tokens"],
+        reasoning_seconds=row["reasoning_seconds"],
     )
 
 
@@ -1108,6 +1119,8 @@ _MESSAGE_FIELDS = {
     "search_suggestions",
     "output_cap",
     "retrieval",
+    "reasoning_tokens",
+    "reasoning_seconds",
 }
 _CHAT_FIELDS = {"title", "model", "settings", "search", "updated_at"}
 _JSON_FIELDS = {

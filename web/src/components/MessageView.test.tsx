@@ -136,6 +136,28 @@ describe("a searched answer (W6)", () => {
     expect(screen.getByText("Reasoning").closest("details")).not.toHaveAttribute("open");
     expect(screen.getByRole("alert")).toHaveTextContent("the key was refused");
   });
+
+  it("shows reasoning tokens and duration without opening the reasoning", () => {
+    show(answer({ reasoning: "Thinking...", reasoningTokens: 128, reasoningSeconds: 3.25 }));
+    const fold = screen.getByText("Reasoning").closest("details")!;
+    expect(fold).not.toHaveAttribute("open");
+    expect(fold.querySelector("summary")).toHaveTextContent("128 tokens3.3s");
+  });
+
+  it("labels missing token counts as estimates and does not invent a duration", () => {
+    show(answer({ reasoning: "Thinking..." }));
+    const summary = screen.getByText("Reasoning").closest("summary")!;
+    expect(summary).toHaveTextContent("~3 tokens");
+    expect(summary).toHaveTextContent("(estimated)");
+    expect(screen.getByTitle(/Estimated from reasoning text/)).toBeInTheDocument();
+    expect(screen.queryByTitle(/Observed time streaming reasoning/)).toBeNull();
+  });
+
+  it("shows reported reasoning tokens even when the reasoning text is withheld", () => {
+    show(answer({ reasoningTokens: 64 }));
+    expect(screen.getByText("Reasoning").closest("summary")).toHaveTextContent("64 tokens");
+    expect(screen.getByText("The model did not share its reasoning text.")).toBeInTheDocument();
+  });
 });
 
 describe("versions of a message (workbench-answer-versions.md)", () => {

@@ -102,6 +102,23 @@ describe("what searching the person's documents came to", () => {
     expect(words.detail.messages[0]!.content).toBe("The");
   });
 
+  it("keeps reasoning measurements from deltas, including explicit unavailable counts", () => {
+    const first = applyEvent(
+      { ...detail, messages: [running()] },
+      { type: "delta", id: "a", reasoning: "Think", reasoningTokens: 12, reasoningSeconds: 0.5 },
+    );
+    expect(first.detail.messages[0]).toMatchObject({ reasoningTokens: 12, reasoningSeconds: 0.5 });
+    const next = applyEvent(first.detail, {
+      type: "delta",
+      id: "a",
+      reasoningTokens: null,
+      reasoningSeconds: 2,
+    });
+    expect(next.detail.messages[0]).toMatchObject({ reasoningTokens: null, reasoningSeconds: 2 });
+    const text = applyEvent(next.detail, { type: "delta", id: "a", content: "Answer" });
+    expect(text.detail.messages[0]).toMatchObject({ reasoningTokens: null, reasoningSeconds: 2 });
+  });
+
   it("can be cleared by an event that says it is none, and is left alone by one that says nothing of it", () => {
     const shown = { ...detail, messages: [running({ retrieval: found })] };
     expect(

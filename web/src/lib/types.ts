@@ -95,6 +95,8 @@ export interface Message {
   role: "user" | "assistant";
   content: string;
   reasoning: string;
+  reasoningTokens?: number | null;
+  reasoningSeconds?: number | null;
   attachments: string[];
   files?: AttachedFile[];
   status: MessageStatus;
@@ -590,6 +592,8 @@ export type ChatEvent =
       contentAt?: number;
       reasoning?: string;
       reasoningAt?: number;
+      reasoningTokens?: number | null;
+      reasoningSeconds?: number | null;
       sources?: Source[];
       searchSuggestions?: string[];
       retrieval?: SearchRecord | null;
