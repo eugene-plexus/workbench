@@ -330,8 +330,8 @@ describe("the search switch says why it is off (W6)", () => {
 
 describe("an attachment goes to a model that takes it (W7)", () => {
   const png = { id: "f", name: "a.png", mediaType: "image/png" };
-  it("says when the model does not take it", () => {
-    expect(attachmentProblem(model(), [png])).toMatch(/does not take images/);
+  it("names the current setup when image input is unavailable", () => {
+    expect(attachmentProblem(model(), [png])).toMatch(/cannot send images.+current setup/);
   });
   it("is quiet when it does", () => {
     expect(attachmentProblem(model({ imageInput: true }), [png])).toBeNull();
@@ -345,14 +345,14 @@ describe("an attachment goes to a model that takes it (W7)", () => {
     expect(attachmentProblem(model({ imageInput: true }), [png, read])).toBeNull();
   });
   it("still asks it of a PDF that Workbench did not read, which goes as the file", () => {
-    expect(attachmentProblem(model(), [pdf])).toMatch(/does not take PDFs/);
+    expect(attachmentProblem(model(), [pdf])).toMatch(/cannot send PDFs/);
     expect(attachmentProblem(model({ fileInput: true }), [pdf])).toBeNull();
     const unread = { ...pdf, kind: "document" as const, reading: null };
-    expect(attachmentProblem(model(), [unread])).toMatch(/does not take PDFs/);
+    expect(attachmentProblem(model(), [unread])).toMatch(/cannot send PDFs/);
   });
   it("still asks it of an image beside a PDF that was read", () => {
     expect(attachmentProblem(model(), [png, read])).toBe(
-      "qwen3-14b does not take images. Pick a model that does, or remove the file.",
+      "Eugene cannot send images to qwen3-14b with its current setup. Choose another model or remove the file.",
     );
   });
 });
