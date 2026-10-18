@@ -67,7 +67,7 @@ export function attachmentProblem(model: Model | undefined, pending: Pending[]):
     if (kind === "audio" && !model.audioInput) missing.add("audio");
   }
   if (missing.size === 0) return null;
-  return `${model.id} does not take ${[...missing].join(" or ")}. Pick a model that does, or remove the file.`;
+  return `Eugene cannot send ${[...missing].join(" or ")} to ${model.id} with its current setup. Choose another model or remove the file.`;
 }
 
 /** Why the search switch is off, or null when it can be used. */

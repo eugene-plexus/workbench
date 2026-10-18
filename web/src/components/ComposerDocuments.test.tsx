@@ -600,7 +600,7 @@ describe("a PDF is not refused for a model that cannot read one itself", () => {
     read(file());
     await wait(FIRST_POLL_MS);
     expect(chip()).toHaveAttribute("data-state", "whole");
-    expect(screen.queryByText(/does not take PDFs/)).toBeNull();
+    expect(screen.queryByText(/cannot send PDFs/)).toBeNull();
     expect(send()).toBeEnabled();
   });
 
@@ -608,7 +608,7 @@ describe("a PDF is not refused for a model that cannot read one itself", () => {
     composer();
     await drop("report.pdf", file({ reading: null, decision: native({ reading: null }).decision }));
     expect(screen.getByRole("alert")).toHaveTextContent(
-      "local does not take PDFs. Pick a model that does, or remove the file.",
+      "Eugene cannot send PDFs to local with its current setup. Choose another model or remove the file.",
     );
     expect(send()).toBeDisabled();
   });
