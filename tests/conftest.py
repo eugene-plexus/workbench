@@ -16,6 +16,7 @@ import hashlib
 import json
 import secrets
 import socket
+import sys
 import threading
 import time
 from collections.abc import AsyncIterator, Iterator
@@ -347,6 +348,10 @@ class ServerThread:
         sockets: list[socket.socket] | None = None
         if port is None:
             sock = socket.socket()
+            if sys.platform != "win32":
+                # As uvicorn's own socket does: on Linux a restart on this port
+                # (restart_workbench) binds only if the old connections had it.
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind(("127.0.0.1", 0))
             port = int(sock.getsockname()[1])
             sockets = [sock]
