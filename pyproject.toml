@@ -58,6 +58,7 @@ dependencies = [
 dev = [
     "pytest==8.4.2",
     "pytest-asyncio==0.26.0",
+    "pytest-xdist==3.8.0",
     "ruff==0.15.14",
     "mypy==1.20.2",
     "datamodel-code-generator==0.57.0",

@@ -342,11 +342,21 @@ def free_port() -> int:
 
 class ServerThread:
     def __init__(self, app: Any, port: int | None = None) -> None:
-        self.port = port or free_port()
+        # A new server keeps the socket it was given port 0 on, so a parallel
+        # test process (pytest -n) cannot take the port between asking and binding.
+        sockets: list[socket.socket] | None = None
+        if port is None:
+            sock = socket.socket()
+            sock.bind(("127.0.0.1", 0))
+            port = int(sock.getsockname()[1])
+            sockets = [sock]
+        self.port = port
         self.url = f"http://127.0.0.1:{self.port}"
         config = uvicorn.Config(app, host="127.0.0.1", port=self.port, log_level="error")
         self.server = uvicorn.Server(config)
-        self.thread = threading.Thread(target=self.server.run, daemon=True)
+        self.thread = threading.Thread(
+            target=self.server.run, kwargs={"sockets": sockets}, daemon=True
+        )
 
     def start(self) -> ServerThread:
         self.thread.start()
@@ -358,8 +368,15 @@ class ServerThread:
         return self
 
     def stop(self) -> None:
-        self.server.should_exit = True
-        self.thread.join(timeout=15)
+        stop_together(self)
+
+
+def stop_together(*servers: ServerThread) -> None:
+    """Stop servers at once: uvicorn's shutdown sleeps about 0.2 s whatever it has to do."""
+    for server in servers:
+        server.server.should_exit = True
+    for server in servers:
+        server.thread.join(timeout=15)
 
 
 # --------------------------------------------------------------------------- #
@@ -1365,8 +1382,7 @@ def world(tmp_path: Path) -> Iterator[World]:
         yield world
     finally:
         world.server.stop()
-        gateway_server.stop()
-        eugene_server.stop()
+        stop_together(gateway_server, eugene_server)
 
 
 @pytest.fixture
