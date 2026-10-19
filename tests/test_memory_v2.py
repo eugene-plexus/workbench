@@ -85,7 +85,7 @@ def test_a_tag_is_one_short_line_without_a_mark_and_a_note_has_each_once() -> No
         memory.validate_tags([f"t{i}" for i in range(11)])
     assert many.value.reason == "too_many_tags"
     with pytest.raises(memory.NoteRefused):
-        memory.validate_description("token: sk-ant-abcdefghij1234567890abcd")
+        memory.validate_description("token: sk-ant-" + "abcdefghij1234567890abcd")
 
 
 def test_the_pinned_block_holds_only_notes_always_used_and_their_bodies_while_they_fit() -> None:
