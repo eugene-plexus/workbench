@@ -479,6 +479,16 @@ async def rebuild_documents(request: Request) -> dict[str, Any]:
     if not (await config.document_settings(store)).enabled:
         raise _problem(status.HTTP_403_FORBIDDEN, _OWNER_OFF)
     made = await _saved(request).rebuild(person.sub, store.chat_owners)
+    # The index held the person's notes and past chats too (MV1, MV2): they are put back
+    # from the store, in the background.
+    state = _state(request)
+    notes = getattr(state, "notes_index", None)
+    if notes is not None:
+        notes.dirty.add(person.sub)
+        notes._later()
+    exchanges = getattr(state, "exchanges_index", None)
+    if exchanges is not None:
+        exchanges.refill(person.sub)
     return {"documents": made.documents, "left": made.left}
 
 

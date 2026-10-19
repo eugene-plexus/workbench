@@ -1,3 +1,5 @@
+import type { PastChatsState, PastChatsTurn } from "./pastChats";
+
 /** What Workbench's own API answers with (src/eugene_plexus_workbench/api.py). */
 
 import type { ArtifactSummary } from "./artifacts";
@@ -277,6 +279,8 @@ export interface ChatSettings {
   documentsOnly?: boolean | null;
   /** The person chose "Send for this chat" for passages of their documents. */
   documentsExternal?: true | null;
+  /** MV2: Use past chats in this chat; unset is off. */
+  pastChats?: true | null;
 }
 
 export interface FolderGrant {
@@ -699,6 +703,8 @@ export interface MemoryPrefs {
   relevantBudgetTokens: number | null;
   /** MV1: whether models may search the notes (`search_memory`). */
   searchTool: boolean;
+  /** MV2: whether models may search the past chats (`search_chats`). */
+  chatsTool?: boolean;
   /** Learn from my chats; null until the person chooses. */
   learn: "off" | "suggest" | null;
   useMode: "relevant" | "all";
@@ -846,6 +852,8 @@ export interface MemoryTurn {
   from: number;
   window: number | null;
   room: number | null;
+  /** MV2: the past chats the turn was sent, when the chat uses them. */
+  pastChats?: PastChatsTurn;
 }
 
 /** `GET /api/chats/{id}/memory`, for a chat that is the asker's. */
@@ -888,6 +896,8 @@ export interface ChatMemory {
   turns?: string[];
   relevantBudget?: number | null;
   searchTool?: boolean | null;
+  /** MV2: Use past chats in this chat, and whether its model may receive them. */
+  pastChats?: PastChatsState;
 }
 
 /** The install owner reading someone else's chat: counts, never the notes. */
@@ -900,7 +910,14 @@ export interface ChatMemoryReadOnly {
   budget: number | null;
   counts: { sent: number; notSent: number };
   /** Counts only: how many notes the answer's turn was sent. */
-  turn?: { messageId: string; notes: number; tokens: number | null; budget: number | null } | null;
+  turn?: {
+    messageId: string;
+    notes: number;
+    tokens: number | null;
+    budget: number | null;
+    /** MV2: how many past exchanges it was sent. */
+    pastChats?: number;
+  } | null;
 }
 
 export type ChatMemoryView = ChatMemory | ChatMemoryReadOnly;

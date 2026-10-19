@@ -20,6 +20,7 @@ export interface ConnectionRights {
   notes: boolean;
   documents: boolean;
   suggest: boolean;
+  chats?: boolean;
 }
 
 export interface Connection {
@@ -38,6 +39,7 @@ export interface ConnectionsPage {
   notesAllowed: boolean;
   documentsAllowed: boolean;
   suggestionsAllowed: boolean;
+  chatsAllowed?: boolean;
   address: string;
   limit: number;
   days: number[];
@@ -55,6 +57,7 @@ const RIGHT_WORDS: [keyof ConnectionRights, string][] = [
   ["notes", "Reads your notes"],
   ["documents", "Searches your documents"],
   ["suggest", "Suggests notes for you to keep or dismiss"],
+  ["chats", "Searches your past chats, which may quote your notes and documents"],
 ];
 
 function rightsWords(rights: ConnectionRights): string {
@@ -249,6 +252,7 @@ function MakeForm({
     notes: data.notesAllowed,
     documents: data.documentsAllowed,
     suggest: false,
+    chats: false,
   });
   const [days, setDays] = useState(data.days[0] ?? 90);
   const [busy, setBusy] = useState(false);
@@ -257,13 +261,15 @@ function MakeForm({
     notes: data.notesAllowed,
     documents: data.documentsAllowed,
     suggest: data.suggestionsAllowed,
+    chats: data.chatsAllowed ?? data.notesAllowed,
   };
   const why: Record<keyof ConnectionRights, string> = {
     notes: "Notes are turned off on this Workbench.",
     documents: "Documents are turned off on this Workbench.",
     suggest: "The owner of this Workbench has turned suggested notes off.",
+    chats: "Memory is turned off on this Workbench.",
   };
-  const chosen = rights.notes || rights.documents || rights.suggest;
+  const chosen = rights.notes || rights.documents || rights.suggest || Boolean(rights.chats);
 
   async function submit(event: FormEvent) {
     event.preventDefault();

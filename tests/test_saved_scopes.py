@@ -89,11 +89,17 @@ def window(world: World, tokens: int = 8192) -> None:
 
 
 def chat_documents(world: World, sub: str = "p-ada") -> list[tuple[str, str, str]]:
-    """Every document in a person's index: (scope, name, state)."""
+    """Every document in a person's index: (scope, name, state); not their past chats'
+    exchanges (MV2), which are the person's memory, not documents."""
     if not index_of(world, sub).exists():
         return []
     with raw(world, sub) as db:
-        return [tuple(r) for r in db.execute("SELECT scope, name, status FROM documents")]
+        return [
+            tuple(r)
+            for r in db.execute(
+                "SELECT scope, name, status FROM documents WHERE scope != 'exchanges'"
+            )
+        ]
 
 
 # --------------------------------------------------------------------------- #

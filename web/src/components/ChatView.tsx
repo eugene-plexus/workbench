@@ -47,8 +47,11 @@ export function ChatView({
   onDeleted,
   onOpenMemory,
   onOpenDocuments,
+  at = null,
 }: {
   chatId: string;
+  /** MV2: the exchange (an answer's id) to open the chat at, from Search chats. */
+  at?: string | null;
   /** Files already in this chat, waiting in its composer: an image sent from the media area (M7). */
   attachments?: { id: string; name: string; mediaType: string }[];
   me: Me;
@@ -106,13 +109,30 @@ export function ChatView({
   // Follow the bottom until the reader scrolls up, and again once they
   // scroll back down. Growth alone never unpins: an answer arriving, or an
   // image loading late, moves the bottom without the reader doing anything.
-  const pinned = useRef(true);
+  const pinned = useRef(at === null);
+  // The exchange opened at is marked for a moment, then the address forgets it.
+  const [marked, setMarked] = useState<string | null>(at);
   const lastTop = useRef(0);
   const running =
     (detail?.messages.some((m) => m.status === "running") ?? false) ||
     agui.run?.status === "running";
   const wasRunning = useRef(running);
   const loaded = detail !== null;
+  useEffect(() => {
+    if (!loaded || !at) return;
+    const shown = detail?.messages ?? [];
+    const index = shown.findIndex((m) => m.id === at);
+    const start = index > 0 ? shown[index - 1]!.id : at;
+    document.getElementById(`message-${start}`)?.scrollIntoView?.({ block: "start" });
+    const done = window.setTimeout(() => {
+      setMarked(null);
+      if (window.location.search) {
+        window.history.replaceState(null, "", window.location.pathname);
+      }
+    }, 4000);
+    return () => window.clearTimeout(done);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded, at]);
 
   // What a screen reader is told when the newest answer changes phase. What is
   // on the page when the chat opens is not news, so the first phrase is only
@@ -504,21 +524,31 @@ export function ChatView({
             )}
             {messages.map((message: Message) => (
               <Fragment key={message.id}>
-                <MessageView
-                  key={message.id}
-                  chatId={chat.id}
-                  message={message}
-                  progress={message.status === "running" ? progress : null}
-                  busy={running}
-                  readOnly={chat.readOnly}
-                  onChanged={() => {
-                    void reload();
-                    onChanged();
-                  }}
-                  onLook={chat.readOnly ? look : undefined}
-                  memory={remember}
-                  documents={chat.readOnly ? undefined : { onManage: onOpenDocuments }}
-                />
+                <div
+                  id={`message-${message.id}`}
+                  data-marked={marked === message.id ? "true" : undefined}
+                  className={
+                    marked === message.id
+                      ? "scroll-mt-4 rounded-plexus ring-2 ring-accent ring-offset-4 ring-offset-bg"
+                      : "scroll-mt-4"
+                  }
+                >
+                  <MessageView
+                    key={message.id}
+                    chatId={chat.id}
+                    message={message}
+                    progress={message.status === "running" ? progress : null}
+                    busy={running}
+                    readOnly={chat.readOnly}
+                    onChanged={() => {
+                      void reload();
+                      onChanged();
+                    }}
+                    onLook={chat.readOnly ? look : undefined}
+                    memory={remember}
+                    documents={chat.readOnly ? undefined : { onManage: onOpenDocuments }}
+                  />
+                </div>
                 <InteractionSurfaces
                   chat={chat.id}
                   message={message.id}

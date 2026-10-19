@@ -521,6 +521,7 @@ function Settings({
     budgetTokens?: number | null;
     relevantBudgetTokens?: number | null;
     searchTool?: boolean;
+    chatsTool?: boolean;
     learn?: "off" | "suggest" | null;
     useMode?: "relevant" | "all";
   }) => void;
@@ -533,6 +534,7 @@ function Settings({
   // the old value back: these are only read while the page is busy.
   const [wanted, setWanted] = useState<{ enabled?: boolean; external?: ExternalChoice }>({});
   const [wantedSearch, setWantedSearch] = useState<boolean | null>(null);
+  const [wantedChats, setWantedChats] = useState<boolean | null>(null);
   const enabled = busy && wanted.enabled !== undefined ? wanted.enabled : effective.enabled;
   const external = busy && wanted.external !== undefined ? wanted.external : effective.external;
   return (
@@ -630,6 +632,29 @@ function Settings({
           {prefs.searchTool
             ? "A model that can use tools may look up notes it was not given. It only reads your notes and can change nothing."
             : "Models are only given the notes Workbench chooses for them."}
+        </p>
+      </div>
+      <div className="field">
+        <label className="check items-center" htmlFor={`${uid}-chats`}>
+          <input
+            id={`${uid}-chats`}
+            type="checkbox"
+            role="switch"
+            data-testid="memory-chats-switch"
+            aria-describedby={`${uid}-chats-help`}
+            checked={busy && wantedChats !== null ? wantedChats : prefs.chatsTool !== false}
+            disabled={busy}
+            onChange={(event) => {
+              setWantedChats(event.target.checked);
+              onPrefs({ chatsTool: event.target.checked });
+            }}
+          />
+          Let models search my past chats
+        </label>
+        <p id={`${uid}-chats-help`} data-testid="memory-chats-effective" className="help">
+          {prefs.chatsTool !== false
+            ? "A model that can use tools may look up what your other chats said. It only reads them and can change nothing."
+            : "Models are not given your other chats, unless you turn on Use past chats in a chat."}
         </p>
       </div>
       <details className="group/b text-sm" data-testid="memory-budget-details">

@@ -370,6 +370,7 @@ def test_a_persons_own_memory_settings_and_what_is_in_effect(world: World) -> No
         "budgetTokens": None,
         "relevantBudgetTokens": None,
         "searchTool": True,
+        "chatsTool": True,
         "learn": None,  # MR8: not chosen
         "useMode": "relevant",
         "effective": {
@@ -689,7 +690,8 @@ def test_the_owner_cannot_read_a_persons_notes_even_where_they_read_her_chats(
             "counts",
             "turn",
         }
-        assert set(view["turn"]) == {"messageId", "notes", "tokens", "budget"}
+        assert set(view["turn"]) == {"messageId", "notes", "tokens", "budget", "pastChats"}
+        assert view["turn"]["pastChats"] == 0
         assert view["turn"]["notes"] == 1 and view["turn"]["tokens"] > 0
         for word in ("plum", "code word", "Denver"):
             assert word not in seen.text, word

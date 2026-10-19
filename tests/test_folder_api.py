@@ -349,6 +349,9 @@ def test_an_edited_file_is_read_again_the_new_words_answer_and_the_old_are_gone(
     chat = chat_on(ada)
     reply = ask(ada, chat, f"What is the {RARE} plan?")
     assert RARE not in str(reply["sources"]), "the old text is not sent to a model"
+    # The person's own questions are in their index too, as their past chats (MV2): the
+    # chat goes, so what is left is the documents'.
+    assert ada.delete(f"/api/chats/{chat}").status_code == 204
     index = index_of(world)
     with raw(world) as db:
         assert db.execute("SELECT COUNT(*) FROM documents").fetchone() == (1,)

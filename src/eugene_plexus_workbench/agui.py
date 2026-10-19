@@ -187,6 +187,10 @@ class AGUI:
                 await monitor
             self.runs.pop(chat, None)
             self.answers.publish(chat, {"type": "reload"})
+            # Its exchange goes in the person's index (MV2), as an answer's does.
+            if self.answers.on_finished is not None:
+                with contextlib.suppress(Exception):
+                    self.answers.on_finished(chat)
 
     async def _native(self, active: Active, request: Request, body: dict[str, Any]) -> None:
         chat, run_id = active.run["threadId"], active.run["runId"]

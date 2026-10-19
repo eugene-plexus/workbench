@@ -52,7 +52,7 @@ from .store import (
     path,
     versions,
 )
-from .tools import MEMORY_SERVER, MEMORY_TOOL_NAME
+from .tools import CHATS_SERVER, CHATS_TOOL_NAME, MEMORY_SERVER, MEMORY_TOOL_NAME
 
 log = logging.getLogger(__name__)
 
@@ -367,6 +367,9 @@ class ChatSettings(BaseModel):
     #: The person chose to send passages of their saved documents to this chat's model
     #: even though it runs outside their machines ("Send for this chat").
     documentsExternal: bool | None = None
+    #: Use past chats (MV2): each turn carries the person's earlier exchanges that match
+    #: what they just asked. Unset is off.
+    pastChats: bool | None = None
 
 
 class ChatUpdate(BaseModel):
@@ -405,6 +408,7 @@ def chat_view(chat: Chat, *, running: bool, read_only: bool = False) -> dict[str
                 "documents",
                 "documentsOnly",
                 "documentsExternal",
+                "pastChats",
                 *SAMPLING,
             )
         },
@@ -573,6 +577,17 @@ def hidden_from_owner(tree: list[Message], mode: str) -> dict[str, str]:
     return hidden
 
 
+#: The tools Workbench runs over a person's own memory (MV1, MV2): never the owner's to read.
+_PRIVATE_SERVERS = (MEMORY_SERVER, CHATS_SERVER)
+
+
+def _touch_exchanges(request: Request, owner: str, chat_id: str) -> None:
+    """The chat's exchanges may have changed (MV2): its index copy is synced soon."""
+    keeper = getattr(_state(request), "exchanges_index", None)
+    if keeper is not None:
+        keeper.touch(owner, chat_id)
+
+
 def hide_notes(view: dict[str, Any]) -> dict[str, Any]:
     """A message as the install's owner may read it, with the person's notes hidden (MV1):
     what its turn was sent of them is counts only, and a `search_memory` call keeps neither
@@ -580,17 +595,26 @@ def hide_notes(view: dict[str, Any]) -> dict[str, Any]:
     used = view.get("memoryUsed")
     rounds = view.get("toolRounds") or []
     searched = any(
-        call.get("serverId") == MEMORY_SERVER for turn in rounds for call in turn.get("calls") or []
+        call.get("serverId") in _PRIVATE_SERVERS
+        for turn in rounds
+        for call in turn.get("calls") or []
     )
     if not used and not searched:
         return view
     out = dict(view)
     if isinstance(used, dict):
+        past = used.get("pastChats")
         out["memoryUsed"] = {
             "notes": len(used.get("notes") or []),
             "tokens": used.get("tokens"),
             "budget": used.get("budget"),
             "redacted": True,
+            # MV2: the past chats a turn was sent are the person's, as their notes are.
+            **(
+                {"pastChats": {"exchanges": len(past.get("exchanges") or []), "redacted": True}}
+                if isinstance(past, dict)
+                else {}
+            ),
         }
     if searched:
         out["toolRounds"] = [
@@ -601,11 +625,14 @@ def hide_notes(view: dict[str, Any]) -> dict[str, Any]:
                     {
                         **call,
                         "arguments": {},
-                        "result": "Hidden: the person's notes.",
+                        "result": "Hidden: the person's notes."
+                        if call.get("serverId") == MEMORY_SERVER
+                        else "Hidden: the person's past chats.",
                         "content": [],
+                        "chats": [],
                         "redacted": True,
                     }
-                    if call.get("serverId") == MEMORY_SERVER
+                    if call.get("serverId") in _PRIVATE_SERVERS
                     else call
                     for call in turn.get("calls") or []
                 ],
@@ -623,7 +650,7 @@ def _hide_memory_calls(assistant: dict[str, Any]) -> dict[str, Any]:
         **assistant,
         "tool_calls": [
             {**c, "function": {**(c.get("function") or {}), "arguments": "{}"}}
-            if (c.get("function") or {}).get("name") == MEMORY_TOOL_NAME
+            if (c.get("function") or {}).get("name") in (MEMORY_TOOL_NAME, CHATS_TOOL_NAME)
             else c
             for c in calls
         ],
@@ -762,6 +789,8 @@ async def update_chat(request: Request, chat_id: str, body: ChatUpdate) -> dict[
         values["settings"] = {k: v for k, v in merged.items() if v is not None}
     values["updated_at"] = time.time()
     await _state(request).store.update_chat(chat.id, **values)
+    if "title" in values:
+        _touch_exchanges(request, person.sub, chat.id)
     fresh = await _own_chat(request, person, chat_id)
     return chat_view(
         fresh,
@@ -778,7 +807,36 @@ async def delete_chat(request: Request, chat_id: str) -> Response:
     await _state(request).agui.stop(chat.id)
     await _answers(request).stop(chat.id)
     records = await store.files_for_chat(chat.id)
-    await store.delete_chat(chat.id)
+    # Its exchanges leave the person's index first (MV2): if they cannot, nothing is
+    # deleted, so no word of a deleted chat stays searchable.
+    keeper = getattr(_state(request), "exchanges_index", None)
+    if keeper is not None:
+        try:
+            await keeper.remove_chat(person.sub, chat.id)
+        except Exception as exc:
+            log.warning("a chat was not deleted: its index said %s: %s", type(exc).__name__, exc)
+            raise _problem(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "Workbench could not remove this chat's words from your search index, so "
+                f"nothing was deleted ({type(exc).__name__}). Try again in a moment.",
+            ) from None
+    try:
+        await store.delete_chat(chat.id)
+    except BaseException:
+        # The chat is still there with no exchanges in the index: put them back.
+        _touch_exchanges(request, person.sub, chat.id)
+        raise
+    if keeper is not None:
+        # A sync that had read the chat before it went may have put an exchange back
+        # after the first removal (stopping its answer touches it): it goes now.
+        try:
+            await keeper.remove_chat(person.sub, chat.id)
+        except Exception as exc:
+            log.warning(
+                "a deleted chat's exchanges were not all removed (%s: %s); the next start will",
+                type(exc).__name__,
+                exc,
+            )
     await _state(request).reader.cancel([r.id for r in records])
     # The documents made from this chat's files go with it: they are in the person's own
     # index, another store, so a failure here is said in the log and the boot reconcile
@@ -893,7 +951,7 @@ async def _ask(
     fresh = await store.chat(chat.id) or chat
     # The person's notes, as this chat was first sent them (or as they are now,
     # at its first request that carries any). Never raises; None is none.
-    from . import documents_api, memory_api, saved_api
+    from . import documents_api, memory_api, past_chats, saved_api
 
     notes = await memory_api.block_for(request, person, fresh, model)
     by_id = {r.id: r for r in records}
@@ -908,10 +966,12 @@ async def _ask(
             request, fresh, history, by_id, model, notes, progress
         )
         decided["documents"] = prepared.sent
-        # The notes that bear on what the person just asked (MV1), in the room the chat
-        # leaves; then the documents' passages, in what is left after them.
-        turn = await memory_api.turn_for(
-            request,
+        # Past chats that bear on what the person just asked, when they turned them on for
+        # this chat (MV2), in up to a third of the relevant budget; then their notes (MV1)
+        # in the rest, in the room the chat leaves; then the documents' passages, in what
+        # is left after them.
+        past = await past_chats.turn_for(
+            _state(request),
             person,
             fresh,
             history,
@@ -919,15 +979,30 @@ async def _ask(
             used=prepared.used,
             reserve=saved_api._reserve(fresh),
         )
+        turn = await memory_api.turn_for(
+            request,
+            person,
+            fresh,
+            history,
+            model,
+            used=prepared.used + past.tokens,
+            reserve=saved_api._reserve(fresh),
+            spent=past.tokens,
+        )
         decided["memory_turn"] = turn.block
         decided["memory_allowed"] = turn.allowed
+        decided["past_turn"] = past.block
+        decided["chats_allowed"] = past.allowed
+        record = turn.record
+        if past.record is not None:
+            record = {**(record or {}), "pastChats": past.record}
         found = await saved_api.retrieve(
             request,
             person,
             fresh,
             history,
             model,
-            used=prepared.used + turn.tokens,
+            used=prepared.used + past.tokens + turn.tokens,
             sent_whole=prepared.sent_whole,
             progress=progress,
             ask_anyway=ask_anyway,
@@ -937,8 +1012,9 @@ async def _ask(
             sources=[*prepared.sources, *found.sources],
             retrieval=found.retrieval,
             reply=found.reply,
-            memory_used=turn.record,
+            memory_used=record,
             memory_tool=turn.tool,
+            chats_tool=past.tool,
         )
 
     def build() -> dict[str, Any]:
@@ -954,6 +1030,8 @@ async def _ask(
             retrieved=decided.get("retrieved"),
             memory_turn=decided.get("memory_turn"),
             memory_allowed=bool(decided.get("memory_allowed", notes is not None)),
+            past_turn=decided.get("past_turn"),
+            chats_allowed=bool(decided.get("chats_allowed", False)),
         )
 
     answers = _answers(request)
@@ -1167,6 +1245,7 @@ async def choose(request: Request, chat_id: str, message_id: str) -> dict[str, A
     if not await _state(request).store.choose(chat.id, message_id):
         raise _problem(status.HTTP_404_NOT_FOUND, "There is no such message in this chat.")
     answers.publish(chat.id, {"type": "path"})
+    _touch_exchanges(request, person.sub, chat.id)
     return await _chat_detail(request, chat, read_only=False)
 
 

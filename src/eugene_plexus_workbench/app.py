@@ -51,6 +51,7 @@ from .mcp_ui import PROTOCOL as MCP_APPS_PROTOCOL
 from .mcp_ui import VERSION as MCP_APPS_VERSION
 from .media import MediaJobs
 from .node_folders import NodeFolders
+from .past_chats import router as past_chats_router
 from .sessions import Sessions
 from .settings import Settings
 from .signin import Provider
@@ -230,10 +231,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         notes_index.start()
         app.state.finder = Finder(store, saved)
 
-        async def search_notes(owner: str, arguments: dict[str, Any]) -> str:
-            return await memory_api.run_search_tool(app.state, owner, arguments)
+        async def search_notes(
+            person: Any, chat_id: str, model: str | None, arguments: dict[str, Any]
+        ) -> str:
+            return await memory_api.run_search_tool(app.state, person, chat_id, model, arguments)
 
         tools.memory_search = search_notes
+        # Past chats (MV2): every person's exchanges in their index, backfilled in the
+        # background, and `search_chats` for models that call tools.
+        from . import past_chats
+        from .exchanges_index import ExchangesIndex
+
+        exchanges = app.state.exchanges_index = ExchangesIndex(store, saved)
+        exchanges.start()
+
+        async def search_chats(
+            person: Any, chat_id: str, model: str | None, arguments: dict[str, Any]
+        ) -> tuple[str, list[str]]:
+            return await past_chats.run_tool(app.state, person, chat_id, model, arguments)
+
+        tools.chats_search = search_chats
+        answers.on_finished = lambda chat_id: exchanges.touch(None, chat_id)
         # Learn from my chats (MR8): one timer per chat that has gone quiet.
         from .memory_learn import Learner
 
@@ -268,6 +286,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await app.state.interactions.aclose()
             await learner.aclose()
             await notes_index.aclose()
+            await exchanges.aclose()
             await answers.aclose()
             await folder_sync.aclose()
             await saved.aclose()
@@ -298,6 +317,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(agui_api.router)
     app.include_router(media_api.router)
     app.include_router(memory_api.router)
+    app.include_router(past_chats_router)
     app.include_router(documents_api.router)
     # Before `saved_api`: `/api/documents/folders` is not a document's id.
     app.include_router(folder_docs_api.router)

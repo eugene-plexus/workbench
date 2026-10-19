@@ -6,6 +6,7 @@ import { Documents } from "./components/Documents";
 import { JobSites } from "./components/JobSites";
 import { Mascot } from "./components/Mascot";
 import { Memory } from "./components/Memory";
+import { PastChats } from "./components/PastChats";
 import { type Handoff, Media } from "./components/Media";
 import { Sidebar } from "./components/Sidebar";
 import { SignIn } from "./components/SignIn";
@@ -21,6 +22,7 @@ import { saveDraft } from "./lib/conveniences";
 import { forget, takeFragment } from "./lib/session";
 import type { Chat, Me, Models } from "./lib/types";
 import { modeChanged } from "./lib/words";
+import { atFromSearch, openChatAt } from "./lib/pastChats";
 import { requestedModel, clearRequestedModel } from "./lib/modelHandoff";
 
 /** The chat an address names: `/chats/<id>`, or none. */
@@ -32,6 +34,11 @@ export function chatFromPath(path: string): string | null {
 /** Whether an address is the Memory page: `/memory`. */
 export function memoryFromPath(path: string): boolean {
   return /^\/memory\/?$/.test(path);
+}
+
+/** Whether an address is Search chats (MV2): `/search`. */
+export function searchFromPath(path: string): boolean {
+  return /^\/search\/?$/.test(path);
 }
 
 /** Whether an address is the Documents screen: `/documents`. */
@@ -50,7 +57,7 @@ function onMac(): boolean {
 }
 
 /** The page a person is on, for the top bar, the tab's title and where focus goes. */
-type View = "chat" | "home" | "tools" | "media" | "documents" | "memory" | "sites";
+type View = "chat" | "home" | "tools" | "media" | "documents" | "memory" | "sites" | "search";
 
 const PAGE_TITLES = {
   tools: "Toolbox · Tools",
@@ -58,6 +65,7 @@ const PAGE_TITLES = {
   documents: "Documents",
   memory: "Memory",
   sites: "Job sites",
+  search: "Search chats",
 } as const;
 
 /** Move focus to a heading (or any element), making it a target if it is not. */
@@ -81,6 +89,9 @@ export default function App() {
   const [documentsOpen, setDocumentsOpen] = useState(() =>
     documentsFromPath(window.location.pathname),
   );
+  const [searchOpen, setSearchOpen] = useState(() => searchFromPath(window.location.pathname));
+  // The exchange a chat was opened at (MV2: `?at=`), so it opens there.
+  const [chatAtId, setChatAtId] = useState(() => atFromSearch(window.location.search));
   // The owner reading someone else's bins (M3); null is one's own.
   const [mediaPerson, setMediaPerson] = useState<{ sub: string; name: string } | null>(null);
   // An image sent to a new chat waits in that chat's composer (M7).
@@ -109,9 +120,11 @@ export default function App() {
           ? "documents"
           : memoryOpen
             ? "memory"
-            : chatId
-              ? "chat"
-              : "home";
+            : searchOpen
+              ? "search"
+              : chatId
+                ? "chat"
+                : "home";
   const lastView = useRef(view);
 
   useEffect(() => {
@@ -129,7 +142,8 @@ export default function App() {
         view !== "media" &&
         view !== "documents" &&
         view !== "memory" &&
-        view !== "sites")
+        view !== "sites" &&
+        view !== "search")
     )
       return;
     document.title = `${PAGE_TITLES[view]} · Workbench`;
@@ -158,7 +172,8 @@ export default function App() {
       view === "media" ||
       view === "documents" ||
       view === "memory" ||
-      view === "sites"
+      view === "sites" ||
+      view === "search"
     ) {
       focusOn(document.getElementById("view-heading") ?? document.querySelector("main h1"));
     }
@@ -168,6 +183,8 @@ export default function App() {
     const path = id ? `/chats/${id}` : "/";
     if (window.location.pathname !== path) window.history.pushState(null, "", path);
     setChatId(id);
+    setChatAtId(null);
+    setSearchOpen(false);
     setMedia(null);
     setMemoryOpen(false);
     setDocumentsOpen(false);
@@ -182,6 +199,7 @@ export default function App() {
       const path = mediaPath(door);
       if (window.location.pathname !== path) window.history.pushState(null, "", path);
       setMedia({ door, id: null });
+      setSearchOpen(false);
       setMemoryOpen(false);
       setDocumentsOpen(false);
       setMediaPerson(person);
@@ -195,6 +213,7 @@ export default function App() {
   const openMemory = useCallback(() => {
     if (window.location.pathname !== "/memory") window.history.pushState(null, "", "/memory");
     setMemoryOpen(true);
+    setSearchOpen(false);
     setDocumentsOpen(false);
     setMedia(null);
     setMediaPerson(null);
@@ -208,6 +227,19 @@ export default function App() {
       window.history.pushState(null, "", "/documents");
     }
     setDocumentsOpen(true);
+    setSearchOpen(false);
+    setMemoryOpen(false);
+    setMedia(null);
+    setMediaPerson(null);
+    setShowTools(false);
+    setShowSites(false);
+    setShowChats(false);
+  }, []);
+
+  const openSearch = useCallback(() => {
+    if (window.location.pathname !== "/search") window.history.pushState(null, "", "/search");
+    setSearchOpen(true);
+    setDocumentsOpen(false);
     setMemoryOpen(false);
     setMedia(null);
     setMediaPerson(null);
@@ -219,6 +251,8 @@ export default function App() {
   useEffect(() => {
     const back = () => {
       setChatId(chatFromPath(window.location.pathname));
+      setChatAtId(atFromSearch(window.location.search));
+      setSearchOpen(searchFromPath(window.location.pathname));
       setMedia(mediaFromPath(window.location.pathname));
       setMemoryOpen(memoryFromPath(window.location.pathname));
       setDocumentsOpen(documentsFromPath(window.location.pathname));
@@ -438,6 +472,7 @@ export default function App() {
             onOpenMedia={(person) => openMedia("images", person)}
             onClose={() => setShowChats(false)}
             onNew={() => void newChat()}
+            onSearchChats={openSearch}
             creating={creating}
             error={chatsError}
             onRetry={() => void refreshChats()}
@@ -635,6 +670,11 @@ export default function App() {
                 setShowTools(true);
               }}
             />
+          ) : searchOpen ? (
+            <PastChats
+              onOpen={(id, messageId) => openChatAt(id, messageId)}
+              onClose={() => open(chatId)}
+            />
           ) : memoryOpen ? (
             <Memory
               chats={chats}
@@ -644,8 +684,9 @@ export default function App() {
             />
           ) : chatId ? (
             <ChatView
-              key={chatId}
+              key={`${chatId}:${chatAtId ?? ""}`}
               chatId={chatId}
+              at={chatAtId}
               attachments={handoff?.chatId === chatId ? handoff.attachments : undefined}
               me={phase.me}
               models={models}

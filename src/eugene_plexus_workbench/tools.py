@@ -32,6 +32,7 @@ from .node_folders import FILES as SITE_FILES
 from .node_folders import PREFIX as NODE_FOLDER_PREFIX
 from .node_folders import SITE_PREFIX, Held, NodeFolders, site_server_id
 from .settings import Settings
+from .store import CHATS_SERVER as CHATS_SERVER_ID
 from .store import Person, Store
 
 if TYPE_CHECKING:
@@ -52,6 +53,11 @@ MAX_RESPONSE = 2_097_152
 #: notes. Its server id is what a kept call is known by, to withhold or hide its results.
 MEMORY_SERVER = "memory"
 MEMORY_TOOL_NAME = memory.SEARCH_TOOL
+#: `search_chats` (MV2): the person's past chats, run by Workbench as `search_memory` is.
+CHATS_SERVER = CHATS_SERVER_ID
+CHATS_TOOL_NAME = "search_chats"
+#: What a kept `search_chats` result is in a request that may not carry past chats.
+CHATS_WITHHELD = "Past-chat results are not sent to this model."
 
 
 class ToolError(Exception):
@@ -150,15 +156,21 @@ def _constant(value: str) -> Any:
     raise ValueError("non-finite JSON number")
 
 
-def transcript(rounds: list[dict[str, Any]], *, notes: bool = True) -> list[dict[str, Any]]:
+def transcript(
+    rounds: list[dict[str, Any]], *, notes: bool = True, chats: bool | None = None
+) -> list[dict[str, Any]]:
     """Kept tool rounds as messages. Without `notes` (the request may not carry the person's
     notes: an outside model, memory turned off), a `search_memory` result is withheld, and so
-    are the call's arguments: the query a model wrote can hold the words of the notes it had."""
+    are the call's arguments: the query a model wrote can hold the words of the notes it had.
+    Without `chats` (MV2; it follows `notes` when not given), a `search_chats` call is
+    withheld the same way."""
+    chats = notes if chats is None else chats
+    held = ({MEMORY_SERVER} if not notes else set()) | ({CHATS_SERVER} if not chats else set())
     out: list[dict[str, Any]] = []
     for turn in rounds:
         assistant = turn["assistant"]
-        if not notes:
-            mine = {c["id"] for c in turn["calls"] if c.get("serverId") == MEMORY_SERVER}
+        if held:
+            mine = {c["id"] for c in turn["calls"] if c.get("serverId") in held}
             if mine and assistant.get("tool_calls"):
                 assistant = {
                     **assistant,
@@ -172,8 +184,10 @@ def transcript(rounds: list[dict[str, Any]], *, notes: bool = True) -> list[dict
         out.append(assistant)
         for call in turn["calls"]:
             result = call["result"] or "This call did not finish. Do not assume it succeeded."
-            if not notes and call.get("serverId") == MEMORY_SERVER:
-                result = memory.WITHHELD
+            if call.get("serverId") in held:
+                result = (
+                    memory.WITHHELD if call.get("serverId") == MEMORY_SERVER else CHATS_WITHHELD
+                )
             out.append({"role": "tool", "tool_call_id": call["id"], "content": result})
     return out
 
@@ -226,8 +240,17 @@ class Tools:
         self.tls = ssl.create_default_context()
         self.apps: McpApps | None = None
         self.a2ui: A2UI | None = None
-        #: Runs one `search_memory` call for a person (`memory_api.run_search_tool`).
-        self.memory_search: Callable[[str, dict[str, Any]], Awaitable[str]] | None = None
+        #: Runs one `search_memory` call for a person in a chat, with the model the answer
+        #: uses (`memory_api.run_search_tool`), which asks the decision again as it runs.
+        self.memory_search: (
+            Callable[[Person, str, str | None, dict[str, Any]], Awaitable[str]] | None
+        ) = None
+        #: Runs one `search_chats` call (MV2, `past_chats.run_tool`): its text, and the chats
+        #: it quoted.
+        self.chats_search: (
+            Callable[[Person, str, str | None, dict[str, Any]], Awaitable[tuple[str, list[str]]]]
+            | None
+        ) = None
 
     @asynccontextmanager
     async def connect(
@@ -515,6 +538,11 @@ class ToolSession:
         self.a2ui = tools.a2ui
         self.memory_search = tools.memory_search
         self.memory_calls = 0
+        self.chats_search = tools.chats_search
+        self.chats_calls = 0
+        #: The chat and model an answer's own tools run for (`add_memory_search`).
+        self.chat_id: str | None = None
+        self.model: str | None = None
         self.metadata: dict[str, dict[str, Any]] = {}
         self.descriptors: dict[tuple[str, str], dict[str, Any]] = {}
         self.model_names: set[str] = set()
@@ -568,9 +596,10 @@ class ToolSession:
             }
         )
 
-    def add_memory_search(self) -> None:
+    def add_memory_search(self, chat_id: str | None = None, model: str | None = None) -> None:
         """Offer `search_memory` (MV1): Workbench runs it over the asking person's own notes,
         without asking them first (it reads only what is theirs and changes nothing)."""
+        self.chat_id, self.model = chat_id or self.chat_id, model or self.model
         if self.memory_search is None or MEMORY_TOOL_NAME in self.tools:
             return
         server = {"id": MEMORY_SERVER, "name": "Memory", "transport": "memory"}
@@ -590,6 +619,30 @@ class ToolSession:
                     "name": MEMORY_TOOL_NAME,
                     "description": memory.SEARCH_TOOL_DESCRIPTION,
                     "parameters": memory.SEARCH_TOOL_SCHEMA,
+                },
+            }
+        )
+
+    def add_chats_search(self, chat_id: str, model: str | None) -> None:
+        """Offer `search_chats` (MV2): Workbench runs it over the asking person's own past
+        chats (not this one), without asking them first, as `search_memory`."""
+        self.chat_id, self.model = chat_id, model or self.model
+        if self.chats_search is None or CHATS_TOOL_NAME in self.tools:
+            return
+        from .past_chats import TOOL_DESCRIPTION, TOOL_SCHEMA
+
+        server = {"id": CHATS_SERVER, "name": "Past chats", "transport": "past-chats"}
+        self.tools[CHATS_TOOL_NAME] = (server, None, CHATS_TOOL_NAME, TOOL_SCHEMA)
+        self.asks[CHATS_TOOL_NAME] = False
+        self.metadata[CHATS_TOOL_NAME] = {}
+        self.model_names.add(CHATS_TOOL_NAME)
+        self.definitions.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": CHATS_TOOL_NAME,
+                    "description": TOOL_DESCRIPTION,
+                    "parameters": TOOL_SCHEMA,
                 },
             }
         )
@@ -672,8 +725,30 @@ class ToolSession:
                     ),
                 )
             else:
-                text = await self.memory_search(self.person.sub, call["arguments"])
+                text = await self.memory_search(
+                    self.person, self.chat_id or "", self.model, call["arguments"]
+                )
                 call.update(status="done", result=text)
+            return
+        if server["transport"] == "past-chats":
+            from .past_chats import TOOL_CALLS
+
+            self.chats_calls += 1
+            if self.chats_search is None or self.person is None or self.chat_id is None:
+                call.update(status="failed", result="Searching past chats is unavailable.")
+            elif self.chats_calls > TOOL_CALLS:
+                call.update(
+                    status="failed",
+                    result=(
+                        f"This answer has searched past chats {TOOL_CALLS} times, the most "
+                        "it may. Answer with what was found."
+                    ),
+                )
+            else:
+                text, quoted = await self.chats_search(
+                    self.person, self.chat_id, self.model, call["arguments"]
+                )
+                call.update(status="done", result=text, chats=quoted)
             return
         if server["transport"] == "site":
             try:

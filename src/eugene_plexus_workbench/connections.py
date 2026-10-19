@@ -76,6 +76,8 @@ MAX_PASSAGES = 10
 #: suggestion may carry.
 NOTE_TOKENS = 8000
 MAX_SUGGESTED_TAGS = 5
+#: Exchanges one search of past chats returns at most (MV2).
+MAX_EXCHANGES = 10
 DAY = 24 * 3600.0
 
 #: Every token that is not a live connection's gets these words, so the door does not say
@@ -319,6 +321,31 @@ _TOOLS: dict[str, types.Tool] = {
             open_world_hint=False,
         ),
     ),
+    "search_chats": types.Tool(
+        name="search_chats",
+        title="Search my past chats",
+        description=(
+            "Search this person's earlier chats in Workbench: what they asked and how each "
+            "answer began, with the chat's title and the date. Use it when they refer to "
+            "something discussed before. after and before (YYYY-MM-DD) keep to those days."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "minLength": 1, "maxLength": MAX_QUERY},
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MAX_EXCHANGES,
+                    "default": 5,
+                },
+                "after": {"type": "string", "maxLength": 10},
+                "before": {"type": "string", "maxLength": 10},
+            },
+            "required": ["query"],
+        },
+        annotations=types.ToolAnnotations(read_only_hint=True, open_world_hint=False),
+    ),
 }
 
 _RIGHTS = {
@@ -327,6 +354,7 @@ _RIGHTS = {
     "search_documents": "search_documents",
     "read_document": "search_documents",
     "suggest_note": "suggest_notes",
+    "search_chats": "search_chats",
 }
 
 
@@ -428,6 +456,47 @@ class Tools:
             spent += cost
             out.append(entry)
         return {"notes": out, "how": how, "why": why}
+
+    async def search_chats(self, caller: Caller, arguments: dict[str, Any]) -> dict[str, Any]:
+        """The person's past chats that match (MV2), read from the store, bounded."""
+        from . import past_chats
+        from .exchanges_index import cut, opening
+
+        query = _text(arguments.get("query"), "query", required=True, limit=MAX_QUERY)
+        limit = _count(arguments.get("limit"), "limit", 5, MAX_EXCHANGES)
+        after, before = arguments.get("after"), arguments.get("before")
+        for name, value in (("after", after), ("before", before)):
+            if value is not None and past_chats.valid_day(value) is None:
+                raise ToolRefused(f"`{name}` must be a day, written YYYY-MM-DD.")
+        sub = caller.person.sub
+        if not (await config.memory_settings(self.store)).enabled:
+            raise ToolRefused("Memory is turned off on this Workbench.")
+        if not (await self.store.memory_prefs(sub))["enabled"]:
+            raise ToolRefused("This person has turned their Workbench memory off.")
+        try:
+            found = await past_chats.find(self.state, sub, query, after=after, before=before)
+        except IndexUnavailable as exc:
+            raise ToolRefused(exc.message) from None
+        out: list[dict[str, Any]] = []
+        spent = 0
+        for r in found.results[:limit]:
+            entry = {
+                "chatId": r.chat_id,
+                "messageId": r.id,
+                "title": r.title,
+                "date": r.date,
+                "question": cut(r.question, past_chats.EXCERPT_QUESTION),
+                "answer": opening(
+                    r.answer, past_chats.EXCERPT_ANSWER, past_chats.EXCERPT_ANSWER // 3
+                ),
+                "via": r.via,
+            }
+            cost = memory.estimate_tokens(json.dumps(entry, ensure_ascii=False))
+            if out and spent + cost > NOTE_TOKENS:
+                break
+            spent += cost
+            out.append(entry)
+        return {"exchanges": out, "how": found.how, "why": found.why}
 
     async def read_note(self, caller: Caller, arguments: dict[str, Any]) -> dict[str, Any]:
         note_id = _text(arguments.get("note_id"), "note_id", required=True, limit=64)
@@ -646,6 +715,16 @@ def _render(name: str, result: dict[str, Any]) -> str:
         if result.get("why"):
             lines.append(str(result["why"]))
         return "\n".join(lines)
+    if name == "search_chats":
+        if not result["exchanges"]:
+            return "No past chat matched."
+        lines = [_DATA_NOTE.format(what="past chats")]
+        for i, e in enumerate(result["exchanges"], start=1):
+            lines.append(
+                f"[{i}] {e['title']}, {e['date']} (chat {e['chatId']})\n"
+                f"Person: {e['question']}\nAnswer (opening): {e['answer']}"
+            )
+        return "\n\n".join(lines)
     if name == "search_documents":
         if result["status"] == "no_documents":
             return "The person keeps no documents in Workbench yet."

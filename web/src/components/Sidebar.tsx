@@ -23,6 +23,7 @@ export function Sidebar({
   onOpenMedia,
   onClose,
   onNew,
+  onSearchChats,
   onSignOut,
   creating,
   error,
@@ -38,6 +39,8 @@ export function Sidebar({
   onOpenMedia: (person: { sub: string; name: string }) => void;
   onClose: () => void;
   onNew: () => void;
+  /** Open Search chats (MV2). */
+  onSearchChats?: () => void;
   onSignOut: () => void;
   creating: boolean;
   error: string | null;
@@ -77,6 +80,16 @@ export function Sidebar({
           <Plus size={16} aria-hidden className="text-accent" />{" "}
           {creating ? "Creating…" : "New chat"}
         </button>
+        {onSearchChats && (
+          <button
+            type="button"
+            data-testid="search-chats"
+            onClick={onSearchChats}
+            className="btn btn-quiet mt-1 w-full justify-start"
+          >
+            <Search size={16} aria-hidden className="text-accent" /> Search chats
+          </button>
+        )}
       </div>
       {me.installMode && (
         <p className="mx-2 mt-3">

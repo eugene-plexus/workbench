@@ -32,6 +32,8 @@ class Rights(BaseModel):
     notes: StrictBool = False
     documents: StrictBool = False
     suggest: StrictBool = False
+    #: MV2: search the person's past chats. Off unless they tick it.
+    chats: StrictBool = False
 
 
 class NewConnection(BaseModel):
@@ -51,6 +53,7 @@ def connection_view(record: ConnectionRecord, now: float) -> dict[str, Any]:
             "notes": record.read_notes,
             "documents": record.search_documents,
             "suggest": record.suggest_notes,
+            "chats": record.search_chats,
         },
         "createdAt": record.created_at,
         "expiresAt": record.expires_at,
@@ -66,6 +69,7 @@ async def _settings(store: Store) -> dict[str, Any]:
         "enabled": await config.connections_enabled(store),
         "suggestionsAllowed": memory.enabled and memory.suggestions != "off",
         "notesAllowed": memory.enabled,
+        "chatsAllowed": memory.enabled,
         "documentsAllowed": (await config.document_settings(store)).enabled,
     }
 
@@ -102,7 +106,7 @@ async def make_connection(request: Request, body: NewConnection) -> dict[str, An
             "A connection lasts 30, 90 or 365 days.",
         )
     rights = body.rights
-    if not (rights.notes or rights.documents or rights.suggest):
+    if not (rights.notes or rights.documents or rights.suggest or rights.chats):
         raise _problem(status.HTTP_422_UNPROCESSABLE_ENTITY, "Choose at least one thing it may do.")
     if rights.suggest and not allowed["suggestionsAllowed"]:
         raise _problem(
@@ -118,6 +122,7 @@ async def make_connection(request: Request, body: NewConnection) -> dict[str, An
         read_notes=rights.notes,
         search_documents=rights.documents,
         suggest_notes=rights.suggest,
+        search_chats=rights.chats,
         created_at=now,
         expires_at=now + body.days * connections.DAY,
     )
