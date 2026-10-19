@@ -66,7 +66,11 @@ test("making one shows the token once, with the address, and says where the text
       connection: made,
       token: "wbc_secret",
       address: page.address,
-      setups: { claudeCode: "claude mcp add ... wbc_secret", json: "{}" },
+      setups: {
+        claudeCode: "claude mcp add ... wbc_secret",
+        codex: "[mcp_servers.workbench]",
+        json: "{}",
+      },
     };
   }) as never);
   render(<Connections />);

@@ -201,7 +201,8 @@ FIELDS = [
             "Nothing is reachable until a person makes a connection and chooses what it may "
             "do. A connection reads only its own person's notes and documents, works only "
             "while they are signed in to Workbench, and can suggest notes only to their "
-            "inbox. The app may send what it reads to a model outside your machines.\n\n"
+            "Suggested notes on their Memory page. The app may send what it reads to a model "
+            "outside your machines.\n\n"
             "- **On**: people may make connections.\n"
             "- **Off**: every connection stops at once, and no one can make one."
         ),
