@@ -967,6 +967,10 @@ async def send(request: Request, chat_id: str, body: Send) -> dict[str, Any]:
     from . import memory_api
 
     command = await memory_api.handle_command(request, person, chat, user)
+    # Learn from my chats (MR8): read the person's new words once the chat goes quiet.
+    learner = getattr(_state(request), "learner", None)
+    if learner is not None:
+        learner.poke(person, chat.id)
     answer = await _ask(
         request, chat, parent_id=user.id, model=model, search=search, records=records
     )

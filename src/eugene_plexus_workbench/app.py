@@ -198,6 +198,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.reader = reader
         app.state.saved = saved
         app.state.folder_sync = folder_sync
+        # Learn from my chats (MR8): one timer per chat that has gone quiet.
+        from .memory_learn import Learner
+
+        learner = Learner(store, hub, busy=lambda chat_id: answers.running(chat_id) is not None)
+        app.state.learner = learner
         app.state.sessions = sessions
         app.state.agui = AGUI(store, app.state.sessions, answers)
         await store.agui.recover()
@@ -222,6 +227,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             await app.state.agui.aclose()
             await app.state.interactions.aclose()
+            await learner.aclose()
             await answers.aclose()
             await folder_sync.aclose()
             await saved.aclose()

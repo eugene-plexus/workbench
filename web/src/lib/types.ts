@@ -626,7 +626,7 @@ export type NoteKind = "fact" | "preference" | "instruction" | "project" | "even
 
 /** How a note got here: written on the Memory page, said in a chat
  * ("Remember that ..."), or kept from a message's Remember this. */
-export type NoteSource = "typed" | "said" | "button";
+export type NoteSource = "typed" | "said" | "button" | "suggested" | "imported";
 
 export interface MemoryNote {
   id: string;
@@ -643,7 +643,21 @@ export interface MemoryNote {
   updatedAt: number;
   lastUsedAt: number | null;
   useCount: number;
+  /** An event leaves chats after this day (ISO date); a project is asked about from this one. */
+  expiresAt?: string | null;
+  revisitAt?: string | null;
 }
+
+/** A note a chat's model suggested, waiting for the person to keep it or turn it away. */
+export interface MemorySuggestion extends MemoryNote {
+  /** The person's own words it came from. */
+  quote: string | null;
+  /** The note it would replace, when the model said one. */
+  replaces: MemoryNote | null;
+}
+
+/** Learn from my chats: whose word it is. measured: on because the chat's model passed. */
+export type LearnSetBy = "owner" | "you" | "measured" | "default";
 
 /** How far notes may travel to a model outside the person's machines. */
 export type ExternalChoice = "never" | "ask" | "always";
@@ -654,12 +668,20 @@ export interface MemoryPrefs {
   enabled: boolean;
   external: ExternalChoice | null;
   budgetTokens: number | null;
+  /** Learn from my chats; null until the person chooses. */
+  learn: "off" | "suggest" | null;
+  useMode: "relevant" | "all";
   effective: {
     enabled: boolean;
     disabledBy: "owner" | "you" | null;
     external: ExternalChoice;
     externalSetBy: "owner" | "you" | "default";
     budgetTokens: number;
+    learn: "off" | "suggest";
+    learnSetBy: LearnSetBy;
+    /** Until the person chooses, a chat on a model that passed the measurement suggests. */
+    learnByModel: boolean;
+    suggestionsAllowed: boolean;
   };
 }
 
@@ -668,7 +690,12 @@ export interface MemoryPage {
   installEnabled: boolean;
   ownerReadsChats: boolean;
   prefs: MemoryPrefs;
-  sections: { always: MemoryNote[]; other: MemoryNote[] };
+  sections: { always: MemoryNote[]; other: MemoryNote[]; past?: MemoryNote[] };
+  suggestions?: MemorySuggestion[];
+  /** The project to ask "Still true?" about now (at most one, at most weekly). */
+  revisit?: MemoryNote[];
+  /** Whether only relevant notes can be chosen now (a search model runs), and why not. */
+  relevance?: { available: boolean; why: string | null };
   usage: {
     tokens: number;
     budget: number;
@@ -708,7 +735,7 @@ export interface SentNote {
 }
 
 export interface NotSentNote extends MemoryNote {
-  reason: "over_budget" | "added_since";
+  reason: "over_budget" | "added_since" | "not_relevant";
   reasonText: string;
 }
 
@@ -744,6 +771,8 @@ export interface ChatMemory {
   text: string | null;
   sent: SentNote[];
   notSent: NotSentNote[];
+  /** How the notes were chosen: by relevance (meaning and words) or every one that fits, and why. */
+  relevance?: { how: "meaning and words" | "all"; why: string | null } | null;
 }
 
 /** The install owner reading someone else's chat: counts, never the notes. */

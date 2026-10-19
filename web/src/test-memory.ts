@@ -46,6 +46,8 @@ export function prefs(
     enabled: true,
     external: null,
     budgetTokens: null,
+    learn: null,
+    useMode: "relevant",
     ...rest,
     effective: {
       enabled: true,
@@ -53,6 +55,10 @@ export function prefs(
       external: "ask",
       externalSetBy: "default",
       budgetTokens: 1000,
+      learn: "off",
+      learnSetBy: "default",
+      learnByModel: true,
+      suggestionsAllowed: true,
       ...effective,
     },
   };

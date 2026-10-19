@@ -44,6 +44,8 @@ from ._generated.models import (
     ConfigDocument,
     ConfigField,
     ConfigFieldError,
+    ConfigFieldStatus,
+    ConfigFieldStatusLevel,
     ConfigSchema,
     ConfigUpdateRequest,
     ConfigUpdateResult,
@@ -57,6 +59,8 @@ OWNER_READS_CHATS = "ownerReadsChats"
 MEMORY_ENABLED = "memoryEnabled"
 MEMORY_MAX_NOTES = "memoryMaxNotes"
 MEMORY_EXTERNAL_MODELS = "memoryExternalModels"
+MEMORY_SUGGESTIONS = "memorySuggestions"
+SUGGESTION_CHOICES = ("off", "choose", "measured")
 DOCUMENTS_ENABLED = "documentsEnabled"
 DOCUMENTS_MAX_FILE_MB = "documentsMaxFileMB"
 DOCUMENTS_WHOLE_UP_TO_TOKENS = "documentsWholeUpToTokens"
@@ -161,6 +165,28 @@ FIELDS = [
         enumValues=list(EXTERNAL_CHOICES),
         enumLabels=["Never", "Ask for each chat", "Always"],
         default="ask",
+    ),
+    ConfigField(
+        key=MEMORY_SUGGESTIONS,
+        label="Suggest notes from people's chats",
+        description=(
+            "Whether a chat's model may suggest notes from what a person wrote, for them to "
+            "keep or turn away.\n\n"
+            "A suggestion quotes the person's own words, never answers, files or pasted text, "
+            "and Workbench refuses any that looks like a secret or is about health, religion, "
+            "politics, sexuality, money or contact details. Nothing is kept until the person "
+            "keeps it.\n\n"
+            "- **Off**: no chat suggests notes.\n"
+            "- **Each person chooses**: off until a person turns on Learn from my chats.\n"
+            "- **On for measured models**: also on, for a person who has not chosen, when the "
+            "chat's model passed Eugene's measurement of suggestions. A person can still turn "
+            "it off."
+        ),
+        category="memory",
+        valueType=ConfigValueType.enum,
+        enumValues=list(SUGGESTION_CHOICES),
+        enumLabels=["Off", "Each person chooses", "On for measured models"],
+        default="measured",
     ),
     ConfigField(
         key=DOCUMENTS_ENABLED,
@@ -412,6 +438,7 @@ DEFAULTS: dict[str, Any] = {
     MEMORY_ENABLED: True,
     MEMORY_MAX_NOTES: 300,
     MEMORY_EXTERNAL_MODELS: "ask",
+    MEMORY_SUGGESTIONS: "measured",
     DOCUMENTS_ENABLED: True,
     DOCUMENTS_MAX_FILE_MB: 50,
     DOCUMENTS_WHOLE_UP_TO_TOKENS: 6000,
@@ -441,13 +468,22 @@ class MemorySettings:
     enabled: bool
     max_notes: int
     external: str
+    #: Memory suggestions (MR8): `off`, `choose` (each person turns them on) or `measured`
+    #: (also on, for a person who has not chosen, with a model that passed the measurement).
+    suggestions: str = "measured"
 
 
 async def memory_settings(store: Store) -> MemorySettings:
     enabled = await store.setting(MEMORY_ENABLED)
     limit = await store.setting(MEMORY_MAX_NOTES)
     external = await store.setting(MEMORY_EXTERNAL_MODELS)
+    suggestions = await store.setting(MEMORY_SUGGESTIONS)
     return MemorySettings(
+        suggestions=(
+            str(suggestions)
+            if suggestions in SUGGESTION_CHOICES
+            else str(DEFAULTS[MEMORY_SUGGESTIONS])
+        ),
         enabled=bool(enabled) if enabled is not None else bool(DEFAULTS[MEMORY_ENABLED]),
         max_notes=int(limit) if limit is not None else int(DEFAULTS[MEMORY_MAX_NOTES]),
         external=(
@@ -592,6 +628,26 @@ async def get_schema(request: Request) -> ConfigSchema:
     )
 
 
+def _suggestions_status() -> ConfigFieldStatus:
+    """What "On for measured models" comes to now: which models passed, or that none has."""
+    from .memory_learn import PASSED
+
+    if not PASSED:
+        return ConfigFieldStatus(
+            level=ConfigFieldStatusLevel.info,
+            text=(
+                "No model has passed the measurement yet, so suggestions are on only for "
+                "people who turn them on."
+            ),
+        )
+    from .memory_learn import PASSED_NAMES
+
+    return ConfigFieldStatus(
+        level=ConfigFieldStatusLevel.info,
+        text=f"Models that passed the measurement: {', '.join(PASSED_NAMES)}.",
+    )
+
+
 async def _fields(request: Request) -> list[ConfigField]:
     """The fields, with the search model and the result sorter settings showing what they come
     to now (settings never lie): the models Eugene lists as suggestions, and a sentence saying
@@ -600,7 +656,10 @@ async def _fields(request: Request) -> list[ConfigField]:
     saved = getattr(request.app.state, "saved", None)
     meaning = getattr(saved, "meaning", None)
     sorting = getattr(saved, "sorting", None)
-    shown = list(FIELDS)
+    shown = [
+        f.model_copy(update={"status": _suggestions_status()}) if f.key == MEMORY_SUGGESTIONS else f
+        for f in FIELDS
+    ]
     if meaning is not None:
         try:
             suggestions, status_ = await meaning.setting_view()
@@ -649,6 +708,7 @@ async def get_config(request: Request) -> ConfigDocument:
             MEMORY_ENABLED: memory.enabled,
             MEMORY_MAX_NOTES: memory.max_notes,
             MEMORY_EXTERNAL_MODELS: memory.external,
+            MEMORY_SUGGESTIONS: memory.suggestions,
             DOCUMENTS_ENABLED: documents.enabled,
             DOCUMENTS_MAX_FILE_MB: documents.max_file_mb,
             DOCUMENTS_WHOLE_UP_TO_TOKENS: documents.whole_up_to_tokens,
@@ -740,6 +800,8 @@ def _problem_with(key: str, value: Any) -> str | None:
         return f"Must be a whole number from 1 to {MAX_NOTES_LIMIT:,}."
     if key in (MEMORY_EXTERNAL_MODELS, DOCUMENTS_EXTERNAL_MODELS):
         return None if value in EXTERNAL_CHOICES else "Must be never, ask or always."
+    if key == MEMORY_SUGGESTIONS:
+        return None if value in SUGGESTION_CHOICES else "Must be off, choose or measured."
     return "Workbench has no such setting."
 
 

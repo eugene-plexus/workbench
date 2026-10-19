@@ -579,6 +579,36 @@ class Hub:
             raise self._unreachable(exc) from exc
         return written
 
+    async def complete(self, body: dict[str, Any], *, seconds: float = 120.0) -> dict[str, Any]:
+        """One chat completion, not streamed (MR8's memory suggestions): the gateway's
+        answer as it sent it. Raises `HubError`."""
+        headers = await self._headers()
+        try:
+            response = await self._http.post(
+                f"{self.gateway_url}/v1/chat/completions",
+                json={**body, "stream": False},
+                headers=headers,
+                timeout=httpx.Timeout(10.0, read=seconds),
+            )
+        except httpx.TimeoutException as exc:
+            raise HubError(
+                f"Eugene's gateway did not answer within {seconds:.0f} seconds "
+                f"({type(exc).__name__}).",
+                status=504,
+                kind="timeout",
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise self._unreachable(exc) from exc
+        if response.status_code != 200:
+            raise refusal(response.status_code, _gateway_words(response))
+        try:
+            answer: dict[str, Any] = response.json()
+        except ValueError as exc:
+            raise HubError(
+                "Eugene's gateway answered with something that is not JSON.", kind="stream"
+            ) from exc
+        return answer
+
     async def stream_chat(self, body: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         """The chunks of one streamed answer, parsed. Raises `HubError`."""
         headers = await self._headers()

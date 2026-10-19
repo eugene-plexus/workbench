@@ -695,6 +695,11 @@ class FakeGateway:
     rerank_script: list[tuple[int, Any, dict[str, str]]] = field(default_factory=list)
     #: A passage with this text in it is scored this, whatever the question: `{text: score}`.
     rerank_prefer: dict[str, float] = field(default_factory=dict)
+    #: Memory suggestion calls (MR8): each body and the person token it came with, what each
+    #: is answered (the model's content), and a refusal to answer them with instead.
+    suggest_requests: list[dict[str, Any]] = field(default_factory=list)
+    suggest_answer: str = '{"notes": []}'
+    suggest_refusal: tuple[int, str] | None = None
 
     def rerank_tokens(self, body: dict[str, Any]) -> int:
         """What reading a request is worth, as Workbench counts it: each passage and the question
@@ -1123,6 +1128,25 @@ class FakeGateway:
         @app.post("/v1/chat/completions")
         async def chat(request: Request) -> Any:
             body = await request.json()
+            if body.get("response_format") and body.get("stream") is False:
+                # A memory suggestion call (MR8): not streamed, answered with `suggest_answer`,
+                # kept apart so a chat's own requests stay what `requests` holds.
+                self.suggest_requests.append(
+                    {"body": body, "person": request.headers.get("X-Eugene-Person-Token")}
+                )
+                if self.suggest_refusal is not None:
+                    status, message = self.suggest_refusal
+                    return JSONResponse({"error": {"message": message}}, status_code=status)
+                return JSONResponse(
+                    {
+                        "choices": [
+                            {
+                                "message": {"role": "assistant", "content": self.suggest_answer},
+                                "finish_reason": "stop",
+                            }
+                        ]
+                    }
+                )
             self.requests.append(body)
             number = len(self.requests)
             self.repetition_modes.append(request.headers.get("X-Eugene-Repetition-Mode"))
