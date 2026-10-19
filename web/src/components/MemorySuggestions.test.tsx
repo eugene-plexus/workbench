@@ -21,6 +21,7 @@ function suggestion(over: Partial<MemorySuggestion> = {}): MemorySuggestion {
     ...note({ id: "s1", text: "Works as a nurse.", source: "suggested", sourceChatId: "c1" }),
     quote: "I'm a nurse working nights",
     replaces: null,
+    proposedTags: [],
     ...over,
   };
 }
@@ -123,6 +124,51 @@ describe("suggested notes", () => {
     );
   });
 
+  it("keeps a proposed tag that is on the list, and one that is not only when Add to my tags is chosen", async () => {
+    shown = page([], {
+      suggestions: [
+        suggestion({
+          proposedTags: [
+            { tag: "health", listed: true },
+            { tag: "night shifts", listed: false },
+          ],
+        }),
+      ],
+    });
+    await opened();
+    const item = screen.getByTestId("memory-suggestion");
+    const add = within(item).getByRole("checkbox", { name: /Add to my tags/ });
+    expect(add).not.toBeChecked();
+    expect(within(item).getAllByTestId("memory-suggestion-tag")).toHaveLength(2);
+    // Left alone, the tag that is not on the list is dropped.
+    fireEvent.click(within(item).getByTestId("memory-suggestion-keep"));
+    await waitFor(() =>
+      expect(post).toHaveBeenLastCalledWith("/api/memory/suggestions/s1/keep", {
+        replace: false,
+        tags: ["health"],
+      }),
+    );
+    // Chosen, it is kept and joins the list.
+    fireEvent.click(add);
+    expect(add).toBeChecked();
+    fireEvent.click(within(item).getByTestId("memory-suggestion-keep"));
+    await waitFor(() =>
+      expect(post).toHaveBeenLastCalledWith("/api/memory/suggestions/s1/keep", {
+        replace: false,
+        tags: ["health", "night shifts"],
+      }),
+    );
+  });
+
+  it("does not offer Procedure as a kind to keep it as", async () => {
+    await opened();
+    fireEvent.click(screen.getByTestId("memory-suggestion-edit"));
+    const kinds = within(screen.getByTestId("memory-suggestion-kind"))
+      .getAllByRole("option")
+      .map((option) => option.textContent);
+    expect(kinds).toEqual(["Fact", "Preference", "Instruction", "Project", "Event"]);
+  });
+
   it("is not there when nothing is waiting", async () => {
     shown = page([note()]);
     await opened();
@@ -172,7 +218,7 @@ describe("the settings", () => {
 
   it("show past events apart", async () => {
     const past = note({ id: "e1", text: "Exam on Friday.", kind: "event" });
-    shown = { ...page([]), sections: { always: [], other: [], past: [past] } };
+    shown = { ...page([]), sections: { always: [], other: [], otherTotal: 0, past: [past] } };
     await opened();
     expect(screen.getByTestId("memory-section-past")).toHaveTextContent("Exam on Friday.");
   });

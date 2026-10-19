@@ -11,6 +11,7 @@ says it was, and the same bytes every turn.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import sqlite3
@@ -26,6 +27,7 @@ from eugene_plexus_workbench.hub import HubError
 from .conftest import ADMIN_TOKEN, MODEL, Browser, World, chat_model
 
 CODE_WORD = "my code word is plum"
+EMPTY_SECTIONS: dict[str, Any] = {"always": [], "other": [], "otherTotal": 0, "past": []}
 
 
 # --------------------------------------------------------------------------- #
@@ -74,6 +76,17 @@ def system_of(request: dict[str, Any]) -> str | None:
     return str(found[0]) if found else None
 
 
+def reaches(request: dict[str, Any], text: str) -> bool:
+    """Whether these words are anywhere in the request the gateway received: the system
+    message, any turn, a tool, anything. Notes are in more than one place now."""
+    return text in json.dumps(request)
+
+
+def last_user(request: dict[str, Any]) -> str:
+    """The latest user message, where relevant notes go, before the person's words."""
+    return str([m["content"] for m in request["messages"] if m["role"] == "user"][-1])
+
+
 def drawer(person: Browser, chat: str) -> dict[str, Any]:
     shown = person.get(f"/api/chats/{chat}/memory")
     assert shown.status_code == 200, shown.text
@@ -109,17 +122,19 @@ def set_chat(person: Browser, chat: str, **settings: Any) -> dict[str, Any]:
 def test_a_person_keeps_lists_edits_pins_and_deletes_a_note(world: World) -> None:
     ada = signed_in(world)
     empty = ada.get("/api/memory").json()
-    assert empty["sections"] == {"always": [], "other": [], "past": []}
+    assert empty["sections"] == EMPTY_SECTIONS
     assert empty["usage"] == {
         "tokens": 0,
-        "budget": 1000,
+        "budget": 2000,
         "notes": 0,
-        "maxNotes": 300,
+        "maxNotes": 20_000,
         "sent": 0,
         "notSent": 0,
+        "pinned": {"tokens": 0, "budget": 2000, "notes": 0},
+        "relevant": {"budget": 6000, "from": 0, "how": "words"},
     }
     assert empty["installEnabled"] is True and empty["ownerReadsChats"] is False
-    assert empty["limits"]["maxChars"] == 240 and empty["limits"]["maxNotes"] == 300
+    assert empty["limits"]["maxChars"] == 240 and empty["limits"]["maxNotes"] == 20_000
 
     made = ada.post("/api/memory/notes", json={"text": "  I use metric units  "})
     assert made.status_code == 201
@@ -137,7 +152,10 @@ def test_a_person_keeps_lists_edits_pins_and_deletes_a_note(world: World) -> Non
     listing = ada.get("/api/memory").json()
     assert [n["id"] for n in listing["sections"]["other"]] == [note["id"]]
     assert listing["sections"]["always"] == []
-    assert listing["usage"]["notes"] == 1 and listing["usage"]["tokens"] > 0
+    assert listing["usage"]["notes"] == 1
+    # Not pinned: chosen again every turn, so it costs the pinned block nothing.
+    assert listing["usage"]["pinned"]["tokens"] == 0
+    assert listing["usage"]["relevant"]["from"] == 1
 
     edited = ada.patch(
         f"/api/memory/notes/{note['id']}",
@@ -154,13 +172,15 @@ def test_a_person_keeps_lists_edits_pins_and_deletes_a_note(world: World) -> Non
     listing = ada.get("/api/memory").json()
     assert [n["id"] for n in listing["sections"]["always"]] == [note["id"]]
     assert listing["sections"]["other"] == []
+    assert listing["usage"]["pinned"]["notes"] == 1 and listing["usage"]["pinned"]["tokens"] > 0
+    assert listing["usage"]["relevant"]["from"] == 0
 
     assert ada.delete(f"/api/memory/notes/{note['id']}").status_code == 204
     again = ada.delete(f"/api/memory/notes/{note['id']}")
     assert (
         again.status_code == 404 and again.json()["detail"]["message"] == "There is no such note."
     )
-    assert ada.get("/api/memory").json()["sections"] == {"always": [], "other": [], "past": []}
+    assert ada.get("/api/memory").json()["sections"] == EMPTY_SECTIONS
 
 
 def test_instructions_are_always_used_whatever_else_is_pinned(world: World) -> None:
@@ -238,7 +258,10 @@ def test_the_same_words_are_not_kept_twice_and_the_install_sets_the_limit(world:
 def test_the_install_settings_take_only_what_they_mean(world: World) -> None:
     for key, bad in (
         ("memoryMaxNotes", 0),
-        ("memoryMaxNotes", 2001),
+        ("memoryMaxNotes", 200_001),
+        ("memoryMaxBodyChars", -1),
+        ("memoryMaxBodyChars", 20_001),
+        ("memoryMaxBodyChars", "long"),
         ("memoryMaxNotes", "many"),
         ("memoryMaxNotes", True),
         ("memoryEnabled", "yes"),
@@ -261,7 +284,18 @@ def test_the_install_settings_take_only_what_they_mean(world: World) -> None:
         50,
         "never",
     )
-    config(world, memoryEnabled=None, memoryMaxNotes=None, memoryExternalModels=None)
+    # Past the old limit of 2,000 is allowed now; the body length has its own setting.
+    assert config(world, memoryMaxNotes=2001, memoryMaxBodyChars=0).json()["applied"] == [
+        "memoryMaxNotes",
+        "memoryMaxBodyChars",
+    ]
+    config(
+        world,
+        memoryEnabled=None,
+        memoryMaxNotes=None,
+        memoryMaxBodyChars=None,
+        memoryExternalModels=None,
+    )
     shown = httpx.get(
         f"{world.workbench}/v1/config",
         headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
@@ -269,9 +303,10 @@ def test_the_install_settings_take_only_what_they_mean(world: World) -> None:
     ).json()
     assert (shown["memoryEnabled"], shown["memoryMaxNotes"], shown["memoryExternalModels"]) == (
         True,
-        300,
+        20_000,
         "ask",
     )
+    assert shown["memoryMaxBodyChars"] == 20_000
 
 
 def test_the_schema_says_each_memory_setting_and_its_default(world: World) -> None:
@@ -282,10 +317,15 @@ def test_the_schema_says_each_memory_setting_and_its_default(world: World) -> No
     ).json()
     fields = {f["key"]: f for f in schema["fields"]}
     assert fields["memoryEnabled"]["default"] is True
-    assert fields["memoryMaxNotes"]["default"] == 300 and fields["memoryMaxNotes"]["minimum"] == 1
+    assert fields["memoryMaxNotes"]["default"] == 20_000
+    assert fields["memoryMaxNotes"]["minimum"] == 1
+    assert fields["memoryMaxNotes"]["maximum"] == 200_000
+    assert fields["memoryMaxBodyChars"]["default"] == 20_000
+    assert fields["memoryMaxBodyChars"]["minimum"] == 0
+    assert fields["memoryMaxBodyChars"]["maximum"] == 20_000
     assert fields["memoryExternalModels"]["default"] == "ask"
     assert fields["memoryExternalModels"]["enumValues"] == ["never", "ask", "always"]
-    for key in ("memoryEnabled", "memoryMaxNotes", "memoryExternalModels"):
+    for key in ("memoryEnabled", "memoryMaxNotes", "memoryMaxBodyChars", "memoryExternalModels"):
         assert fields[key]["category"] == "memory" and len(fields[key]["description"]) > 80
     assert schema["categories"]["memory"] == "Memory"
     assert "never covers a person's memory" in fields["ownerReadsChats"]["description"]
@@ -295,7 +335,7 @@ def test_what_the_owner_turns_off_stays_off_and_the_person_can_still_leave(world
     ada = signed_in(world)
     note = keep(ada, "I like tea")
     chat = ada.new_chat()
-    assert "I like tea" in (system_of(ask(world, ada, chat)) or "")
+    assert reaches(ask(world, ada, chat), "I like tea")
     config(world, memoryEnabled=False)
     page = ada.get("/api/memory").json()
     assert page["installEnabled"] is False
@@ -310,8 +350,12 @@ def test_what_the_owner_turns_off_stays_off_and_the_person_can_still_leave(world
     assert ada.patch(f"/api/memory/notes/{note['id']}", json={"text": "x"}).status_code == 403
     # A new chat is sent no notes; the person can still read, export and delete theirs.
     fresh = ada.new_chat()
-    assert system_of(ask(world, ada, fresh)) is None
+    held = ask(world, ada, fresh)
+    assert system_of(held) is None and not reaches(held, "I like tea")
+    assert "tools" not in held, "no search_memory when no note may be sent"
     assert drawer(ada, fresh)["reasonCode"] == "install_off"
+    # An older chat that had been sent notes is sent none either.
+    assert not reaches(ask(world, ada, chat, "And now?"), "I like tea")
     assert ada.get("/api/memory/export?format=md").status_code == 200
     assert [n["text"] for n in ada.get("/api/memory").json()["sections"]["other"]] == ["I like tea"]
     assert ada.delete(f"/api/memory/notes/{note['id']}").status_code == 204
@@ -324,6 +368,8 @@ def test_a_persons_own_memory_settings_and_what_is_in_effect(world: World) -> No
         "enabled": True,
         "external": None,  # not chosen: the owner's default, which is ask
         "budgetTokens": None,
+        "relevantBudgetTokens": None,
+        "searchTool": True,
         "learn": None,  # MR8: not chosen
         "useMode": "relevant",
         "effective": {
@@ -331,7 +377,8 @@ def test_a_persons_own_memory_settings_and_what_is_in_effect(world: World) -> No
             "disabledBy": None,
             "external": "ask",
             "externalSetBy": "default",
-            "budgetTokens": 1000,
+            "budgetTokens": 2000,
+            "relevantBudgetTokens": 6000,
             "learn": "off",
             "learnSetBy": "default",
             "learnByModel": True,
@@ -351,6 +398,18 @@ def test_a_persons_own_memory_settings_and_what_is_in_effect(world: World) -> No
     assert changed["effective"]["enabled"] is False and changed["effective"]["disabledBy"] == "you"
     assert changed["effective"]["budgetTokens"] == 500
     assert ada.get("/api/memory").json()["usage"]["budget"] == 500
+    assert ada.get("/api/memory").json()["usage"]["pinned"]["budget"] == 500
+    both = ada.put(
+        "/api/memory/prefs", json={"relevantBudgetTokens": 900, "searchTool": False}
+    ).json()
+    assert (both["budgetTokens"], both["relevantBudgetTokens"], both["searchTool"]) == (
+        500,
+        900,
+        False,
+    )
+    assert both["effective"]["relevantBudgetTokens"] == 900
+    assert ada.get("/api/memory").json()["usage"]["relevant"]["budget"] == 900
+    ada.put("/api/memory/prefs", json={"relevantBudgetTokens": None, "searchTool": True})
     # `null` is back to the default; what is not sent stays.
     reset = ada.put("/api/memory/prefs", json={"budgetTokens": None, "enabled": None}).json()
     assert (reset["enabled"], reset["external"], reset["budgetTokens"]) == (True, "never", None)
@@ -364,6 +423,9 @@ def test_a_persons_own_memory_settings_and_what_is_in_effect(world: World) -> No
         {"budgetTokens": 50},
         {"budgetTokens": "500"},
         {"budgetTokens": 20001},
+        {"relevantBudgetTokens": 50},
+        {"relevantBudgetTokens": 20001},
+        {"searchTool": "yes"},
         {"enabled": "yes"},
         {"learn": "auto"},
     ):
@@ -439,7 +501,21 @@ def test_export_is_a_plain_file_of_the_askers_notes_only(world: World) -> None:
         "Lives in Denver",
         "Short answers, code first",
     ]
-    assert {"text", "kind", "pinned", "source", "createdAt", "updatedAt"} == set(body["notes"][0])
+    assert {
+        "id",
+        "text",
+        "body",
+        "kind",
+        "pinned",
+        "tags",
+        "source",
+        "createdAt",
+        "updatedAt",
+        "validFrom",
+        "supersededAt",
+        "supersededBy",
+    } == set(body["notes"][0])
+    assert {"earlierVersions", "tags"} <= set(body)
     assert body["notes"][0]["createdAt"].endswith("Z") and body["exportedAt"].endswith("Z")
     assert "beekeeping" not in data.text
     assert "Nothing here." in bo.get("/api/memory/export").text.split("## Other notes")[0]
@@ -449,7 +525,7 @@ def test_export_is_a_plain_file_of_the_askers_notes_only(world: World) -> None:
 def test_deleting_a_note_leaves_nothing_of_it_in_the_database(world: World) -> None:
     ada = signed_in(world)
     keep(ada, "I like tea")
-    note = keep(ada, CODE_WORD)
+    note = keep(ada, CODE_WORD, pinned=True)
     ada.patch(f"/api/memory/notes/{note['id']}", json={"text": "my code word is damson"})
     chat = ada.new_chat()
     ask(world, ada, chat)
@@ -478,7 +554,31 @@ def test_deleting_a_note_leaves_nothing_of_it_in_the_database(world: World) -> N
     # The chat that had been sent it is sent a new copy, without it.
     assert drawer(ada, chat)["frozen"] is False
     assert "plum" not in (system_of(ask(world, ada, chat, "And now?")) or "")
-    assert CODE_WORD not in json.dumps(world.gateway.requests[-1])
+    assert not reaches(world.gateway.requests[-1], "plum")
+    assert not reaches(world.gateway.requests[-1], "damson")
+
+
+def test_deleting_a_note_that_was_sent_in_a_turn_leaves_nothing_of_it_in_the_answers(
+    world: World,
+) -> None:
+    """A turn's record keeps the notes it was sent, as words. Forgetting a note forgets
+    those words too."""
+    ada = signed_in(world)
+    note = keep(ada, CODE_WORD)
+    chat = ada.new_chat()
+    assert reaches(ask(world, ada, chat, "What is my code word?"), "plum")
+    with database(world) as db:
+        assert db.execute(
+            "SELECT count(*) FROM messages WHERE memory_used LIKE '%plum%'"
+        ).fetchone() == (1,)
+    assert ada.delete(f"/api/memory/notes/{note['id']}").status_code == 204
+    assert "plum" not in json.dumps(ada.get(f"/api/chats/{chat}").json())
+    assert "plum" not in json.dumps(drawer(ada, chat))
+    assert not reaches(ask(world, ada, chat, "And now?"), "plum")
+    with database(world) as db:
+        assert db.execute(
+            "SELECT count(*) FROM messages WHERE memory_used LIKE '%plum%'"
+        ).fetchone() == (0,)
 
 
 def test_every_note_can_be_deleted_at_once_when_the_caller_says_so(world: World) -> None:
@@ -487,7 +587,7 @@ def test_every_note_can_be_deleted_at_once_when_the_caller_says_so(world: World)
     keep(ada, "Lives in Denver")
     keep(bo, "I like coffee")
     chat = ada.new_chat()
-    assert system_of(ask(world, ada, chat)) is not None
+    assert reaches(ask(world, ada, chat), "I like tea")
     stray = ada.delete("/api/memory/notes")
     assert stray.status_code == 400 and "confirm=all" in stray.json()["detail"]["message"]
     assert ada.get("/api/memory").json()["usage"]["notes"] == 2
@@ -495,7 +595,9 @@ def test_every_note_can_be_deleted_at_once_when_the_caller_says_so(world: World)
     assert gone.status_code == 200 and gone.json() == {"deleted": 2}
     assert ada.get("/api/memory").json()["usage"]["notes"] == 0
     assert bo.get("/api/memory").json()["usage"]["notes"] == 1, "nobody else's"
-    assert system_of(ask(world, ada, chat, "Again")) is None
+    again = ask(world, ada, chat, "Again")
+    assert system_of(again) is None and "tools" not in again
+    assert not reaches(again, "I like tea") and not reaches(again, "Lives in Denver")
     with database(world) as db:
         assert db.execute("SELECT count(*) FROM memory_notes WHERE owner = 'p-ada'").fetchone() == (
             0,
@@ -517,7 +619,7 @@ def test_a_note_that_is_not_yours_is_a_note_that_does_not_exist(world: World) ->
     ask(world, ada, ada_chat, "Hi")
     sent = ada.get(f"/api/chats/{ada_chat}").json()["messages"][0]["id"]
     bo_chat = bo.new_chat()
-    assert drawer(ada, ada_chat)["text"] is not None
+    assert drawer(ada, ada_chat)["turn"] is not None
     nothing = "There is no such note."
     for call in (
         bo.patch(f"/api/memory/notes/{note['id']}", json={"text": "hacked"}),
@@ -546,14 +648,14 @@ def test_a_note_that_is_not_yours_is_a_note_that_does_not_exist(world: World) ->
     missing = bo.get("/api/chats/does-not-exist/memory")
     assert missing.json() == bo.get(f"/api/chats/{ada_chat}/memory").json()
     # What he reads, exports and searches is his.
-    assert bo.get("/api/memory").json()["sections"] == {"always": [], "other": [], "past": []}
+    assert bo.get("/api/memory").json()["sections"] == EMPTY_SECTIONS
     assert "plum" not in bo.get("/api/memory/export?format=md").text
     assert bo.get("/api/memory/export?format=json").json()["notes"] == []
     assert bo.delete("/api/memory/notes?confirm=all").json() == {"deleted": 0}
     answer = bo.post(f"/api/chats/{bo_chat}/messages", json={"content": "Forget my code word"})
     assert answer.json()["memory"]["candidates"] == [], "the index does not lead to her notes"
     bo.wait_answer(bo_chat)
-    assert "plum" not in json.dumps(world.gateway.requests[-1])
+    assert not reaches(world.gateway.requests[-1], "plum")
     # All of it left her note and her chat alone.
     [mine] = ada.get("/api/memory").json()["sections"]["other"]
     assert (mine["id"], mine["text"], mine["pinned"]) == (note["id"], CODE_WORD, False)
@@ -564,9 +666,10 @@ def test_the_owner_cannot_read_a_persons_notes_even_where_they_read_her_chats(
     world: World,
 ) -> None:
     ada, owner = signed_in(world), signed_in(world, "operator")
-    note = keep(ada, CODE_WORD)
+    note = keep(ada, CODE_WORD, pinned=True)
+    keep(ada, "Lives in Denver")  # not pinned: sent in the turn, not in the pinned block
     chat = ada.new_chat()
-    ask(world, ada, chat, "Hello")
+    assert reaches(ask(world, ada, chat, "Hello"), "Denver")
     assert config(world, ownerReadsChats=True).json()["applied"] == ["ownerReadsChats"]
     try:
         # The chat is readable, read-only. Its notes are not.
@@ -584,8 +687,12 @@ def test_the_owner_cannot_read_a_persons_notes_even_where_they_read_her_chats(
             "tokens",
             "budget",
             "counts",
+            "turn",
         }
-        assert "plum" not in seen.text and "code word" not in seen.text
+        assert set(view["turn"]) == {"messageId", "notes", "tokens", "budget"}
+        assert view["turn"]["notes"] == 1 and view["turn"]["tokens"] > 0
+        for word in ("plum", "code word", "Denver"):
+            assert word not in seen.text, word
         # Nor can the owner write, refresh, or reach a note by its id.
         assert owner.post(f"/api/chats/{chat}/memory/refresh").status_code == 404
         assert owner.patch(f"/api/memory/notes/{note['id']}", json={"text": "x"}).status_code == 404
@@ -595,24 +702,27 @@ def test_the_owner_cannot_read_a_persons_notes_even_where_they_read_her_chats(
             == 404
         )
         # Their own page is their own.
-        assert owner.get("/api/memory").json()["sections"] == {
-            "always": [],
-            "other": [],
-            "past": [],
-        }
-        assert "plum" not in owner.get("/api/memory/export?format=md").text
-        assert "plum" not in owner.get("/api/memory/export?format=json").text
+        assert owner.get("/api/memory").json()["sections"] == EMPTY_SECTIONS
+        for word in ("plum", "Denver"):
+            assert word not in owner.get("/api/memory/export?format=md").text
+            assert word not in owner.get("/api/memory/export?format=json").text
         # And the list of people says nothing of anyone's notes.
         people = owner.get("/api/people").json()["people"]
         assert [set(p) for p in people] == [{"sub", "name", "chats", "media"}]
-        everything = json.dumps(
-            [owner.get(f"/api/chats/{chat}").json(), owner.get("/api/people/p-ada/chats").json()]
-        )
-        assert "plum" not in everything
+        read = owner.get(f"/api/chats/{chat}").json()
+        everything = json.dumps([read, owner.get("/api/people/p-ada/chats").json()])
+        for word in ("plum", "Denver"):
+            assert word not in everything, "not in the chat as the owner reads it either"
+        # An answer's own record is counts only for the owner.
+        [answer] = [m for m in read["messages"] if m["role"] == "assistant"]
+        assert answer["memoryUsed"]["notes"] == 1 and "Denver" not in json.dumps(answer)
     finally:
         config(world, ownerReadsChats=None)
     assert owner.get(f"/api/chats/{chat}/memory").status_code == 404
-    assert ada.get("/api/memory").json()["usage"]["notes"] == 1
+    assert ada.get("/api/memory").json()["usage"]["notes"] == 2
+    # Hers, she reads whole.
+    mine = [m for m in ada.get(f"/api/chats/{chat}").json()["messages"] if m["role"] == "assistant"]
+    assert [n["text"] for n in mine[0]["memoryUsed"]["notes"]] == ["Lives in Denver"]
 
 
 # --------------------------------------------------------------------------- #
@@ -634,8 +744,11 @@ def test_a_command_keeps_the_persons_words_and_the_message_is_still_sent(world: 
     ada.wait_answer(chat)
     # The model was sent the message as written, and the note with it, at once.
     request = world.gateway.requests[-1]
-    assert request["messages"][-1] == {"role": "user", "content": f"Remember that {CODE_WORD}"}
-    assert f"- {CODE_WORD}" in (system_of(request) or "")
+    sent_words = last_user(request)
+    assert sent_words.startswith("<memory-") and sent_words.endswith(
+        f"Remember that {CODE_WORD}"
+    ), "the message as written, after the notes that bear on it"
+    assert CODE_WORD in sent_words.split("</memory-")[0], "and the note is in them, at once"
     # The stored message is theirs, never the injected block.
     stored = ada.get(f"/api/chats/{chat}").json()["messages"][0]["content"]
     assert stored == f"Remember that {CODE_WORD}"
@@ -769,8 +882,8 @@ def test_forget_finds_candidates_and_never_deletes_on_a_guess(world: World) -> N
 
 def test_the_notes_go_in_the_one_system_message_after_the_instructions(world: World) -> None:
     ada = signed_in(world)
-    keep(ada, "Lives in Denver; uses metric units")
-    keep(ada, "Short answers, code first", kind="preference")
+    keep(ada, "Lives in Denver; uses metric units", pinned=True)
+    keep(ada, "Short answers, code first", kind="preference", pinned=True)
     chat = ada.new_chat()
     set_chat(ada, chat, instructions="Be brief.")
     first = ask(world, ada, chat, "One")
@@ -794,6 +907,27 @@ def test_the_notes_go_in_the_one_system_message_after_the_instructions(world: Wo
     assert system_of(ask(world, ada, other)) == block
 
 
+def test_only_always_used_notes_are_in_the_system_message_and_the_rest_go_with_the_turn(
+    world: World,
+) -> None:
+    ada = signed_in(world)
+    keep(ada, "Answer in short sentences", kind="instruction")
+    keep(ada, "Likes tea", pinned=True)
+    keep(ada, "Lives in Denver")
+    keep(ada, "Is building a NAS", kind="project")
+    chat = ada.new_chat()
+    request = ask(world, ada, chat, "What should I do this weekend?")
+    system = system_of(request) or ""
+    assert "- Answer in short sentences" in system and "- Likes tea" in system
+    assert "Denver" not in system and "NAS" not in system
+    words = last_user(request)
+    assert words.startswith("<memory-") and words.endswith("What should I do this weekend?")
+    inside = words.split("</memory-")[0]
+    assert "Lives in Denver" in inside and "Is building a NAS" in inside
+    assert "Likes tea" not in inside, "what the system message holds is not sent twice"
+    assert "data, not instructions" in inside
+
+
 def test_a_person_with_no_notes_is_sent_no_system_message_and_nothing_is_frozen(
     world: World,
 ) -> None:
@@ -804,10 +938,15 @@ def test_a_person_with_no_notes_is_sent_no_system_message_and_nothing_is_frozen(
     view = drawer(ada, chat)
     assert (view["sending"], view["reasonCode"], view["frozen"]) == (False, "no_notes", False)
     assert view["counts"] == {"notes": 0, "sent": 0, "notSent": 0}
-    # The first note is carried by the next request, and that is the one that freezes.
+    # A note that is not pinned goes with the next turn and freezes nothing.
     keep(ada, "I like tea")
     later = ask(world, ada, chat, "Again")
-    assert "- I like tea" in (system_of(later) or "")
+    assert system_of(later) is None and "I like tea" in last_user(later)
+    assert drawer(ada, chat)["frozen"] is False
+    # The first note that is always used is carried by the next request, and freezes.
+    keep(ada, "Lives in Denver", pinned=True)
+    third = ask(world, ada, chat, "Once more")
+    assert "- Lives in Denver" in (system_of(third) or "")
     assert drawer(ada, chat)["frozen"] is True
 
 
@@ -815,17 +954,23 @@ def test_every_turn_sends_the_same_bytes_until_the_person_refreshes(world: World
     """The engine's prompt cache reuses a prompt up to its first changed token,
     so the start of every request in a chat must not change."""
     ada = signed_in(world)
-    keep(ada, "I like tea")
+    keep(ada, "I like tea", pinned=True)
     chat = ada.new_chat()
     set_chat(ada, chat, instructions="Be brief.")
     first = system_of(ask(world, ada, chat, "One"))
     assert first and "- I like tea" in first
-    # A note added mid-chat waits: the chat keeps what it was first sent.
-    added = keep(ada, "Lives in Denver")
+    # A pinned note added mid-chat waits: the chat keeps what it was first sent.
+    added = keep(ada, "Lives in Denver", pinned=True)
+    # A note that is not pinned does not wait: it goes with the very next turn.
+    keep(ada, "Plays jazz piano")
     second = ask(world, ada, chat, "Two")
     assert system_of(second) == first
+    assert "Plays jazz piano" in last_user(second)
     third = ask(world, ada, chat, "Three")
     assert system_of(third) == first and third["messages"][0] == second["messages"][0]
+    # The waiting note goes nowhere until Refresh, as the drawer says: not in the frozen
+    # block, and not with the turn (a note always used is the pinned block's).
+    assert "Denver" not in json.dumps(third)
     view = drawer(ada, chat)
     assert view["changed"] is True, "and the drawer says the notes changed"
     assert [n["id"] for n in view["notSent"]] == [added["id"]]
@@ -855,8 +1000,8 @@ def test_every_turn_sends_the_same_bytes_until_the_person_refreshes(world: World
 
 def test_an_edit_waits_for_a_refresh_and_a_delete_does_not(world: World) -> None:
     ada = signed_in(world)
-    tea = keep(ada, "I like tea")
-    coffee = keep(ada, "I like coffee")
+    tea = keep(ada, "I like tea", pinned=True)
+    coffee = keep(ada, "I like coffee", pinned=True)
     chat = ada.new_chat()
     first = ask(world, ada, chat, "One")
     assert "I like tea" in (system_of(first) or "") and "I like coffee" in (system_of(first) or "")
@@ -871,6 +1016,26 @@ def test_an_edit_waits_for_a_refresh_and_a_delete_does_not(world: World) -> None
     assert drawer(ada, chat)["changed"] is False
 
 
+def test_an_edit_or_a_delete_of_a_note_that_is_not_pinned_is_in_the_very_next_turn(
+    world: World,
+) -> None:
+    """Notes that are not pinned are chosen again every turn, so there is nothing to
+    refresh: what the person edits or deletes is what the next turn carries."""
+    ada = signed_in(world)
+    tea = keep(ada, "I like tea")
+    coffee = keep(ada, "I like coffee")
+    chat = ada.new_chat()
+    first = ask(world, ada, chat, "One")
+    assert "I like tea" in last_user(first) and "I like coffee" in last_user(first)
+    ada.patch(f"/api/memory/notes/{tea['id']}", json={"text": "I like cocoa"})
+    second = ask(world, ada, chat, "Two")
+    assert "I like cocoa" in last_user(second) and "I like tea" not in last_user(second)
+    ada.delete(f"/api/memory/notes/{coffee['id']}")
+    third = ask(world, ada, chat, "Three")
+    assert "coffee" not in last_user(third) and "I like cocoa" in last_user(third)
+    assert drawer(ada, chat)["frozen"] is False
+
+
 def test_the_drawer_says_exactly_what_the_model_was_sent(world: World) -> None:
     ada = signed_in(world)
     keep(ada, "Be brief", kind="instruction")
@@ -882,43 +1047,59 @@ def test_the_drawer_says_exactly_what_the_model_was_sent(world: World) -> None:
     assert view["readOnly"] is False and view["sending"] is True and view["frozen"] is True
     assert view["reason"] is None and view["reasonCode"] is None
     assert system_of(request) == view["text"]
-    assert view["tokens"] == memory.estimate_tokens(view["text"]) and view["budget"] == 1000
+    assert view["tokens"] == memory.estimate_tokens(view["text"]) and view["budget"] == 1310
     assert view["model"] == {"id": MODEL, "window": 32768, "locality": "local", "runsOn": None}
     assert view["outside"] is None and view["chatSwitch"] == "on"
     assert {(s["text"], s["always"]) for s in view["sent"]} == {
         ("Be brief", True),
         ("Likes tea", True),
-        ("Lives in Denver", False),
     }
-    assert view["counts"] == {"notes": 3, "sent": 3, "notSent": 0} and view["notSent"] == []
+    assert view["counts"] == {"notes": 3, "sent": 2, "notSent": 0} and view["notSent"] == []
     assert view["changed"] is False and view["frozenAt"] is not None
-    # The sent notes were counted as used, once.
-    used = {n["text"]: n["useCount"] for n in ada.get("/api/memory").json()["sections"]["other"]}
-    assert used == {"Lives in Denver": 1}
-    ask(world, ada, chat, "Again")
-    assert ada.get("/api/memory").json()["sections"]["other"][0]["useCount"] == 1
+    # The latest turn's record says what its user message carried, and is that.
+    assert [n["text"] for n in view["turn"]["notes"]] == ["Lives in Denver"]
+    assert "Lives in Denver" in last_user(request)
+    assert view["turn"]["budget"] == 3276 and view["turn"]["tokens"] > 0
+    assert (view["relevantBudget"], view["searchTool"], len(view["turns"])) == (3276, True, 1)
+    assert [t["function"]["name"] for t in request["tools"]] == ["search_memory"]
+    # The pinned notes were counted as used once, when frozen; the other in every turn.
+    page = ada.get("/api/memory").json()["sections"]
+    assert {n["text"]: n["useCount"] for n in page["always"]} == {"Be brief": 1, "Likes tea": 1}
+    assert {n["text"]: n["useCount"] for n in page["other"]} == {"Lives in Denver": 1}
+    again = ask(world, ada, chat, "Again")
+    assert system_of(again) == view["text"] and "Lives in Denver" in last_user(again)
+    page = ada.get("/api/memory").json()["sections"]
+    assert {n["text"]: n["useCount"] for n in page["always"]} == {"Be brief": 1, "Likes tea": 1}
+    assert {n["text"]: n["useCount"] for n in page["other"]} == {"Lives in Denver": 2}
+    assert len(drawer(ada, chat)["turns"]) == 2
     # The block is never stored as the person's words.
     contents = [m["content"] for m in ada.get(f"/api/chats/{chat}").json()["messages"]]
     assert all("What you know about this person" not in c for c in contents)
+    assert all("<memory-" not in c and "Denver" not in c for c in contents)
 
 
 def test_the_chat_switch_takes_the_notes_out_and_back_in_unchanged(world: World) -> None:
     ada = signed_in(world)
-    keep(ada, "I like tea")
+    keep(ada, "I like tea", pinned=True)
+    keep(ada, "I like jazz")
     chat = ada.new_chat()
-    with_notes = system_of(ask(world, ada, chat, "One"))
-    assert with_notes
+    first = ask(world, ada, chat, "One")
+    with_notes = system_of(first)
+    assert with_notes and "I like jazz" in last_user(first)
     changed = set_chat(ada, chat, memory="off")
     assert changed["settings"]["memory"] == "off"
     off = ask(world, ada, chat, "Two")
     assert system_of(off) is None and off["messages"][0]["role"] == "user"
+    assert not reaches(off, "I like tea") and not reaches(off, "I like jazz")
+    assert "tools" not in off and "<memory-" not in json.dumps(off)
     view = drawer(ada, chat)
     assert (view["sending"], view["reasonCode"], view["chatSwitch"]) == (False, "chat_off", "off")
     assert view["reason"] == "Memory is off for this chat." and view["text"] is None
-    assert view["counts"]["notes"] == 1 and view["sent"] == []
+    assert view["counts"]["notes"] == 2 and view["sent"] == []
     # On again (or unset), and the chat still has the copy it first took.
     set_chat(ada, chat, memory="on")
-    assert system_of(ask(world, ada, chat, "Three")) == with_notes
+    three = ask(world, ada, chat, "Three")
+    assert system_of(three) == with_notes and "I like jazz" in last_user(three)
     set_chat(ada, chat, memory=None)
     assert system_of(ask(world, ada, chat, "Four")) == with_notes
     assert ada.get(f"/api/chats/{chat}").json()["chat"]["settings"]["memory"] is None
@@ -932,25 +1113,33 @@ def test_a_chat_that_starts_with_the_switch_off_is_sent_nothing_and_takes_no_cop
     world: World,
 ) -> None:
     ada = signed_in(world)
-    keep(ada, "I like tea")
+    keep(ada, "I like tea", pinned=True)
+    keep(ada, "I like jazz")
     chat = ada.new_chat()
     set_chat(ada, chat, memory="off")
-    assert system_of(ask(world, ada, chat, "One")) is None
+    one = ask(world, ada, chat, "One")
+    assert system_of(one) is None
+    assert not reaches(one, "I like tea") and not reaches(one, "I like jazz")
     assert drawer(ada, chat)["frozen"] is False
     set_chat(ada, chat, memory="on")
-    assert "I like tea" in (system_of(ask(world, ada, chat, "Two")) or "")
+    two = ask(world, ada, chat, "Two")
+    assert "I like tea" in (system_of(two) or "") and "I like jazz" in last_user(two)
 
 
 def test_a_person_who_turns_memory_off_for_themselves_is_sent_none(world: World) -> None:
     ada = signed_in(world)
-    keep(ada, "I like tea")
+    keep(ada, "I like tea", pinned=True)
+    keep(ada, "I like jazz")
     chat = ada.new_chat()
     ada.put("/api/memory/prefs", json={"enabled": False})
-    assert system_of(ask(world, ada, chat, "One")) is None
+    one = ask(world, ada, chat, "One")
+    assert system_of(one) is None and "tools" not in one
+    assert not reaches(one, "I like tea") and not reaches(one, "I like jazz")
     view = drawer(ada, chat)
     assert view["reasonCode"] == "person_off" and "Memory is off for you" in view["reason"]
     ada.put("/api/memory/prefs", json={"enabled": True})
-    assert "I like tea" in (system_of(ask(world, ada, chat, "Two")) or "")
+    two = ask(world, ada, chat, "Two")
+    assert "I like tea" in (system_of(two) or "") and "I like jazz" in last_user(two)
 
 
 def test_notes_are_held_back_from_a_model_that_runs_outside_the_machines(world: World) -> None:
@@ -958,10 +1147,13 @@ def test_notes_are_held_back_from_a_model_that_runs_outside_the_machines(world: 
         chat_model("cloud-model", locality="external", window=128000, owned_by="openrouter")
     ]
     ada = signed_in(world)
-    keep(ada, "I like tea")
+    keep(ada, "I like tea", pinned=True)
+    keep(ada, "I like jazz")
     chat = ada.post("/api/chats", json={"model": "cloud-model"}).json()["id"]
     held = ask(world, ada, chat, "One")
     assert system_of(held) is None
+    assert not reaches(held, "I like tea") and not reaches(held, "I like jazz")
+    assert "tools" not in held, "search_memory is not offered to a model notes may not go to"
     view = drawer(ada, chat)
     assert (view["sending"], view["reasonCode"]) == (False, "outside_model")
     assert view["reason"] == (
@@ -975,17 +1167,21 @@ def test_notes_are_held_back_from_a_model_that_runs_outside_the_machines(world: 
         "canSendForThisChat": True,
         "sendForThisChat": False,
     }
-    assert view["text"] is None and view["counts"]["notes"] == 1 and view["frozen"] is False
+    assert view["text"] is None and view["counts"]["notes"] == 2 and view["frozen"] is False
     # "Send for this chat" is the person's, for this chat only.
     set_chat(ada, chat, memoryExternal=True)
-    sent = system_of(ask(world, ada, chat, "Two")) or ""
-    assert "- I like tea" in sent
+    two = ask(world, ada, chat, "Two")
+    assert "- I like tea" in (system_of(two) or "") and "I like jazz" in last_user(two)
     view = drawer(ada, chat)
     assert view["sending"] is True and view["outside"]["sendForThisChat"] is True
     other = ada.post("/api/chats", json={"model": "cloud-model"}).json()["id"]
-    assert system_of(ask(world, ada, other, "Hello")) is None, "another chat is asked again"
+    again = ask(world, ada, other, "Hello")
+    assert system_of(again) is None, "another chat is asked again"
+    assert not reaches(again, "I like tea") and not reaches(again, "I like jazz")
     set_chat(ada, chat, memoryExternal=None)
-    assert system_of(ask(world, ada, chat, "Three")) is None
+    three = ask(world, ada, chat, "Three")
+    assert system_of(three) is None
+    assert not reaches(three, "I like tea") and not reaches(three, "I like jazz")
 
 
 def test_never_and_always_behave_as_named_for_a_model_outside(world: World) -> None:
@@ -993,11 +1189,20 @@ def test_never_and_always_behave_as_named_for_a_model_outside(world: World) -> N
         chat_model("cloud-model", locality="external", owned_by="openrouter")
     ]
     ada = signed_in(world)
-    keep(ada, "I like tea")
+    keep(ada, "I like tea", pinned=True)
+    keep(ada, "I like jazz")
+
+    def nothing_of_it(request: dict[str, Any]) -> bool:
+        return (
+            system_of(request) is None
+            and not reaches(request, "I like tea")
+            and not reaches(request, "I like jazz")
+        )
+
     chat = ada.post("/api/chats", json={"model": "cloud-model"}).json()["id"]
     ada.put("/api/memory/prefs", json={"external": "never"})
     set_chat(ada, chat, memoryExternal=True)
-    assert system_of(ask(world, ada, chat, "One")) is None, "never even when asked for"
+    assert nothing_of_it(ask(world, ada, chat, "One")), "never even when asked for"
     view = drawer(ada, chat)
     assert view["outside"]["choice"] == "never" and view["outside"]["canSendForThisChat"] is False
     assert (view["outside"]["setBy"], view["hint"]) == (
@@ -1007,12 +1212,13 @@ def test_never_and_always_behave_as_named_for_a_model_outside(world: World) -> N
     # Always sends without asking, though the owner's default is to ask.
     ada.put("/api/memory/prefs", json={"external": "always"})
     set_chat(ada, chat, memoryExternal=None)
-    assert "- I like tea" in (system_of(ask(world, ada, chat, "Two")) or "")
+    two = ask(world, ada, chat, "Two")
+    assert "- I like tea" in (system_of(two) or "") and "I like jazz" in last_user(two)
     view = drawer(ada, chat)
     assert (view["outside"]["choice"], view["outside"]["setBy"]) == ("always", "you")
     # The owner's never is final, whatever the person chose.
     config(world, memoryExternalModels="never")
-    assert system_of(ask(world, ada, chat, "Three")) is None
+    assert nothing_of_it(ask(world, ada, chat, "Three"))
     view = drawer(ada, chat)
     assert (view["outside"]["choice"], view["outside"]["setBy"]) == ("never", "owner")
     assert view["outside"]["canSendForThisChat"] is False
@@ -1021,101 +1227,132 @@ def test_never_and_always_behave_as_named_for_a_model_outside(world: World) -> N
     # a person who has not chosen is sent to.
     config(world, memoryExternalModels="always")
     ada.put("/api/memory/prefs", json={"external": "ask"})
-    assert system_of(ask(world, ada, chat, "Four")) is None, "the person's own ask holds"
+    assert nothing_of_it(ask(world, ada, chat, "Four")), "the person's own ask holds"
     ada.put("/api/memory/prefs", json={"external": None})
-    assert "- I like tea" in (system_of(ask(world, ada, chat, "Five")) or "")
+    five = ask(world, ada, chat, "Five")
+    assert "- I like tea" in (system_of(five) or "") and "I like jazz" in last_user(five)
     assert drawer(ada, chat)["outside"]["setBy"] == "default"
 
 
 def test_a_model_nobody_can_place_is_not_trusted_with_notes(world: World) -> None:
     world.gateway.locality = None
     ada = signed_in(world)
-    keep(ada, "I like tea")
+    keep(ada, "I like tea", pinned=True)
+    keep(ada, "I like jazz")
     chat = ada.new_chat()
-    assert system_of(ask(world, ada, chat, "One")) is None
+    one = ask(world, ada, chat, "One")
+    assert system_of(one) is None and "tools" not in one
+    assert not reaches(one, "I like tea") and not reaches(one, "I like jazz")
     view = drawer(ada, chat)
     assert view["reasonCode"] == "outside_model" and view["model"]["locality"] == "unknown"
     assert view["reason"].startswith("Your notes were not sent: Eugene cannot tell whether")
     # A model the listing does not name at all is the same.
     gone = ada.post("/api/chats", json={"model": "not-listed"}).json()["id"]
-    assert system_of(ask(world, ada, gone, "Hello")) is None
+    hello = ask(world, ada, gone, "Hello")
+    assert system_of(hello) is None
+    assert not reaches(hello, "I like tea") and not reaches(hello, "I like jazz")
     assert drawer(ada, gone)["model"]["locality"] == "unknown"
     world.gateway.locality = "local"
     set_chat(ada, chat, memoryExternal=True)
-    assert "- I like tea" in (system_of(ask(world, ada, chat, "Two")) or "")
+    two = ask(world, ada, chat, "Two")
+    assert "- I like tea" in (system_of(two) or "") and "I like jazz" in last_user(two)
 
 
 def test_a_window_under_4096_is_given_no_notes_and_the_drawer_says_why(world: World) -> None:
     ada = signed_in(world)
-    keep(ada, "I like tea")
+    keep(ada, "I like tea", pinned=True)
+    keep(ada, "I like jazz")
     world.gateway.context_length = 2048
     chat = ada.new_chat()
-    assert system_of(ask(world, ada, chat, "One")) is None
+    one = ask(world, ada, chat, "One")
+    assert system_of(one) is None and "tools" not in one
+    assert not reaches(one, "I like tea") and not reaches(one, "I like jazz")
     view = drawer(ada, chat)
     assert view["reasonCode"] == "window_too_small"
     assert view["reason"] == (
         "Memory is off for this model: its window (2,048 tokens) is too small to share notes."
     )
     assert view["model"]["window"] == 2048 and view["frozen"] is False
-    # At 4,096 notes fit, in 327 tokens (8% of the window).
+    # At 4,096 notes fit: 163 tokens for the pinned block (4% of the window) and 409 for
+    # what a turn carries (10%).
     world.gateway.context_length = 4096
-    system = system_of(ask(world, ada, chat, "Two")) or ""
-    assert "- I like tea" in system
-    assert drawer(ada, chat)["budget"] == 327 and memory.estimate_tokens(system) <= 327
-    # A gateway that does not say how big the window is gets the ordinary budget.
+    two = ask(world, ada, chat, "Two")
+    system = system_of(two) or ""
+    assert "- I like tea" in system and "I like jazz" in last_user(two)
+    view = drawer(ada, chat)
+    assert view["budget"] == 163 and memory.estimate_tokens(system) <= 163
+    assert view["relevantBudget"] == 409 and view["turn"]["budget"] == 409
+    assert view["turn"]["tokens"] <= 409
+    # A gateway that does not say how big the window is gets the ordinary budgets.
     world.gateway.context_length = None
     unsure = ada.new_chat()
-    assert "- I like tea" in (system_of(ask(world, ada, unsure, "Hello")) or "")
-    assert drawer(ada, unsure)["budget"] == 1000 and drawer(ada, unsure)["model"]["window"] is None
+    hello = ask(world, ada, unsure, "Hello")
+    assert "- I like tea" in (system_of(hello) or "") and "I like jazz" in last_user(hello)
+    view = drawer(ada, unsure)
+    assert (view["budget"], view["relevantBudget"]) == (2000, 6000)
+    assert view["model"]["window"] is None
 
 
 def test_the_budget_is_kept_and_what_did_not_fit_is_named(world: World) -> None:
     ada = signed_in(world)
-    oldest = keep(
-        ada, "the oldest note, which is pinned so it always goes " + "x" * 100, pinned=True
-    )
-    for n in range(60):
-        keep(ada, f"note number {n:02d} " + "y" * 100)
-    world.gateway.context_length = 8192  # 655 tokens
+    for n in range(80):
+        keep(ada, f"pinned note number {n:02d} " + "y" * 100, pinned=True)
+    for n in range(10):
+        keep(ada, f"other note number {n:02d} " + "z" * 100)
+    world.gateway.context_length = 8192  # 327 tokens pinned, 819 a turn
     chat = ada.new_chat()
-    system = system_of(ask(world, ada, chat, "Hello")) or ""
+    request = ask(world, ada, chat, "Hello")
+    system = system_of(request) or ""
     view = drawer(ada, chat)
-    assert view["budget"] == 655 and memory.estimate_tokens(system) <= 655
+    assert view["budget"] == 327 and memory.estimate_tokens(system) <= 327
     assert view["tokens"] == memory.estimate_tokens(system)
-    assert view["sent"][0]["id"] == oldest["id"], "pinned first, though it is the oldest"
     assert view["notSent"] and all(n["reason"] == "over_budget" for n in view["notSent"])
     assert (
-        view["notSent"][0]["reasonText"] == "Did not fit this model's memory budget (655 tokens)."
+        view["notSent"][0]["reasonText"] == "Did not fit this model's memory budget (327 tokens)."
     )
-    assert view["counts"]["sent"] + view["counts"]["notSent"] == view["counts"]["notes"] == 61
-    sent_numbers = {s["text"].split()[2] for s in view["sent"][1:]}
-    left_numbers = {n["text"].split()[2] for n in view["notSent"]}
+    # Only the notes that are always used are the pinned block's to send or leave out.
+    assert view["counts"]["sent"] + view["counts"]["notSent"] == 80
+    assert view["counts"]["notes"] == 90
+    sent_numbers = {s["text"].split()[3] for s in view["sent"]}
+    left_numbers = {n["text"].split()[3] for n in view["notSent"]}
     assert max(left_numbers) < min(sent_numbers), "the oldest are left out, not a patchwork"
-    # The page's meter is for a model with room.
+    # What the pinned block left out is not lost: every note outside the block is a
+    # candidate for the turn, which is held to its own budget.
+    turn = view["turn"]
+    assert turn["budget"] == 819 and turn["tokens"] <= 819
+    assert memory.estimate_tokens(last_user(request)) <= 819 + 10
+    assert "other note number" in last_user(request)
+    # The page's meters are for a model with room.
     usage = ada.get("/api/memory").json()["usage"]
-    assert usage["budget"] == 1000 and usage["tokens"] <= 1000 and usage["notSent"] > 0
-    # The person's own ceiling.
-    ada.put("/api/memory/prefs", json={"budgetTokens": 300})
+    assert usage["budget"] == 2000 and usage["tokens"] <= 2000 and usage["notSent"] > 0
+    assert usage["pinned"]["budget"] == 2000 and usage["relevant"]["budget"] == 6000
+    # The person's own ceilings.
+    ada.put("/api/memory/prefs", json={"budgetTokens": 300, "relevantBudgetTokens": 300})
     small = ada.new_chat()
     world.gateway.context_length = 32768
-    again = system_of(ask(world, ada, small, "Hello")) or ""
-    assert memory.estimate_tokens(again) <= 300 and drawer(ada, small)["budget"] == 300
+    again = ask(world, ada, small, "Hello")
+    assert memory.estimate_tokens(system_of(again) or "") <= 300
+    view = drawer(ada, small)
+    assert (view["budget"], view["relevantBudget"], view["turn"]["budget"]) == (300, 300, 300)
+    assert view["turn"]["tokens"] <= 300
 
 
 def test_another_model_takes_the_notes_again_for_its_own_window(world: World) -> None:
     world.gateway.more_chat_models = [chat_model("small-local", locality="local", window=8192)]
     ada = signed_in(world)
-    keep(ada, "I like tea")
+    keep(ada, "I like tea", pinned=True)
     chat = ada.new_chat()
     big = ask(world, ada, chat, "One")
-    assert drawer(ada, chat)["budget"] == 1000
+    assert drawer(ada, chat)["budget"] == 1310
     small = ask(world, ada, chat, "Two", model="small-local")
     assert system_of(small) == system_of(big), "the same notes: the same words"
     view = drawer(ada, chat)
-    assert view["model"]["id"] == "small-local" and view["budget"] == 655 and view["frozen"] is True
+    assert view["model"]["id"] == "small-local" and view["budget"] == 327 and view["frozen"] is True
+    assert view["relevantBudget"] == 819
     # Back on the first, it is a new copy again, and then it holds.
     ask(world, ada, chat, "Three", model=MODEL)
-    assert drawer(ada, chat)["budget"] == 1000
+    view = drawer(ada, chat)
+    assert (view["budget"], view["relevantBudget"]) == (1310, 3276)
 
 
 def test_memory_that_fails_never_stops_an_answer(
@@ -1132,6 +1369,7 @@ def test_memory_that_fails_never_stops_an_answer(
     with caplog.at_level(logging.WARNING, logger="eugene_plexus_workbench.memory_api"):
         request = ask(world, ada, chat, "Hello")
     assert system_of(request) is None and [m["role"] for m in request["messages"]] == ["user"]
+    assert not reaches(request, "I like tea") and "tools" not in request
     assert any(
         "left out of its request" in r.getMessage() and "ValueError" in r.getMessage()
         for r in caplog.records
@@ -1148,7 +1386,7 @@ def test_memory_that_fails_never_stops_an_answer(
 
 def test_a_chat_copy_that_cannot_be_trusted_is_taken_again(world: World) -> None:
     ada = signed_in(world)
-    keep(ada, "I like tea")
+    keep(ada, "I like tea", pinned=True)
     chat = ada.new_chat()
     first = system_of(ask(world, ada, chat, "One"))
     with database(world, write=True) as db:
@@ -1159,9 +1397,30 @@ def test_a_chat_copy_that_cannot_be_trusted_is_taken_again(world: World) -> None
     assert "Tampered" not in again and again == first
 
 
+def test_a_copy_from_before_this_design_is_taken_again(world: World) -> None:
+    """A saved copy says which version of the pinned block it is. One that does not say
+    version 2 (every chat from before notes were chosen per turn) is not sent: it would
+    put notes that are not always used into the system message."""
+    ada = signed_in(world)
+    keep(ada, "I like tea", pinned=True)
+    keep(ada, "I like jazz")
+    chat = ada.new_chat()
+    first = system_of(ask(world, ada, chat, "One"))
+    with database(world, write=True) as db:
+        saved = json.loads(db.execute("SELECT memory_snapshot FROM chats").fetchone()[0])
+        assert saved["version"] == 2 and "relevance" not in saved
+        saved["version"] = 1
+        saved["text"] += "\n- I like jazz"
+        saved["hash"] = hashlib.sha256(saved["text"].encode()).hexdigest()
+        db.execute("UPDATE chats SET memory_snapshot = ?", (json.dumps(saved),))
+    again = ask(world, ada, chat, "Two")
+    assert system_of(again) == first and "I like jazz" in last_user(again)
+    assert "I like jazz" not in (system_of(again) or "")
+
+
 def test_a_refresh_while_notes_are_held_back_says_why_and_takes_nothing(world: World) -> None:
     ada = signed_in(world)
-    keep(ada, "I like tea")
+    keep(ada, "I like tea", pinned=True)
     chat = ada.new_chat()
     ask(world, ada, chat, "One")
     assert drawer(ada, chat)["frozen"] is True
@@ -1171,7 +1430,7 @@ def test_a_refresh_while_notes_are_held_back_says_why_and_takes_nothing(world: W
     assert refreshed["frozen"] is False, "the old copy is gone"
     assert ada.post(f"/api/chats/{chat}/memory/refresh").status_code == 200
     set_chat(ada, chat, memory="on")
-    keep(ada, "Lives in Denver")
+    keep(ada, "Lives in Denver", pinned=True)
     sent = system_of(ask(world, ada, chat, "Two")) or ""
     assert "Lives in Denver" in sent and "I like tea" in sent
 
@@ -1187,12 +1446,14 @@ def test_a_chat_with_no_model_yet_says_so(world: World) -> None:
 
 def test_a_preview_before_the_first_message_is_not_a_copy(world: World) -> None:
     ada = signed_in(world)
-    keep(ada, "I like tea")
+    keep(ada, "I like tea", pinned=True)
+    keep(ada, "I like jazz")
     chat = ada.new_chat()
     preview = drawer(ada, chat)
     assert preview["sending"] is True and preview["frozen"] is False
     assert "- I like tea" in preview["text"] and preview["sent"][0]["text"] == "I like tea"
-    keep(ada, "Lives in Denver")
+    assert "jazz" not in preview["text"] and preview["turn"] is None
+    keep(ada, "Lives in Denver", pinned=True)
     sent = system_of(ask(world, ada, chat, "Hello")) or ""
     assert "Lives in Denver" in sent, "a note kept before the first message is in it"
     with database(world) as db:

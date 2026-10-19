@@ -594,6 +594,7 @@ def test_settings_are_changed_only_with_the_agents_admin_token(world: World) -> 
         "ownerReadsChats",
         "memoryEnabled",
         "memoryMaxNotes",
+        "memoryMaxBodyChars",
         "memoryExternalModels",
         "memorySuggestions",
         "connections",
@@ -616,7 +617,8 @@ def test_settings_are_changed_only_with_the_agents_admin_token(world: World) -> 
     assert httpx.get(f"{world.workbench}/v1/config", headers=good, trust_env=False).json() == {
         "ownerReadsChats": False,
         "memoryEnabled": True,
-        "memoryMaxNotes": 300,
+        "memoryMaxNotes": 20000,
+        "memoryMaxBodyChars": 20000,
         "memoryExternalModels": "ask",
         "memorySuggestions": "measured",
         "connections": True,

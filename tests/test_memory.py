@@ -67,20 +67,37 @@ def test_a_cjk_character_is_a_token_of_its_own() -> None:
 @pytest.mark.parametrize(
     ("window", "ceiling", "expected"),
     [
-        (4096, None, 327),  # 8% of the smallest window that is given notes
-        (8192, None, 655),
-        (32768, None, 1000),
-        (131072, None, 1000),
-        (None, None, 1000),  # a window nobody states: the ceiling
+        (4096, None, 163),  # 4% of the smallest window that is given notes
+        (8192, None, 327),
+        (32768, None, 1310),
+        (131072, None, 2000),
+        (None, None, 2000),  # a window nobody states: the ceiling
         (32768, 500, 500),  # a person's own ceiling
         (131072, 3000, 3000),
-        (8192, 3000, 655),  # but never more than 8% of a small window
+        (8192, 3000, 327),  # but never more than 4% of a small window
     ],
 )
-def test_the_budget_is_a_thousand_tokens_or_eight_percent_of_the_window(
+def test_the_pinned_budget_is_two_thousand_tokens_or_four_percent_of_the_window(
     window: int | None, ceiling: int | None, expected: int
 ) -> None:
     assert memory.budget_for(window, ceiling) == expected
+
+
+@pytest.mark.parametrize(
+    ("window", "ceiling", "expected"),
+    [
+        (4096, None, 409),  # 10% of the smallest window that is given notes
+        (32768, None, 3276),
+        (131072, None, 6000),
+        (None, None, 6000),  # a window nobody states: the ceiling
+        (131072, 1000, 1000),  # a person's own ceiling
+        (8192, 3000, 819),  # but never more than 10% of a small window
+    ],
+)
+def test_the_relevant_budget_is_six_thousand_tokens_or_ten_percent_of_the_window(
+    window: int | None, ceiling: int | None, expected: int
+) -> None:
+    assert memory.relevant_budget_for(window, ceiling) == expected
 
 
 def test_a_window_under_4096_is_given_no_notes_and_the_reason_is_said() -> None:
@@ -301,33 +318,56 @@ def test_a_note_written_another_way_cannot_start_a_line_of_its_own() -> None:
     assert block.count("How they like answers") == 1
 
 
-def test_the_budget_is_spent_instructions_and_pinned_first_then_newest_first() -> None:
+def test_the_budget_is_spent_in_priority_order_newest_first() -> None:
+    """Among the notes that are always used, the newest are taken first."""
     notes = [
         note("an older pinned note", pinned=True, at=10.0, id="pinned"),
         note("an old instruction", kind="instruction", at=20.0, id="instruction"),
-        note("the newest fact", at=500.0, id="newest"),
-        note("a newer fact", at=400.0, id="newer"),
-        note("an old fact", at=100.0, id="old"),
-        note("the oldest fact", at=50.0, id="oldest"),
+        note("the newest pinned fact", pinned=True, at=500.0, id="newest"),
+        note("a newer pinned fact", pinned=True, at=400.0, id="newer"),
+        note("an old pinned fact", pinned=True, at=100.0, id="old"),
+        note("the oldest pinned fact", pinned=True, at=50.0, id="oldest"),
     ]
+    by_id = {n.id: n for n in notes}
     three = memory.build_snapshot(
-        [n for n in notes if n.id in ("pinned", "instruction", "newest")],
+        [by_id[i] for i in ("newest", "newer", "old")],
         budget=10_000,
         window=None,
         model=None,
         now=0.0,
     )
     snap = memory.build_snapshot(notes, budget=three.tokens, window=32768, model="m", now=5.0)
-    assert sorted(snap.ids) == ["instruction", "newest", "pinned"], (
-        "the pinned two, then the newest"
-    )
-    assert [d.id for d in snap.dropped] == ["newer", "old", "oldest"]
+    assert sorted(snap.ids) == ["newer", "newest", "old"], "the newest three"
+    assert [d.id for d in snap.dropped] == ["oldest", "instruction", "pinned"]
     assert all(d.reason == memory.OVER_BUDGET for d in snap.dropped)
     assert snap.tokens <= snap.budget == three.tokens
     assert (snap.window, snap.model, snap.frozen_at) == (32768, "m", 5.0)
-    # Room for one more note, and it is the newest of the rest.
-    wider = memory.build_snapshot(notes, budget=three.tokens + 6, window=None, model=None, now=0.0)
-    assert "newer" in wider.ids and "old" not in wider.ids
+    # Room for one more note, and it is the next newest.
+    four = memory.build_snapshot(
+        [by_id[i] for i in ("newest", "newer", "old", "oldest")],
+        budget=10_000,
+        window=None,
+        model=None,
+        now=0.0,
+    )
+    wider = memory.build_snapshot(notes, budget=four.tokens, window=None, model=None, now=0.0)
+    assert "oldest" in wider.ids and "instruction" not in wider.ids
+
+
+def test_a_note_that_is_not_always_used_is_not_in_the_pinned_block_and_is_not_dropped() -> None:
+    """The other notes are chosen again each turn, in the latest message: the pinned block
+    ignores them, and does not list them as left out."""
+    notes = [
+        note("pinned", pinned=True, id="p"),
+        note("an instruction", kind="instruction", id="i"),
+        note("an ordinary fact", id="f"),
+        note("a preference", kind="preference", id="r"),
+        note("a procedure", kind="procedure", id="d"),
+    ]
+    snap = memory.build_snapshot(notes, budget=10_000, window=None, model=None, now=0.0)
+    assert sorted(snap.ids) == ["i", "p"]
+    assert snap.dropped == ()
+    assert "ordinary fact" not in snap.text and "a procedure" not in snap.text
 
 
 def test_the_first_note_that_does_not_fit_ends_the_taking() -> None:
@@ -335,9 +375,9 @@ def test_the_first_note_that_does_not_fit_ends_the_taking() -> None:
     squeezed in behind a big newer one."""
     big = "b" * 200
     notes = [
-        note("small", at=1.0, id="small"),
-        note(big, at=2.0, id="big"),
-        note("tiny newest", at=3.0, id="tiny"),
+        note("small", pinned=True, at=1.0, id="small"),
+        note(big, pinned=True, at=2.0, id="big"),
+        note("tiny newest", pinned=True, at=3.0, id="tiny"),
     ]
     # Room for the newest and not for the big one after it: the small old
     # note would fit alone, and is still not taken.
@@ -348,7 +388,7 @@ def test_the_first_note_that_does_not_fit_ends_the_taking() -> None:
 
 
 def test_nothing_that_fits_is_no_block_and_every_note_is_named() -> None:
-    notes = [note("a note", id="a"), note("another", id="b", at=2.0)]
+    notes = [note("a note", pinned=True, id="a"), note("another", pinned=True, id="b", at=2.0)]
     snap = memory.build_snapshot(notes, budget=5, window=None, model=None, now=0.0)
     assert snap.text == "" and snap.sent == () and snap.tokens == 0
     assert sorted(d.id for d in snap.dropped) == ["a", "b"]
@@ -358,12 +398,34 @@ def test_nothing_that_fits_is_no_block_and_every_note_is_named() -> None:
 
 def test_only_active_notes_are_sent() -> None:
     notes = [
-        note("kept", id="a"),
-        note("a suggestion", id="b", status="pending"),
-        note("dismissed", id="c", status="dismissed"),
+        note("kept", pinned=True, id="a"),
+        note("a suggestion", pinned=True, id="b", status="pending"),
+        note("dismissed", pinned=True, id="c", status="dismissed"),
+        note("an old version", pinned=True, id="d", status="superseded"),
     ]
     snap = memory.build_snapshot(notes, budget=1000, window=None, model=None, now=0.0)
     assert snap.ids == ["a"] and "suggestion" not in snap.text and snap.dropped == ()
+    assert "old version" not in snap.text
+
+
+def test_a_pinned_body_goes_whole_when_it_fits_and_by_relevance_when_it_does_not() -> None:
+    """A body is sent whole or not at all; one that does not fit is named for relevance."""
+    notes = [
+        note("short body", pinned=True, at=2.0, id="a"),
+        note("long body", pinned=True, at=1.0, id="b"),
+    ]
+    bodies = {"a": "A few lines.", "b": "x " * 3000}
+    snap = memory.build_snapshot(
+        notes, budget=600, window=None, model=None, now=0.0, bodies=bodies, nonce="abcd1234"
+    )
+    assert snap.ids == ["a", "b"]
+    assert [s.body for s in snap.sent] == [True, False]
+    assert '<note-abcd1234 title="short body">\nA few lines.\n</note-abcd1234>' in snap.text
+    assert "x x x" not in snap.text
+    assert [(d.id, d.reason) for d in snap.dropped] == [("b", memory.BODY_BY_RELEVANCE)]
+    assert snap.deferred == ["b"]
+    assert snap.tokens <= snap.budget
+    assert memory.Snapshot.from_json(snap.to_json()) == snap
 
 
 def test_a_snapshot_never_exceeds_its_budget_and_its_count_is_the_texts() -> None:
@@ -376,23 +438,25 @@ def test_a_snapshot_never_exceeds_its_budget_and_its_count_is_the_texts() -> Non
             note(
                 "".join(rng.choice(alphabet) for _ in range(rng.randint(1, 240))).strip() or "x",
                 kind=rng.choice(memory.KINDS),
-                pinned=rng.random() < 0.2,
+                pinned=rng.random() < 0.5,
                 at=float(rng.randint(1, 50)),
                 id=f"n{i}",
             )
             for i in range(rng.randint(0, 25))
         ]
+        always = [n for n in notes if memory.is_always(n)]
         budget = rng.randint(0, 900)
         snap = memory.build_snapshot(notes, budget=budget, window=None, model=None, now=0.0)
         assert snap.tokens == memory.estimate_tokens(snap.text)
         assert snap.tokens <= budget
-        assert len(snap.sent) + len(snap.dropped) == len(notes)
+        assert len(snap.sent) + len(snap.dropped) == len(always)
         assert snap.text == memory.render_block([n for n in notes if n.id in snap.ids])
 
 
 def test_the_same_notes_are_the_same_bytes_whatever_order_they_come_in() -> None:
     notes = [
-        note(f"note {i}", kind=memory.KINDS[i % 5], at=float(i % 4), id=f"n{i}") for i in range(30)
+        note(f"note {i}", kind=memory.KINDS[i % 5], pinned=True, at=float(i % 4), id=f"n{i}")
+        for i in range(30)
     ]
     first = memory.build_snapshot(notes, budget=400, window=None, model=None, now=1.0)
     shuffled = list(notes)
@@ -403,7 +467,10 @@ def test_the_same_notes_are_the_same_bytes_whatever_order_they_come_in() -> None
 
 def test_a_snapshot_survives_being_saved_and_a_bad_copy_is_not_trusted() -> None:
     snap = memory.build_snapshot(
-        [note("I use metric units", id="a"), note("Be brief", kind="instruction", id="b")],
+        [
+            note("I use metric units", pinned=True, id="a"),
+            note("Be brief", kind="instruction", id="b"),
+        ],
         budget=1000,
         window=8192,
         model="local-model",

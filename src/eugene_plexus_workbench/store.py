@@ -89,7 +89,7 @@ from .agui_store import AGUIStore, allow_chat_write
 from .interaction_store import SCHEMA as INTERACTION_SCHEMA
 from .interaction_store import InteractionStore
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 
 #: The oldest schema this migrates from: what Workbench v0.1.0 wrote. Schema 1 predates
 #: it, and nobody holds one.
@@ -284,19 +284,62 @@ CREATE TABLE IF NOT EXISTS artifact_revisions (
 #: *external content* FTS5 table over `memory_notes`; its triggers keep it in
 #: step, and the delete trigger also nulls the text of the note's events, so
 #: no path that deletes a note can leave its words in the log.
-_MEMORY_SCHEMA: list[str] = [
+#:
+#: Memory v2 (schema 22, `workbench-memory-v2.md` MV1): a note's `text` is its title and
+#: `body` its Markdown; `procedure` is a kind; a changed fact is a new version and the old
+#: one `superseded` (`valid_from`, `superseded_at`, `superseded_by`); a person's tags are
+#: `memory_tags`, and a note's are `memory_note_tags`, whose rows the note's delete
+#: trigger removes. `proposed_tags` holds the tags a suggestion came with (JSON).
+_NOTES_TABLE = (
     "CREATE TABLE IF NOT EXISTS memory_notes ("
     "id TEXT PRIMARY KEY, owner TEXT NOT NULL, "
     "text TEXT NOT NULL CHECK (length(text) <= 240), "
-    "kind TEXT NOT NULL CHECK (kind IN ('fact','preference','instruction','project','event')), "
-    "status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','pending','dismissed')), "
+    "kind TEXT NOT NULL CHECK (kind IN "
+    "('fact','preference','instruction','project','event','procedure')), "
+    "status TEXT NOT NULL DEFAULT 'active' CHECK (status IN "
+    "('active','pending','dismissed','superseded')), "
     "pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)), "
     "source TEXT NOT NULL CHECK (source IN ('typed','said','button','suggested','imported')), "
     "source_chat_id TEXT, source_message_id TEXT, quote TEXT, "
     "expires_at TEXT, revisit_at TEXT, "
     "created_at REAL NOT NULL, updated_at REAL NOT NULL, last_used_at REAL, "
-    "use_count INTEGER NOT NULL DEFAULT 0)",
+    "use_count INTEGER NOT NULL DEFAULT 0, "
+    "replaces TEXT, source_connection_id TEXT, source_connection TEXT, "
+    "body TEXT NOT NULL DEFAULT '' CHECK (length(body) <= 20000), "
+    "valid_from REAL, superseded_at REAL, superseded_by TEXT, proposed_tags TEXT)"
+)
+#: Every column of `_NOTES_TABLE`, in order: what a rebuild copies.
+_NOTE_COLUMNS = (
+    "id, owner, text, kind, status, pinned, source, source_chat_id, source_message_id, quote, "
+    "expires_at, revisit_at, created_at, updated_at, last_used_at, use_count, replaces, "
+    "source_connection_id, source_connection, body, valid_from, superseded_at, superseded_by, "
+    "proposed_tags"
+)
+_NOTES_FTS = [
+    "CREATE VIRTUAL TABLE IF NOT EXISTS memory_notes_fts USING fts5("
+    "text, content='memory_notes', tokenize='porter unicode61 remove_diacritics 2')",
+    "CREATE TRIGGER IF NOT EXISTS memory_notes_ai AFTER INSERT ON memory_notes BEGIN "
+    "INSERT INTO memory_notes_fts (rowid, text) VALUES (new.rowid, new.text); END",
+    "CREATE TRIGGER IF NOT EXISTS memory_notes_ad AFTER DELETE ON memory_notes BEGIN "
+    "INSERT INTO memory_notes_fts (memory_notes_fts, rowid, text) "
+    "VALUES ('delete', old.rowid, old.text); "
+    "UPDATE memory_events SET old_text = NULL, new_text = NULL WHERE note_id = old.id; "
+    "DELETE FROM memory_note_tags WHERE note_id = old.id; END",
+    "CREATE TRIGGER IF NOT EXISTS memory_notes_au AFTER UPDATE OF text ON memory_notes BEGIN "
+    "INSERT INTO memory_notes_fts (memory_notes_fts, rowid, text) "
+    "VALUES ('delete', old.rowid, old.text); "
+    "INSERT INTO memory_notes_fts (rowid, text) VALUES (new.rowid, new.text); END",
+]
+_MEMORY_SCHEMA: list[str] = [
+    _NOTES_TABLE,
     "CREATE INDEX IF NOT EXISTS memory_notes_by_owner ON memory_notes (owner, status)",
+    "CREATE TABLE IF NOT EXISTS memory_tags ("
+    "owner TEXT NOT NULL, key TEXT NOT NULL, tag TEXT NOT NULL CHECK (length(tag) <= 40), "
+    "description TEXT NOT NULL DEFAULT '' CHECK (length(description) <= 200), "
+    "created_at REAL NOT NULL, PRIMARY KEY (owner, key))",
+    "CREATE TABLE IF NOT EXISTS memory_note_tags ("
+    "owner TEXT NOT NULL, note_id TEXT NOT NULL, key TEXT NOT NULL, PRIMARY KEY (note_id, key))",
+    "CREATE INDEX IF NOT EXISTS memory_note_tags_by_tag ON memory_note_tags (owner, key)",
     "CREATE TABLE IF NOT EXISTS memory_events ("
     "id INTEGER PRIMARY KEY, owner TEXT NOT NULL, note_id TEXT NOT NULL, ts REAL NOT NULL, "
     "event TEXT NOT NULL, actor TEXT NOT NULL, old_text TEXT, new_text TEXT)",
@@ -311,18 +354,7 @@ _MEMORY_SCHEMA: list[str] = [
     "external TEXT CHECK (external IS NULL OR external IN ('never','ask','always')), "
     "use_mode TEXT NOT NULL DEFAULT 'relevant' CHECK (use_mode IN ('relevant','all')), "
     "budget_tokens INTEGER)",
-    "CREATE VIRTUAL TABLE IF NOT EXISTS memory_notes_fts USING fts5("
-    "text, content='memory_notes', tokenize='porter unicode61 remove_diacritics 2')",
-    "CREATE TRIGGER IF NOT EXISTS memory_notes_ai AFTER INSERT ON memory_notes BEGIN "
-    "INSERT INTO memory_notes_fts (rowid, text) VALUES (new.rowid, new.text); END",
-    "CREATE TRIGGER IF NOT EXISTS memory_notes_ad AFTER DELETE ON memory_notes BEGIN "
-    "INSERT INTO memory_notes_fts (memory_notes_fts, rowid, text) "
-    "VALUES ('delete', old.rowid, old.text); "
-    "UPDATE memory_events SET old_text = NULL, new_text = NULL WHERE note_id = old.id; END",
-    "CREATE TRIGGER IF NOT EXISTS memory_notes_au AFTER UPDATE OF text ON memory_notes BEGIN "
-    "INSERT INTO memory_notes_fts (memory_notes_fts, rowid, text) "
-    "VALUES ('delete', old.rowid, old.text); "
-    "INSERT INTO memory_notes_fts (rowid, text) VALUES (new.rowid, new.text); END",
+    *_NOTES_FTS,
 ]
 
 
@@ -416,6 +448,51 @@ def _connections(db: sqlite3.Connection) -> None:
     for column, declaration in _CONNECTION_NOTE_COLUMNS:
         if column not in have:
             db.execute(f"ALTER TABLE memory_notes ADD COLUMN {column} {declaration}")
+
+
+#: Schema 22's columns outside `memory_notes` (MV1): the person's ceiling for relevant
+#: memory a turn, whether models may search their notes, and what each answer's turn was
+#: sent of them.
+_MEMORY_V2_COLUMNS: list[tuple[str, str, str]] = [
+    ("memory_prefs", "relevant_budget_tokens", "INTEGER"),
+    (
+        "memory_prefs",
+        "search_tool",
+        "INTEGER NOT NULL DEFAULT 1 CHECK (search_tool IN (0, 1))",
+    ),
+    ("messages", "memory_used", "TEXT"),
+]
+
+
+def _memory_v2(db: sqlite3.Connection) -> None:
+    """Schema 22 (MV1): `memory_notes` in its v2 shape, and the columns beside it.
+
+    SQLite cannot change a `CHECK`, so a table without `body` is rebuilt: renamed,
+    made again, its rows copied with their `rowid`s (which the full-text index is
+    keyed by), the old one dropped, and the index, the full-text table (rebuilt from
+    the rows) and the triggers made again. Every version a note has is its own row,
+    so a note that exists is its own first version (`valid_from` its creation)."""
+    have = {row[1] for row in db.execute("PRAGMA table_info(memory_notes)")}
+    if "body" not in have:
+        for trigger in ("memory_notes_ai", "memory_notes_ad", "memory_notes_au"):
+            db.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+        db.execute("DROP TABLE IF EXISTS memory_notes_fts")
+        db.execute("ALTER TABLE memory_notes RENAME TO memory_notes_v1")
+        db.execute(_NOTES_TABLE)
+        old = {row[1] for row in db.execute("PRAGMA table_info(memory_notes_v1)")}
+        carried = [c.strip() for c in _NOTE_COLUMNS.split(",") if c.strip() in old]
+        db.execute(
+            f"INSERT INTO memory_notes (rowid, {', '.join(carried)}, valid_from) "
+            f"SELECT rowid, {', '.join(carried)}, created_at FROM memory_notes_v1"
+        )
+        db.execute("DROP TABLE memory_notes_v1")
+        for statement in _MEMORY_SCHEMA:
+            db.execute(statement)
+        db.execute("INSERT INTO memory_notes_fts (memory_notes_fts) VALUES ('rebuild')")
+    for table, column, declaration in _MEMORY_V2_COLUMNS:
+        present = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+        if column not in present:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
 
 #: What brings a store written at version N-1 to N, for N above `OLDEST_SCHEMA`.
@@ -547,6 +624,15 @@ _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
     20: [_memory_learning],
     # Connections (MR9b, 2026-10-18): one new table and two new note columns.
     21: [_connections],
+    # Memory v2 (MV1, 2026-10-19): note bodies, the procedure kind, versions, tags, two
+    # budgets. Every chat's frozen notes are retaken once: a v1 copy holds notes that are
+    # now chosen each turn instead.
+    22: [
+        _memory_v2,
+        "UPDATE memory_prefs SET relevant_budget_tokens = budget_tokens "
+        "WHERE budget_tokens IS NOT NULL",
+        "UPDATE chats SET memory_snapshot = NULL WHERE memory_snapshot IS NOT NULL",
+    ],
 }
 
 
@@ -676,6 +762,7 @@ def _initialize_schema(
             db.execute(statement)
         _memory_learning(db)
         _connections(db)
+        _memory_v2(db)
         db.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?)",
             (str(SCHEMA_VERSION),),
@@ -759,6 +846,18 @@ class MemoryNote:
     #: For a note a connection suggested (MR9b): its id, and its name at the time.
     source_connection_id: str | None = None
     source_connection: str | None = None
+    #: MV1. The note's Markdown body, or None when it was not read (a list reads only
+    #: its length, `body_chars`).
+    body: str | None = ""
+    body_chars: int = 0
+    #: When this version became the current one; when it was replaced, and by which.
+    valid_from: float | None = None
+    superseded_at: float | None = None
+    superseded_by: str | None = None
+    #: The tags on the note, as the person's list writes them, in list order.
+    tags: list[str] = field(default_factory=list)
+    #: For a suggestion: the tags it came with, some perhaps not on the list.
+    proposed_tags: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -790,6 +889,34 @@ class MemoryFull(Exception):
     def __init__(self, limit: int) -> None:
         super().__init__(f"{limit} notes is the limit")
         self.limit = limit
+
+
+class TagListFull(Exception):
+    """The person's tag list has as many tags as it may."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(f"{limit} tags is the limit")
+        self.limit = limit
+
+
+#: Tags one person's list may hold.
+MAX_TAGS = 1000
+#: What a kept `search_memory` result becomes when a note it named is deleted (MV1).
+FORGOTTEN_RESULT = "A note this search found was deleted since, so its result is not kept."
+
+
+def tag_key(tag: str) -> str:
+    """What makes two tags one tag: the words, ignoring case and Unicode's forms."""
+    return " ".join(unicodedata.normalize("NFKC", tag).casefold().split())
+
+
+#: A note's columns without its body, which can be 20,000 characters: what a list reads.
+_NOTE_LIST = (
+    "id, owner, text, kind, status, pinned, source, source_chat_id, source_message_id, quote, "
+    "expires_at, revisit_at, created_at, updated_at, last_used_at, use_count, replaces, "
+    "source_connection_id, source_connection, length(body) AS body_chars, valid_from, "
+    "superseded_at, superseded_by, proposed_tags"
+)
 
 
 def note_key(text: str) -> str:
@@ -838,6 +965,9 @@ class Message:
     #: What searching the person's saved documents came to for this answer
     #: (`saved_api.retrieval_view`); None when none was searched.
     retrieval: dict[str, Any] | None = None
+    #: What this answer's turn was sent of the person's notes, chosen for it (MV1,
+    #: `memory_api.TurnMemory.record`); None when none was.
+    memory_used: dict[str, Any] | None = None
 
     reasoning_tokens: int | None = None
     reasoning_seconds: float | None = None
@@ -973,6 +1103,7 @@ def _chat(row: sqlite3.Row) -> Chat:
 
 
 def _note(row: sqlite3.Row) -> MemoryNote:
+    keys = row.keys()
     return MemoryNote(
         id=row["id"],
         owner=row["owner"],
@@ -993,7 +1124,21 @@ def _note(row: sqlite3.Row) -> MemoryNote:
         updated_at=row["updated_at"],
         last_used_at=row["last_used_at"],
         use_count=row["use_count"],
+        body=row["body"] if "body" in keys else None,
+        body_chars=int(row["body_chars"]) if "body_chars" in keys else len(row["body"] or ""),
+        valid_from=row["valid_from"],
+        superseded_at=row["superseded_at"],
+        superseded_by=row["superseded_by"],
+        proposed_tags=_tag_list(row["proposed_tags"]),
     )
+
+
+def _tag_list(value: str | None) -> list[str]:
+    try:
+        found = json.loads(value) if value else []
+    except ValueError:
+        return []
+    return [str(t) for t in found] if isinstance(found, list) else []
 
 
 @dataclass
@@ -1044,6 +1189,10 @@ MEMORY_PREFS_DEFAULT: dict[str, Any] = {
     "learn_set": False,
     "offer_dismissed": False,
     "revisit_asked_at": None,
+    # MV1: `budget_tokens` is the pinned block's ceiling, this the relevant memory's a
+    # turn; and whether models may search the person's notes (`search_memory`).
+    "relevant_budget_tokens": None,
+    "search_tool": True,
 }
 
 
@@ -1080,6 +1229,7 @@ def _message(row: sqlite3.Row) -> Message:
         search_suggestions=json.loads(row["search_suggestions"] or "[]"),
         output_cap=json.loads(row["output_cap"]) if row["output_cap"] else None,
         retrieval=_snapshot(row["retrieval"]),
+        memory_used=_snapshot(row["memory_used"]),
         reasoning_tokens=row["reasoning_tokens"],
         reasoning_seconds=row["reasoning_seconds"],
     )
@@ -1246,6 +1396,7 @@ _MESSAGE_FIELDS = {
     "search_suggestions",
     "output_cap",
     "retrieval",
+    "memory_used",
     "reasoning_tokens",
     "reasoning_seconds",
 }
@@ -1258,6 +1409,7 @@ _JSON_FIELDS = {
     "search_suggestions",
     "output_cap",
     "retrieval",
+    "memory_used",
 }
 
 
@@ -1459,6 +1611,8 @@ class Store:
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA journal_mode=WAL")
             db.execute("PRAGMA foreign_keys=ON")
+            # A deleted note's words are overwritten where they lay, not left in a free page.
+            db.execute("PRAGMA secure_delete=ON")
             try:
                 _initialize_schema(db, self._path, self._kept)
             except sqlite3.OperationalError as exc:
@@ -2391,27 +2545,203 @@ class Store:
             if saved is None or note_ids & set(saved.get("ids") or []):
                 db.execute("UPDATE chats SET memory_snapshot = NULL WHERE id = ?", (row["id"],))
 
-    async def memory_notes(self, owner: str, *, status: str | None = "active") -> list[MemoryNote]:
-        """The person's notes, newest first; every status when `status` is None."""
+    @staticmethod
+    def _tags_of(
+        db: sqlite3.Connection, owner: str, note_ids: Sequence[str] | None = None
+    ) -> dict[str, list[str]]:
+        """Each of the person's notes' tags (only these notes' when given), by note id, as
+        their list writes them."""
+        found: dict[str, list[str]] = {}
+        sql = (
+            "SELECT l.note_id, t.tag FROM memory_note_tags AS l JOIN memory_tags AS t "
+            "ON t.owner = l.owner AND t.key = l.key WHERE l.owner = ?"
+        )
+        batches: list[list[str] | None] = [None]
+        if note_ids is not None:
+            wanted = list(note_ids)
+            batches = [wanted[i : i + 500] for i in range(0, len(wanted), 500)]
+        for batch in batches:
+            where, params = "", [owner]
+            if batch is not None:
+                where = f" AND l.note_id IN ({', '.join('?' for _ in batch)})"
+                params += batch
+            for row in db.execute(sql + where + " ORDER BY t.key", params):
+                found.setdefault(row["note_id"], []).append(row["tag"])
+        return found
+
+    @staticmethod
+    def _link_tags(
+        db: sqlite3.Connection, owner: str, note_id: str, tags: Sequence[str], now: float
+    ) -> None:
+        """Set a note's tags to exactly these. A tag not on the person's list is added to it
+        (the person wrote it); `TagListFull` when the list has no room for it."""
+        db.execute("DELETE FROM memory_note_tags WHERE note_id = ? AND owner = ?", (note_id, owner))
+        for tag in tags:
+            key = tag_key(tag)
+            listed = db.execute(
+                "SELECT 1 FROM memory_tags WHERE owner = ? AND key = ?", (owner, key)
+            ).fetchone()
+            if listed is None:
+                held = db.execute(
+                    "SELECT COUNT(*) AS n FROM memory_tags WHERE owner = ?", (owner,)
+                ).fetchone()["n"]
+                if int(held) >= MAX_TAGS:
+                    raise TagListFull(MAX_TAGS)
+                db.execute(
+                    "INSERT INTO memory_tags (owner, key, tag, description, created_at) "
+                    "VALUES (?, ?, ?, '', ?)",
+                    (owner, key, tag, now),
+                )
+            db.execute(
+                "INSERT OR IGNORE INTO memory_note_tags (owner, note_id, key) VALUES (?, ?, ?)",
+                (owner, note_id, key),
+            )
+
+    def _notes(
+        self,
+        db: sqlite3.Connection,
+        owner: str,
+        where: str,
+        params: Sequence[Any],
+        *,
+        with_body: bool,
+        order: str = " ORDER BY created_at DESC, rowid DESC",
+    ) -> list[MemoryNote]:
+        columns = "*" if with_body else _NOTE_LIST
+        rows = db.execute(
+            f"SELECT {columns} FROM memory_notes WHERE owner = ?{where}{order}", (owner, *params)
+        ).fetchall()
+        few = len(rows) <= 500
+        tags = self._tags_of(db, owner, [r["id"] for r in rows] if few else None) if rows else {}
+        notes = [_note(r) for r in rows]
+        for note in notes:
+            note.tags = tags.get(note.id, [])
+        return notes
+
+    @staticmethod
+    def _scrub_notes(db: sqlite3.Connection) -> None:
+        """After a delete, leave none of its words in the file: the titles' full-text index
+        keeps a deleted word in its segments until they are merged, and the log holds the
+        pages it wrote until it is folded in. Best effort: the delete is committed."""
+        with contextlib.suppress(sqlite3.Error):
+            db.execute("INSERT INTO memory_notes_fts (memory_notes_fts) VALUES ('optimize')")
+            db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    @staticmethod
+    def _drop_from_answers(
+        db: sqlite3.Connection, owner: str, titles: dict[str, str] | None
+    ) -> None:
+        """Take deleted notes (`titles`: id -> title; every note when None) out of what the
+        person's answers kept of them (MV1): a turn's record (`memory_used`) loses them, and a
+        `search_memory` result that named one is replaced, so neither the page nor a later
+        request carries a deleted note's words."""
+        wanted = None if titles is None else {" ".join(t.split()) for t in titles.values()}
+        rows = db.execute(
+            "SELECT m.id, m.memory_used, m.tool_rounds FROM messages AS m "
+            "JOIN chats AS c ON c.id = m.chat_id WHERE c.owner = ? AND m.role = 'assistant' "
+            "AND (m.memory_used IS NOT NULL OR m.tool_rounds LIKE '%\"memory\"%')",
+            (owner,),
+        ).fetchall()
+        for row in rows:
+            changes: dict[str, str | None] = {}
+            used = _snapshot(row["memory_used"])
+            if used is not None:
+                notes = [n for n in used.get("notes") or [] if isinstance(n, dict)]
+                kept = [] if titles is None else [n for n in notes if n.get("id") not in titles]
+                if len(kept) != len(notes):
+                    used["notes"] = kept
+                    used["forgotten"] = int(used.get("forgotten") or 0) + len(notes) - len(kept)
+                    changes["memory_used"] = json.dumps(used)
+            try:
+                rounds = json.loads(row["tool_rounds"] or "[]")
+            except ValueError:
+                rounds = []
+            touched = False
+            for turn in rounds if isinstance(rounds, list) else []:
+                for call in turn.get("calls") or [] if isinstance(turn, dict) else []:
+                    if not isinstance(call, dict) or call.get("serverId") != "memory":
+                        continue
+                    result = str(call.get("result") or "")
+                    if wanted is None or any(t and t in result for t in wanted):
+                        call["result"] = FORGOTTEN_RESULT
+                        call["content"] = []
+                        touched = True
+            if touched:
+                changes["tool_rounds"] = json.dumps(rounds)
+            if changes:
+                columns = ", ".join(f"{k} = ?" for k in changes)
+                db.execute(
+                    f"UPDATE messages SET {columns} WHERE id = ?", (*changes.values(), row["id"])
+                )
+
+    async def memory_notes(
+        self, owner: str, *, status: str | None = "active", with_body: bool = False
+    ) -> list[MemoryNote]:
+        """The person's notes, newest first; every status when `status` is None. A body is
+        read only with `with_body`; otherwise `body` is None and `body_chars` its length."""
 
         def go() -> list[MemoryNote]:
-            sql, params = "SELECT * FROM memory_notes WHERE owner = ?", [owner]
-            if status is not None:
-                sql += " AND status = ?"
-                params.append(status)
-            rows = self._conn().execute(sql + " ORDER BY created_at DESC, rowid DESC", params)
-            return [_note(r) for r in rows]
+            where, params = ("", []) if status is None else (" AND status = ?", [status])
+            return self._notes(self._conn(), owner, where, params, with_body=with_body)
 
         return await self._run(go)
 
-    async def memory_note(self, owner: str, note_id: str) -> MemoryNote | None:
+    async def memory_notes_by_ids(
+        self, owner: str, note_ids: Sequence[str], *, with_body: bool = False
+    ) -> list[MemoryNote]:
+        """These of the person's notes, whatever their status, in no order. An id that is
+        not theirs is not found."""
+        wanted = list(dict.fromkeys(note_ids))
+        if not wanted:
+            return []
+
+        def go() -> list[MemoryNote]:
+            db = self._conn()
+            found: list[MemoryNote] = []
+            for start in range(0, len(wanted), 500):
+                part = wanted[start : start + 500]
+                marks = ", ".join("?" for _ in part)
+                found += self._notes(
+                    db, owner, f" AND id IN ({marks})", part, with_body=with_body, order=""
+                )
+            return found
+
+        return await self._run(go)
+
+    async def memory_note(
+        self, owner: str, note_id: str, *, with_body: bool = True
+    ) -> MemoryNote | None:
         def go() -> MemoryNote | None:
-            row = (
-                self._conn()
-                .execute("SELECT * FROM memory_notes WHERE id = ? AND owner = ?", (note_id, owner))
-                .fetchone()
-            )
-            return _note(row) if row is not None else None
+            found = self._notes(self._conn(), owner, " AND id = ?", [note_id], with_body=with_body)
+            return found[0] if found else None
+
+        return await self._run(go)
+
+    async def note_history(self, owner: str, note_id: str) -> list[MemoryNote]:
+        """The versions a note replaced, newest first, bodies and all."""
+
+        def go() -> list[MemoryNote]:
+            db = self._conn()
+            chain: list[MemoryNote] = []
+            seen = {note_id}
+            current = note_id
+            while True:
+                found = self._notes(
+                    db, owner, " AND superseded_by = ?", [current], with_body=True, order=""
+                )
+                if not found or found[0].id in seen:
+                    return chain
+                chain.append(found[0])
+                seen.add(found[0].id)
+                current = found[0].id
+
+        return await self._run(go)
+
+    async def memory_owners(self) -> list[str]:
+        """Everyone who has a note of any kind: whose index holds notes, or may."""
+
+        def go() -> list[str]:
+            return [r[0] for r in self._conn().execute("SELECT DISTINCT owner FROM memory_notes")]
 
         return await self._run(go)
 
@@ -2426,26 +2756,87 @@ class Store:
 
         return await self._run(go)
 
+    @staticmethod
+    def _insert_note(db: sqlite3.Connection, note: MemoryNote) -> None:
+        # "Newest first" must be a fact, not a coin toss: a clock that ticks in 15 ms
+        # steps gives two notes made together one moment, so a note is always later than
+        # the person's latest.
+        latest = db.execute(
+            "SELECT MAX(created_at) AS at FROM memory_notes WHERE owner = ?", (note.owner,)
+        ).fetchone()["at"]
+        if latest is not None and note.created_at <= latest:
+            note.created_at = note.updated_at = latest + 1e-6
+        if note.valid_from is None:
+            note.valid_from = note.created_at
+        db.execute(
+            "INSERT INTO memory_notes (id, owner, text, kind, status, pinned, source, "
+            "source_chat_id, source_message_id, quote, expires_at, revisit_at, "
+            "created_at, updated_at, last_used_at, use_count, replaces, body, valid_from, "
+            "source_connection_id, source_connection, proposed_tags) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                note.id,
+                note.owner,
+                note.text,
+                note.kind,
+                note.status,
+                int(note.pinned),
+                note.source,
+                note.source_chat_id,
+                note.source_message_id,
+                note.quote,
+                note.expires_at,
+                note.revisit_at,
+                note.created_at,
+                note.updated_at,
+                note.last_used_at,
+                note.use_count,
+                note.replaces,
+                note.body or "",
+                note.valid_from,
+                note.source_connection_id,
+                note.source_connection,
+                json.dumps(note.proposed_tags) if note.proposed_tags else None,
+            ),
+        )
+
     async def add_memory_note(
         self, note: MemoryNote, *, limit: int, actor: str = "person"
     ) -> tuple[MemoryNote, bool]:
-        """Keep a note: `(the note, True)`. The same words already kept are not
-        kept twice: `(the one already there, False)`. Raises `MemoryFull` at
-        `limit` notes. The count, the check and the insert are one step."""
+        """Keep a note, with its tags (`note.tags`; one not on the list is added to it):
+        `(the note, True)`. The same title and body already kept are not kept twice:
+        `(the one already there, False)`. Raises `MemoryFull` at `limit` notes, and
+        `TagListFull`. The count, the check and the insert are one step."""
 
         def go() -> tuple[MemoryNote, bool]:
             db = self._conn()
             db.execute("BEGIN IMMEDIATE")
             try:
                 wanted = note_key(note.text)
-                kept = db.execute(
-                    "SELECT * FROM memory_notes WHERE owner = ? AND status = 'active'",
-                    (note.owner,),
-                ).fetchall()
-                twin = next((r for r in kept if note_key(r["text"]) == wanted), None)
+                body = note.body or ""
+                # Titles first, and a body read only where the title is the same.
+                twin = next(
+                    (
+                        r
+                        for r in db.execute(
+                            "SELECT id, text FROM memory_notes "
+                            "WHERE owner = ? AND status = 'active'",
+                            (note.owner,),
+                        ).fetchall()
+                        if note_key(r["text"]) == wanted
+                        and db.execute(
+                            "SELECT body FROM memory_notes WHERE id = ?", (r["id"],)
+                        ).fetchone()["body"]
+                        == body
+                    ),
+                    None,
+                )
                 if twin is not None:
+                    found = self._notes(
+                        db, note.owner, " AND id = ?", [twin["id"]], with_body=True
+                    )[0]
                     db.execute("COMMIT")
-                    return _note(twin), False
+                    return found, False
                 total = db.execute(
                     "SELECT COUNT(*) AS n FROM memory_notes "
                     "WHERE owner = ? AND status != 'pending'",
@@ -2453,40 +2844,11 @@ class Store:
                 ).fetchone()["n"]
                 if total >= limit:
                     raise MemoryFull(limit)
-                # "Newest first" must be a fact, not a coin toss: a clock that
-                # ticks in 15 ms steps gives two notes made together one moment,
-                # so a note is always later than the person's latest.
-                latest = db.execute(
-                    "SELECT MAX(created_at) AS at FROM memory_notes WHERE owner = ?", (note.owner,)
-                ).fetchone()["at"]
-                if latest is not None and note.created_at <= latest:
-                    note.created_at = note.updated_at = latest + 1e-6
-                db.execute(
-                    "INSERT INTO memory_notes (id, owner, text, kind, status, pinned, source, "
-                    "source_chat_id, source_message_id, quote, expires_at, revisit_at, "
-                    "created_at, updated_at, last_used_at, use_count, replaces) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        note.id,
-                        note.owner,
-                        note.text,
-                        note.kind,
-                        note.status,
-                        int(note.pinned),
-                        note.source,
-                        note.source_chat_id,
-                        note.source_message_id,
-                        note.quote,
-                        note.expires_at,
-                        note.revisit_at,
-                        note.created_at,
-                        note.updated_at,
-                        note.last_used_at,
-                        note.use_count,
-                        note.replaces,
-                    ),
-                )
+                self._insert_note(db, note)
+                self._link_tags(db, note.owner, note.id, note.tags, time.time())
                 self._event(db, note.owner, note.id, "add", actor, None, note.text)
+                note.tags = self._tags_of(db, note.owner).get(note.id, [])
+                note.body_chars = len(body)
                 db.execute("COMMIT")
             except BaseException:
                 db.execute("ROLLBACK")
@@ -2501,19 +2863,24 @@ class Store:
         note_id: str,
         *,
         text: str | None = None,
+        body: str | None = None,
         kind: str | None = None,
         pinned: bool | None = None,
+        tags: Sequence[str] | None = None,
         actor: str = "person",
     ) -> MemoryNote | None:
-        """Change a note's words, kind or pin. None when the person has no such
-        note. The log keeps the words before and after, until the note goes."""
+        """Change a current note in place: its words, body, kind, pin or tags (a typo, a
+        better word; a fact that changed is `supersede_memory_note`). None when the person
+        has no such current note. The log keeps the title before and after, until the note
+        goes."""
 
         def go() -> MemoryNote | None:
             db = self._conn()
             db.execute("BEGIN IMMEDIATE")
             try:
                 row = db.execute(
-                    "SELECT * FROM memory_notes WHERE id = ? AND owner = ?", (note_id, owner)
+                    "SELECT * FROM memory_notes WHERE id = ? AND owner = ? AND status = 'active'",
+                    (note_id, owner),
                 ).fetchone()
                 if row is None:
                     db.execute("COMMIT")
@@ -2521,16 +2888,25 @@ class Store:
                 changes: dict[str, Any] = {}
                 if text is not None and text != row["text"]:
                     changes["text"] = text
+                if body is not None and body != row["body"]:
+                    changes["body"] = body
                 if kind is not None and kind != row["kind"]:
                     changes["kind"] = kind
                 if pinned is not None and int(pinned) != row["pinned"]:
                     changes["pinned"] = int(pinned)
-                if changes:
+                now = time.time()
+                retagged = False
+                if tags is not None:
+                    before = sorted(self._tags_of(db, owner).get(note_id, []), key=tag_key)
+                    if [tag_key(t) for t in before] != sorted(tag_key(t) for t in tags):
+                        self._link_tags(db, owner, note_id, tags, now)
+                        retagged = True
+                if changes or retagged:
                     columns = ", ".join(f"{k} = ?" for k in changes)
                     db.execute(
-                        f"UPDATE memory_notes SET {columns}, updated_at = ? "
+                        f"UPDATE memory_notes SET {columns}{', ' if columns else ''}updated_at = ? "
                         "WHERE id = ? AND owner = ?",
-                        (*changes.values(), time.time(), note_id, owner),
+                        (*changes.values(), now, note_id, owner),
                     )
                     self._event(
                         db,
@@ -2541,40 +2917,138 @@ class Store:
                         row["text"] if "text" in changes else None,
                         changes.get("text"),
                     )
-                fresh = db.execute("SELECT * FROM memory_notes WHERE id = ?", (note_id,)).fetchone()
+                fresh = self._notes(db, owner, " AND id = ?", [note_id], with_body=True)[0]
                 db.execute("COMMIT")
             except BaseException:
                 db.execute("ROLLBACK")
                 raise
-            return _note(fresh)
+            return fresh
 
         return await self._run(go)
 
-    async def delete_memory_note(self, owner: str, note_id: str) -> bool:
-        """Forget a note, for real: its row and its index entry go, its log
-        keeps no words, and no chat keeps a copy. False when it is not theirs."""
+    @staticmethod
+    def _supersede(
+        db: sqlite3.Connection, owner: str, old_id: str, new_id: str, at: float, actor: str
+    ) -> bool:
+        """`old_id` is replaced by `new_id`: kept as history, never sent again, and taken
+        from every chat's frozen copy."""
+        done = db.execute(
+            "UPDATE memory_notes SET status = 'superseded', superseded_at = ?, superseded_by = ?, "
+            "updated_at = ? WHERE id = ? AND owner = ? AND status = 'active'",
+            (at, new_id, at, old_id, owner),
+        ).rowcount
+        if done:
+            Store._event(db, owner, old_id, "supersede", actor, None, None)
+            Store._drop_from_chats(db, owner, {old_id})
+        return bool(done)
 
-        def go() -> bool:
+    async def supersede_memory_note(
+        self,
+        owner: str,
+        note_id: str,
+        new: MemoryNote,
+        *,
+        limit: int | None = None,
+        actor: str = "person",
+    ) -> MemoryNote | None:
+        """Save a changed fact as a new version: `new` is kept (its tags as `new.tags`) and
+        the current note `note_id` becomes its earlier version. None when the person has no
+        such current note. Earlier versions are stored notes and count: `MemoryFull` at
+        `limit`."""
+
+        def go() -> MemoryNote | None:
             db = self._conn()
             db.execute("BEGIN IMMEDIATE")
             try:
-                cursor = db.execute(
-                    "DELETE FROM memory_notes WHERE id = ? AND owner = ?", (note_id, owner)
-                )
-                gone = cursor.rowcount == 1
-                if gone:
-                    self._event(db, owner, note_id, "delete", "person", None, None)
-                    self._drop_from_chats(db, owner, {note_id})
+                row = db.execute(
+                    "SELECT id FROM memory_notes WHERE id = ? AND owner = ? AND status = 'active'",
+                    (note_id, owner),
+                ).fetchone()
+                if row is None:
+                    db.execute("COMMIT")
+                    return None
+                if limit is not None:
+                    total = db.execute(
+                        "SELECT COUNT(*) AS n FROM memory_notes "
+                        "WHERE owner = ? AND status != 'pending'",
+                        (owner,),
+                    ).fetchone()["n"]
+                    if total >= limit:
+                        raise MemoryFull(limit)
+                now = time.time()
+                new.valid_from = None
+                self._insert_note(db, new)
+                self._link_tags(db, owner, new.id, new.tags, now)
+                self._event(db, owner, new.id, "add", actor, None, new.text)
+                self._supersede(db, owner, note_id, new.id, new.created_at, actor)
+                fresh = self._notes(db, owner, " AND id = ?", [new.id], with_body=True)[0]
                 db.execute("COMMIT")
             except BaseException:
                 db.execute("ROLLBACK")
                 raise
+            return fresh
+
+        return await self._run(go)
+
+    async def delete_memory_note(self, owner: str, note_id: str) -> list[str]:
+        """Forget a note, for real: its row, its index entry and its tags go, its log keeps
+        no words, and no chat keeps a copy. A current note takes its earlier versions with
+        it; an earlier version goes alone, and the one it replaced now replaces the one it
+        followed. Returns the ids that went (none when it is not theirs)."""
+
+        def go() -> list[str]:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute(
+                    "SELECT id, status, superseded_by FROM memory_notes WHERE id = ? AND owner = ?",
+                    (note_id, owner),
+                ).fetchone()
+                if row is None:
+                    db.execute("COMMIT")
+                    return []
+                gone = [note_id]
+                if row["status"] == "superseded":
+                    db.execute(
+                        "UPDATE memory_notes SET superseded_by = ? "
+                        "WHERE owner = ? AND superseded_by = ?",
+                        (row["superseded_by"], owner, note_id),
+                    )
+                else:
+                    current = note_id
+                    while True:
+                        earlier = db.execute(
+                            "SELECT id FROM memory_notes WHERE owner = ? AND superseded_by = ?",
+                            (owner, current),
+                        ).fetchone()
+                        if earlier is None or earlier["id"] in gone:
+                            break
+                        gone.append(earlier["id"])
+                        current = earlier["id"]
+                titles = {
+                    r["id"]: r["text"]
+                    for one in gone
+                    for r in db.execute(
+                        "SELECT id, text FROM memory_notes WHERE id = ? AND owner = ?", (one, owner)
+                    )
+                }
+                for one in gone:
+                    db.execute("DELETE FROM memory_notes WHERE id = ? AND owner = ?", (one, owner))
+                    self._event(db, owner, one, "delete", "person", None, None)
+                self._drop_from_chats(db, owner, set(gone))
+                self._drop_from_answers(db, owner, titles)
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            self._scrub_notes(db)
             return gone
 
         return await self._run(go)
 
     async def delete_memory_notes(self, owner: str) -> int:
-        """Forget every note the person has, as `delete_memory_note` does each."""
+        """Forget every note the person has, as `delete_memory_note` does each. Their tag
+        list stays: it is a list of words, not notes."""
 
         def go() -> int:
             db = self._conn()
@@ -2586,15 +3060,237 @@ class Store:
                     (time.time(), owner),
                 )
                 count = db.execute("DELETE FROM memory_notes WHERE owner = ?", (owner,)).rowcount
+                db.execute("DELETE FROM memory_note_tags WHERE owner = ?", (owner,))
                 db.execute("DELETE FROM memory_dismissed WHERE owner = ?", (owner,))
                 self._drop_from_chats(db, owner, None)
+                self._drop_from_answers(db, owner, None)
                 db.execute("COMMIT")
             except BaseException:
                 db.execute("ROLLBACK")
                 raise
+            self._scrub_notes(db)
             return count
 
         return await self._run(go)
+
+    # --- the tag list (MV1, call 14) ----------------------------------------
+
+    async def memory_tags(self, owner: str) -> list[dict[str, Any]]:
+        """The person's tags, by name: each `{tag, key, description, notes}`, where `notes`
+        counts the current and pending notes carrying it."""
+
+        def go() -> list[dict[str, Any]]:
+            rows = self._conn().execute(
+                "SELECT t.tag, t.key, t.description, "
+                "(SELECT COUNT(*) FROM memory_note_tags AS l JOIN memory_notes AS n "
+                "ON n.id = l.note_id WHERE l.owner = t.owner AND l.key = t.key "
+                "AND n.status IN ('active', 'pending')) AS notes "
+                "FROM memory_tags AS t WHERE t.owner = ? ORDER BY t.key",
+                (owner,),
+            )
+            return [
+                {
+                    "tag": r["tag"],
+                    "key": r["key"],
+                    "description": r["description"],
+                    "notes": int(r["notes"]),
+                }
+                for r in rows
+            ]
+
+        return await self._run(go)
+
+    async def put_memory_tag(self, owner: str, tag: str, description: str | None) -> dict[str, Any]:
+        """Add a tag to the list, or change the description of one on it (None leaves it).
+        Raises `TagListFull`."""
+
+        def go() -> None:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                self._put_tag(db, owner, tag, description, time.time())
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+
+        await self._run(go)
+        found = [t for t in await self.memory_tags(owner) if t["key"] == tag_key(tag)]
+        return found[0]
+
+    @staticmethod
+    def _put_tag(
+        db: sqlite3.Connection, owner: str, tag: str, description: str | None, now: float
+    ) -> str:
+        """`added`, `updated` or `same`."""
+        key = tag_key(tag)
+        row = db.execute(
+            "SELECT description FROM memory_tags WHERE owner = ? AND key = ?", (owner, key)
+        ).fetchone()
+        if row is None:
+            held = db.execute(
+                "SELECT COUNT(*) AS n FROM memory_tags WHERE owner = ?", (owner,)
+            ).fetchone()["n"]
+            if int(held) >= MAX_TAGS:
+                raise TagListFull(MAX_TAGS)
+            db.execute(
+                "INSERT INTO memory_tags (owner, key, tag, description, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (owner, key, tag, description or "", now),
+            )
+            return "added"
+        if description is not None and description != row["description"]:
+            db.execute(
+                "UPDATE memory_tags SET description = ? WHERE owner = ? AND key = ?",
+                (description, owner, key),
+            )
+            return "updated"
+        return "same"
+
+    async def rename_memory_tag(self, owner: str, tag: str, new: str) -> int | None:
+        """Rename a tag; every note follows. A new name that is already on the list merges
+        the two (each note carries it once, and the old description goes unless the kept
+        one has none). Returns how many notes now carry the new name; None when the person
+        has no such tag."""
+
+        def go() -> int | None:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                old_key, new_key = tag_key(tag), tag_key(new)
+                old = db.execute(
+                    "SELECT description FROM memory_tags WHERE owner = ? AND key = ?",
+                    (owner, old_key),
+                ).fetchone()
+                if old is None:
+                    db.execute("COMMIT")
+                    return None
+                if new_key == old_key:
+                    db.execute(
+                        "UPDATE memory_tags SET tag = ? WHERE owner = ? AND key = ?",
+                        (new, owner, old_key),
+                    )
+                else:
+                    kept = db.execute(
+                        "SELECT description FROM memory_tags WHERE owner = ? AND key = ?",
+                        (owner, new_key),
+                    ).fetchone()
+                    if kept is None:
+                        db.execute(
+                            "UPDATE memory_tags SET tag = ?, key = ? WHERE owner = ? AND key = ?",
+                            (new, new_key, owner, old_key),
+                        )
+                    else:
+                        if not kept["description"] and old["description"]:
+                            db.execute(
+                                "UPDATE memory_tags SET description = ? "
+                                "WHERE owner = ? AND key = ?",
+                                (old["description"], owner, new_key),
+                            )
+                        db.execute(
+                            "DELETE FROM memory_tags WHERE owner = ? AND key = ?", (owner, old_key)
+                        )
+                    db.execute(
+                        "UPDATE OR IGNORE memory_note_tags SET key = ? WHERE owner = ? AND key = ?",
+                        (new_key, owner, old_key),
+                    )
+                    db.execute(
+                        "DELETE FROM memory_note_tags WHERE owner = ? AND key = ?", (owner, old_key)
+                    )
+                count = db.execute(
+                    "SELECT COUNT(*) AS n FROM memory_note_tags WHERE owner = ? AND key = ?",
+                    (owner, new_key),
+                ).fetchone()["n"]
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return int(count)
+
+        return await self._run(go)
+
+    async def delete_memory_tag(self, owner: str, tag: str) -> int | None:
+        """Take a tag off the list and off every note (the notes stay). Returns how many
+        notes lost it; None when the person has no such tag."""
+
+        def go() -> int | None:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                key = tag_key(tag)
+                gone = db.execute(
+                    "DELETE FROM memory_tags WHERE owner = ? AND key = ?", (owner, key)
+                ).rowcount
+                if not gone:
+                    db.execute("COMMIT")
+                    return None
+                count = db.execute(
+                    "SELECT COUNT(*) AS n FROM memory_note_tags AS l JOIN memory_notes AS n "
+                    "ON n.id = l.note_id WHERE l.owner = ? AND l.key = ? "
+                    "AND n.status IN ('active', 'pending')",
+                    (owner, key),
+                ).fetchone()["n"]
+                db.execute("DELETE FROM memory_note_tags WHERE owner = ? AND key = ?", (owner, key))
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return int(count)
+
+        return await self._run(go)
+
+    async def import_memory_tags(
+        self, owner: str, rows: Sequence[tuple[str, str | None]], *, replace: bool = False
+    ) -> dict[str, Any]:
+        """Bring in a list: each `(tag, description or None)` is added, or its description
+        updated (None, or an empty one, leaves the kept description). With `replace`, every
+        tag not in `rows` is deleted too, from the list and from its notes. In one step;
+        raises `TagListFull` and changes nothing when the list would pass the limit.
+        Returns `{added, updated, removed: [{tag, notes}]}`."""
+
+        def go() -> dict[str, Any]:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                now = time.time()
+                added = updated = 0
+                wanted = {tag_key(tag) for tag, _ in rows}
+                removed: list[dict[str, Any]] = []
+                if replace:
+                    for row in db.execute(
+                        "SELECT tag, key FROM memory_tags WHERE owner = ? ORDER BY key", (owner,)
+                    ).fetchall():
+                        if row["key"] in wanted:
+                            continue
+                        notes = db.execute(
+                            "DELETE FROM memory_note_tags WHERE owner = ? AND key = ?",
+                            (owner, row["key"]),
+                        ).rowcount
+                        db.execute(
+                            "DELETE FROM memory_tags WHERE owner = ? AND key = ?",
+                            (owner, row["key"]),
+                        )
+                        removed.append({"tag": row["tag"], "notes": int(notes)})
+                for tag, description in rows:
+                    said = self._put_tag(db, owner, tag, description or None, now)
+                    added += said == "added"
+                    updated += said == "updated"
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return {"added": added, "updated": updated, "removed": removed}
+
+        return await self._run(go)
+
+    async def tags_removed_by(self, owner: str, keep: Sequence[str]) -> list[dict[str, Any]]:
+        """What Replace my list would take away, keeping only `keep`: `[{tag, notes}]`."""
+        wanted = {tag_key(t) for t in keep}
+        return [
+            {"tag": t["tag"], "notes": t["notes"]}
+            for t in await self.memory_tags(owner)
+            if t["key"] not in wanted
+        ]
 
     async def search_memory(self, owner: str, match: str, *, limit: int = 5) -> list[MemoryNote]:
         """The person's active notes that match an FTS5 expression, best first.
@@ -2648,6 +3344,8 @@ class Store:
                 "learn_set": bool(row["learn_set"]),
                 "offer_dismissed": bool(row["offer_dismissed"]),
                 "revisit_asked_at": row["revisit_asked_at"],
+                "relevant_budget_tokens": row["relevant_budget_tokens"],
+                "search_tool": bool(row["search_tool"]),
             }
 
         return await self._run(go)
@@ -2768,7 +3466,8 @@ class Store:
                 held = {
                     note_key(r["text"])
                     for r in db.execute(
-                        "SELECT text FROM memory_notes WHERE owner = ? AND status != 'dismissed'",
+                        "SELECT text FROM memory_notes WHERE owner = ? "
+                        "AND status IN ('active', 'pending')",
                         (owner,),
                     )
                 }
@@ -2802,8 +3501,8 @@ class Store:
                     db.execute(
                         "INSERT INTO memory_notes (id, owner, text, kind, status, pinned, source, "
                         "source_chat_id, source_message_id, quote, expires_at, revisit_at, "
-                        "created_at, updated_at, replaces) "
-                        "VALUES (?, ?, ?, ?, 'pending', 0, 'suggested', ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "created_at, updated_at, replaces, proposed_tags) "
+                        "VALUES (?, ?, ?, ?, 'pending', 0, 'suggested', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             note.id,
                             owner,
@@ -2817,6 +3516,7 @@ class Store:
                             note.created_at,
                             note.updated_at,
                             note.replaces,
+                            json.dumps(note.proposed_tags) if note.proposed_tags else None,
                         ),
                     )
                     # The words are in the note; the log says only that it was offered.
@@ -2846,11 +3546,14 @@ class Store:
         text: str | None = None,
         kind: str | None = None,
         replace: bool = False,
+        tags: Sequence[str] | None = None,
     ) -> tuple[MemoryNote, str | None] | None:
         """Keep a suggestion as a note, with the person's own edits: `(the note, the id
-        of the note it replaced, if any)`. With `replace`, the note it names is
-        forgotten as `delete_memory_note` forgets one. None when the person has no
-        such suggestion."""
+        of the note it replaced, if any)`. With `replace`, the note it names becomes the
+        kept one's earlier version (MV1: kept as history, never sent). `tags` are the ones
+        the person kept (a tag not on their list is added to it: they chose it); None
+        keeps those it came with that are on the list. None when the person has no such
+        suggestion."""
 
         def go() -> tuple[MemoryNote, str | None] | None:
             db = self._conn()
@@ -2863,12 +3566,23 @@ class Store:
                 if row is None:
                     db.execute("COMMIT")
                     return None
+                now = time.time()
                 words = text if text is not None else row["text"]
                 db.execute(
                     "UPDATE memory_notes SET status = 'active', text = ?, kind = ?, "
-                    "replaces = NULL, updated_at = ? WHERE id = ?",
-                    (words, kind or row["kind"], time.time(), note_id),
+                    "replaces = NULL, proposed_tags = NULL, valid_from = ?, updated_at = ? "
+                    "WHERE id = ?",
+                    (words, kind or row["kind"], now, now, note_id),
                 )
+                if tags is None:
+                    listed = {
+                        r["key"]
+                        for r in db.execute("SELECT key FROM memory_tags WHERE owner = ?", (owner,))
+                    }
+                    kept_tags = [t for t in _tag_list(row["proposed_tags"]) if tag_key(t) in listed]
+                else:
+                    kept_tags = list(tags)
+                self._link_tags(db, owner, note_id, kept_tags, now)
                 self._event(
                     db,
                     owner,
@@ -2879,21 +3593,34 @@ class Store:
                     words if words != row["text"] else None,
                 )
                 replaced = None
-                if replace and row["replaces"]:
-                    gone = db.execute(
-                        "DELETE FROM memory_notes WHERE id = ? AND owner = ? AND status = 'active'",
+                old = (
+                    db.execute(
+                        "SELECT pinned, body FROM memory_notes "
+                        "WHERE id = ? AND owner = ? AND status = 'active'",
                         (row["replaces"], owner),
-                    ).rowcount
-                    if gone:
-                        replaced = row["replaces"]
-                        self._event(db, owner, replaced, "delete", "person", None, None)
-                        self._drop_from_chats(db, owner, {replaced})
-                fresh = db.execute("SELECT * FROM memory_notes WHERE id = ?", (note_id,)).fetchone()
+                    ).fetchone()
+                    if replace and row["replaces"]
+                    else None
+                )
+                if old is not None and self._supersede(
+                    db, owner, row["replaces"], note_id, now, "person"
+                ):
+                    replaced = row["replaces"]
+                    # The new version keeps what the person gave the old one: its pin, its
+                    # body and its tags (MV1 section 4); only the title is the suggestion's.
+                    db.execute(
+                        "UPDATE memory_notes SET pinned = ?, body = ? WHERE id = ?",
+                        (old["pinned"], old["body"], note_id),
+                    )
+                    carried = self._tags_of(db, owner, [replaced]).get(replaced, [])
+                    held = self._tags_of(db, owner, [note_id]).get(note_id, [])
+                    self._link_tags(db, owner, note_id, [*held, *carried], now)
+                fresh = self._notes(db, owner, " AND id = ?", [note_id], with_body=True)[0]
                 db.execute("COMMIT")
             except BaseException:
                 db.execute("ROLLBACK")
                 raise
-            return _note(fresh), replaced
+            return fresh, replaced
 
         return await self._run(go)
 
@@ -3100,7 +3827,8 @@ class Store:
                 held = {
                     note_key(r["text"])
                     for r in db.execute(
-                        "SELECT text FROM memory_notes WHERE owner = ? AND status != 'dismissed'",
+                        "SELECT text FROM memory_notes WHERE owner = ? "
+                        "AND status IN ('active', 'pending')",
                         (owner,),
                     )
                 }
@@ -3129,8 +3857,9 @@ class Store:
                         note.created_at = note.updated_at = latest + 1e-6
                     db.execute(
                         "INSERT INTO memory_notes (id, owner, text, kind, status, pinned, source, "
-                        "quote, created_at, updated_at, source_connection_id, source_connection) "
-                        "VALUES (?, ?, ?, ?, 'pending', 0, 'suggested', NULL, ?, ?, ?, ?)",
+                        "quote, created_at, updated_at, source_connection_id, source_connection, "
+                        "proposed_tags) "
+                        "VALUES (?, ?, ?, ?, 'pending', 0, 'suggested', NULL, ?, ?, ?, ?, ?)",
                         (
                             note.id,
                             owner,
@@ -3140,6 +3869,7 @@ class Store:
                             note.updated_at,
                             connection.id,
                             connection.name,
+                            json.dumps(note.proposed_tags) if note.proposed_tags else None,
                         ),
                     )
                     # The words are in the note; the log says only that it was offered.

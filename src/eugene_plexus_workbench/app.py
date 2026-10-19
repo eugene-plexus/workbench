@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 import httpx
 from fastapi import FastAPI
@@ -219,6 +220,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.reader = reader
         app.state.saved = saved
         app.state.folder_sync = folder_sync
+        # A person's notes in their index (MV1): what a stop left out of step is put right in
+        # the background, and every turn chooses its notes from it.
+        from . import memory_api
+        from .memory_relevance import Finder
+        from .notes_index import NotesIndex
+
+        notes_index = app.state.notes_index = NotesIndex(store, saved)
+        notes_index.start()
+        app.state.finder = Finder(store, saved)
+
+        async def search_notes(owner: str, arguments: dict[str, Any]) -> str:
+            return await memory_api.run_search_tool(app.state, owner, arguments)
+
+        tools.memory_search = search_notes
         # Learn from my chats (MR8): one timer per chat that has gone quiet.
         from .memory_learn import Learner
 
@@ -252,6 +267,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await app.state.agui.aclose()
             await app.state.interactions.aclose()
             await learner.aclose()
+            await notes_index.aclose()
             await answers.aclose()
             await folder_sync.aclose()
             await saved.aclose()

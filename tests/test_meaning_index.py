@@ -501,3 +501,18 @@ async def test_every_write_is_counted_and_a_read_is_not(indexes: Indexes) -> Non
 def test_the_identity_that_is_kept_is_readable_as_json(indexes: Indexes) -> None:  # noqa: F811
     assert json.loads(IDENT)["model"] == MODEL and json.loads(IDENT)["dim"] == DIM
     assert passages_of("# A\n\nx") and summary([])["kind"] == "markdown"
+
+
+async def test_notes_and_documents_are_owed_meaning_apart_and_the_cap_counts_documents_only(
+    indexes: Indexes,  # noqa: F811
+) -> None:
+    index = indexes.get(ADA)
+    assert index is not None
+    await two_sections(index, "doc00001", ready=False)
+    await two_sections(index, "note0001", scope=index_module.NOTES, ready=False)
+    assert {p.doc_id for p in (await index.pending_meaning(16))[0]} == {"doc00001", "note0001"}
+    assert (await index.pending_meaning(16, notes=False, documents=False))[0] == []
+    only_notes = (await index.pending_meaning(16, documents=False))[0]
+    assert {p.doc_id for p in only_notes} == {"note0001"}
+    assert {p.doc_id for p in (await index.pending_meaning(16, notes=False))[0]} == {"doc00001"}
+    assert await index.passages_total() == 2

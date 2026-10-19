@@ -1357,7 +1357,7 @@ def test_notes_and_documents_each_in_their_place_and_the_notes_cost_the_document
     world: World,
 ) -> None:
     ada, chat = start(world)
-    ada.post("/api/memory/notes", json={"text": "I like short answers", "kind": "preference"})
+    ada.post("/api/memory/notes", json={"text": "I like short answers", "kind": "instruction"})
     file_id = attach(ada, chat, "report.pdf", docs.three_pages(), "application/pdf")
     ask(ada, chat, "What is the code word?", [file_id])
     system, user = last(world)

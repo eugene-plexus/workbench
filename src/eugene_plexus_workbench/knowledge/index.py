@@ -69,6 +69,10 @@ TRASH = "trash"
 #: `chat:<id>` for one searched only in the chat it was attached to.
 LIBRARY = "library"
 CHAT = "chat:"
+#: A person's notes (MV1, `workbench-memory-v2.md`): one document a note, by the note's id,
+#: written by `Index.put_note` from the main store and never read from a file. Not a document
+#: the person keeps: the Documents screen, its counts and its cap leave this scope out.
+NOTES = "notes"
 #: What a document's `source` starts with when it was read from a folder the person was granted
 #: (MR7): `folder:<grant id>/<path below the folder>`. A document is the same document while
 #: its source is, so an edited file replaces the one it was and a deleted one is found by its path.
@@ -810,10 +814,15 @@ class Index:
         return await self._run(go)
 
     async def passages_total(self) -> int:
-        """Every passage in the index, in every scope: what the person's cap counts."""
+        """Every passage of the person's documents, in every scope but their notes': what
+        the person's cap counts."""
 
         def go(db: sqlite3.Connection) -> int:
-            return int(db.execute("SELECT COALESCE(SUM(chunks), 0) FROM documents").fetchone()[0])
+            return int(
+                db.execute(
+                    "SELECT COALESCE(SUM(chunks), 0) FROM documents WHERE scope != ?", (NOTES,)
+                ).fetchone()[0]
+            )
 
         return await self._run(go)
 
@@ -1037,7 +1046,9 @@ class Index:
                     return "gone"
                 others = int(
                     db.execute(
-                        "SELECT COALESCE(SUM(chunks), 0) FROM documents WHERE id != ?", (doc_id,)
+                        "SELECT COALESCE(SUM(chunks), 0) FROM documents WHERE id != ? "
+                        "AND scope != ?",
+                        (doc_id, NOTES),
                     ).fetchone()[0]
                 )
                 if others + len(passages) > cap:
@@ -1172,7 +1183,9 @@ class Index:
         None while there are none: `meta.embedder`."""
         return await self.meta(EMBEDDER)
 
-    async def pending_meaning(self, limit: int) -> tuple[list[Pending], int]:
+    async def pending_meaning(
+        self, limit: int, *, notes: bool = True, documents: bool = True
+    ) -> tuple[list[Pending], int]:
         """The next `limit` passages owed their meaning, in the order they are served:
         a chat's own files before the ones in My documents, then the document that has
         waited longest, in reading order; and the `epoch` the index is at, read with them,
@@ -1181,9 +1194,16 @@ class Index:
 
         def go(db: sqlite3.Connection) -> tuple[list[Pending], int]:
             owed: list[Pending] = []
+            if not notes and not documents:
+                return owed, self.epoch
+            # A person's notes go to a search model on their own machines only, and are
+            # added whether or not the owner has documents on (`Meaning._work` says which).
+            only = "" if notes and documents else " AND scope = ?" if notes else " AND scope != ?"
             docs = db.execute(
                 "SELECT id, name, scope FROM documents WHERE status IN ('searchable', 'embedding') "
-                "AND chunks > embedded ORDER BY (scope = 'library'), added_at, rowid"
+                f"AND chunks > embedded{only} ORDER BY CASE WHEN scope = 'library' THEN 1 "
+                f"WHEN scope = '{NOTES}' THEN 2 ELSE 0 END, added_at, rowid",
+                () if notes and documents else (NOTES,),
             ).fetchall()
             for doc in docs:
                 rows = db.execute(
@@ -1405,7 +1425,8 @@ class Index:
             rows = db.execute(
                 "SELECT id, chunks - embedded AS owed FROM documents "
                 "WHERE status IN ('searchable', 'embedding') AND chunks > embedded "
-                "ORDER BY (scope = 'library'), added_at, rowid"
+                "AND scope != ? ORDER BY (scope = 'library'), added_at, rowid",
+                (NOTES,),
             )
             return [(r["id"], r["owed"]) for r in rows]
 
@@ -1587,6 +1608,107 @@ class Index:
             if found:
                 self._scrub(db)
             return found
+
+        return await self._run(go)
+
+    # --- a person's notes (MV1) -----------------------------------------
+
+    async def put_note(
+        self, note_id: str, sha256: str, title: str, passages: Sequence[chunk.Passage]
+    ) -> bool:
+        """Make the index hold this version of a note: one document in `NOTES`, its passages
+        searchable by words at once and owed their meaning. Whatever it held of the note is
+        replaced in the same transaction. False when it already holds this version."""
+
+        def go(db: sqlite3.Connection) -> bool:
+            def body() -> bool:
+                row = db.execute(
+                    "SELECT sha256, scope FROM documents WHERE id = ?", (note_id,)
+                ).fetchone()
+                if row is not None and row["sha256"] == sha256 and row["scope"] == NOTES:
+                    return False
+                if row is not None and row["scope"] != NOTES:
+                    raise IndexDamaged("a note's id is a document's")
+                db.execute("DELETE FROM documents WHERE id = ?", (note_id,))
+                now = time.time()
+                db.execute(
+                    "INSERT INTO documents (id, scope, name, media_type, bytes, sha256, source, "
+                    "status, kind, added_at, read_at, indexed_at, chunks, tokens_est) "
+                    "VALUES (?, ?, ?, 'text/markdown', ?, ?, 'note', 'searchable', 'note', "
+                    "?, ?, ?, ?, ?)",
+                    (
+                        note_id,
+                        NOTES,
+                        title[:240],
+                        sum(len(p.text) for p in passages),
+                        sha256,
+                        now,
+                        now,
+                        now,
+                        len(passages),
+                        sum(p.tokens_est for p in passages),
+                    ),
+                )
+                db.executemany(
+                    _INSERT_CHUNK,
+                    [
+                        (
+                            note_id,
+                            p.ord,
+                            p.heading_path,
+                            p.page_start,
+                            p.page_end,
+                            p.line_start,
+                            p.line_end,
+                            p.char_start,
+                            p.char_end,
+                            p.text,
+                            p.tokens_est,
+                        )
+                        for p in passages
+                    ],
+                )
+                return True
+
+            return self._transaction(db, body)
+
+        return await self._run(go)
+
+    async def note_digests(self) -> dict[str, str]:
+        """Each note the index holds, by id: the `sha256` of the version it holds."""
+
+        def go(db: sqlite3.Connection) -> dict[str, str]:
+            return {
+                r["id"]: r["sha256"]
+                for r in db.execute("SELECT id, sha256 FROM documents WHERE scope = ?", (NOTES,))
+            }
+
+        return await self._run(go)
+
+    async def delete_notes(self, note_ids: Sequence[str]) -> int:
+        """Take these notes out of the index for real, in one transaction: their passages,
+        those passages' entries in the words index (merged, so no deleted word is kept in a
+        segment) and their vectors. How many it held."""
+        ids = list(dict.fromkeys(note_ids))
+        if not ids:
+            return 0
+
+        def go(db: sqlite3.Connection) -> int:
+            def body() -> int:
+                gone = 0
+                for start in range(0, len(ids), 500):
+                    part = ids[start : start + 500]
+                    marks = ", ".join("?" for _ in part)
+                    gone += db.execute(
+                        f"DELETE FROM documents WHERE scope = ? AND id IN ({marks})",
+                        (NOTES, *part),
+                    ).rowcount
+                return gone
+
+            count = self._transaction(db, body)
+            if count:
+                self._scrub(db)
+            return int(count)
 
         return await self._run(go)
 

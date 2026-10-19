@@ -44,13 +44,24 @@ import {
   refusalOf,
   saveFile,
   setByWords,
-  tokenWords,
+  tagsFrom,
   UNDO_MS,
+  usageWords,
 } from "../lib/memory";
-import type { Chat, ExternalChoice, MemoryNote, MemoryPage, NoteKind } from "../lib/types";
+import type {
+  Chat,
+  ExternalChoice,
+  MemoryNote,
+  MemoryPage,
+  MemoryTag,
+  NoteKind,
+  NoteWhole,
+} from "../lib/types";
 import { useKeepFocus } from "../lib/useKeepFocus";
 import { Connections } from "./Connections";
+import { Details, NoteSearch, readWhole } from "./MemoryDetails";
 import { LearnSettings, StillTrue, Suggestions } from "./MemorySuggestions";
+import { TagChips, Tags, TagsField } from "./MemoryTags";
 
 /** The lines of a box, one note each: trimmed, with the empty ones left out. */
 function linesOf(text: string): string[] {
@@ -246,16 +257,24 @@ export function Memory({
           busy={busy}
           from={whereFrom(note)}
           working={working}
+          limits={data.limits}
+          tags={data.tags}
+          onSaid={setSaid}
           onPin={() =>
             void act(
               () => patch(`/api/memory/notes/${note.id}`, { pinned: !note.pinned }),
               `pin-${note.id}`,
             )
           }
-          onDelete={() =>
+          onDelete={(whole) =>
             void act(async () => {
               await del(`/api/memory/notes/${note.id}`);
-              setUndo(note);
+              if (whole.earlier.length === 0) {
+                setUndo(whole.note);
+              } else {
+                setUndo(null);
+                setSaid(`Deleted the note and ${plural(whole.earlier.length, "earlier version")}.`);
+              }
             }, `${uid}-notes`)
           }
         />
@@ -382,6 +401,8 @@ export function Memory({
                         text: undo.text,
                         kind: undo.kind,
                         pinned: undo.pinned,
+                        ...(undo.body ? { body: undo.body } : {}),
+                        ...(undo.tags.length > 0 ? { tags: undo.tags } : {}),
                       });
                       setUndo(null);
                     })
@@ -438,6 +459,9 @@ export function Memory({
                   ) : (
                     list(data.sections.other)
                   )}
+                  {data.sections.otherTotal > data.sections.other.length && (
+                    <NoteSearch data={data} list={list} />
+                  )}
                 </section>
                 {past.length > 0 && (
                   <section
@@ -456,9 +480,12 @@ export function Memory({
                 )}
               </>
             )}
-            {!off && notes.length > 0 && <AddNote busy={busy} working={working} />}
+            {!off && notes.length > 0 && (
+              <AddNote busy={busy} working={working} limits={data.limits} tags={data.tags} />
+            )}
           </section>
         )}
+        {!off && !bare && <Tags data={data} busy={busy} act={(work) => act(work)} />}
         <Connections />
         {!bare && (
           <YourData
@@ -492,6 +519,8 @@ function Settings({
     enabled?: boolean;
     external?: ExternalChoice | null;
     budgetTokens?: number | null;
+    relevantBudgetTokens?: number | null;
+    searchTool?: boolean;
     learn?: "off" | "suggest" | null;
     useMode?: "relevant" | "all";
   }) => void;
@@ -503,6 +532,7 @@ function Settings({
   // What was just chosen shows while the server catches up, and a refusal puts
   // the old value back: these are only read while the page is busy.
   const [wanted, setWanted] = useState<{ enabled?: boolean; external?: ExternalChoice }>({});
+  const [wantedSearch, setWantedSearch] = useState<boolean | null>(null);
   const enabled = busy && wanted.enabled !== undefined ? wanted.enabled : effective.enabled;
   const external = busy && wanted.external !== undefined ? wanted.external : effective.external;
   return (
@@ -579,6 +609,29 @@ function Settings({
         )}
       </fieldset>
       <LearnSettings data={data} busy={busy} onPrefs={onPrefs} />
+      <div className="field">
+        <label className="check items-center" htmlFor={`${uid}-search`}>
+          <input
+            id={`${uid}-search`}
+            type="checkbox"
+            role="switch"
+            data-testid="memory-search-switch"
+            aria-describedby={`${uid}-search-help`}
+            checked={busy && wantedSearch !== null ? wantedSearch : prefs.searchTool}
+            disabled={busy}
+            onChange={(event) => {
+              setWantedSearch(event.target.checked);
+              onPrefs({ searchTool: event.target.checked });
+            }}
+          />
+          Let models search my notes
+        </label>
+        <p id={`${uid}-search-help`} data-testid="memory-search-effective" className="help">
+          {prefs.searchTool
+            ? "A model that can use tools may look up notes it was not given. It only reads your notes and can change nothing."
+            : "Models are only given the notes Workbench chooses for them."}
+        </p>
+      </div>
       <details className="group/b text-sm" data-testid="memory-budget-details">
         <summary
           data-testid="memory-budget-summary"
@@ -592,11 +645,28 @@ function Settings({
           How much room notes may take
         </summary>
         <BudgetField
-          key={String(prefs.budgetTokens)}
-          data={data}
+          key={`pinned-${String(prefs.budgetTokens)}`}
+          kind="pinned"
+          label="Pinned notes: most tokens in every chat"
+          help={`A chat's pinned notes and instructions take at most this many tokens, and never more than ${limits.budgetSharePercent}% of its model's window.`}
+          value={prefs.budgetTokens}
+          effective={prefs.effective.budgetTokens}
+          ceiling={limits.budgetCeiling}
           busy={busy}
           floor={limits.budgetFloor}
           onSave={(budgetTokens) => onPrefs({ budgetTokens })}
+        />
+        <BudgetField
+          key={`relevant-${String(prefs.relevantBudgetTokens)}`}
+          kind="relevant"
+          label="Relevant notes: most tokens a turn"
+          help={`The notes chosen for each message take at most this many tokens, and never more than ${limits.relevantSharePercent}% of its model's window.`}
+          value={prefs.relevantBudgetTokens}
+          effective={prefs.effective.relevantBudgetTokens}
+          ceiling={limits.relevantCeiling}
+          busy={busy}
+          floor={limits.budgetFloor}
+          onSave={(relevantBudgetTokens) => onPrefs({ relevantBudgetTokens })}
         />
       </details>
     </section>
@@ -604,20 +674,31 @@ function Settings({
 }
 
 function BudgetField({
-  data,
+  kind,
+  label,
+  help,
+  value,
+  effective,
+  ceiling,
   busy,
   floor,
   onSave,
 }: {
-  data: MemoryPage;
+  /** `pinned` keeps the ids the page has always had; `relevant` is the second field. */
+  kind: "pinned" | "relevant";
+  label: string;
+  help: string;
+  value: number | null;
+  effective: number;
+  ceiling: number;
   busy: boolean;
   floor: number;
   onSave: (tokens: number | null) => void;
 }) {
   const uid = useId();
-  const { prefs, limits } = data;
-  const [text, setText] = useState(prefs.budgetTokens === null ? "" : String(prefs.budgetTokens));
+  const [text, setText] = useState(value === null ? "" : String(value));
   const [problem, setProblem] = useState<string | null>(null);
+  const id = kind === "pinned" ? "budget" : "relevant-budget";
   function submit(event: FormEvent) {
     event.preventDefault();
     const tokens = Number(text.trim());
@@ -632,39 +713,36 @@ function BudgetField({
   }
   return (
     <div className="mt-2 flex flex-col gap-3">
-      <p className="help">
-        A chat gives notes at most this many tokens, and never more than {limits.budgetSharePercent}
-        % of its model&apos;s window.
-      </p>
-      <p data-testid="memory-budget-effective" className="help">
-        In effect: <strong>{prefs.effective.budgetTokens.toLocaleString()} tokens</strong>.{" "}
-        {prefs.budgetTokens === null ? setByWords("default") : setByWords("you")}
+      <p className="help">{help}</p>
+      <p data-testid={`memory-${id}-effective`} className="help">
+        In effect: <strong>{effective.toLocaleString()} tokens</strong>.{" "}
+        {value === null ? setByWords("default") : setByWords("you")}
       </p>
       <form className="flex flex-wrap items-end gap-2" onSubmit={submit}>
         <div className="field">
-          <label htmlFor={`${uid}-budget`} className="field-label">
-            Most tokens for notes
+          <label htmlFor={`${uid}-${id}`} className="field-label">
+            {label}
           </label>
           <input
-            id={`${uid}-budget`}
-            data-testid="memory-budget-input"
+            id={`${uid}-${id}`}
+            data-testid={`memory-${id}-input`}
             inputMode="numeric"
             value={text}
             disabled={busy}
-            placeholder={`${limits.budgetCeiling.toLocaleString()} (the default)`}
+            placeholder={`${ceiling.toLocaleString()} (the default)`}
             aria-invalid={problem ? true : undefined}
-            aria-describedby={problem ? `${uid}-budget-problem` : undefined}
+            aria-describedby={problem ? `${uid}-${id}-problem` : undefined}
             onChange={(event) => setText(event.target.value)}
             className="control w-44"
           />
         </div>
-        <button type="submit" data-testid="memory-budget-save" disabled={busy} className="btn">
+        <button type="submit" data-testid={`memory-${id}-save`} disabled={busy} className="btn">
           Save
         </button>
-        {prefs.budgetTokens !== null && (
+        {value !== null && (
           <button
             type="button"
-            data-testid="memory-budget-default"
+            data-testid={`memory-${id}-default`}
             disabled={busy}
             onClick={() => onSave(null)}
             className="btn btn-quiet"
@@ -674,7 +752,7 @@ function BudgetField({
         )}
       </form>
       {problem && (
-        <p id={`${uid}-budget-problem`} role="alert" className="notice notice--error">
+        <p id={`${uid}-${id}-problem`} role="alert" className="notice notice--error">
           <CircleAlert size={16} aria-hidden />
           {problem}
         </p>
@@ -691,7 +769,7 @@ function Usage({ data }: { data: MemoryPage }) {
   return (
     <div className="flex flex-col gap-2">
       <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
-        <p data-testid="memory-usage-tokens">{tokenWords(usage.tokens, usage.budget)}</p>
+        <p data-testid="memory-usage-tokens">{usageWords(usage)}</p>
         <p data-testid="memory-usage-notes">
           {usage.notes.toLocaleString()} of {usage.maxNotes.toLocaleString()} notes
         </p>
@@ -717,14 +795,26 @@ function Usage({ data }: { data: MemoryPage }) {
 
 // --- one note ---
 
+type Limits = MemoryPage["limits"];
+
+interface Draft {
+  text: string;
+  kind: NoteKind;
+  body: string;
+  tags: string;
+}
+
 function NoteItem({
   note,
   locked,
   busy,
   from,
   working,
+  limits,
+  tags,
   onPin,
   onDelete,
+  onSaid,
 }: {
   note: MemoryNote;
   /** The owner has turned Memory off: a note can be read and deleted, not changed. */
@@ -732,12 +822,21 @@ function NoteItem({
   busy: boolean;
   from: ReactNode;
   working: Working;
+  limits: Limits;
+  tags: MemoryTag[];
   onPin: () => void;
-  onDelete: () => void;
+  /** The note whole, and its earlier versions, which go with it. */
+  onDelete: (whole: NoteWhole) => void;
+  onSaid: (words: string) => void;
 }) {
   const uid = useId();
-  const [draft, setDraft] = useState<{ text: string; kind: NoteKind } | null>(null);
+  const [draft, setDraft] = useState<Draft | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
+  // While the note is read whole (to edit it, or before it is deleted).
+  const [reading, setReading] = useState(false);
+  const [asking, setAsking] = useState<NoteWhole | null>(null);
+  const original = useRef<{ body: string; tags: string[] }>({ body: "", tags: [] });
   const back = useRef(false);
   const name = excerpt(note);
   const created = new Date(note.createdAt * 1000);
@@ -749,19 +848,60 @@ function NoteItem({
     document.getElementById(`edit-${note.id}`)?.focus();
   }, [draft, note.id]);
 
+  async function startEdit() {
+    setProblem(null);
+    let body = note.body ?? "";
+    if (note.bodyChars > 0 && note.body === undefined) {
+      setReading(true);
+      try {
+        body = (await readWhole(note.id)).note.body ?? "";
+      } catch (failure) {
+        setProblem(failureWords(failure));
+        return;
+      } finally {
+        setReading(false);
+      }
+    }
+    original.current = { body, tags: note.tags };
+    setDraft({ text: note.text, kind: note.kind, body, tags: note.tags.join(", ") });
+  }
+
+  async function startDelete() {
+    setProblem(null);
+    setReading(true);
+    try {
+      const whole = await readWhole(note.id);
+      if (whole.earlier.length === 0) onDelete(whole);
+      else setAsking(whole);
+    } catch (failure) {
+      setProblem(`Could not check this note's earlier versions: ${failureWords(failure)}`);
+    } finally {
+      setReading(false);
+    }
+  }
+
   if (draft) {
     const length = characters(draft.text);
     const over = length > NOTE_LIMIT;
-    const save = async () => {
+    const bodyLength = characters(draft.body);
+    const bodyOver = bodyLength > Math.max(limits.maxBodyChars, original.current.body.length);
+    const listed = tagsFrom(draft.tags);
+    const save = async (asNewVersion: boolean) => {
       const text = draft.text.trim();
-      if (!text || over || busy) return;
+      if (!text || over || bodyOver || busy) return;
       setProblem(null);
+      const body = {
+        text,
+        kind: draft.kind,
+        ...(draft.body !== original.current.body ? { body: draft.body } : {}),
+        ...(listed.join("\n") !== original.current.tags.join("\n") ? { tags: listed } : {}),
+        ...(asNewVersion ? { asNewVersion: true } : {}),
+      };
       try {
-        await working(() =>
-          patch(`/api/memory/notes/${note.id}`, { text, kind: draft.kind }).then(() => undefined),
-        );
+        await working(() => patch(`/api/memory/notes/${note.id}`, body).then(() => undefined));
         back.current = true;
         setDraft(null);
+        if (asNewVersion) onSaid("Saved as a new version. The old one is under Earlier versions.");
       } catch (failure) {
         setProblem(failureWords(failure));
       }
@@ -773,7 +913,7 @@ function NoteItem({
           className="flex flex-col gap-3"
           onSubmit={(event) => {
             event.preventDefault();
-            void save();
+            void save(false);
           }}
           onKeyDown={(event) => {
             if (event.key === "Escape") {
@@ -800,12 +940,44 @@ function NoteItem({
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
                   event.preventDefault();
-                  void save();
+                  void save(false);
                 }
               }}
               className="control"
             />
           </div>
+          {(limits.maxBodyChars > 0 || original.current.body) && (
+            <div className="field">
+              <label htmlFor={`${uid}-body`} className="field-label">
+                Details
+              </label>
+              <textarea
+                id={`${uid}-body`}
+                data-testid="memory-edit-body"
+                rows={5}
+                dir="auto"
+                value={draft.body}
+                disabled={busy}
+                aria-invalid={bodyOver || undefined}
+                onChange={(event) => setDraft({ ...draft, body: event.target.value })}
+                className="control"
+              />
+              <p
+                data-testid="memory-edit-body-count"
+                className={`text-xs tabular-nums ${bodyOver ? "text-error" : "text-muted"}`}
+              >
+                {bodyLength.toLocaleString()} of {limits.maxBodyChars.toLocaleString()}
+              </p>
+            </div>
+          )}
+          <TagsField
+            value={draft.tags}
+            onChange={(text) => setDraft({ ...draft, tags: text })}
+            tags={tags}
+            maxTags={limits.maxTagsPerNote}
+            disabled={busy}
+            testId="memory-edit-tags"
+          />
           <div className="flex flex-wrap items-end gap-x-4 gap-y-2">
             <div className="field">
               <label htmlFor={`${uid}-kind`} className="field-label">
@@ -829,7 +1001,7 @@ function NoteItem({
             <span className={`pb-2 text-xs tabular-nums ${over ? "text-error" : "text-muted"}`}>
               {length.toLocaleString()} of {NOTE_LIMIT}
             </span>
-            <span className="ml-auto flex gap-2">
+            <span className="ml-auto flex flex-wrap gap-2">
               <button
                 type="button"
                 data-testid="memory-note-cancel"
@@ -843,15 +1015,30 @@ function NoteItem({
                 Cancel
               </button>
               <button
+                type="button"
+                data-testid="memory-note-save-version"
+                disabled={busy || over || bodyOver || !draft.text.trim()}
+                aria-describedby={`${uid}-versions`}
+                onClick={() => void save(true)}
+                className="btn"
+              >
+                Save as new version
+              </button>
+              <button
                 type="submit"
                 data-testid="memory-note-save"
-                disabled={busy || over || !draft.text.trim()}
+                disabled={busy || over || bodyOver || !draft.text.trim()}
+                aria-describedby={`${uid}-versions`}
                 className="btn btn-primary"
               >
-                Save note
+                Save
               </button>
             </span>
           </div>
+          <p id={`${uid}-versions`} className="help">
+            Save fixes this note where it is, for a typo. Save as new version is for a fact that
+            changed: the old one is kept under Earlier versions and never sent to a model.
+          </p>
           {problem && (
             <p id={`${uid}-problem`} role="alert" className="notice notice--error">
               <CircleAlert size={16} aria-hidden />
@@ -876,21 +1063,78 @@ function NoteItem({
             Pinned
           </span>
         )}
+        <TagChips tags={note.tags} />
+        {note.bodyChars > 0 && (
+          <span data-testid="memory-note-body-size" className="badge">
+            Details: {plural(note.bodyChars, "character")}
+          </span>
+        )}
         <time dateTime={created.toISOString()} title={created.toLocaleString()}>
           {noteDate(note.createdAt)}
         </time>
         <span aria-hidden>·</span>
         <span data-testid="memory-note-from">{from}</span>
       </div>
+      {asking && (
+        <div
+          role="group"
+          aria-label="Delete this note and its earlier versions?"
+          data-testid="memory-note-delete-confirm"
+          className="notice notice--error flex-col"
+          onKeyDown={(event) => {
+            if (event.key === "Escape") setAsking(null);
+          }}
+        >
+          <p>
+            This note has {plural(asking.earlier.length, "earlier version")}. Deleting the note
+            deletes {asking.earlier.length === 1 ? "it" : "them"} too. This cannot be undone.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              data-testid="memory-note-delete-cancel"
+              onClick={() => setAsking(null)}
+              className="btn"
+            >
+              Keep the note
+            </button>
+            <button
+              type="button"
+              data-testid="memory-note-delete-go"
+              disabled={busy}
+              onClick={() => onDelete(asking)}
+              className="btn btn-danger"
+            >
+              Delete note and earlier versions
+            </button>
+          </div>
+        </div>
+      )}
+      {problem && (
+        <p role="alert" data-testid="memory-note-problem" className="notice notice--error">
+          <CircleAlert size={16} aria-hidden />
+          {problem}
+        </p>
+      )}
       <div className="-ms-2 flex flex-wrap items-center gap-1">
+        <button
+          type="button"
+          data-testid="memory-note-details"
+          aria-label={`${open ? "Hide" : "Show"} details of note: ${name}`}
+          aria-expanded={open}
+          onClick={() => setOpen(!open)}
+          className="btn btn-quiet"
+        >
+          {open ? "Hide details" : "Show details"}
+        </button>
         {!locked && (
           <button
             type="button"
             id={`edit-${note.id}`}
             data-testid="memory-note-edit"
             aria-label={`Edit note: ${name}`}
-            disabled={busy}
-            onClick={() => setDraft({ text: note.text, kind: note.kind })}
+            disabled={busy || reading}
+            onClick={() => void startEdit()}
             className="btn btn-quiet"
           >
             Edit
@@ -915,40 +1159,64 @@ function NoteItem({
           id={`delete-${note.id}`}
           data-testid="memory-note-delete"
           aria-label={`Delete note: ${name}`}
-          disabled={busy}
-          onClick={onDelete}
+          disabled={busy || reading}
+          onClick={() => void startDelete()}
           className="btn btn-quiet btn-danger"
         >
           Delete
         </button>
       </div>
+      {open && <Details note={note} busy={busy} working={working} />}
     </li>
   );
 }
 
 // --- writing notes ---
 
-function AddNote({ busy, working }: { busy: boolean; working: Working }) {
+function AddNote({
+  busy,
+  working,
+  limits,
+  tags,
+}: {
+  busy: boolean;
+  working: Working;
+  limits: Limits;
+  tags: MemoryTag[];
+}) {
   const uid = useId();
   const [text, setText] = useState("");
+  const [body, setBody] = useState("");
+  const [tagText, setTagText] = useState("");
   const [kind, setKind] = useState<NoteKind>("fact");
   const [pinned, setPinned] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const [said, setSaid] = useState<string | null>(null);
   const length = characters(text.trim());
   const over = length > NOTE_LIMIT;
+  const bodyLength = characters(body);
+  const bodyOver = bodyLength > limits.maxBodyChars;
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (busy || over || !text.trim()) return;
+    if (busy || over || bodyOver || !text.trim()) return;
     setProblem(null);
     setSaid(null);
+    const listed = tagsFrom(tagText);
     try {
       const kept = await working(() =>
-        post<{ created: boolean }>("/api/memory/notes", { text: text.trim(), kind, pinned }),
+        post<{ created: boolean }>("/api/memory/notes", {
+          text: text.trim(),
+          kind,
+          pinned,
+          ...(body.trim() ? { body } : {}),
+          ...(listed.length > 0 ? { tags: listed } : {}),
+        }),
       );
       setSaid(kept.created ? "Kept." : "You already have that note.");
       setText("");
+      setBody("");
+      setTagText("");
       setPinned(false);
     } catch (failure) {
       setProblem(failureWords(failure));
@@ -995,6 +1263,45 @@ function AddNote({ busy, working }: { busy: boolean; working: Working }) {
           One line, at most {NOTE_LIMIT} characters. Passwords, keys and card numbers are not kept.
         </p>
       </div>
+      {limits.maxBodyChars > 0 && (
+        <div className="field">
+          <label htmlFor={`${uid}-body`} className="field-label">
+            Details (optional)
+          </label>
+          <textarea
+            id={`${uid}-body`}
+            data-testid="memory-add-body"
+            rows={4}
+            dir="auto"
+            value={body}
+            disabled={busy}
+            aria-invalid={bodyOver || undefined}
+            aria-describedby={`${uid}-body-help`}
+            onChange={(event) => {
+              setBody(event.target.value);
+              setSaid(null);
+            }}
+            className="control"
+          />
+          <p id={`${uid}-body-help`} className="help">
+            Markdown. Steps, a brief or a checklist go here; the line above stays the title.{" "}
+            <span
+              data-testid="memory-add-body-count"
+              className={`tabular-nums ${bodyOver ? "text-error" : ""}`}
+            >
+              {bodyLength.toLocaleString()} of {limits.maxBodyChars.toLocaleString()}
+            </span>
+          </p>
+        </div>
+      )}
+      <TagsField
+        value={tagText}
+        onChange={setTagText}
+        tags={tags}
+        maxTags={limits.maxTagsPerNote}
+        disabled={busy}
+        testId="memory-add-tags"
+      />
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="field">
           <label htmlFor={`${uid}-kind`} className="field-label">
@@ -1050,7 +1357,7 @@ function AddNote({ busy, working }: { busy: boolean; working: Working }) {
         <button
           type="submit"
           data-testid="memory-add"
-          disabled={busy || over || !text.trim()}
+          disabled={busy || over || bodyOver || !text.trim()}
           className="btn btn-primary"
         >
           Add note

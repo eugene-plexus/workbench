@@ -1,4 +1,4 @@
-"""Memory's routes, and what a chat's request does with a person's notes (MR1).
+"""Memory's routes, and what a chat's request does with a person's notes (MR1; MV1).
 
 The rules themselves -- what a note may be, what a model is shown, what a
 command is -- are `memory.py`, pure. This module is the part that reads the
@@ -9,16 +9,22 @@ and nothing from the client, and every store call puts that person in its
 own query, so **a note that is not yours is the same 404 as one that does
 not exist** (W4). `ownerReadsChats` does not reach memory: there is no route
 that reads another person's notes, and in the owner's read-only view of a
-chat the memory shows counts, taken from the chat's saved copy, without ever
-reading the notes table (`workbench-memory.md`).
+chat the memory shows counts, taken from the chat's saved copy and its answers'
+records, without ever reading the notes table (`workbench-memory.md`).
 
-**A chat is sent its notes once, then the same bytes.** The first request that
-carries notes keeps a snapshot with the chat (`memory.Snapshot`), and every
-later turn sends that text again so the engine's prompt cache holds. A
-request for another model takes a new one: its window sets the budget and
-where it runs sets whether notes may go. "Refresh memory" takes a new one on
-request. A note that is deleted is dropped from every chat's copy at once
-(`Store.delete_memory_note`): a deleted note is not sent again.
+**What a model is sent comes in two parts** (MV1, `workbench-memory-v2.md` section 6):
+
+- **The pinned block** (instructions and pinned notes, and the bodies of pinned notes that
+  fit) goes in the chat's system message. The first request that carries notes keeps it with
+  the chat (`memory.Snapshot`), and every later turn sends that text again so the engine's
+  prompt cache holds. A request for another model takes a new one; "Refresh memory" takes a
+  new one on request; a note that is deleted or replaced is dropped from every chat's copy at
+  once.
+- **Relevant memory** is chosen again for every turn (`turn_for`, `memory_relevance`) from
+  what the person just asked, and goes in their latest message only, as data, as passages of
+  their documents do. Each answer keeps what its turn was sent (`Message.memory_used`).
+- **`search_memory`**, for a model that calls tools: the same search, run by Workbench, its
+  results the same delimited data (`run_search_tool`).
 
 **Notes go to a model that runs on the person's own machines.** For one that
 runs outside them, or that Eugene cannot place, they are held back unless
@@ -27,17 +33,21 @@ the person chooses "Send for this chat", `never` always holds them, `always`
 sends them. The install's `memoryExternalModels` is the default for a person
 who has not chosen, except that its `never` is the owner's rule and final
 (`resolve_external`): an owner can forbid it for everyone, and otherwise a
-person's own choice stands.
+person's own choice stands. One decision (`_placement`) covers the pinned block, relevant
+memory and the tool, and a `search_memory` result kept from an earlier turn is withheld from a
+request that may not carry notes (`conversation.request_for`).
 
-**Memory never stops an answer.** Anything that goes wrong choosing the block
-is logged with its cause and the answer is sent without notes.
+**Memory never stops an answer.** Anything that goes wrong choosing the notes is
+logged with its cause and the answer is sent without them.
 """
 
 from __future__ import annotations
 
+import csv
+import io
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
@@ -49,7 +59,7 @@ from . import config, memory, memory_learn, memory_relevance
 from .api import _new_id, _own_chat, _person, _problem, _readable_chat, _state
 from .hub import Hub, HubError
 from .media_api import _common as served
-from .store import Chat, MemoryFull, MemoryNote, Message, Person, Store
+from .store import Chat, MemoryFull, MemoryNote, Message, Person, Store, TagListFull, tag_key
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +67,10 @@ router = APIRouter()
 
 _OWNER_OFF = "The owner of this Workbench has turned Memory off."
 _PERSON_OFF = "Memory is off for you. Turn it on in Memory to share notes with models."
+#: The newest notes the Memory page lists outside the pinned ones; a search finds the rest.
+PAGE_NOTES = 200
+#: What one search of notes (the page, `search_memory`) returns at most.
+SEARCH_LIMIT = 50
 
 
 def _store(request: Request) -> Store:
@@ -67,6 +81,28 @@ def _store(request: Request) -> Store:
 def _hub(request: Request) -> Hub:
     hub: Hub = _state(request).hub
     return hub
+
+
+def _finder(state: Any) -> memory_relevance.Finder:
+    found = getattr(state, "finder", None)
+    if found is None:
+        found = state.finder = memory_relevance.Finder(state.store, getattr(state, "saved", None))
+    return found
+
+
+async def _reindex(state: Any, owner: str, note_ids: list[str]) -> None:
+    """Keep the person's index in step with these notes (`notes_index`). Never raises."""
+    keeper = getattr(state, "notes_index", None)
+    if keeper is not None and note_ids:
+        await keeper.put(owner, note_ids)
+
+
+async def _unindex(state: Any, owner: str, note_ids: list[str]) -> None:
+    """Take these notes' words out of the person's index, before the notes go. Raises when
+    it cannot, so the delete that asked does not go on (`notes_index`)."""
+    keeper = getattr(state, "notes_index", None)
+    if keeper is not None and note_ids:
+        await keeper.remove(owner, note_ids)
 
 
 def _refused(code: int, detail: dict[str, Any]) -> HTTPException:
@@ -95,13 +131,14 @@ def resolve_external(install: str, chosen: str | None) -> tuple[str, str]:
 
 
 def note_view(note: MemoryNote) -> dict[str, Any]:
-    return {
+    out = {
         "id": note.id,
         "text": note.text,
         "kind": note.kind,
         "pinned": note.pinned,
-        # Instructions and pinned notes are used first (the page's "Always used").
+        # Instructions and pinned notes are in every turn (the page's "Always used").
         "always": memory.is_always(note),
+        "status": note.status,
         "source": note.source,
         "sourceChatId": note.source_chat_id,
         # MR9b: the connection that suggested it, by the name it had then.
@@ -114,16 +151,29 @@ def note_view(note: MemoryNote) -> dict[str, Any]:
         # MR8: an event leaves chats after `expiresAt`; a project is asked about from `revisitAt`.
         "expiresAt": note.expires_at,
         "revisitAt": note.revisit_at,
+        # MV1: its tags, how long its body is, and its place among its versions.
+        "tags": list(note.tags),
+        "bodyChars": note.body_chars,
+        "validFrom": note.valid_from,
+        "supersededAt": note.superseded_at,
+        "supersededBy": note.superseded_by,
     }
+    if note.body is not None:
+        out["body"] = note.body
+    return out
 
 
-def suggestion_view(note: MemoryNote, replaces: MemoryNote | None) -> dict[str, Any]:
-    """A suggestion as the inbox shows it: the note, the person's words it came from, and
-    the note it would replace, if the model said one."""
+def suggestion_view(
+    note: MemoryNote, replaces: MemoryNote | None, listed: set[str]
+) -> dict[str, Any]:
+    """A suggestion as Suggested notes shows it: the note, the person's words it came from,
+    the note it would replace, if the model said one, and the tags it came with, saying which
+    are not on the person's list ("Add to my tags")."""
     return {
         **note_view(note),
         "quote": note.quote,
         "replaces": note_view(replaces) if replaces is not None else None,
+        "proposedTags": [{"tag": t, "listed": tag_key(t) in listed} for t in note.proposed_tags],
     }
 
 
@@ -139,6 +189,8 @@ def prefs_view(prefs: dict[str, Any], install: config.MemorySettings) -> dict[st
         "enabled": prefs["enabled"],
         "external": prefs["external"],
         "budgetTokens": prefs["budget_tokens"],
+        "relevantBudgetTokens": prefs.get("relevant_budget_tokens"),
+        "searchTool": bool(prefs.get("search_tool", True)),
         # MR8: `learn` is null until the person chooses; `useMode` is theirs, `relevant` until
         # they choose `all`.
         "learn": ("off" if prefs["learn"] == "off" else "suggest")
@@ -151,6 +203,7 @@ def prefs_view(prefs: dict[str, Any], install: config.MemorySettings) -> dict[st
             "external": external,
             "externalSetBy": set_by,
             "budgetTokens": prefs["budget_tokens"] or memory.BUDGET_CEILING,
+            "relevantBudgetTokens": prefs.get("relevant_budget_tokens") or memory.RELEVANT_CEILING,
             # For no model in particular; a chat on a measured model may differ (`learnByModel`).
             "learn": learn,
             "learnSetBy": learn_by,
@@ -163,12 +216,19 @@ def prefs_view(prefs: dict[str, Any], install: config.MemorySettings) -> dict[st
 def _limits(install: config.MemorySettings) -> dict[str, Any]:
     return {
         "maxChars": memory.MAX_NOTE_CHARS,
+        "maxBodyChars": install.max_body_chars,
         "maxNotes": install.max_notes,
         "kinds": list(memory.KINDS),
         "minWindow": memory.MIN_WINDOW,
         "budgetCeiling": memory.BUDGET_CEILING,
         "budgetSharePercent": memory.BUDGET_SHARE_PERCENT,
+        "relevantCeiling": memory.RELEVANT_CEILING,
+        "relevantSharePercent": memory.RELEVANT_SHARE_PERCENT,
         "budgetFloor": memory.BUDGET_FLOOR,
+        "maxTagChars": memory.MAX_TAG_CHARS,
+        "maxTagsPerNote": memory.MAX_TAGS_PER_NOTE,
+        "maxDescriptionChars": memory.MAX_DESCRIPTION_CHARS,
+        "pageNotes": PAGE_NOTES,
     }
 
 
@@ -179,11 +239,13 @@ def _limits(install: config.MemorySettings) -> dict[str, Any]:
 
 @router.get("/api/memory")
 async def get_memory(request: Request) -> dict[str, Any]:
-    """The asker's notes by section, their settings, and what the notes cost.
+    """The asker's notes by section, their tags, their settings, and what the notes cost.
 
-    `usage.tokens` is what the notes would take of `usage.budget` in a chat
-    whose model has room; a chat on a small window gets less, and its own
-    drawer (`GET /api/chats/{id}/memory`) says how much."""
+    `usage.pinned` is what the pinned block would take of its budget in a chat whose model
+    has room; `usage.relevant` is the most relevant memory may take a turn, and from how
+    many notes it is chosen. A chat on a small window gets less, and its own drawer
+    (`GET /api/chats/{id}/memory`) says how much. "Other notes" lists the newest
+    `PAGE_NOTES`; `GET /api/memory/notes` searches them all."""
     person = await _person(request)
     store = _store(request)
     install = await config.memory_settings(store)
@@ -191,41 +253,69 @@ async def get_memory(request: Request) -> dict[str, Any]:
     notes = await store.memory_notes(person.sub)
     today = _today()
     budget = memory.budget_for(None, prefs["budget_tokens"])
+    always = [n for n in notes if memory.is_always(n)]
     shown = memory.build_snapshot(
-        notes, budget=budget, window=None, model=None, now=0.0, today=today
+        always,
+        budget=budget,
+        window=None,
+        model=None,
+        now=0.0,
+        today=today,
+        bodies=await _bodies(store, person.sub, always),
+        nonce="00000000",
     )
     current = [n for n in notes if not memory.is_past(n, today)]
+    others = [n for n in current if not memory.is_always(n)]
     by_id = {n.id: n for n in notes}
     # A suggestion left waiting a month is not one they want: it goes, quote and all.
     await store.expire_suggestions(person.sub, time.time() - SUGGESTION_DAYS * 86_400.0)
     pending = await store.memory_notes(person.sub, status="pending")
+    tags = await store.memory_tags(person.sub)
+    listed = {t["key"] for t in tags}
+    relevance = dict(
+        zip(
+            ("available", "why"),
+            await memory_relevance.available(
+                getattr(getattr(_state(request), "saved", None), "meaning", None)
+            ),
+            strict=True,
+        )
+    )
     return {
         "installEnabled": install.enabled,
         "ownerReadsChats": await config.owner_reads_chats(store),
         "prefs": prefs_view(prefs, install),
         "sections": {
             "always": [note_view(n) for n in current if memory.is_always(n)],
-            "other": [note_view(n) for n in current if not memory.is_always(n)],
+            "other": [note_view(n) for n in others[:PAGE_NOTES]],
+            "otherTotal": len(others),
             # MR8: events whose day has gone, kept until the person deletes them.
             "past": [note_view(n) for n in notes if memory.is_past(n, today)],
         },
         "suggestions": [
-            suggestion_view(n, by_id.get(n.replaces) if n.replaces else None) for n in pending
+            suggestion_view(n, by_id.get(n.replaces) if n.replaces else None, listed)
+            for n in pending
         ],
         "revisit": [note_view(n) for n in _due_revisits(notes, prefs, today)],
-        # Whether "only what is relevant" can be done now (settings never lie).
-        "relevance": dict(
-            zip(
-                ("available", "why"),
-                await memory_relevance.available(
-                    getattr(getattr(_state(request), "saved", None), "meaning", None)
-                ),
-                strict=True,
-            )
-        ),
+        "tags": tags,
+        # Whether choosing by meaning can be done now (settings never lie).
+        "relevance": relevance,
         "usage": {
+            # Kept for the page as it was: the pinned block's figures.
             "tokens": shown.tokens,
             "budget": budget,
+            "pinned": {"tokens": shown.tokens, "budget": budget, "notes": len(shown.sent)},
+            "relevant": {
+                "budget": memory.relevant_budget_for(None, prefs.get("relevant_budget_tokens")),
+                "from": len(others),
+                "how": (
+                    memory_relevance.ALL_THAT_FIT
+                    if prefs.get("use_mode") == "all"
+                    else memory_relevance.WORDS_AND_MEANING
+                    if relevance["available"]
+                    else memory_relevance.WORDS
+                ),
+            },
             "notes": len(notes),
             "maxNotes": install.max_notes,
             "sent": len(shown.sent),
@@ -235,11 +325,74 @@ async def get_memory(request: Request) -> dict[str, Any]:
     }
 
 
+async def _bodies(store: Store, owner: str, notes: list[MemoryNote]) -> dict[str, str]:
+    """The bodies of these notes, by id, for the ones that have one."""
+    wanted = [n.id for n in notes if n.body_chars]
+    if not wanted:
+        return {}
+    return {
+        n.id: n.body or ""
+        for n in await store.memory_notes_by_ids(owner, wanted, with_body=True)
+        if n.body
+    }
+
+
+@router.get("/api/memory/notes")
+async def list_notes(
+    request: Request,
+    query: str = "",
+    tag: str | None = None,
+    offset: int = 0,
+    limit: int = PAGE_NOTES,
+) -> dict[str, Any]:
+    """The asker's current notes: newest first, or the ones that match `query` (by words
+    and meaning; `#tag` filters), and only those with `tag` when it is given."""
+    person = await _person(request)
+    store = _store(request)
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+    notes = await store.memory_notes(person.sub)
+    if tag:
+        key = tag_key(tag)
+        notes = [n for n in notes if key in {tag_key(t) for t in n.tags}]
+    how = None
+    if query.strip():
+        chosen = await _finder(_state(request)).search(person.sub, query[:1000], notes, today=None)
+        by_id = {n.id: n for n in notes}
+        notes = [by_id[c.id] for c in chosen.candidates if c.id in by_id]
+        how = {"how": chosen.how, "why": chosen.why}
+    return {
+        "notes": [note_view(n) for n in notes[offset : offset + limit]],
+        "total": len(notes),
+        "offset": offset,
+        "search": how,
+    }
+
+
+@router.get("/api/memory/notes/{note_id}")
+async def get_note(request: Request, note_id: str) -> dict[str, Any]:
+    """One note whole, and the versions it replaced, newest first."""
+    person = await _person(request)
+    store = _store(request)
+    note = await store.memory_note(person.sub, note_id)
+    if note is None or note.status not in ("active", "superseded"):
+        raise _problem(status.HTTP_404_NOT_FOUND, "There is no such note.")
+    history = await store.note_history(person.sub, note_id)
+    return {"note": note_view(note), "earlier": [note_view(n) for n in history]}
+
+
+_KIND = Literal["fact", "preference", "instruction", "project", "event", "procedure"]
+_SUGGESTED_KIND = Literal["fact", "preference", "instruction", "project", "event"]
+
+
 class NoteCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     text: str = Field(max_length=2000)
-    kind: Literal["fact", "preference", "instruction", "project", "event"] = "fact"
+    #: MV1: Markdown, up to the install's `memoryMaxBodyChars`.
+    body: str = Field(default="", max_length=40_000)
+    kind: _KIND = "fact"
     pinned: StrictBool = False
+    tags: list[str] = Field(default_factory=list, max_length=50)
     #: `button` for a message's Remember; then the chat and message it came from.
     source: Literal["typed", "button"] = "typed"
     chatId: str | None = Field(default=None, max_length=200)
@@ -249,8 +402,13 @@ class NoteCreate(BaseModel):
 class NoteUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     text: str | None = Field(default=None, max_length=2000)
-    kind: Literal["fact", "preference", "instruction", "project", "event"] | None = None
+    body: str | None = Field(default=None, max_length=40_000)
+    kind: _KIND | None = None
     pinned: StrictBool | None = None
+    tags: list[str] | None = Field(default=None, max_length=50)
+    #: MV1: "Save as a new version" (the fact changed: the note is kept as history), not
+    #: "Save" (a typo: changed in place).
+    asNewVersion: StrictBool = False
 
 
 class PrefsUpdate(BaseModel):
@@ -258,6 +416,10 @@ class PrefsUpdate(BaseModel):
     enabled: StrictBool | None = None
     external: Literal["never", "ask", "always"] | None = None
     budgetTokens: int | None = Field(default=None, ge=memory.BUDGET_FLOOR, le=20000, strict=True)
+    relevantBudgetTokens: int | None = Field(
+        default=None, ge=memory.BUDGET_FLOOR, le=20000, strict=True
+    )
+    searchTool: StrictBool | None = None
     #: MR8. `null` returns Learn from my chats to the install's default.
     learn: Literal["off", "suggest"] | None = None
     useMode: Literal["relevant", "all"] | None = None
@@ -267,6 +429,20 @@ class PrefsUpdate(BaseModel):
 def _vetted(text: str) -> str:
     try:
         return memory.validate_note(text)
+    except memory.NoteRefused as exc:
+        raise _refused(status.HTTP_422_UNPROCESSABLE_CONTENT, exc.view()) from None
+
+
+def _vetted_body(body: str, install: config.MemorySettings) -> str:
+    try:
+        return memory.validate_body(body, install.max_body_chars)
+    except memory.NoteRefused as exc:
+        raise _refused(status.HTTP_422_UNPROCESSABLE_CONTENT, exc.view()) from None
+
+
+def _vetted_tags(tags: list[str]) -> list[str]:
+    try:
+        return memory.validate_tags(tags)
     except memory.NoteRefused as exc:
         raise _refused(status.HTTP_422_UNPROCESSABLE_CONTENT, exc.view()) from None
 
@@ -282,6 +458,14 @@ def _full(limit: int) -> dict[str, Any]:
     }
 
 
+def _tags_full(limit: int) -> dict[str, Any]:
+    return {
+        "message": f"Your tag list has {limit:,} tags, the limit. Delete or merge some first.",
+        "reason": "tags_full",
+        "limit": limit,
+    }
+
+
 @router.post("/api/memory/notes")
 async def add_note(request: Request, body: NoteCreate) -> JSONResponse:
     """Keep a note. 201 with the note; 200 when the same words were already
@@ -293,6 +477,8 @@ async def add_note(request: Request, body: NoteCreate) -> JSONResponse:
     if not install.enabled:
         raise _refused(status.HTTP_403_FORBIDDEN, {"message": _OWNER_OFF, "reason": "off"})
     text = _vetted(body.text)
+    note_body = _vetted_body(body.body, install)
+    tags = _vetted_tags(body.tags)
     chat_id = message_id = None
     if body.chatId is not None:
         chat = await _own_chat(request, person, body.chatId)
@@ -316,11 +502,17 @@ async def add_note(request: Request, body: NoteCreate) -> JSONResponse:
         source=body.source,
         source_chat_id=chat_id,
         source_message_id=message_id,
+        body=note_body,
+        tags=tags,
     )
     try:
         kept, created = await store.add_memory_note(note, limit=install.max_notes)
     except MemoryFull as exc:
         raise _refused(status.HTTP_409_CONFLICT, _full(exc.limit)) from None
+    except TagListFull as exc:
+        raise _refused(status.HTTP_409_CONFLICT, _tags_full(exc.limit)) from None
+    if created:
+        await _reindex(_state(request), person.sub, [kept.id])
     return JSONResponse(
         {"note": note_view(kept), "created": created},
         status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
@@ -329,25 +521,103 @@ async def add_note(request: Request, body: NoteCreate) -> JSONResponse:
 
 @router.patch("/api/memory/notes/{note_id}")
 async def edit_note(request: Request, note_id: str, body: NoteUpdate) -> dict[str, Any]:
+    """Change a current note in place ("Save"), or save what changed as a new version that
+    replaces it (`asNewVersion`: the old one is kept as history and never sent again).
+    `replaced` names the note a new version replaced."""
     person = await _person(request)
     store = _store(request)
-    if not (await config.memory_settings(store)).enabled:
+    install = await config.memory_settings(store)
+    if not install.enabled:
         raise _refused(status.HTTP_403_FORBIDDEN, {"message": _OWNER_OFF, "reason": "off"})
     text = _vetted(body.text) if body.text is not None else None
-    note = await store.update_memory_note(
-        person.sub, note_id, text=text, kind=body.kind, pinned=body.pinned
-    )
+    note_body = _vetted_body(body.body, install) if body.body is not None else None
+    tags = _vetted_tags(body.tags) if body.tags is not None else None
+    state = _state(request)
+    try:
+        if body.asNewVersion:
+            old = await store.memory_note(person.sub, note_id)
+            if old is None or old.status != "active":
+                raise _problem(status.HTTP_404_NOT_FOUND, "There is no such note.")
+            now = time.time()
+            new = MemoryNote(
+                id=_new_id(),
+                owner=person.sub,
+                text=text if text is not None else old.text,
+                kind=body.kind or old.kind,
+                created_at=now,
+                updated_at=now,
+                pinned=old.pinned if body.pinned is None else body.pinned,
+                source="typed",
+                body=note_body if note_body is not None else old.body or "",
+                tags=tags if tags is not None else list(old.tags),
+                expires_at=old.expires_at,
+                revisit_at=old.revisit_at,
+            )
+            kept = await store.supersede_memory_note(
+                person.sub, note_id, new, limit=install.max_notes
+            )
+            if kept is None:
+                raise _problem(status.HTTP_404_NOT_FOUND, "There is no such note.")
+            await _reindex(state, person.sub, [kept.id, note_id])
+            return {"note": note_view(kept), "replaced": note_id}
+        note = await store.update_memory_note(
+            person.sub,
+            note_id,
+            text=text,
+            body=note_body,
+            kind=body.kind,
+            pinned=body.pinned,
+            tags=tags,
+        )
+    except MemoryFull as exc:
+        raise _refused(status.HTTP_409_CONFLICT, _full(exc.limit)) from None
+    except TagListFull as exc:
+        raise _refused(status.HTTP_409_CONFLICT, _tags_full(exc.limit)) from None
     if note is None:
         raise _problem(status.HTTP_404_NOT_FOUND, "There is no such note.")
-    return {"note": note_view(note)}
+    await _reindex(state, person.sub, [note.id])
+    return {"note": note_view(note), "replaced": None}
+
+
+async def forget(state: Any, owner: str, note_id: str) -> list[str]:
+    """Forget a note for real (and, for a current one, its earlier versions): first its words
+    in the person's index, then it, its log's words, its tags and every chat's copy of it.
+    The ids that went; none when it is not theirs. Raises when the index cannot let go of
+    its words: then nothing was deleted."""
+    store: Store = state.store
+    note = await store.memory_note(owner, note_id, with_body=False)
+    if note is None:
+        return []
+    chain = [note_id] + (
+        [n.id for n in await store.note_history(owner, note_id)]
+        if note.status != "superseded"
+        else []
+    )
+    await _unindex(state, owner, chain)
+    gone = await store.delete_memory_note(owner, note_id)
+    if set(gone) != set(chain):
+        # Another version was made or forgotten between the two steps: what the store
+        # holds now is what the index must hold.
+        await _reindex(state, owner, sorted(set(gone) | set(chain)))
+    return gone
 
 
 @router.delete("/api/memory/notes/{note_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_note(request: Request, note_id: str) -> Response:
-    """Forget a note for real: it, its index entry, its log's words and every
-    chat's copy of it. Allowed whatever the owner has set."""
+    """Forget a note for real: it, its earlier versions (unless it is one), its words in the
+    index, its log's words, its tags and every chat's copy of it. Allowed whatever the owner
+    has set. 503 when its words could not be taken out of the index: then nothing went."""
     person = await _person(request)
-    if not await _store(request).delete_memory_note(person.sub, note_id):
+    try:
+        gone = await forget(_state(request), person.sub, note_id)
+    except Exception as exc:
+        log.warning("a note was not deleted: its index said %s: %s", type(exc).__name__, exc)
+        raise _problem(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Workbench could not remove this note's words from your search index, so nothing "
+            f"was deleted ({type(exc).__name__}). Try again in a moment.",
+        ) from None
+    if not gone:
         raise _problem(status.HTTP_404_NOT_FOUND, "There is no such note.")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -361,7 +631,18 @@ async def delete_all_notes(request: Request, confirm: str | None = None) -> dict
         raise _problem(
             status.HTTP_400_BAD_REQUEST, "To delete every note, say so: add ?confirm=all."
         )
-    return {"deleted": await _store(request).delete_memory_notes(person.sub)}
+    state = _state(request)
+    store = _store(request)
+    every = [n.id for n in await store.memory_notes(person.sub, status=None)]
+    try:
+        await _unindex(state, person.sub, every)
+    except Exception as exc:
+        raise _problem(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Workbench could not remove your notes' words from your search index, so nothing "
+            f"was deleted ({type(exc).__name__}). Try again in a moment.",
+        ) from None
+    return {"deleted": await store.delete_memory_notes(person.sub)}
 
 
 @router.put("/api/memory/prefs")
@@ -375,6 +656,8 @@ async def put_prefs(request: Request, body: PrefsUpdate) -> dict[str, Any]:
         "enabled": True,
         "external": None,
         "budgetTokens": None,
+        "relevantBudgetTokens": None,
+        "searchTool": True,
         "learn": "off",
         "useMode": "relevant",
         "offerDismissed": False,
@@ -383,6 +666,8 @@ async def put_prefs(request: Request, body: PrefsUpdate) -> dict[str, Any]:
         "enabled": "enabled",
         "external": "external",
         "budgetTokens": "budget_tokens",
+        "relevantBudgetTokens": "relevant_budget_tokens",
+        "searchTool": "search_tool",
         "learn": "learn",
         "useMode": "use_mode",
         "offerDismissed": "offer_dismissed",
@@ -394,6 +679,243 @@ async def put_prefs(request: Request, body: PrefsUpdate) -> dict[str, Any]:
             values["learn_set"] = given is not None
     prefs = await store.put_memory_prefs(person.sub, **values)
     return prefs_view(prefs, await config.memory_settings(store))
+
+
+# --------------------------------------------------------------------------- #
+# the tag list (MV1, call 14)
+# --------------------------------------------------------------------------- #
+
+
+class TagCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    tag: str = Field(max_length=200)
+    description: str | None = Field(default=None, max_length=1000)
+
+
+class TagUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    #: A new name: every note follows; a name already on the list merges the two.
+    tag: str | None = Field(default=None, max_length=200)
+    description: str | None = Field(default=None, max_length=1000)
+
+
+class TagImport(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    #: The file's text: CSV `tag,description` (a header row optional), or one tag a line.
+    text: str = Field(max_length=500_000)
+    format: Literal["csv", "txt"] = "csv"
+    #: "Replace my list": tags not in the file are deleted, from the list and their notes.
+    replace: StrictBool = False
+    #: For `replace`: the tags the person was told would go, sent back to say yes. Until it
+    #: is, nothing changes and the answer says what would.
+    confirm: list[str] | None = Field(default=None, max_length=2000)
+
+
+def _vetted_tag(tag: str) -> str:
+    try:
+        return memory.validate_tag(tag)
+    except memory.NoteRefused as exc:
+        raise _refused(status.HTTP_422_UNPROCESSABLE_CONTENT, exc.view()) from None
+
+
+def _vetted_description(text: str) -> str:
+    try:
+        return memory.validate_description(text)
+    except memory.NoteRefused as exc:
+        raise _refused(status.HTTP_422_UNPROCESSABLE_CONTENT, exc.view()) from None
+
+
+@router.get("/api/memory/tags")
+async def list_tags(request: Request) -> dict[str, Any]:
+    person = await _person(request)
+    return {"tags": await _store(request).memory_tags(person.sub)}
+
+
+@router.post("/api/memory/tags")
+async def add_tag(request: Request, body: TagCreate) -> dict[str, Any]:
+    """Add a tag to the list, or change the description of one already on it."""
+    person = await _person(request)
+    tag = _vetted_tag(body.tag)
+    description = _vetted_description(body.description) if body.description is not None else None
+    try:
+        kept = await _store(request).put_memory_tag(person.sub, tag, description)
+    except TagListFull as exc:
+        raise _refused(status.HTTP_409_CONFLICT, _tags_full(exc.limit)) from None
+    return {"tag": kept}
+
+
+async def _tagged(store: Store, owner: str, tag: str) -> list[str]:
+    key = tag_key(tag)
+    return [n.id for n in await store.memory_notes(owner) if key in {tag_key(t) for t in n.tags}]
+
+
+@router.patch("/api/memory/tags/{tag:path}")
+async def edit_tag(request: Request, tag: str, body: TagUpdate) -> dict[str, Any]:
+    """Rename a tag (every note follows; onto a tag already on the list, the two merge), or
+    change its description. 404 when the person has no such tag."""
+    person = await _person(request)
+    store = _store(request)
+    known = {t["key"] for t in await store.memory_tags(person.sub)}
+    if tag_key(tag) not in known:
+        raise _problem(status.HTTP_404_NOT_FOUND, "There is no such tag.")
+    notes: int | None = None
+    name = tag
+    if body.tag is not None:
+        name = _vetted_tag(body.tag)
+        merged = tag_key(name) in known and tag_key(name) != tag_key(tag)
+        affected = await _tagged(store, person.sub, tag)
+        notes = await store.rename_memory_tag(person.sub, tag, name)
+        if notes is None:
+            raise _problem(status.HTTP_404_NOT_FOUND, "There is no such tag.")
+        await _reindex(_state(request), person.sub, affected)
+    else:
+        merged = False
+    if body.description is not None:
+        await store.put_memory_tag(person.sub, name, _vetted_description(body.description))
+    kept = next(t for t in await store.memory_tags(person.sub) if t["key"] == tag_key(name))
+    return {"tag": kept, "merged": merged, "notes": notes}
+
+
+@router.delete("/api/memory/tags/{tag:path}")
+async def delete_tag(request: Request, tag: str) -> dict[str, Any]:
+    """Take a tag off the list and off every note; the notes stay. `notes` is how many lost
+    it (the page's dialog says so first, from the list's counts)."""
+    person = await _person(request)
+    store = _store(request)
+    affected = await _tagged(store, person.sub, tag)
+    notes = await store.delete_memory_tag(person.sub, tag)
+    if notes is None:
+        raise _problem(status.HTTP_404_NOT_FOUND, "There is no such tag.")
+    await _reindex(_state(request), person.sub, affected)
+    return {"deleted": tag, "notes": notes}
+
+
+@router.get("/api/memory/tags/export")
+async def export_tags(request: Request) -> Response:
+    """The tag list as CSV, `tag,description`, with a header row: any spreadsheet or text
+    editor opens it, and Import takes it back."""
+    person = await _person(request)
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\n")
+    writer.writerow(["tag", "description"])
+    for t in await _store(request).memory_tags(person.sub):
+        writer.writerow([t["tag"], _csv_cell(t["description"])])
+    return Response(
+        out.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": 'attachment; filename="workbench-tags.csv"',
+        },
+    )
+
+
+#: What a spreadsheet takes a cell starting with as a formula.
+_FORMULA_START = ("=", "+", "-", "@")
+
+
+def _csv_cell(text: str) -> str:
+    """A description as a CSV cell no spreadsheet runs: one that would start a formula
+    (after any quote marks) gets a quote mark first, which `read_tag_file` takes off."""
+    return "'" + text if text.lstrip("'").startswith(_FORMULA_START) else text
+
+
+def _from_csv_cell(text: str) -> str:
+    return (
+        text[1:]
+        if text.startswith("'") and text[1:].lstrip("'").startswith(_FORMULA_START)
+        else text
+    )
+
+
+def read_tag_file(text: str, fmt: str) -> tuple[list[tuple[str, str | None]], list[dict[str, Any]]]:
+    """A tag file's rows, `(tag, description or None)`, and every line it could not take,
+    `{line, text, message}`. CSV is `tag,description` (a first row `tag,description` is a
+    header); a `.txt` is one tag a line. Blank lines are skipped; a tag twice keeps the
+    last description given."""
+    rows: dict[str, tuple[str, str | None]] = {}
+    problems: list[dict[str, Any]] = []
+    if text.startswith("﻿"):
+        text = text[1:]
+    if fmt == "txt":
+        lines = [(i, [line]) for i, line in enumerate(text.splitlines(), 1)]
+    else:
+        lines = list(enumerate(csv.reader(io.StringIO(text)), 1))
+    for number, cells in lines:
+        if not cells or not any(c.strip() for c in cells):
+            continue
+        if (
+            fmt == "csv"
+            and number == 1
+            and cells[0].strip().casefold() == "tag"
+            and (len(cells) < 2 or cells[1].strip().casefold() == "description")
+        ):
+            continue
+        if fmt == "csv" and len(cells) > 2:
+            problems.append(
+                {
+                    "line": number,
+                    "text": ",".join(cells)[:120],
+                    "message": "A row has at most two cells: tag, description. Quote a "
+                    "description that holds a comma.",
+                }
+            )
+            continue
+        try:
+            tag = memory.validate_tag(cells[0])
+            description = (
+                memory.validate_description(_from_csv_cell(cells[1]) if fmt == "csv" else cells[1])
+                if len(cells) > 1
+                else None
+            )
+        except memory.NoteRefused as exc:
+            problems.append({"line": number, "text": cells[0][:120], "message": exc.message})
+            continue
+        rows[tag_key(tag)] = (tag, description or None)
+    return list(rows.values()), problems
+
+
+@router.post("/api/memory/tags/import")
+async def import_tags(request: Request, body: TagImport) -> dict[str, Any]:
+    """Bring in a tag list. By default it adds new tags and updates descriptions, and
+    removes nothing. With `replace`, the first answer only says what would be removed and
+    from how many notes (`confirmNeeded`); sending again with `confirm` naming exactly those
+    tags does it. Lines that cannot be taken are named, and the rest are taken."""
+    person = await _person(request)
+    store = _store(request)
+    rows, problems = read_tag_file(body.text, body.format)
+    removed: list[dict[str, Any]] = []
+    if body.replace:
+        would = await store.tags_removed_by(person.sub, [t for t, _ in rows])
+        named = sorted(tag_key(w["tag"]) for w in would)
+        if body.confirm is None or sorted(tag_key(t) for t in body.confirm) != named:
+            return {
+                "confirmNeeded": True,
+                "wouldRemove": would,
+                "rows": len(rows),
+                "problems": problems,
+            }
+    affected: list[str] = []
+    if body.replace:
+        wanted = {tag_key(t) for t, _ in rows}
+        affected = [
+            n.id
+            for n in await store.memory_notes(person.sub)
+            if any(tag_key(t) not in wanted for t in n.tags)
+        ]
+    try:
+        done = await store.import_memory_tags(person.sub, rows, replace=body.replace)
+    except TagListFull as exc:
+        raise _refused(status.HTTP_409_CONFLICT, _tags_full(exc.limit)) from None
+    removed = done["removed"]
+    await _reindex(_state(request), person.sub, affected)
+    return {
+        "confirmNeeded": False,
+        "added": done["added"],
+        "updated": done["updated"],
+        "removed": removed,
+        "problems": problems,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -423,29 +945,39 @@ def _due_revisits(notes: list[MemoryNote], prefs: dict[str, Any], today: str) ->
 
 class KeepSuggestion(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    #: The person's own edit of the words, and of the kind, before keeping it.
+    #: The person's own edit of the words, and of the kind, before keeping it. Never a
+    #: procedure: a suggestion is a model's words, and a procedure is the person's (MV1).
     text: str | None = Field(default=None, max_length=2000)
-    kind: Literal["fact", "preference", "instruction", "project", "event"] | None = None
-    #: For a suggestion that replaces a note: Keep new (true) or Keep both (false).
+    kind: _SUGGESTED_KIND | None = None
+    #: For a suggestion that replaces a note: Keep new (true: the old one becomes its
+    #: earlier version) or Keep both (false).
     replace: StrictBool = False
+    #: The tags kept on it; a tag not on the list is added to it ("Add to my tags"). None
+    #: keeps the ones it came with that are on the list.
+    tags: list[str] | None = Field(default=None, max_length=50)
 
 
 @router.post("/api/memory/suggestions/{note_id}/keep")
 async def keep_suggestion(request: Request, note_id: str, body: KeepSuggestion) -> dict[str, Any]:
     """Keep a suggestion as a note, as it is or as the person edited it. With `replace`, the
-    note it would replace is forgotten (as Delete forgets one). 404 when the person has no
-    such suggestion; 422 names why edited words cannot be kept."""
+    note it would replace becomes its earlier version (kept as history, never sent). 404 when
+    the person has no such suggestion; 422 names why edited words cannot be kept."""
     person = await _person(request)
     store = _store(request)
     if not (await config.memory_settings(store)).enabled:
         raise _refused(status.HTTP_403_FORBIDDEN, {"message": _OWNER_OFF, "reason": "off"})
     text = _vetted(body.text) if body.text is not None else None
-    kept = await store.keep_suggestion(
-        person.sub, note_id, text=text, kind=body.kind, replace=body.replace
-    )
+    tags = _vetted_tags(body.tags) if body.tags is not None else None
+    try:
+        kept = await store.keep_suggestion(
+            person.sub, note_id, text=text, kind=body.kind, replace=body.replace, tags=tags
+        )
+    except TagListFull as exc:
+        raise _refused(status.HTTP_409_CONFLICT, _tags_full(exc.limit)) from None
     if kept is None:
         raise _problem(status.HTTP_404_NOT_FOUND, "There is no such suggestion.")
     note, replaced = kept
+    await _reindex(_state(request), person.sub, [note.id, *([replaced] if replaced else [])])
     return {"note": note_view(note), "replaced": replaced}
 
 
@@ -485,7 +1017,14 @@ async def revisit(request: Request, body: Revisit) -> dict[str, Any]:
         later = (datetime.now().date() + timedelta(days=days)).isoformat()
         await store.set_revisit(person.sub, note.id, later)
     elif body.answer == "no":
-        await store.delete_memory_note(person.sub, note.id)
+        try:
+            await forget(_state(request), person.sub, note.id)
+        except Exception as exc:
+            raise _problem(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "Workbench could not remove this note's words from your search index, so it "
+                f"was kept ({type(exc).__name__}). Try again in a moment.",
+            ) from None
     await store.put_memory_prefs(person.sub, revisit_asked_at=time.time())
     return {"answer": body.answer}
 
@@ -510,32 +1049,48 @@ def _day(moment: float) -> str:
     return datetime.fromtimestamp(moment, UTC).strftime("%Y-%m-%d")
 
 
-def _stamp(moment: float) -> str:
+def _stamp(moment: float | None) -> str | None:
+    if moment is None:
+        return None
     return datetime.fromtimestamp(moment, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 @router.get("/api/memory/export")
 async def export(request: Request, format: Literal["md", "json"] = "md") -> Response:
-    """The asker's notes as a plain file: Markdown to read, JSON to keep."""
+    """The asker's notes as a plain file: Markdown to read, JSON to keep. Both carry each
+    note's body and tags, the versions a note replaced, and the tag list (MV1)."""
     person = await _person(request)
-    notes = await _store(request).memory_notes(person.sub)
+    store = _store(request)
+    every = await store.memory_notes(person.sub, status=None, with_body=True)
+    notes = [n for n in every if n.status == "active"]
+    earlier = [n for n in every if n.status == "superseded"]
+    tags = await store.memory_tags(person.sub)
     now = time.time()
     headers = {"Cache-Control": "private, no-store"}
     if format == "json":
+
+        def entry(n: MemoryNote) -> dict[str, Any]:
+            return {
+                "id": n.id,
+                "text": n.text,
+                "body": n.body or "",
+                "kind": n.kind,
+                "pinned": n.pinned,
+                "tags": list(n.tags),
+                "source": n.source,
+                "createdAt": _stamp(n.created_at),
+                "updatedAt": _stamp(n.updated_at),
+                "validFrom": _stamp(n.valid_from),
+                "supersededAt": _stamp(n.superseded_at),
+                "supersededBy": n.superseded_by,
+            }
+
         return JSONResponse(
             {
                 "exportedAt": _stamp(now),
-                "notes": [
-                    {
-                        "text": n.text,
-                        "kind": n.kind,
-                        "pinned": n.pinned,
-                        "source": n.source,
-                        "createdAt": _stamp(n.created_at),
-                        "updatedAt": _stamp(n.updated_at),
-                    }
-                    for n in notes
-                ],
+                "notes": [entry(n) for n in notes],
+                "earlierVersions": [entry(n) for n in earlier],
+                "tags": [{"tag": t["tag"], "description": t["description"]} for t in tags],
             },
             headers={
                 **headers,
@@ -551,14 +1106,27 @@ async def export(request: Request, format: Literal["md", "json"] = "md") -> Resp
     for title, members in (
         ("Always used (instructions and pinned notes)", [n for n in notes if memory.is_always(n)]),
         ("Other notes", [n for n in notes if not memory.is_always(n)]),
+        ("Earlier versions", earlier),
     ):
         lines += [f"## {title}", ""]
         if not members:
             lines += ["Nothing here.", ""]
         for n in members:
             kept = f"{n.kind}{', pinned' if n.pinned else ''}, added {_day(n.created_at)}"
+            if n.superseded_at is not None:
+                kept += f", replaced {_day(n.superseded_at)}"
+            if n.tags:
+                kept += ", tags: " + ", ".join(n.tags)
             lines.append(f"- {n.text} *({kept})*")
+            if n.body:
+                lines += ["", *("    " + line if line else "" for line in n.body.split("\n")), ""]
         lines.append("")
+    lines += ["## Tags", ""]
+    if not tags:
+        lines += ["Nothing here.", ""]
+    for t in tags:
+        lines.append(f"- {t['tag']}" + (f": {t['description']}" if t["description"] else ""))
+    lines.append("")
     return Response(
         "\n".join(lines),
         media_type="text/markdown; charset=utf-8",
@@ -582,6 +1150,8 @@ class ModelFacts:
     who: str | None
     #: Whether it takes a PDF as a file (`file_input`): documents use this.
     file_input: bool = False
+    #: Whether a request for it may carry tools (`tool_calling`; assumed when not said).
+    tools: bool = True
 
 
 @dataclass
@@ -616,6 +1186,7 @@ async def model_facts(hub: Hub, model_id: str) -> ModelFacts:
         locality=str(common["locality"]),
         who=common["provider"] or common["account"],
         file_input=bool(info.get("file_input")),
+        tools=info.get("tool_calling") is not False,
     )
 
 
@@ -665,7 +1236,12 @@ async def _decide(request: Request, person: Person, chat: Chat, model_id: str | 
     """Every reason a chat's next request would carry no notes, in the order a
     person can act on them. The request and the chat's drawer both ask this,
     so the drawer says what the request does."""
-    store = _store(request)
+    return await decide(_state(request), person, chat, model_id)
+
+
+async def decide(state: Any, person: Person, chat: Chat, model_id: str | None) -> Decision:
+    """`_decide`, for a caller that holds Workbench's state rather than a request."""
+    store: Store = state.store
     install = await config.memory_settings(store)
     prefs = await store.memory_prefs(person.sub)
     if (off := _switches(install, prefs, chat)) is not None:
@@ -673,7 +1249,7 @@ async def _decide(request: Request, person: Person, chat: Chat, model_id: str | 
     if not model_id:
         return Decision(False, "no_model", "Choose a model first, and notes can be sent to it.")
     try:
-        facts = await model_facts(_hub(request), model_id)
+        facts = await model_facts(state.hub, model_id)
     except HubError as exc:
         return Decision(
             False,
@@ -689,63 +1265,38 @@ def _today() -> str:
     return datetime.now().date().isoformat()
 
 
-async def _relevance(
-    request: Request, person: Person, chat: Chat, notes: list[MemoryNote], prefs: dict[str, Any]
-) -> memory_relevance.Relevance:
-    """Which notes this chat is about (MR8), from the person's latest message in it: every
-    note that fits when they asked for that (`use_mode = all`) or when relevance cannot run."""
-    if prefs.get("use_mode") == "all":
-        return memory_relevance.Relevance(None, memory_relevance.ALL_THAT_FIT)
-    state = _state(request)
-    store = _store(request)
-    messages = await store.messages(chat.id)
-    question = next(
-        (m.content for m in reversed(messages) if m.role == "user" and m.content.strip()), ""
-    )
-    if not question:
-        return memory_relevance.Relevance(None, memory_relevance.ALL_THAT_FIT)
-    saved = getattr(state, "saved", None)
-    vectors = getattr(state, "note_vectors", None)
-    if vectors is None:
-        vectors = state.note_vectors = memory_relevance.NoteVectors()
-    return await memory_relevance.relevant(
-        store, getattr(saved, "meaning", None), vectors, person.sub, notes, question
-    )
-
-
-def _relevance_view(relevance: memory_relevance.Relevance) -> dict[str, Any]:
-    return {"how": relevance.how, "why": relevance.why, "ids": relevance.ids}
-
-
-async def _freeze(
-    request: Request,
+async def _pinned(
     store: Store,
     person: Person,
-    chat: Chat,
     facts: ModelFacts,
     prefs: dict[str, Any],
+    notes: list[MemoryNote] | None = None,
 ) -> memory.Snapshot:
-    """Choose the notes for this chat and model, and keep what was chosen with
-    the chat. Nothing is kept when there is nothing to send."""
-    notes = await store.memory_notes(person.sub)
-    now = time.time()
-    relevance = await _relevance(request, person, chat, notes, prefs)
-    snapshot = memory.build_snapshot(
-        notes,
+    """The pinned block for this person and model, as it would be taken now."""
+    held = notes if notes is not None else await store.memory_notes(person.sub)
+    always = [n for n in held if memory.is_always(n)]
+    return memory.build_snapshot(
+        always,
         budget=memory.budget_for(facts.window, prefs["budget_tokens"]),
         window=facts.window,
         model=facts.id,
-        now=now,
-        relevant=relevance.ids,
+        now=time.time(),
         today=_today(),
+        bodies=await _bodies(store, person.sub, always),
     )
+
+
+async def _freeze(
+    store: Store, person: Person, chat: Chat, facts: ModelFacts, prefs: dict[str, Any]
+) -> memory.Snapshot:
+    """Choose the pinned block for this chat and model, and keep it with the chat. Nothing
+    is kept when there is nothing to send."""
+    snapshot = await _pinned(store, person, facts, prefs)
     if snapshot.text:
-        await store.set_memory_snapshot(
-            chat.id, person.sub, {**snapshot.to_json(), "relevance": _relevance_view(relevance)}
-        )
-        await store.mark_memory_used(person.sub, snapshot.ids, now)
+        await store.set_memory_snapshot(chat.id, person.sub, snapshot.to_json())
+        await store.mark_memory_used(person.sub, snapshot.ids, snapshot.frozen_at)
         log.info(
-            "%d memory note(s), %d of %d tokens, went with a chat's first request%s",
+            "%d pinned note(s), %d of %d tokens, went with a chat's first request%s",
             len(snapshot.sent),
             snapshot.tokens,
             snapshot.budget,
@@ -754,10 +1305,37 @@ async def _freeze(
     return snapshot
 
 
+async def _current_pinned(
+    request: Request, person: Person, chat: Chat, model_id: str, *, freeze: bool
+) -> tuple[memory.Snapshot | None, Decision | None]:
+    """The chat's pinned block for this model, and the decision that let notes go; `(None,
+    None)` when none may go. Takes one at the first request that carries notes, and again
+    for another model."""
+    store = _store(request)
+    install = await config.memory_settings(store)
+    prefs = await store.memory_prefs(person.sub)
+    if _switches(install, prefs, chat) is not None:
+        return None, None
+    snapshot = memory.Snapshot.from_json(chat.memory_snapshot)
+    if snapshot is None and await store.memory_count(person.sub) == 0:
+        return None, None  # nothing to send, so there is no model to ask about
+    facts = await model_facts(_hub(request), model_id)
+    decision = _placement(facts, install, prefs, chat)
+    if not decision.send:
+        return None, None
+    if snapshot is None or snapshot.model != model_id:
+        snapshot = (
+            await _freeze(store, person, chat, facts, prefs)
+            if freeze
+            else await _pinned(store, person, facts, prefs)
+        )
+    return snapshot, decision
+
+
 async def block_for(
     request: Request, person: Person, chat: Chat, model_id: str, *, freeze: bool = True
 ) -> str | None:
-    """The block of notes the next request carries, or None for none.
+    """The pinned block the next request carries in its system message, or None for none.
 
     Reuses the chat's snapshot byte for byte; takes one at the first request
     that carries notes, and again for another model. Never raises: memory
@@ -765,47 +1343,183 @@ async def block_for(
     is counted as used: the block a request *would* carry, for a check made
     before one is sent."""
     try:
-        store = _store(request)
-        install = await config.memory_settings(store)
-        prefs = await store.memory_prefs(person.sub)
-        if _switches(install, prefs, chat) is not None:
-            return None
-        snapshot = memory.Snapshot.from_json(chat.memory_snapshot)
-        if snapshot is None and await store.memory_count(person.sub) == 0:
-            return None  # nothing to send, so there is no model to ask about
-        facts = await model_facts(_hub(request), model_id)
-        if not _placement(facts, install, prefs, chat).send:
-            return None
-        if snapshot is None or snapshot.model != model_id:
-            if freeze:
-                snapshot = await _freeze(request, store, person, chat, facts, prefs)
-            else:
-                notes = await store.memory_notes(person.sub)
-                relevance = await _relevance(request, person, chat, notes, prefs)
-                snapshot = memory.build_snapshot(
-                    notes,
-                    budget=memory.budget_for(facts.window, prefs["budget_tokens"]),
-                    window=facts.window,
-                    model=facts.id,
-                    now=time.time(),
-                    relevant=relevance.ids,
-                    today=_today(),
-                )
-        return snapshot.text or None
+        snapshot, _ = await _current_pinned(request, person, chat, model_id, freeze=freeze)
+        return (snapshot.text or None) if snapshot is not None else None
     except Exception as exc:
         log.warning("a chat's notes were left out of its request: %s: %s", type(exc).__name__, exc)
         return None
 
 
+@dataclass
+class TurnMemory:
+    """What one turn carries of the person's notes, chosen for it (MV1): the block for their
+    latest message, or None; what the answer keeps of it (`record`); and whether this
+    request may carry notes at all (which `search_memory` and the replay of its results
+    follow), and whether the tool is offered."""
+
+    block: str | None = None
+    record: dict[str, Any] | None = None
+    tokens: int = 0
+    allowed: bool = False
+    tool: bool = False
+    #: The decision's facts, for the tool's own budget.
+    facts: ModelFacts | None = None
+    found: list[str] = field(default_factory=list)
+
+
+async def turn_for(
+    request: Request,
+    person: Person,
+    chat: Chat,
+    history: list[Message],
+    model_id: str,
+    *,
+    used: int,
+    reserve: int,
+) -> TurnMemory:
+    """Relevant memory for the turn about to be asked: chosen from the person's latest
+    message (and the one before it), in budget, and in the room the window has left after
+    `used` tokens and the answer's `reserve`. Never raises: memory does not stop an answer."""
+    try:
+        return await _turn_for(request, person, chat, history, model_id, used, reserve)
+    except Exception as exc:
+        log.warning(
+            "a turn's relevant notes were left out of its request: %s: %s", type(exc).__name__, exc
+        )
+        return TurnMemory()
+
+
+async def _turn_for(
+    request: Request,
+    person: Person,
+    chat: Chat,
+    history: list[Message],
+    model_id: str,
+    used: int,
+    reserve: int,
+) -> TurnMemory:
+    store = _store(request)
+    fresh = await store.chat(chat.id) or chat
+    snapshot, decision = await _current_pinned(request, person, fresh, model_id, freeze=False)
+    if decision is None or decision.facts is None:
+        return TurnMemory()
+    prefs = await store.memory_prefs(person.sub)
+    notes = await store.memory_notes(person.sub)
+    others = [n for n in notes if not memory.is_always(n)]
+    deferred = snapshot.deferred if snapshot is not None else []
+    facts = decision.facts
+    tool = bool(prefs.get("search_tool", True)) and facts.tools and bool(others or deferred)
+    out = TurnMemory(allowed=True, tool=tool, facts=facts)
+    users = [m for m in history if m.role == "user"]
+    latest = users[-1].content if users else ""
+    if not latest.strip() or not (others or deferred):
+        return out
+    budget = memory.relevant_budget_for(facts.window, prefs.get("relevant_budget_tokens"))
+    room = None if facts.window is None else max(0, facts.window - used - reserve)
+    allowed = budget if room is None else min(budget, room)
+    chosen = await _finder(_state(request)).choose(
+        person.sub,
+        latest,
+        users[-2].content if len(users) >= 2 else None,
+        notes,
+        pinned=snapshot.ids if snapshot is not None else [],
+        deferred=deferred,
+        today=_today(),
+        everything=prefs.get("use_mode") == "all",
+    )
+    turn = memory.pack_relevant(chosen.candidates, allowed)
+    record = {
+        **turn.record(),
+        "how": chosen.how,
+        "why": chosen.why,
+        "from": chosen.of,
+        "window": facts.window,
+        "room": room,
+    }
+    if turn.sent:
+        await store.mark_memory_used(person.sub, [c.id for c in turn.sent], time.time())
+        log.info(
+            "%d relevant note(s), %d of %d tokens, went with a turn (%s)",
+            len(turn.sent),
+            turn.tokens,
+            allowed,
+            chosen.how,
+        )
+    out.block = turn.text or None
+    out.record = record
+    out.tokens = turn.tokens
+    out.found = [c.id for c in turn.sent]
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# search_memory: the tool a model may call (MV1)
+# --------------------------------------------------------------------------- #
+
+
+async def run_search_tool(state: Any, owner: str, arguments: dict[str, Any]) -> str:
+    """One `search_memory` call for this person: the notes that match, as the same delimited
+    data a turn carries, at most `SEARCH_TOOL_TOKENS`. Never raises: what went wrong is the
+    result, in words."""
+    query = str(arguments.get("query") or "").strip()[:500]
+    limit = arguments.get("limit") or 8
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 20:
+        limit = 8
+    if not query:
+        return "Nothing to search for: give a query."
+    try:
+        notes = await state.store.memory_notes(owner)
+        chosen = await _finder(state).search(owner, query, notes, today=_today())
+        turn = memory.pack_relevant(chosen.candidates[:limit], memory.SEARCH_TOOL_TOKENS)
+    except Exception as exc:
+        log.warning("search_memory failed: %s: %s", type(exc).__name__, exc)
+        return f"Searching the person's notes failed ({type(exc).__name__})."
+    if not turn.sent:
+        return "No note matched."
+    return turn.text
+
+
+# --------------------------------------------------------------------------- #
+# the chat's Memory drawer
+# --------------------------------------------------------------------------- #
+
+
+def _turn_view(message: Message | None) -> dict[str, Any] | None:
+    """What one answer's turn was sent, as the drawer shows it."""
+    if message is None or message.memory_used is None:
+        return None
+    return {"messageId": message.id, **message.memory_used}
+
+
 async def chat_memory(
-    request: Request, person: Person, chat: Chat, *, read_only: bool, refresh: bool = False
+    request: Request,
+    person: Person,
+    chat: Chat,
+    *,
+    read_only: bool,
+    refresh: bool = False,
+    message_id: str | None = None,
 ) -> dict[str, Any]:
-    """What a chat's notes are, as its drawer shows them: what the model was
-    shown, what it was not and why, and whether the next request carries them.
+    """What a chat's notes are, as its drawer shows them: the pinned block (what the model
+    is shown in every turn, what it was not and why), what one turn was sent of relevant
+    memory (the latest answer's, or `message_id`'s), and whether the next request carries
+    notes.
 
     For the owner reading someone else's chat (`read_only`), counts only: the
-    chat's saved copy is read, and the notes table is not."""
+    chat's saved copy and the answers' records are read, and the notes table is not."""
+    store = _store(request)
     saved = memory.Snapshot.from_json(chat.memory_snapshot)
+    answers = [m for m in await store.messages(chat.id) if m.role == "assistant"]
+    chosen_turn = (
+        next(
+            (m for m in answers if m.id == message_id),
+            None,
+        )
+        if message_id
+        else next((m for m in reversed(answers) if m.memory_used), None)
+    )
+    turn = _turn_view(chosen_turn)
+    turns = [m.id for m in answers if m.memory_used]
     if read_only:
         return {
             "chatId": chat.id,
@@ -818,8 +1532,17 @@ async def chat_memory(
                 "sent": len(saved.sent) if saved else 0,
                 "notSent": len(saved.dropped) if saved else 0,
             },
+            "turn": (
+                {
+                    "messageId": turn["messageId"],
+                    "notes": len(turn.get("notes") or []),
+                    "tokens": turn.get("tokens"),
+                    "budget": turn.get("budget"),
+                }
+                if turn
+                else None
+            ),
         }
-    store = _store(request)
     if refresh:
         # Take the notes again: the copy the chat kept goes, whatever follows.
         await store.set_memory_snapshot(chat.id, person.sub, None)
@@ -866,35 +1589,31 @@ async def chat_memory(
         "text": None,
         "sent": [],
         "notSent": [],
+        # MV1: what a turn was sent, chosen for it, and which answers have a record.
+        "turn": turn,
+        "turns": turns,
+        "relevantBudget": None,
+        "searchTool": None,
     }
     if decision.send and not notes:
         out["reason"], out["reasonCode"] = "You have no notes yet.", "no_notes"
     if not sending or decision.facts is None:
         return out
     facts = decision.facts
+    out["relevantBudget"] = memory.relevant_budget_for(
+        facts.window, prefs.get("relevant_budget_tokens")
+    )
+    out["searchTool"] = bool(prefs.get("search_tool", True)) and facts.tools
     snapshot = saved if saved is not None and saved.model == facts.id else None
-    relevance_seen: dict[str, Any] | None = None
     if snapshot is None:
-        if refresh:
-            snapshot = await _freeze(request, store, person, chat, facts, prefs)
-            fresh = await store.chat(chat.id)
-            relevance_seen = ((fresh.memory_snapshot if fresh else None) or {}).get("relevance")
-        else:
-            relevance = await _relevance(request, person, chat, notes, prefs)
-            relevance_seen = _relevance_view(relevance)
-            snapshot = memory.build_snapshot(
-                notes,
-                budget=memory.budget_for(facts.window, prefs["budget_tokens"]),
-                window=facts.window,
-                model=facts.id,
-                now=time.time(),
-                relevant=relevance.ids,
-                today=_today(),
-            )
+        snapshot = (
+            await _freeze(store, person, chat, facts, prefs)
+            if refresh
+            else await _pinned(store, person, facts, prefs, notes)
+        )
         frozen = refresh and bool(snapshot.text)
     else:
         frozen = True
-        relevance_seen = (chat.memory_snapshot or {}).get("relevance")
     kept = {n.id: n for n in notes}
     not_sent: list[dict[str, Any]] = []
     sent_ids = set(snapshot.ids)
@@ -916,22 +1635,12 @@ async def chat_memory(
                 "reasonText": memory.added_since_reason(),
             }
             for n in notes
-            if n.id not in seen
+            if memory.is_always(n) and n.id not in seen
         )
-        kept_relevance = (chat.memory_snapshot or {}).get("relevance") or {}
-        live = memory.build_snapshot(
-            notes,
-            budget=snapshot.budget,
-            window=snapshot.window,
-            model=snapshot.model,
-            now=snapshot.frozen_at,
-            relevant=kept_relevance.get("ids"),
-            today=_today(),
-        )
-        out["changed"] = live.hash != snapshot.hash
-    out["relevance"] = (
-        {k: v for k, v in relevance_seen.items() if k != "ids"} if relevance_seen else None
-    )
+        live = await _pinned(store, person, facts, prefs, notes)
+        out["changed"] = [s for s in live.sent] != [s for s in snapshot.sent] or [
+            (d.id, d.reason) for d in live.dropped
+        ] != [(d.id, d.reason) for d in snapshot.dropped]
     out.update(
         frozen=frozen,
         frozenAt=snapshot.frozen_at if frozen else None,
@@ -945,6 +1654,7 @@ async def chat_memory(
                 "kind": s.kind,
                 "pinned": s.pinned,
                 "always": s.pinned or s.kind == "instruction",
+                "body": s.body,
             }
             for s in snapshot.sent
         ],
@@ -955,18 +1665,20 @@ async def chat_memory(
 
 
 @router.get("/api/chats/{chat_id}/memory")
-async def get_chat_memory(request: Request, chat_id: str) -> dict[str, Any]:
+async def get_chat_memory(
+    request: Request, chat_id: str, message: str | None = None
+) -> dict[str, Any]:
     """What this chat's model is shown of the person's notes, and what it is
-    not, with the reason. The chat's owner sees the notes; the install's owner,
-    reading it read-only, sees counts."""
+    not, with the reason; and what one turn (`message`, else the latest) was sent. The
+    chat's owner sees the notes; the install's owner, reading it read-only, sees counts."""
     person = await _person(request)
     chat, read_only = await _readable_chat(request, person, chat_id)
-    return await chat_memory(request, person, chat, read_only=read_only)
+    return await chat_memory(request, person, chat, read_only=read_only, message_id=message)
 
 
 @router.post("/api/chats/{chat_id}/memory/refresh")
 async def refresh_chat_memory(request: Request, chat_id: str) -> dict[str, Any]:
-    """Take the notes again for this chat, from now: the next request, and
+    """Take the pinned notes again for this chat, from now: the next request, and
     every one after it, carries what is returned."""
     person = await _person(request)
     chat = await _own_chat(request, person, chat_id)
@@ -1038,6 +1750,8 @@ async def handle_command(
             )
         except MemoryFull as exc:
             return {"command": "remember", "refused": _full(exc.limit)}
+        if created:
+            await _reindex(_state(request), person.sub, [kept.id])
         return {"command": "remember", "remembered": note_view(kept), "created": created}
     except Exception as exc:
         log.warning("a memory command failed: %s: %s", type(exc).__name__, exc)

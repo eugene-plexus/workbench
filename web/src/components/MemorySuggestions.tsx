@@ -15,11 +15,11 @@ import { post } from "../lib/api";
 import {
   characters,
   failureWords,
-  KINDS,
   kindLabel,
   LEARN_CHOICES,
   learnSetByWords,
   NOTE_LIMIT,
+  SUGGESTED_KINDS,
   USE_CHOICES,
 } from "../lib/memory";
 import type { MemoryNote, MemoryPage, MemorySuggestion, NoteKind } from "../lib/types";
@@ -174,17 +174,23 @@ function SuggestionItem({
   const uid = useId();
   const [draft, setDraft] = useState<{ text: string; kind: NoteKind } | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  // The proposed tags that are not on the person's list, and which of them they chose to add.
+  const [added, setAdded] = useState<string[]>([]);
+  const proposed = suggestion.proposedTags ?? [];
 
   async function keep(replace: boolean) {
     setProblem(null);
     onProblem(null);
     const text = draft?.text.trim();
+    // A tag on the list is kept; one that is not is kept only if they chose Add to my tags.
+    const tags = proposed.filter((t) => t.listed || added.includes(t.tag)).map((t) => t.tag);
     try {
       await working(() =>
         post(`/api/memory/suggestions/${suggestion.id}/keep`, {
           replace,
           ...(draft && text !== suggestion.text ? { text } : {}),
           ...(draft && draft.kind !== suggestion.kind ? { kind: draft.kind } : {}),
+          ...(proposed.length > 0 ? { tags } : {}),
         }).then(() => undefined),
       );
     } catch (failure) {
@@ -238,7 +244,7 @@ function SuggestionItem({
             onChange={(event) => setDraft({ ...draft, kind: event.target.value as NoteKind })}
             className="control w-48"
           >
-            {KINDS.map((k) => (
+            {SUGGESTED_KINDS.map((k) => (
               <option key={k.kind} value={k.kind}>
                 {k.label}
               </option>
@@ -259,6 +265,44 @@ function SuggestionItem({
             {"”"} {from}
           </span>
         </p>
+      )}
+      {proposed.length > 0 && (
+        <div data-testid="memory-suggestion-tags" className="flex flex-col gap-1">
+          <p className="help">Suggested tags</p>
+          <ul className="flex flex-col gap-1">
+            {proposed.map((t) => (
+              <li key={t.tag} className="flex flex-wrap items-center gap-2 text-sm">
+                {t.listed ? (
+                  <span data-testid="memory-suggestion-tag" className="badge">
+                    {t.tag}
+                  </span>
+                ) : (
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      data-testid="memory-suggestion-tag-add"
+                      checked={added.includes(t.tag)}
+                      disabled={busy || locked}
+                      onChange={(event) =>
+                        setAdded(
+                          event.target.checked
+                            ? [...added, t.tag]
+                            : added.filter((one) => one !== t.tag),
+                        )
+                      }
+                    />
+                    <span>
+                      <span data-testid="memory-suggestion-tag" className="badge">
+                        {t.tag}
+                      </span>{" "}
+                      Add to my tags
+                    </span>
+                  </label>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
       {suggestion.sourceConnection && (
         <p data-testid="memory-suggestion-connection" className="help wrap-anywhere">

@@ -15,7 +15,18 @@ import { MessageView } from "./components/MessageView";
 import { api, del, patch, post, put } from "./lib/api";
 import type { Chat, ChatMemoryView, MemoryNote, MemoryPage, Message } from "./lib/types";
 import { controlsIn, lacking, wrong } from "./test-controls";
-import { held, note, notSent, owners, page, prefs, sending } from "./test-memory";
+import {
+  held,
+  note,
+  notSent,
+  owners,
+  page,
+  prefs,
+  sending,
+  sentNote,
+  tag,
+  turn,
+} from "./test-memory";
 
 // Connections (MR9b) has its own tests; this page's do not serve it.
 vi.mock("./components/Connections", () => ({ Connections: () => null }));
@@ -183,8 +194,79 @@ describe("the Memory page", () => {
 
   it("with a deleted note, and Undo", async () => {
     const view = await opened(ALL());
+    vi.mocked(api).mockImplementation((async (path: string) =>
+      path.startsWith("/api/memory/notes/") ? { note: NOTES[0], earlier: [] } : ALL()) as never);
     fireEvent.click(screen.getAllByTestId("memory-note-delete")[0]!);
     await screen.findByTestId("memory-deleted");
+    expect(wrong(view)).toEqual([]);
+  });
+
+  it("with a note's details open, and its earlier versions", async () => {
+    const view = await opened(ALL());
+    const mine = note({ id: "n1", text: "Keep answers short", bodyChars: 12, tags: ["style"] });
+    vi.mocked(api).mockImplementation((async (path: string) =>
+      path.startsWith("/api/memory/notes/")
+        ? {
+            note: { ...mine, body: "Steps: one." },
+            earlier: [note({ id: "old", text: "Keep answers long", supersededAt: 1, tags: [] })],
+          }
+        : ALL()) as never);
+    fireEvent.click(screen.getAllByTestId("memory-note-details")[0]!);
+    await screen.findByTestId("memory-earlier-version");
+    expect(screen.getByTestId("memory-note-body")).toBeInTheDocument();
+    expect(wrong(view)).toEqual([]);
+  });
+
+  it("with the question before a note and its earlier versions are deleted", async () => {
+    const view = await opened(ALL());
+    vi.mocked(api).mockImplementation((async (path: string) =>
+      path.startsWith("/api/memory/notes/")
+        ? { note: NOTES[0], earlier: [note({ id: "old", supersededAt: 1 })] }
+        : ALL()) as never);
+    fireEvent.click(screen.getAllByTestId("memory-note-delete")[0]!);
+    await screen.findByTestId("memory-note-delete-confirm");
+    expect(wrong(view)).toEqual([]);
+  });
+
+  it("with the tag list, and each question it asks", async () => {
+    const tags = [
+      tag({ tag: "cooking", notes: 3, description: "Food" }),
+      tag({ tag: "Cook", notes: 1 }),
+    ];
+    const view = await opened(ALL({ tags }));
+    expect(screen.getAllByTestId("memory-tag")).toHaveLength(2);
+    expect(wrong(view)).toEqual([]);
+    fireEvent.click(screen.getAllByTestId("memory-tag-delete")[0]!);
+    expect(screen.getByTestId("memory-tag-delete-confirm")).toBeInTheDocument();
+    expect(wrong(view)).toEqual([]);
+    fireEvent.click(screen.getByTestId("memory-tag-delete-cancel"));
+    fireEvent.click(screen.getAllByTestId("memory-tag-edit")[1]!);
+    fireEvent.change(screen.getByTestId("memory-tag-edit-name"), { target: { value: "cooking" } });
+    fireEvent.click(screen.getByTestId("memory-tag-edit-save"));
+    expect(screen.getByTestId("memory-tag-merge-confirm")).toBeInTheDocument();
+    expect(wrong(view)).toEqual([]);
+  });
+
+  it("with the search of notes the page does not list", async () => {
+    const data = ALL();
+    data.sections.otherTotal = 450;
+    const view = await opened({ ...data, tags: [tag({ tag: "cooking" })] });
+    expect(screen.getByTestId("memory-showing")).toHaveTextContent("Showing the newest 3 of 450");
+    expect(wrong(view)).toEqual([]);
+  });
+
+  it("with the settings that are new: two budgets and the search switch", async () => {
+    const view = await opened(
+      ALL({
+        prefs: prefs({
+          relevantBudgetTokens: 3000,
+          searchTool: false,
+          effective: { relevantBudgetTokens: 3000 },
+        }),
+      }),
+    );
+    expect(screen.getByTestId("memory-search-switch")).not.toBeChecked();
+    expect(screen.getByTestId("memory-relevant-budget-default")).toBeInTheDocument();
     expect(wrong(view)).toEqual([]);
   });
 
@@ -289,6 +371,34 @@ const VIEWS: [string, ChatMemoryView][] = [
   ["held: a small window", held("window_too_small", "This model's window is small.")],
   ["held: no notes", held("no_notes", "You have no notes yet.")],
   ["someone else's chat", owners()],
+  [
+    "sending, a turn was chosen",
+    sending({ relevantBudget: 3277, searchTool: true, turn: turn(), turns: ["a1"] }),
+  ],
+  [
+    "sending, several turns to pick from, and a pinned note's details sent whole",
+    sending({
+      relevantBudget: 3277,
+      searchTool: false,
+      turn: turn({
+        how: "meaning and words",
+        didNotFit: 2,
+        notes: [{ ...turn().notes[0]!, via: "both", passages: [1, 2] }],
+      }),
+      turns: ["a0", "a1"],
+      sent: [sentNote({ body: "Step one." })],
+      notSent: [
+        notSent({
+          reason: "body_by_relevance",
+          reasonText: "Its details are too long to send in every turn.",
+        }),
+      ],
+    }),
+  ],
+  [
+    "someone else's chat, with a turn's counts",
+    owners({ turn: { messageId: "a1", notes: 2, tokens: 90, budget: 3277 } }),
+  ],
 ];
 
 function drawer(view: ChatMemoryView | null, error: string | null = null) {

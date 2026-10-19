@@ -1,8 +1,8 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
-import { patch, post } from "../lib/api";
+import { api, patch, post } from "../lib/api";
 import type { Chat, ChatMemoryView } from "../lib/types";
-import { BLOCK, held, notSent, NOW, owners, sending, sentNote } from "../test-memory";
+import { BLOCK, held, notSent, NOW, owners, sending, sentNote, turn } from "../test-memory";
 import { MemoryChip, MemoryDrawer } from "./MemoryChip";
 
 vi.mock("../lib/api", () => ({ api: vi.fn(), del: vi.fn(), patch: vi.fn(), post: vi.fn() }));
@@ -189,7 +189,7 @@ describe("what was sent", () => {
     expect(rows[2]).not.toHaveTextContent("Always used");
     expect(within(rows[0]!).getByText("I live in Lisbon")).toHaveAttribute("dir", "auto");
     expect(
-      screen.getByRole("heading", { level: 3, name: "Sent to the model" }),
+      screen.getByRole("heading", { level: 3, name: "Sent to the model in every turn" }),
     ).toBeInTheDocument();
   });
 
@@ -635,5 +635,132 @@ describe("over the whole window", () => {
     unmount();
     expect(opener).toHaveFocus();
     opener.remove();
+  });
+});
+
+describe("this turn", () => {
+  const withTurn = (over: Parameters<typeof sending>[0] = {}) =>
+    sending({ relevantBudget: 3277, searchTool: true, turn: turn(), turns: ["a1"], ...over });
+
+  it("lists the notes the turn was sent, how many tokens of the budget, and how they were found", () => {
+    drawer(withTurn());
+    const section = screen.getByRole("region", { name: "This turn" });
+    expect(within(section).getByTestId("memory-turn-summary")).toHaveTextContent(
+      "1 note chosen. Using 90 of 3,277 tokens.",
+    );
+    expect(within(section).getByTestId("memory-turn-how")).toHaveTextContent(
+      "Chosen from 12 notes by words.",
+    );
+    const row = within(section).getByTestId("memory-turn-notes");
+    expect(row).toHaveTextContent("Cedar is the wood for the birdhouse");
+    expect(row).toHaveTextContent("Project");
+    expect(row).toHaveTextContent("woodwork");
+    expect(row).toHaveTextContent("Found by words.");
+    expect(within(section).getByTestId("memory-turn-budget")).toHaveTextContent(
+      "up to 3,277 tokens a turn. This model can search your notes.",
+    );
+  });
+
+  it("says which part of a long note was sent, and what did not fit", () => {
+    drawer(
+      withTurn({
+        searchTool: false,
+        turn: turn({
+          how: "meaning and words",
+          didNotFit: 3,
+          notes: [{ ...turn().notes[0]!, via: "both", passages: [1, 4] }],
+        }),
+      }),
+    );
+    const section = screen.getByRole("region", { name: "This turn" });
+    expect(section).toHaveTextContent("3 more did not fit.");
+    expect(section).toHaveTextContent("Chosen from 12 notes by meaning and words.");
+    expect(section).toHaveTextContent("Found by meaning and words. 2 parts of its details sent.");
+    expect(section).toHaveTextContent("This model cannot search your notes.");
+  });
+
+  it("gives the reason when every note that fits was used, or words only", () => {
+    drawer(withTurn({ turn: turn({ how: "all", why: null, notes: [] }) }));
+    expect(screen.getByTestId("memory-turn-summary")).toHaveTextContent(
+      "No notes were chosen for this turn.",
+    );
+    expect(screen.getByTestId("memory-turn-how")).toHaveTextContent(
+      "Every note that fits was used.",
+    );
+  });
+
+  it("labels the pinned block as sent in every turn, and says when a pinned note's details went whole", () => {
+    drawer(withTurn({ sent: [sentNote({ body: "Step one." })] }));
+    expect(
+      screen.getByRole("heading", { level: 3, name: "Sent to the model in every turn" }),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("memory-note-body-sent")).toHaveTextContent(
+      "Its details went whole: 9 characters.",
+    );
+  });
+
+  it("says why a pinned note's details go by relevance instead", () => {
+    drawer(
+      withTurn({
+        counts: { notes: 2, sent: 1, notSent: 1 },
+        notSent: [
+          notSent({
+            reason: "body_by_relevance",
+            reasonText: "Its details are too long to send in every turn.",
+          }),
+        ],
+      }),
+    );
+    expect(screen.getByTestId("memory-not-sent")).toHaveTextContent(
+      "Its details are too long to send in every turn.",
+    );
+  });
+
+  it("lets the person pick another turn when there are several, and reads it from the server", async () => {
+    const earlier = turn({
+      messageId: "a0",
+      notes: [{ ...turn().notes[0]!, id: "n9", text: "Plans a trip to Oslo", tags: [] }],
+    });
+    vi.mocked(api).mockResolvedValue(sending({ turn: earlier }) as never);
+    drawer(withTurn({ turns: ["a0", "a1"] }));
+    const pick = screen.getByRole("combobox", { name: "Turn" });
+    expect(pick).toHaveValue("a1");
+    expect(
+      within(pick)
+        .getAllByRole("option")
+        .map((o) => o.textContent),
+    ).toEqual(["Answer 1", "Answer 2 (latest)"]);
+    fireEvent.change(pick, { target: { value: "a0" } });
+    await waitFor(() => expect(api).toHaveBeenCalledWith("/api/chats/c1/memory?message=a0"));
+    expect(await screen.findByText("Plans a trip to Oslo")).toBeInTheDocument();
+    expect(screen.queryByText("Cedar is the wood for the birdhouse")).toBeNull();
+    // Back to the latest needs no read.
+    vi.mocked(api).mockClear();
+    fireEvent.change(screen.getByRole("combobox", { name: "Turn" }), { target: { value: "a1" } });
+    expect(await screen.findByText("Cedar is the wood for the birdhouse")).toBeInTheDocument();
+    expect(api).not.toHaveBeenCalled();
+  });
+
+  it("offers no picker for one turn, and no section for a chat with no answers yet", () => {
+    drawer(withTurn());
+    expect(screen.queryByRole("combobox", { name: "Turn" })).toBeNull();
+    document.body.innerHTML = "";
+    drawer(sending());
+    expect(screen.queryByTestId("memory-this-turn")).toBeNull();
+  });
+
+  it("says why a turn could not be read", async () => {
+    vi.mocked(api).mockRejectedValue(new Error("Workbench answered 502."));
+    drawer(withTurn({ turns: ["a0", "a1"] }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Turn" }), { target: { value: "a0" } });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Workbench answered 502.");
+  });
+
+  it("tells the owner reading someone else's chat only how many notes a turn was sent", () => {
+    drawer(owners({ turn: { messageId: "a1", notes: 2, tokens: 90, budget: 3277 } }));
+    expect(screen.getByTestId("memory-turn-counts")).toHaveTextContent(
+      "The latest answer was sent 2 notes chosen for it. Using 90 of 3,277 tokens.",
+    );
+    expect(screen.queryByTestId("memory-turn-notes")).toBeNull();
   });
 });

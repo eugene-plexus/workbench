@@ -53,7 +53,7 @@ from ._build import commit
 from .knowledge.index import FOUND, LIBRARY, PENDING, IndexUnavailable, valid_id
 from .knowledge.search import plan_query
 from .sessions import SignedOut, own_origin
-from .store import ConnectionRecord, MemoryNote, Person, Store
+from .store import ConnectionRecord, MemoryNote, Person, Store, tag_key
 
 log = logging.getLogger(__name__)
 
@@ -72,6 +72,10 @@ PASSAGE_TOKENS = 8000
 READ_TOKENS = 4000
 MAX_NOTES = 20
 MAX_PASSAGES = 10
+#: What one search of notes may return, in tokens (MV1: notes have bodies), and tags a
+#: suggestion may carry.
+NOTE_TOKENS = 8000
+MAX_SUGGESTED_TAGS = 5
 DAY = 24 * 3600.0
 
 #: Every token that is not a live connection's gets these words, so the door does not say
@@ -208,9 +212,11 @@ _TOOLS: dict[str, types.Tool] = {
         title="Search my notes",
         description=(
             "Search the notes this person keeps in Workbench (facts about them, their "
-            "preferences, how they want answers, their projects). Returns the notes that "
-            "match, with the ones they always want used first. An empty query returns only "
-            "those."
+            "preferences, how they want answers, their projects, procedures). Returns the "
+            "notes that match, with the ones they always want used first, and for a note "
+            "with a body the parts of it that matched (read_note reads one whole). Write "
+            "#tag to keep to notes with that tag. An empty query returns only the ones "
+            "always used."
         ),
         input_schema={
             "type": "object",
@@ -261,6 +267,24 @@ _TOOLS: dict[str, types.Tool] = {
         },
         annotations=types.ToolAnnotations(read_only_hint=True, open_world_hint=False),
     ),
+    "read_note": types.Tool(
+        name="read_note",
+        title="Read one of my notes",
+        description=(
+            f"Read one of this person's notes whole, by the id search_notes gave: its title, "
+            f"kind, tags and body, from `offset` characters into the body, at most about "
+            f"{READ_TOKENS:,} tokens of it."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "note_id": {"type": "string", "maxLength": 64},
+                "offset": {"type": "integer", "minimum": 0},
+            },
+            "required": ["note_id"],
+        },
+        annotations=types.ToolAnnotations(read_only_hint=True, open_world_hint=False),
+    ),
     "suggest_note": types.Tool(
         name="suggest_note",
         title="Suggest a note",
@@ -280,6 +304,11 @@ _TOOLS: dict[str, types.Tool] = {
                     "enum": ["fact", "preference", "instruction", "project"],
                     "default": "fact",
                 },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string", "maxLength": memory.MAX_TAG_CHARS},
+                    "maxItems": MAX_SUGGESTED_TAGS,
+                },
             },
             "required": ["text"],
         },
@@ -294,6 +323,7 @@ _TOOLS: dict[str, types.Tool] = {
 
 _RIGHTS = {
     "search_notes": "read_notes",
+    "read_note": "read_notes",
     "search_documents": "search_documents",
     "read_document": "search_documents",
     "suggest_note": "suggest_notes",
@@ -355,39 +385,74 @@ class Tools:
             raise ToolRefused("This person has turned their Workbench memory off.")
         today = datetime.now().date().isoformat()
         notes = [n for n in await self.store.memory_notes(sub) if not memory.is_past(n, today)]
-        always = [n for n in memory.layout(notes) if memory.is_always(n)]
+        _, tags = memory_relevance.split_tags(query)
+        wanted = {tag_key(t) for t in tags}
+        always = [
+            n
+            for n in memory.layout(notes)
+            if memory.is_always(n) and wanted <= {tag_key(t) for t in n.tags}
+        ]
         how, why = "always used", None
-        found: list[MemoryNote] = []
+        found: list[memory.Candidate] = []
         if query:
-            saved = getattr(self.state, "saved", None)
-            vectors = getattr(self.state, "note_vectors", None)
-            if vectors is None:
-                vectors = self.state.note_vectors = memory_relevance.NoteVectors()
-            relevance = await memory_relevance.relevant(
-                self.store, getattr(saved, "meaning", None), vectors, sub, notes, query
+            finder = getattr(self.state, "finder", None) or memory_relevance.Finder(
+                self.store, getattr(self.state, "saved", None)
             )
-            ids = relevance.ids
-            how = relevance.how
-            if ids is None:
-                # Every note is too much for an app to be handed: by words, and why.
-                ids = await memory_relevance.by_words(self.store, sub, query)
-                how, why = "words", relevance.why
-            by_id = {n.id: n for n in notes if not memory.is_always(n)}
-            found = [by_id[i] for i in ids if i in by_id]
-        chosen = (always + found)[:limit]
+            try:
+                chosen = await finder.search(
+                    sub, query, [n for n in notes if not memory.is_always(n)], today=today
+                )
+            except IndexUnavailable as exc:
+                raise ToolRefused(exc.message) from None
+            found, how, why = chosen.candidates, chosen.how, chosen.why
+        by_id = {n.id: n for n in notes}
+        picked = [memory_relevance.Finder._candidate(n, (), "always") for n in always] + found
+        out: list[dict[str, Any]] = []
+        spent = 0
+        for c in picked[:limit]:
+            note = by_id[c.id]
+            entry: dict[str, Any] = {
+                "id": c.id,
+                "text": c.text,
+                "kind": c.kind,
+                "always": memory.is_always(note),
+                "expiresAt": note.expires_at,
+                "tags": list(note.tags),
+                "bodyChars": note.body_chars,
+            }
+            if c.passages:
+                entry["passages"] = [{"text": text} for _, text in c.passages]
+            cost = memory.estimate_tokens(json.dumps(entry, ensure_ascii=False))
+            if out and spent + cost > NOTE_TOKENS:
+                break
+            spent += cost
+            out.append(entry)
+        return {"notes": out, "how": how, "why": why}
+
+    async def read_note(self, caller: Caller, arguments: dict[str, Any]) -> dict[str, Any]:
+        note_id = _text(arguments.get("note_id"), "note_id", required=True, limit=64)
+        offset = arguments.get("offset") or 0
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ToolRefused("`offset` must be a whole number from 0.")
+        sub = caller.person.sub
+        if not (await config.memory_settings(self.store)).enabled:
+            raise ToolRefused("Notes are turned off on this Workbench.")
+        if not (await self.store.memory_prefs(sub))["enabled"]:
+            raise ToolRefused("This person has turned their Workbench memory off.")
+        note = await self.store.memory_note(sub, note_id)
+        if note is None or note.status != "active":
+            raise ToolRefused("There is no such note.")
+        body = (note.body or "")[offset:]
+        cut = _cut(body, READ_TOKENS)
         return {
-            "notes": [
-                {
-                    "id": n.id,
-                    "text": n.text,
-                    "kind": n.kind,
-                    "always": memory.is_always(n),
-                    "expiresAt": n.expires_at,
-                }
-                for n in chosen
-            ],
-            "how": how,
-            "why": why,
+            "id": note.id,
+            "text": note.text,
+            "kind": note.kind,
+            "tags": list(note.tags),
+            "bodyChars": len(note.body or ""),
+            "offset": offset,
+            "body": cut,
+            "more": len(cut) < len(body),
         }
 
     async def search_documents(self, caller: Caller, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -486,6 +551,13 @@ class Tools:
         kind = arguments.get("kind") or "fact"
         if kind not in ("fact", "preference", "instruction", "project"):
             raise ToolRefused("`kind` must be fact, preference, instruction or project.")
+        given = arguments.get("tags") or []
+        if not isinstance(given, list) or len(given) > MAX_SUGGESTED_TAGS:
+            raise ToolRefused(f"`tags` must be a list of at most {MAX_SUGGESTED_TAGS} tags.")
+        try:
+            tags = memory.validate_tags([str(t) for t in given])
+        except memory.NoteRefused as exc:
+            raise ToolRefused(exc.message) from None
         sub = caller.person.sub
         install = await config.memory_settings(self.store)
         if not install.enabled:
@@ -518,6 +590,7 @@ class Tools:
             updated_at=now,
             status="pending",
             source="suggested",
+            proposed_tags=tags,
         )
         why = await self.store.add_connection_suggestion(
             sub,

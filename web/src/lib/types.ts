@@ -622,7 +622,7 @@ export interface Person {
 
 // --- Memory (MR1): what src/eugene_plexus_workbench/memory_api.py answers with ---
 
-export type NoteKind = "fact" | "preference" | "instruction" | "project" | "event";
+export type NoteKind = "fact" | "preference" | "instruction" | "project" | "event" | "procedure";
 
 /** How a note got here: written on the Memory page, said in a chat
  * ("Remember that ..."), or kept from a message's Remember this. */
@@ -648,6 +648,30 @@ export interface MemoryNote {
   /** An event leaves chats after this day (ISO date); a project is asked about from this one. */
   expiresAt?: string | null;
   revisitAt?: string | null;
+  /** MV1: `active`, or `superseded` for an earlier version. */
+  status: "active" | "superseded" | "pending";
+  tags: string[];
+  /** How long its details (body) are; 0 for none. The details come with `GET /api/memory/notes/{id}`. */
+  bodyChars: number;
+  validFrom: number | null;
+  supersededAt: number | null;
+  supersededBy: string | null;
+  /** Markdown; only on a note read whole. */
+  body?: string;
+}
+
+/** One tag on the person's list. */
+export interface MemoryTag {
+  tag: string;
+  key: string;
+  description: string;
+  notes: number;
+}
+
+/** A tag a model proposed, and whether it is already on the person's list. */
+export interface ProposedTag {
+  tag: string;
+  listed: boolean;
 }
 
 /** A note a chat's model suggested, waiting for the person to keep it or turn it away. */
@@ -656,6 +680,7 @@ export interface MemorySuggestion extends MemoryNote {
   quote: string | null;
   /** The note it would replace, when the model said one. */
   replaces: MemoryNote | null;
+  proposedTags: ProposedTag[];
 }
 
 /** Learn from my chats: whose word it is. measured: on because the chat's model passed. */
@@ -670,6 +695,10 @@ export interface MemoryPrefs {
   enabled: boolean;
   external: ExternalChoice | null;
   budgetTokens: number | null;
+  /** MV1: the most relevant notes may take a turn; null until the person chooses. */
+  relevantBudgetTokens: number | null;
+  /** MV1: whether models may search the notes (`search_memory`). */
+  searchTool: boolean;
   /** Learn from my chats; null until the person chooses. */
   learn: "off" | "suggest" | null;
   useMode: "relevant" | "all";
@@ -679,6 +708,7 @@ export interface MemoryPrefs {
     external: ExternalChoice;
     externalSetBy: "owner" | "you" | "default";
     budgetTokens: number;
+    relevantBudgetTokens: number;
     learn: "off" | "suggest";
     learnSetBy: LearnSetBy;
     /** Until the person chooses, a chat on a model that passed the measurement suggests. */
@@ -692,7 +722,14 @@ export interface MemoryPage {
   installEnabled: boolean;
   ownerReadsChats: boolean;
   prefs: MemoryPrefs;
-  sections: { always: MemoryNote[]; other: MemoryNote[]; past?: MemoryNote[] };
+  sections: {
+    always: MemoryNote[];
+    other: MemoryNote[];
+    /** How many "other" notes there are; `other` holds the newest `limits.pageNotes`. */
+    otherTotal: number;
+    past?: MemoryNote[];
+  };
+  tags: MemoryTag[];
   suggestions?: MemorySuggestion[];
   /** The project to ask "Still true?" about now (at most one, at most weekly). */
   revisit?: MemoryNote[];
@@ -705,17 +742,64 @@ export interface MemoryPage {
     maxNotes: number;
     sent: number;
     notSent: number;
+    pinned: { tokens: number; budget: number; notes: number };
+    relevant: { budget: number; from: number; how: RelevantHow };
   };
   limits: {
     maxChars: number;
+    maxBodyChars: number;
     maxNotes: number;
     kinds: NoteKind[];
     minWindow: number;
     budgetCeiling: number;
     budgetSharePercent: number;
     budgetFloor: number;
+    relevantCeiling: number;
+    relevantSharePercent: number;
+    maxTagChars: number;
+    maxTagsPerNote: number;
+    maxDescriptionChars: number;
+    pageNotes: number;
   };
 }
+
+/** How relevant memory is chosen: by meaning and words, by words only, or every note that fits. */
+export type RelevantHow = "meaning and words" | "words" | "all";
+
+/** `GET /api/memory/notes`: a search of the person's current notes. */
+export interface NotesFound {
+  notes: MemoryNote[];
+  total: number;
+  offset: number;
+  search: { how: RelevantHow; why: string | null } | null;
+}
+
+/** `GET /api/memory/notes/{id}`: one note whole, and the versions it replaced, newest first. */
+export interface NoteWhole {
+  note: MemoryNote;
+  earlier: MemoryNote[];
+}
+
+/** `POST /api/memory/tags/import`: what would go (ask again to do it), or what was done. */
+export interface TagImportProblem {
+  line: number;
+  text: string;
+  message: string;
+}
+export type TagImportAnswer =
+  | {
+      confirmNeeded: true;
+      wouldRemove: { tag: string; notes: number }[];
+      rows: number;
+      problems: TagImportProblem[];
+    }
+  | {
+      confirmNeeded: false;
+      added: number;
+      updated: number;
+      removed: { tag: string; notes: number }[];
+      problems: TagImportProblem[];
+    };
 
 /** Why a chat's next request carries no notes, in the order a person can act on it. */
 export type MemoryReason =
@@ -734,11 +818,34 @@ export interface SentNote {
   kind: NoteKind;
   pinned: boolean;
   always: boolean;
+  /** MV1: its details went whole in the pinned block. */
+  body?: string;
 }
 
 export interface NotSentNote extends MemoryNote {
-  reason: "over_budget" | "added_since" | "not_relevant";
+  reason: "over_budget" | "added_since" | "not_relevant" | "body_by_relevance";
   reasonText: string;
+}
+
+/** What one answer's turn was sent of relevant memory. */
+export interface MemoryTurn {
+  messageId: string;
+  tokens: number;
+  budget: number;
+  didNotFit: number;
+  notes: {
+    id: string;
+    text: string;
+    kind: NoteKind;
+    tags: string[];
+    passages: number[];
+    via: "words" | "meaning" | "both" | "recent";
+  }[];
+  how: RelevantHow;
+  why: string | null;
+  from: number;
+  window: number | null;
+  room: number | null;
 }
 
 /** `GET /api/chats/{id}/memory`, for a chat that is the asker's. */
@@ -775,6 +882,12 @@ export interface ChatMemory {
   notSent: NotSentNote[];
   /** How the notes were chosen: by relevance (meaning and words) or every one that fits, and why. */
   relevance?: { how: "meaning and words" | "all"; why: string | null } | null;
+  /** MV1: what the chosen answer's turn was sent (the latest, or `?message=`), or null. */
+  turn?: MemoryTurn | null;
+  /** The answers that have a record of their turn. */
+  turns?: string[];
+  relevantBudget?: number | null;
+  searchTool?: boolean | null;
 }
 
 /** The install owner reading someone else's chat: counts, never the notes. */
@@ -786,6 +899,8 @@ export interface ChatMemoryReadOnly {
   tokens: number;
   budget: number | null;
   counts: { sent: number; notSent: number };
+  /** Counts only: how many notes the answer's turn was sent. */
+  turn?: { messageId: string; notes: number; tokens: number | null; budget: number | null } | null;
 }
 
 export type ChatMemoryView = ChatMemory | ChatMemoryReadOnly;
@@ -793,7 +908,7 @@ export type ChatMemoryView = ChatMemory | ChatMemoryReadOnly;
 /** Why words were not kept: the server's sentence, and what it saw. */
 export interface Refusal {
   message: string;
-  reason?: "empty" | "hidden" | "secret" | "too_long" | "full" | "off" | "error";
+  reason?: "empty" | "hidden" | "secret" | "too_long" | "full" | "tags_full" | "off" | "error";
   /** For a secret: what it has the shape of ("a card number"). */
   looksLike?: string;
   limit?: number;

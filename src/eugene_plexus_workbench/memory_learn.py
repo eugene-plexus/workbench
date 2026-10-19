@@ -252,15 +252,28 @@ class Learner:
             return await done("nothing_to_read")
         # The notes they keep go to the model only where their notes may go.
         known: list[memory_suggest.Known] = []
+        tags: list[memory_suggest.TagChoice] = []
         try:
             facts = await memory_api.model_facts(self._hub, chat.model)
             if memory_api._placement(facts, install, prefs, chat).send:
                 known = await self._known(owner, " ".join(sources))
+                # Their tag list is their words too: it goes only where their notes may.
+                tags = [
+                    memory_suggest.TagChoice(t["tag"], t["description"])
+                    for t in await store.memory_tags(owner)
+                ]
         except HubError as exc:
             log.warning("memory suggestions could not ask about the chat's model: %s", exc.message)
             return Outcome(skipped="gateway")
         today = self._today()
-        body = memory_suggest.request_body(chat.model, sources, known, today, secrets.token_hex(4))
+        body = memory_suggest.request_body(
+            chat.model,
+            sources,
+            known,
+            today,
+            secrets.token_hex(4),
+            tags if memory_suggest.TAGS_IN_REQUEST else (),
+        )
         self._calls.setdefault(owner, deque()).append(now)
         try:
             with acting_as(owner, person.session_id):
@@ -307,6 +320,7 @@ class Learner:
                 expires_at=p.expires_at,
                 revisit_at=p.revisit_at,
                 replaces=p.replaces,
+                proposed_tags=list(p.tags or memory_suggest.tags_for(p.text, tags)),
             )
             for p in outcome.proposals
         ]

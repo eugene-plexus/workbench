@@ -81,6 +81,16 @@ EVENT_DEFAULT_DAYS = 30
 EVENT_HORIZON_DAYS = 730
 #: The remembered notes shown to the model, so it can skip or replace them.
 MAX_KNOWN_SHOWN = 20
+#: MV1 (call 14): tags a proposal may carry; and the longest tag list sent as the schema's
+#: `enum`. Past it the tags are free words, and one not on the list waits for the person's
+#: "Add to my tags".
+MAX_TAGS_PER_PROPOSAL = 3
+TAG_ENUM_MAX = 50
+#: Whether the person's tags go in the request at all. Measured 2026-10-19 on Gemma 4 E4B
+#: (`docs/acceptance/m-memory-data/tags`): any list, 12 to 200 tags, raised false memories
+#: from 0% to 5-17% and let an injection through at 12-50, so Workbench tags a proposal in
+#: code instead (`tags_for`). Troy's call MV1-C1 decides whether this stays off.
+TAGS_IN_REQUEST = False
 
 #: The request's own settings: steady, short, no tools, no thinking.
 TEMPERATURE = 0.2
@@ -139,18 +149,41 @@ project, or event
 - replaces: the number of the remembered note it updates, or 0"""
 
 
-def response_format() -> dict[str, Any]:
-    """The schema the answer is constrained to (OpenAI's `json_schema`)."""
+@dataclass(frozen=True)
+class TagChoice:
+    """A tag on the person's list, as the model is shown it: the tag, and what they said it
+    is for (what tells "clients" from "work")."""
+
+    tag: str
+    description: str = ""
+
+
+def response_format(
+    tags: Sequence[TagChoice] = (), *, enum_max: int = TAG_ENUM_MAX
+) -> dict[str, Any]:
+    """The schema the answer is constrained to (OpenAI's `json_schema`). With the person's
+    tags, each note has `tags`: from the list (an `enum`) while it is at most `enum_max`
+    long, else free words. No tags, no field."""
+    properties: dict[str, Any] = {
+        "text": {"type": "string", "maxLength": MAX_TEXT_CHARS},
+        "kind": {"type": "string", "enum": list(memory.SUGGESTED_KINDS)},
+        "quote": {"type": "string", "maxLength": MAX_QUOTE_CHARS},
+        "date": {"type": "string", "maxLength": 10},
+        "replaces": {"type": "integer", "minimum": 0},
+    }
+    required = ["text", "kind", "quote", "date", "replaces"]
+    if tags:
+        item: dict[str, Any] = (
+            {"type": "string", "enum": [t.tag for t in tags]}
+            if len(tags) <= enum_max
+            else {"type": "string", "maxLength": memory.MAX_TAG_CHARS}
+        )
+        properties["tags"] = {"type": "array", "items": item, "maxItems": MAX_TAGS_PER_PROPOSAL}
+        required.append("tags")
     note = {
         "type": "object",
-        "properties": {
-            "text": {"type": "string", "maxLength": MAX_TEXT_CHARS},
-            "kind": {"type": "string", "enum": list(memory.KINDS)},
-            "quote": {"type": "string", "maxLength": MAX_QUOTE_CHARS},
-            "date": {"type": "string", "maxLength": 10},
-            "replaces": {"type": "integer", "minimum": 0},
-        },
-        "required": ["text", "kind", "quote", "date", "replaces"],
+        "properties": properties,
+        "required": required,
         "additionalProperties": False,
     }
     return {
@@ -254,8 +287,14 @@ def sources_of(messages: Sequence[str]) -> list[str]:
     return [source_text(m) for m in list(messages)[-MAX_SOURCE_MESSAGES:]]
 
 
-def prompt(sources: Sequence[str], known: Sequence[Known], today: dt.date, nonce: str) -> str:
-    """The user turn: the date, the notes already kept, the messages.
+def prompt(
+    sources: Sequence[str],
+    known: Sequence[Known],
+    today: dt.date,
+    nonce: str,
+    tags: Sequence[TagChoice] = (),
+) -> str:
+    """The user turn: the date, the notes already kept, the person's tags, the messages.
 
     Each message sits between tags carrying `nonce`, a random word the caller
     makes per call, so text in a message cannot close its own tag."""
@@ -264,6 +303,16 @@ def prompt(sources: Sequence[str], known: Sequence[Known], today: dt.date, nonce
     if shown:
         lines += ["", "Already remembered:"]
         lines += [f"{i}. {' '.join(k.text.split())}" for i, k in enumerate(shown, 1)]
+    if tags:
+        lines += [
+            "",
+            f"Their tags. Give each note up to {MAX_TAGS_PER_PROPOSAL} of these that fit it, "
+            "or none:",
+        ]
+        lines += [
+            f"- {t.tag}" + (f": {' '.join(t.description.split())}" if t.description else "")
+            for t in tags
+        ]
     lines += ["", "Their messages, oldest first:"]
     for text in sources:
         if text:
@@ -277,15 +326,18 @@ def request_body(
     known: Sequence[Known],
     today: dt.date,
     nonce: str,
+    tags: Sequence[TagChoice] = (),
+    *,
+    enum_max: int = TAG_ENUM_MAX,
 ) -> dict[str, Any]:
     """The whole chat-completions body (no tools, no stream)."""
     return {
         "model": model,
         "messages": [
             {"role": "system", "content": INSTRUCTIONS},
-            {"role": "user", "content": prompt(sources, known, today, nonce)},
+            {"role": "user", "content": prompt(sources, known, today, nonce, tags)},
         ],
-        "response_format": response_format(),
+        "response_format": response_format(tags, enum_max=enum_max),
         # Thinking off (MRC3): Eugene's driver gives a llama.cpp model's template
         # `enable_thinking: false` for it. Measured: with thinking, Qwen models spent the whole
         # budget thinking on 31-100% of calls; without, none did.
@@ -592,6 +644,9 @@ class Proposal:
     revisit_at: str | None = None
     #: The id of the note it would replace, if the model said so.
     replaces: str | None = None
+    #: The tags it came with (MV1): from the person's list, or, past the enum's cut-off,
+    #: words that may not be on it.
+    tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -684,7 +739,11 @@ def _judge(
         return Rejected(NOT_A_NOTE)
     text, quote = item.get("text"), item.get("quote")
     kind, date, replaces = item.get("kind"), item.get("date") or "", item.get("replaces") or 0
-    if not isinstance(text, str) or not isinstance(quote, str) or kind not in memory.KINDS:
+    if (
+        not isinstance(text, str)
+        or not isinstance(quote, str)
+        or kind not in memory.SUGGESTED_KINDS
+    ):
         return Rejected(NOT_A_NOTE)
     if not isinstance(date, str) or not isinstance(replaces, int) or isinstance(replaces, bool):
         return Rejected(NOT_A_NOTE)
@@ -738,4 +797,35 @@ def _judge(
         expires_at=expires,
         revisit_at=revisit,
         replaces=replaced,
+        tags=_tags_of(item.get("tags")),
     )
+
+
+def tags_for(text: str, listed: Sequence[TagChoice]) -> tuple[str, ...]:
+    """The person's tags a note names in its own words (MV1): a tag whose words stand whole
+    in the note's text, case and Unicode forms apart; at most `MAX_TAGS_PER_PROPOSAL`, in
+    list order. No model is asked: measured, asking made small models' suggestions worse."""
+    words = f" {' '.join(re.findall(r'[^\W_]+', memory.tag_key(text)))} "
+    found: list[str] = []
+    for choice in listed:
+        key = " ".join(re.findall(r"[^\W_]+", memory.tag_key(choice.tag)))
+        if key and f" {key} " in words and choice.tag not in found:
+            found.append(choice.tag)
+    return tuple(found[:MAX_TAGS_PER_PROPOSAL])
+
+
+def _tags_of(value: Any) -> tuple[str, ...]:
+    """The tags a proposal came with that are fit to be tags; never more than the schema's."""
+    if not isinstance(value, list):
+        return ()
+    kept: list[str] = []
+    for raw in value:
+        if not isinstance(raw, str):
+            continue
+        try:
+            tag = memory.validate_tag(unicodedata.normalize("NFKC", raw))
+        except memory.NoteRefused:
+            continue
+        if memory.tag_key(tag) not in {memory.tag_key(t) for t in kept}:
+            kept.append(tag)
+    return tuple(kept[:MAX_TAGS_PER_PROPOSAL])

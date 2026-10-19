@@ -73,6 +73,10 @@ class Preparation:
     sources: list[dict[str, Any]] = field(default_factory=list)
     retrieval: dict[str, Any] | None = None
     reply: str | None = None
+    #: What this turn was sent of the person's notes (`Message.memory_used`), or None.
+    memory_used: dict[str, Any] | None = None
+    #: Whether the model is offered `search_memory` (MV1): the answer then runs with tools.
+    memory_tool: bool = False
     #: How a `reply` ends, as a message's `finish` says it.
     finish: str = "documents_only"
 
@@ -231,6 +235,7 @@ def message_view(message: Message) -> dict[str, Any]:
         "toolRounds": message.tool_rounds,
         "outputCap": message.output_cap,
         "retrieval": message.retrieval,
+        "memoryUsed": message.memory_used,
     }
 
 
@@ -381,6 +386,7 @@ class Answers:
             "reasoning_from": m.reasoning_from,
             "tool_rounds": m.tool_rounds,
             "retrieval": m.retrieval,
+            "memory_used": m.memory_used,
             "model": m.model,
         }
         if final:
@@ -428,9 +434,11 @@ class Answers:
             if value is not None:
                 self.publish(chat_id, {"type": "progress", "id": m.id, "progress": value})
 
+        memory_tool = False
         try:
             if prepare is not None:
                 prepared = await prepare(progress)
+                memory_tool = prepared.memory_tool
                 running.progress = None
                 told: dict[str, Any] = {}
                 if prepared.sources:
@@ -439,6 +447,9 @@ class Answers:
                 if prepared.retrieval is not None:
                     m.retrieval = prepared.retrieval
                     told["retrieval"] = m.retrieval
+                if prepared.memory_used is not None:
+                    m.memory_used = prepared.memory_used
+                    told["memoryUsed"] = m.memory_used
                 if prepared.reply is not None:
                     # Nothing to answer from, and the chat answers only from the
                     # person's documents: these are Workbench's words, not a model's.
@@ -456,8 +467,10 @@ class Answers:
             if context:
                 # Ordinary user context, before the current explicit request.
                 body["messages"][-1:-1] = context
-            if tool_servers or folder_grants:
-                await self._with_tools(running, body, tool_servers, folder_grants)
+            if tool_servers or folder_grants or memory_tool:
+                await self._with_tools(
+                    running, body, tool_servers, folder_grants, memory_tool=memory_tool
+                )
             else:
                 await self._stream(running, body)
             m.status = "done"
@@ -558,7 +571,13 @@ class Answers:
         )
 
     async def _with_tools(
-        self, running: Running, body: dict[str, Any], server_ids: list[str], folder_ids: list[str]
+        self,
+        running: Running,
+        body: dict[str, Any],
+        server_ids: list[str],
+        folder_ids: list[str],
+        *,
+        memory_tool: bool = False,
     ) -> None:
         if self._tools is None:
             raise ToolError("Tools are unavailable. Restart Workbench and try again.")
@@ -566,6 +585,8 @@ class Answers:
         chat = await self._store.chat(running.chat_id)
         person = running.person or (await self._store.person(chat.owner) if chat else None)
         async with self._tools.connect(server_ids, person, folder_ids) as session:
+            if memory_tool and person is not None:
+                session.add_memory_search()
             if not session.definitions:
                 raise ToolError("The selected servers offer no tools. Check them in Tools.")
             body["tools"] = session.definitions
