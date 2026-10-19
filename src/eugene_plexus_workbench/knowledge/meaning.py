@@ -827,8 +827,8 @@ class Meaning:
         then goes to the back. Seconds to wait before the next turn (0: go on), or None to
         wait until somebody has something owed."""
         settings = await self._settings()
-        if not settings.enabled:
-            return None  # the owner turned documents off: nothing is added
+        # With documents turned off by the owner, a person's notes still get their meaning
+        # (MV1): `_work` asks the index for notes' passages only.
         now = self._clock()
         if now < self._limit_until:
             return self._limit_until - now
@@ -913,6 +913,8 @@ class Meaning:
         if index is None:
             return Outcome.DONE
         try:
+            if not settings.enabled and not (await index.pending_meaning(1, documents=False))[0]:
+                return Outcome.DONE  # documents are off, and none of this person's notes is owed
             built = Identity.from_json(await index.embedder())
             if sub in self._blocked:
                 await self.probe(fresh=True)  # it was waiting for the search model: look again
@@ -946,7 +948,11 @@ class Meaning:
             await index.reopen_unembedded()
             ident = built or embedders.identity_for(seen.model, seen.dim, self._wall())
             await self.limiter.wait(settings.embed_per_minute)
-            pending, epoch = await index.pending_meaning(BATCH)
+            # A person's notes are a profile of them: embedded only by a search model on the
+            # install's own machines (MV1), never by one the owner allowed for documents.
+            pending, epoch = await index.pending_meaning(
+                BATCH, notes=model.local, documents=settings.enabled
+            )
             if not pending:
                 await self._finish_counted(index)
                 return Outcome.DONE

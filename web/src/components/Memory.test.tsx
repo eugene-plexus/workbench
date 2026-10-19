@@ -80,6 +80,12 @@ function vetted(text: string): string {
 function listen() {
   vi.mocked(api).mockImplementation((async (path: string, init?: RequestInit) => {
     if (path === "/api/memory") return seen();
+    const whole = /^\/api\/memory\/notes\/([^/?]+)$/.exec(path);
+    if (whole && !init?.method) {
+      const found = server.notes.find((n) => n.id === whole[1]);
+      if (!found) throw new ApiError("There is no such note.", 404);
+      return { note: found, earlier: [] };
+    }
     if (path === "/api/memory/notes?confirm=all" && init?.method === "DELETE") {
       const deleted = server.notes.length;
       server.notes = [];
@@ -144,7 +150,7 @@ function listen() {
         disabledBy: next.enabled ? null : "you",
         external: next.external ?? "ask",
         externalSetBy: next.external ? "you" : "default",
-        budgetTokens: next.budgetTokens ?? 1000,
+        budgetTokens: next.budgetTokens ?? 2000,
       },
     });
     return server.prefs;
@@ -327,7 +333,7 @@ describe("how much is used", () => {
     server.notes = [note({ id: "a" }), note({ id: "b", text: "I live in Lisbon" })];
     await opened();
     expect(screen.getByTestId("memory-usage-tokens")).toHaveTextContent(
-      "Using 174 of 1,000 tokens",
+      "Pinned: 174 of 2,000 tokens, in every chat. Relevant: up to 6,000 tokens a turn, chosen from 2 notes by words.",
     );
     expect(screen.getByTestId("memory-usage-notes")).toHaveTextContent("2 of 300 notes");
   });
@@ -540,7 +546,11 @@ describe("editing a note", () => {
       }),
       { target: { value: "project" } },
     );
-    fireEvent.click(screen.getByRole("button", { name: "Save note" }));
+    fireEvent.click(
+      within(screen.getByRole("form", { name: "Edit this note" })).getByRole("button", {
+        name: "Save",
+      }),
+    );
     await waitFor(() => expect(textOf(rows()[0]!)).toBe("I live in Porto"));
     expect(patch).toHaveBeenCalledExactlyOnceWith("/api/memory/notes/a", {
       text: "I live in Porto",
@@ -586,9 +596,17 @@ describe("editing a note", () => {
     fireEvent.change(box, { target: { value: "x".repeat(250) } });
     expect(screen.getByText("250 of 240")).toHaveClass("text-error");
     expect(box).toHaveAttribute("aria-invalid", "true");
-    expect(screen.getByRole("button", { name: "Save note" })).toBeDisabled();
+    expect(
+      within(screen.getByRole("form", { name: "Edit this note" })).getByRole("button", {
+        name: "Save",
+      }),
+    ).toBeDisabled();
     fireEvent.change(box, { target: { value: "  " } });
-    expect(screen.getByRole("button", { name: "Save note" })).toBeDisabled();
+    expect(
+      within(screen.getByRole("form", { name: "Edit this note" })).getByRole("button", {
+        name: "Save",
+      }),
+    ).toBeDisabled();
     fireEvent.keyDown(box, { key: "Enter" });
     expect(patch).not.toHaveBeenCalled();
   });
@@ -596,7 +614,11 @@ describe("editing a note", () => {
   it("says in the server's words why a note was refused, and keeps the box open", async () => {
     const box = await edit();
     fireEvent.change(box, { target: { value: "My card is 4242 4242 4242 4242" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save note" }));
+    fireEvent.click(
+      within(screen.getByRole("form", { name: "Edit this note" })).getByRole("button", {
+        name: "Save",
+      }),
+    );
     const refused = await screen.findByRole("alert");
     expect(refused).toHaveTextContent(
       "That looks like a password or key, so Workbench will not keep it. It looks like a card number.",
@@ -739,6 +761,7 @@ describe("adding a note", () => {
       ["instruction", "How you want answers written. Always used."],
       ["project", "Something you are working on."],
       ["event", "Something with a date."],
+      ["procedure", "Steps, a brief or a checklist. Can be long."],
     ] as const) {
       fireEvent.change(kind, { target: { value } });
       expect(within(add()).getByText(help)).toBeInTheDocument();
@@ -747,7 +770,7 @@ describe("adding a note", () => {
       within(kind)
         .getAllByRole("option")
         .map((o) => o.textContent),
-    ).toEqual(["Fact", "Preference", "Instruction", "Project", "Event"]);
+    ).toEqual(["Fact", "Preference", "Instruction", "Project", "Event", "Procedure"]);
   });
 
   it("keeps the note with its kind and whether it is always used, and then the page reads it", async () => {
@@ -1086,12 +1109,12 @@ describe("how much room notes may take", () => {
     expect(details).not.toHaveAttribute("open");
     expect(within(details).getByText("How much room notes may take")).toHaveClass("disclosure");
     expect(screen.getByTestId("memory-budget-effective")).toHaveTextContent(
-      "In effect: 1,000 tokens. Nobody has chosen, so the default applies.",
+      "In effect: 2,000 tokens. Nobody has chosen, so the default applies.",
     );
-    expect(details).toHaveTextContent("never more than 8% of its model's window");
+    expect(details).toHaveTextContent("never more than 4% of its model's window");
     expect(screen.getByTestId("memory-budget-input")).toHaveAttribute(
       "placeholder",
-      "1,000 (the default)",
+      "2,000 (the default)",
     );
     expect(screen.queryByTestId("memory-budget-default")).toBeNull();
   });
@@ -1108,7 +1131,7 @@ describe("how much room notes may take", () => {
     expect(screen.getByTestId("memory-budget-input")).toHaveValue("600");
     fireEvent.click(screen.getByTestId("memory-budget-default"));
     await waitFor(() =>
-      expect(screen.getByTestId("memory-budget-effective")).toHaveTextContent("1,000 tokens"),
+      expect(screen.getByTestId("memory-budget-effective")).toHaveTextContent("2,000 tokens"),
     );
     expect(put).toHaveBeenLastCalledWith("/api/memory/prefs", { budgetTokens: null });
     expect(screen.getByTestId("memory-budget-input")).toHaveValue("");

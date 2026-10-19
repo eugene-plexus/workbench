@@ -60,6 +60,7 @@ log = logging.getLogger(__name__)
 OWNER_READS_CHATS = "ownerReadsChats"
 MEMORY_ENABLED = "memoryEnabled"
 MEMORY_MAX_NOTES = "memoryMaxNotes"
+MEMORY_MAX_BODY_CHARS = "memoryMaxBodyChars"
 MEMORY_EXTERNAL_MODELS = "memoryExternalModels"
 MEMORY_SUGGESTIONS = "memorySuggestions"
 SUGGESTION_CHOICES = ("off", "choose", "measured")
@@ -83,7 +84,9 @@ DOCUMENTS_FOLDER_MAX_DEPTH = "documentsFolderMaxDepth"
 #: the machines (`memory_api`'s `resolve_external` says how the owner's and a person's
 #: choices meet).
 EXTERNAL_CHOICES = ("never", "ask", "always")
-MAX_NOTES_LIMIT = 2000
+MAX_NOTES_LIMIT = 200_000
+#: A note's body (MV1): the store's own ceiling, which the setting cannot pass.
+MAX_BODY_CHARS_LIMIT = 20_000
 MAX_FILE_MB_LIMIT = 500
 MIN_WHOLE_TOKENS, MAX_WHOLE_TOKENS = 500, 200_000
 MIN_PASSAGES_LIMIT, MAX_PASSAGES_LIMIT = 100, 1_000_000
@@ -138,15 +141,31 @@ FIELDS = [
         description=(
             "How many notes each person can keep.\n\n"
             "At the limit a person is told so and keeps no new note until they delete "
-            "one; lowering it deletes nothing. Each note is at most 240 characters, "
-            "and a chat sends only as many as fit in 8% of its model's window, at most "
-            "1,000 tokens."
+            "one; lowering it deletes nothing. Earlier versions of a note count. A chat "
+            "sends pinned notes in every turn, at most 2,000 tokens or 4% of its model's "
+            "window, and in each turn only the other notes that bear on what was asked, "
+            "at most 6,000 tokens or 10% of the window."
         ),
         category="memory",
         valueType=ConfigValueType.integer,
-        default=300,
+        default=20_000,
         minimum=1,
         maximum=MAX_NOTES_LIMIT,
+    ),
+    ConfigField(
+        key=MEMORY_MAX_BODY_CHARS,
+        label="Longest note body",
+        description=(
+            "How many characters a note's body may hold, below its one-line title.\n\n"
+            "A body holds a procedure, a brief or a checklist, in Markdown. A chat sends "
+            "only the parts of a body that bear on what was asked. 0 means notes have no "
+            "body. Lowering it shortens nothing already kept."
+        ),
+        category="memory",
+        valueType=ConfigValueType.integer,
+        default=MAX_BODY_CHARS_LIMIT,
+        minimum=0,
+        maximum=MAX_BODY_CHARS_LIMIT,
     ),
     ConfigField(
         key=MEMORY_EXTERNAL_MODELS,
@@ -458,7 +477,8 @@ FIELDS = [
 DEFAULTS: dict[str, Any] = {
     OWNER_READS_CHATS: False,
     MEMORY_ENABLED: True,
-    MEMORY_MAX_NOTES: 300,
+    MEMORY_MAX_NOTES: 20_000,
+    MEMORY_MAX_BODY_CHARS: MAX_BODY_CHARS_LIMIT,
     MEMORY_EXTERNAL_MODELS: "ask",
     MEMORY_SUGGESTIONS: "measured",
     CONNECTIONS: True,
@@ -499,11 +519,14 @@ class MemorySettings:
     #: Memory suggestions (MR8): `off`, `choose` (each person turns them on) or `measured`
     #: (also on, for a person who has not chosen, with a model that passed the measurement).
     suggestions: str = "measured"
+    #: MV1: the most characters a new or edited note's body may hold.
+    max_body_chars: int = MAX_BODY_CHARS_LIMIT
 
 
 async def memory_settings(store: Store) -> MemorySettings:
     enabled = await store.setting(MEMORY_ENABLED)
     limit = await store.setting(MEMORY_MAX_NOTES)
+    body = await store.setting(MEMORY_MAX_BODY_CHARS)
     external = await store.setting(MEMORY_EXTERNAL_MODELS)
     suggestions = await store.setting(MEMORY_SUGGESTIONS)
     return MemorySettings(
@@ -514,6 +537,7 @@ async def memory_settings(store: Store) -> MemorySettings:
         ),
         enabled=bool(enabled) if enabled is not None else bool(DEFAULTS[MEMORY_ENABLED]),
         max_notes=int(limit) if limit is not None else int(DEFAULTS[MEMORY_MAX_NOTES]),
+        max_body_chars=int(body) if body is not None else MAX_BODY_CHARS_LIMIT,
         external=(
             str(external) if external in EXTERNAL_CHOICES else str(DEFAULTS[MEMORY_EXTERNAL_MODELS])
         ),
@@ -735,6 +759,7 @@ async def get_config(request: Request) -> ConfigDocument:
             OWNER_READS_CHATS: await owner_reads_chats(store),
             MEMORY_ENABLED: memory.enabled,
             MEMORY_MAX_NOTES: memory.max_notes,
+            MEMORY_MAX_BODY_CHARS: memory.max_body_chars,
             MEMORY_EXTERNAL_MODELS: memory.external,
             MEMORY_SUGGESTIONS: memory.suggestions,
             CONNECTIONS: await connections_enabled(store),
@@ -833,6 +858,14 @@ def _problem_with(key: str, value: Any) -> str | None:
         if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= MAX_NOTES_LIMIT:
             return None
         return f"Must be a whole number from 1 to {MAX_NOTES_LIMIT:,}."
+    if key == MEMORY_MAX_BODY_CHARS:
+        if (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and 0 <= value <= MAX_BODY_CHARS_LIMIT
+        ):
+            return None
+        return f"Must be a whole number from 0 to {MAX_BODY_CHARS_LIMIT:,}."
     if key in (MEMORY_EXTERNAL_MODELS, DOCUMENTS_EXTERNAL_MODELS):
         return None if value in EXTERNAL_CHOICES else "Must be never, ask or always."
     if key == MEMORY_SUGGESTIONS:

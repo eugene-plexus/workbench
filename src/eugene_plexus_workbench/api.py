@@ -52,6 +52,7 @@ from .store import (
     path,
     versions,
 )
+from .tools import MEMORY_SERVER, MEMORY_TOOL_NAME
 
 log = logging.getLogger(__name__)
 
@@ -572,11 +573,69 @@ def hidden_from_owner(tree: list[Message], mode: str) -> dict[str, str]:
     return hidden
 
 
+def hide_notes(view: dict[str, Any]) -> dict[str, Any]:
+    """A message as the install's owner may read it, with the person's notes hidden (MV1):
+    what its turn was sent of them is counts only, and a `search_memory` call keeps neither
+    what was asked nor what it found. A person's notes are never the owner's to read."""
+    used = view.get("memoryUsed")
+    rounds = view.get("toolRounds") or []
+    searched = any(
+        call.get("serverId") == MEMORY_SERVER for turn in rounds for call in turn.get("calls") or []
+    )
+    if not used and not searched:
+        return view
+    out = dict(view)
+    if isinstance(used, dict):
+        out["memoryUsed"] = {
+            "notes": len(used.get("notes") or []),
+            "tokens": used.get("tokens"),
+            "budget": used.get("budget"),
+            "redacted": True,
+        }
+    if searched:
+        out["toolRounds"] = [
+            {
+                **turn,
+                "assistant": _hide_memory_calls(turn.get("assistant") or {}),
+                "calls": [
+                    {
+                        **call,
+                        "arguments": {},
+                        "result": "Hidden: the person's notes.",
+                        "content": [],
+                        "redacted": True,
+                    }
+                    if call.get("serverId") == MEMORY_SERVER
+                    else call
+                    for call in turn.get("calls") or []
+                ],
+            }
+            for turn in rounds
+        ]
+    return out
+
+
+def _hide_memory_calls(assistant: dict[str, Any]) -> dict[str, Any]:
+    calls = assistant.get("tool_calls") or []
+    if not calls:
+        return assistant
+    return {
+        **assistant,
+        "tool_calls": [
+            {**c, "function": {**(c.get("function") or {}), "arguments": "{}"}}
+            if (c.get("function") or {}).get("name") == MEMORY_TOOL_NAME
+            else c
+            for c in calls
+        ],
+    }
+
+
 def hide_saved_documents(view: dict[str, Any]) -> dict[str, Any]:
     """A message as the install's owner may read it, with the passages of a person's
     saved documents hidden: "a document", and no name, no words, no headings, no page
     (MR4). Saved documents are never the owner's to read, even where the person's chats
     are; a file the person attached to the chat is in the chat and stays readable."""
+    view = hide_notes(view)
     sources = view.get("sources") or []
     if not any(s.get("kind") == "document" and s.get("passage") for s in sources):
         return view
@@ -849,13 +908,26 @@ async def _ask(
             request, fresh, history, by_id, model, notes, progress
         )
         decided["documents"] = prepared.sent
-        found = await saved_api.retrieve(
+        # The notes that bear on what the person just asked (MV1), in the room the chat
+        # leaves; then the documents' passages, in what is left after them.
+        turn = await memory_api.turn_for(
             request,
             person,
             fresh,
             history,
             model,
             used=prepared.used,
+            reserve=saved_api._reserve(fresh),
+        )
+        decided["memory_turn"] = turn.block
+        decided["memory_allowed"] = turn.allowed
+        found = await saved_api.retrieve(
+            request,
+            person,
+            fresh,
+            history,
+            model,
+            used=prepared.used + turn.tokens,
             sent_whole=prepared.sent_whole,
             progress=progress,
             ask_anyway=ask_anyway,
@@ -865,6 +937,8 @@ async def _ask(
             sources=[*prepared.sources, *found.sources],
             retrieval=found.retrieval,
             reply=found.reply,
+            memory_used=turn.record,
+            memory_tool=turn.tool,
         )
 
     def build() -> dict[str, Any]:
@@ -878,6 +952,8 @@ async def _ask(
             memory=notes,
             documents=decided.get("documents"),
             retrieved=decided.get("retrieved"),
+            memory_turn=decided.get("memory_turn"),
+            memory_allowed=bool(decided.get("memory_allowed", notes is not None)),
         )
 
     answers = _answers(request)

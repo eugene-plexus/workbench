@@ -20,7 +20,9 @@ from typing import Any
 import pytest
 
 from eugene_plexus_workbench.hub import Embedded, HubError
+from eugene_plexus_workbench.knowledge import chunk as chunk_module
 from eugene_plexus_workbench.knowledge import embedders
+from eugene_plexus_workbench.knowledge import index as index_module
 from eugene_plexus_workbench.knowledge import meaning as meaning_module
 from eugene_plexus_workbench.knowledge.index import (
     LIBRARY,
@@ -1344,3 +1346,53 @@ async def test_a_waiting_documents_row_says_why_it_waits(world: World) -> None:
         "Ready for words. Meaning is waiting: the search model embed-model is not running. "
         "Start it in Eugene's console under Backends."
     )
+
+
+# --------------------------------------------------------------------------- #
+# a person's notes (MV1)
+# --------------------------------------------------------------------------- #
+
+
+async def _note(world: World, note_id: str, text: str) -> None:
+    passage = chunk_module.Passage(
+        ord=0,
+        text=text,
+        heading_path=None,
+        page_start=None,
+        page_end=None,
+        line_start=None,
+        line_end=None,
+        char_start=0,
+        char_end=0,
+        tokens_est=5,
+    )
+    await world.index().put_note(note_id, "digest-" + note_id, text, [passage])
+    world.meaning.wake(ADA)
+
+
+async def test_a_note_is_never_sent_to_a_search_model_outside_the_machines(world: World) -> None:
+    """The owner may let documents go to an outside search model; a person's notes, a profile
+    of them, never go with them."""
+    world.gateway.listing = [search_model("cloud-embed", locality="external", owned_by="openai")]
+    world.settings.embedding_model = "cloud-embed"
+    world.settings.external_embedding = True
+    await world.add("doc00001", 2)
+    await _note(world, "note0001", "Lives in Lisbon with two cats")
+    await world.run()
+    sent = " ".join(world.gateway.passages())
+    assert "doc00001" in sent, "the documents went, as the owner allowed"
+    assert "Lisbon" not in sent, "the note did not"
+    counts = await world.index().meaning_counts(index_module.NOTES)
+    assert counts.embedded == 0
+
+
+async def test_notes_get_their_meaning_with_documents_off_and_documents_do_not(
+    world: World,
+) -> None:
+    world.settings.enabled = False
+    await world.add("doc00001", 2)
+    await _note(world, "note0001", "Lives in Lisbon with two cats")
+    await world.run()
+    sent = " ".join(world.gateway.passages())
+    assert "Lisbon" in sent and "doc00001" not in sent
+    assert (await world.index().meaning_counts(index_module.NOTES)).embedded == 1

@@ -121,10 +121,15 @@ describe("after Remember that ...", () => {
     // focus a button a pointer presses): the keyboard was nowhere, so it stays there.
     (document.activeElement as HTMLElement | null)?.blur();
     expect(document.body).toHaveFocus();
-    fireEvent.click(screen.getByRole("button", { name: "Undo" }));
-    const focus = vi.spyOn(screen.getByRole("button", { name: "Dismiss" }), "focus");
-    await screen.findByText("Undone.");
-    expect(focus).not.toHaveBeenCalled();
+    // Any button the toast draws (it draws them anew once Undo is done).
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+      await screen.findByText("Undone.");
+      expect(focus).not.toHaveBeenCalled();
+    } finally {
+      focus.mockRestore();
+    }
     expect(document.body).toHaveFocus();
   });
 

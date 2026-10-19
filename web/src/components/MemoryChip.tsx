@@ -32,6 +32,7 @@ import type {
 } from "../lib/types";
 import { useKeepFocus } from "../lib/useKeepFocus";
 import { FOCUSABLE, useOverlay } from "./ChatSettings";
+import { ReadOnlyTurn, ThisTurn } from "./MemoryTurn";
 import { ScrollText } from "./ScrollText";
 
 const TONE: Record<ChipTone, string> = {
@@ -94,6 +95,11 @@ function NoteRow({ note, children }: { note: SentNote | NotSentNote; children?: 
           {note.always && <span className="badge">Always used</span>}
         </span>
       </div>
+      {"body" in note && note.body ? (
+        <span data-testid="memory-note-body-sent" className="text-xs text-muted">
+          Its details went whole: {plural(note.body.length, "character")}.
+        </span>
+      ) : null}
       {children}
     </li>
   );
@@ -364,6 +370,7 @@ export function MemoryDrawer({
           {view?.readOnly && (
             <div data-testid="memory-status" className="flex flex-col gap-2 text-sm">
               <p>{readOnlyWords(view)}</p>
+              <ReadOnlyTurn view={view} />
               <p className="help">
                 This is someone else&apos;s chat. You can see how many notes it used, not what they
                 said: notes are private.
@@ -416,7 +423,7 @@ export function MemoryDrawer({
               {own.sent.length > 0 && (
                 <section aria-labelledby={`${uid}-sent`} className="flex flex-col gap-1">
                   <h3 id={`${uid}-sent`} className="eyebrow text-muted">
-                    Sent to the model
+                    Sent to the model in every turn
                   </h3>
                   {own.budget ? (
                     <p className="help">
@@ -438,6 +445,7 @@ export function MemoryDrawer({
                   </ul>
                 </section>
               )}
+              {own.sending && <ThisTurn chatId={chatId} view={own} />}
               {own.notSent.length > 0 && (
                 <section aria-labelledby={`${uid}-not-sent`} className="flex flex-col gap-1">
                   <h3 id={`${uid}-not-sent`} className="eyebrow text-muted">

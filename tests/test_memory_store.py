@@ -12,6 +12,7 @@ import asyncio
 import json
 import sqlite3
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -97,7 +98,9 @@ def test_a_note_is_kept_with_its_owner_and_read_back(tmp_path: Path) -> None:
             False,
         )
         assert (found.source, found.source_chat_id, found.use_count) == ("said", "c1", 0)
-        assert await store.memory_note("ada", "a1") == found
+        # A list holds no body (None); a note read whole holds it ("" when it has none).
+        assert found.body is None
+        assert await store.memory_note("ada", "a1") == replace(found, body="")
         assert await store.memory_count("ada") == 1
 
     run(tmp_path / "w.sqlite3", body)
@@ -116,7 +119,7 @@ def test_no_method_reaches_a_note_that_is_not_the_askers(tmp_path: Path) -> None
         assert await store.memory_count("bo") == 1
         assert await store.update_memory_note("bo", "a1", text="hacked") is None
         assert await store.update_memory_note("bo", "a1", pinned=True) is None
-        assert await store.delete_memory_note("bo", "a1") is False
+        assert await store.delete_memory_note("bo", "a1") == []
         assert [n.text for n in await store.search_memory("bo", '"plum"')] == []
         assert [n.text for n in await store.search_memory("ada", '"plum"')] == [
             "My code word is plum"
@@ -262,7 +265,7 @@ def test_deleting_a_note_is_real(tmp_path: Path) -> None:
                 },
             )
         assert (await store.chat("c1")).memory_snapshot is not None  # type: ignore[union-attr]
-        assert await store.delete_memory_note("ada", "a1")
+        assert await store.delete_memory_note("ada", "a1") == ["a1"]
 
     run(path, body)
     assert rows(path, "SELECT id FROM memory_notes WHERE id = 'a1'") == []
@@ -486,12 +489,12 @@ def test_a_schema_9_file_gains_memory_and_keeps_every_chat(tmp_path: Path) -> No
         await store.add_memory_note(make("ada", "Lives in Denver", id="a1"), limit=LIMIT)
         assert [n.id for n in await store.search_memory("ada", '"denver"')] == ["a1"]
         assert await store.set_memory_snapshot("c1", "ada", {"ids": ["a1"]})
-        assert await store.delete_memory_note("ada", "a1")
+        assert await store.delete_memory_note("ada", "a1") == ["a1"]
         assert (await store.chat("c1")).memory_snapshot is None  # type: ignore[union-attr]
 
     run(path, body)
     with sqlite3.connect(path) as db:
-        assert db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone() == ("21",)
+        assert db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone() == ("22",)
         tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         triggers = {
             r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'")

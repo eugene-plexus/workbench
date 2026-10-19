@@ -1,4 +1,4 @@
-"""Prove the memory checks are observed (MR1, memory v1).
+"""Prove the memory checks are observed (MR1; memory v2, MV1).
 
 Each case breaks one thing in the store, the rules or the routes, and its
 named check must fail. Files are restored from exact bytes kept beside the
@@ -7,6 +7,7 @@ does not count as a caught defect.
 
   python scripts/check-memory-sabotage.py            # every case
   python scripts/check-memory-sabotage.py --anchors  # only check each anchor is unique
+  python scripts/check-memory-sabotage.py --label TEXT ...  # only the cases whose label has TEXT
 
 Run it with the interpreter and PYTHONPATH the tests use, and with every
 ambient EUGENE_PLEXUS_* variable cleared.
@@ -30,41 +31,34 @@ CONVERSATION = SRC + "conversation.py"
 RULES = "tests/test_memory.py"
 STORING = "tests/test_memory_store.py"
 HTTP = "tests/test_memory_api.py"
+V2 = "tests/test_memory_v2.py"
+TOOLS = SRC + "tools.py"
+RELEVANCE = SRC + "memory_relevance.py"
+MEANING = SRC + "knowledge/meaning.py"
 
 # (label, file, before, after, check)
 CASES: list[tuple[str, str, str, str, str]] = [
     # --- whose notes -------------------------------------------------------
     (
-        "a note read by its id ignores the owner",
+        "a note read or listed by its id ignores the owner",
         STORE,
-        '.execute("SELECT * FROM memory_notes WHERE id = ? AND owner = ?", (note_id, owner))',
-        '.execute("SELECT * FROM memory_notes WHERE id = ? AND ? IS NOT NULL", (note_id, owner))',
+        'f"SELECT {columns} FROM memory_notes WHERE owner = ?{where}{order}", (owner, *params)',
+        'f"SELECT {columns} FROM memory_notes WHERE ? IS NOT NULL{where}{order}", (owner, *params)',
         f"{STORING}::test_no_method_reaches_a_note_that_is_not_the_askers",
     ),
     (
         "an edit finds a note without the owner",
         STORE,
-        "                row = db.execute(\n"
-        '                    "SELECT * FROM memory_notes WHERE id = ? AND owner = ?", (note_id, owner)\n'
-        "                ).fetchone()",
-        "                row = db.execute(\n"
-        '                    "SELECT * FROM memory_notes WHERE id = ? AND ? IS NOT NULL", (note_id, owner)\n'
-        "                ).fetchone()",
+        "\"SELECT * FROM memory_notes WHERE id = ? AND owner = ? AND status = 'active'\",",
+        "\"SELECT * FROM memory_notes WHERE id = ? AND ? IS NOT NULL AND status = 'active'\",",
         f"{STORING}::test_no_method_reaches_a_note_that_is_not_the_askers",
     ),
     (
-        "a delete by id ignores the owner",
+        "a delete finds a note without the owner",
         STORE,
-        '"DELETE FROM memory_notes WHERE id = ? AND owner = ?", (note_id, owner)',
-        '"DELETE FROM memory_notes WHERE id = ? AND ? IS NOT NULL", (note_id, owner)',
-        f"{HTTP}::test_a_note_that_is_not_yours_is_a_note_that_does_not_exist",
-    ),
-    (
-        "the list of notes is everyone's",
-        STORE,
-        'sql, params = "SELECT * FROM memory_notes WHERE owner = ?", [owner]',
-        'sql, params = "SELECT * FROM memory_notes WHERE ? IS NOT NULL", [owner]',
-        f"{HTTP}::test_a_note_that_is_not_yours_is_a_note_that_does_not_exist",
+        '"SELECT id, status, superseded_by FROM memory_notes WHERE id = ? AND owner = ?",',
+        '"SELECT id, status, superseded_by FROM memory_notes WHERE id = ? AND ? IS NOT NULL",',
+        f"{V2}::test_a_new_version_keeps_the_old_as_history_and_deleting_takes_the_chain",
     ),
     (
         "the forget search ranks other people's notes",
@@ -139,9 +133,9 @@ CASES: list[tuple[str, str, str, str, str]] = [
     (
         "a delete only hides the note",
         STORE,
-        '"DELETE FROM memory_notes WHERE id = ? AND owner = ?", (note_id, owner)',
-        "\"UPDATE memory_notes SET status = 'dismissed' WHERE id = ? AND owner = ?\", "
-        "(note_id, owner)",
+        'db.execute("DELETE FROM memory_notes WHERE id = ? AND owner = ?", (one, owner))',
+        "db.execute(\"UPDATE memory_notes SET status = 'dismissed' WHERE id = ? AND owner = ?\", "
+        "(one, owner))",
         f"{STORING}::test_deleting_a_note_is_real",
     ),
     (
@@ -157,14 +151,14 @@ CASES: list[tuple[str, str, str, str, str]] = [
     (
         "a deleted note's log keeps its words",
         STORE,
-        '"UPDATE memory_events SET old_text = NULL, new_text = NULL WHERE note_id = old.id; END",',
-        '"UPDATE memory_events SET old_text = old_text WHERE note_id = old.id; END",',
+        '"UPDATE memory_events SET old_text = NULL, new_text = NULL WHERE note_id = old.id; "',
+        '"UPDATE memory_events SET old_text = old_text WHERE note_id = old.id; "',
         f"{STORING}::test_deleting_a_note_is_real",
     ),
     (
         "a deleted note stays in a chat's copy",
         STORE,
-        "                    self._drop_from_chats(db, owner, {note_id})\n",
+        "                self._drop_from_chats(db, owner, set(gone))\n",
         "",
         f"{HTTP}::test_an_edit_waits_for_a_refresh_and_a_delete_does_not",
     ),
@@ -179,9 +173,9 @@ CASES: list[tuple[str, str, str, str, str]] = [
     (
         "the budget is ignored",
         MEMORY,
-        "        if _tokens(other + o, cjk + c) <= budget:",
-        "        if True:",
-        f"{RULES}::test_the_budget_is_spent_instructions_and_pinned_first_then_newest_first",
+        "            o, c = o + to, c + tc\n        if _tokens(other + o, cjk + c) <= budget:",
+        "            o, c = o + to, c + tc\n        if True:",
+        f"{RULES}::test_the_budget_is_spent_in_priority_order_newest_first",
     ),
     (
         "a window gives up no share of itself",
@@ -202,20 +196,20 @@ CASES: list[tuple[str, str, str, str, str]] = [
         MEMORY,
         "    return (0 if is_always(note) else 1, -note.created_at, note.id)",
         "    return (0 if is_always(note) else 1, note.created_at, note.id)",
-        f"{RULES}::test_the_budget_is_spent_instructions_and_pinned_first_then_newest_first",
+        f"{RULES}::test_the_budget_is_spent_in_priority_order_newest_first",
     ),
     (
         "instructions are not used first",
         MEMORY,
         "    return (0 if is_always(note) else 1, -note.created_at, note.id)",
         "    return (0 if note.pinned else 1, -note.created_at, note.id)",
-        f"{RULES}::test_the_budget_is_spent_instructions_and_pinned_first_then_newest_first",
+        f"{RULES}::test_the_budget_is_spent_in_priority_order_newest_first",
     ),
     (
         "a suggestion that is not approved is sent",
         MEMORY,
-        '    for note in sorted((n for n in notes if n.status == "active"), key=_priority):',
-        "    for note in sorted(notes, key=_priority):",
+        'usable = [n for n in notes if n.status == "active" and is_always(n) and not is_past(n, today)]',
+        "usable = [n for n in notes if is_always(n) and not is_past(n, today)]",
         f"{RULES}::test_only_active_notes_are_sent",
     ),
     (
@@ -241,15 +235,15 @@ CASES: list[tuple[str, str, str, str, str]] = [
     (
         "a chat takes new notes at every turn",
         ROUTES,
-        "        if snapshot is None or snapshot.model != model_id:",
-        "        if True:",
+        "    if snapshot is None or snapshot.model != model_id:",
+        "    if True:",
         f"{HTTP}::test_every_turn_sends_the_same_bytes_until_the_person_refreshes",
     ),
     (
         "another model is sent the first model's copy",
         ROUTES,
-        "        if snapshot is None or snapshot.model != model_id:",
-        "        if snapshot is None:",
+        "    if snapshot is None or snapshot.model != model_id:",
+        "    if snapshot is None:",
         f"{HTTP}::test_another_model_takes_the_notes_again_for_its_own_window",
     ),
     (
@@ -267,16 +261,13 @@ CASES: list[tuple[str, str, str, str, str]] = [
         f"{RULES}::test_a_snapshot_survives_being_saved_and_a_bad_copy_is_not_trusted",
     ),
     (
-        "the command is handled after the request is built",
+        # Its order against `_ask` is not a case: the request is built in the answer's own
+        # task, so a command handled just after `_ask` still lands first under the fakes.
+        # The live run (mr1-memory-acceptance.py, part 2) checks the first request.
+        "the command is not handled",
         API,
-        "    command = await memory_api.handle_command(request, person, chat, user)\n"
-        "    answer = await _ask(\n"
-        "        request, chat, parent_id=user.id, model=model, search=search, records=records\n"
-        "    )\n",
-        "    answer = await _ask(\n"
-        "        request, chat, parent_id=user.id, model=model, search=search, records=records\n"
-        "    )\n"
         "    command = await memory_api.handle_command(request, person, chat, user)\n",
+        "    command = None\n",
         f"{HTTP}::test_a_command_keeps_the_persons_words_and_the_message_is_still_sent",
     ),
     # --- the switches ------------------------------------------------------
@@ -306,8 +297,9 @@ CASES: list[tuple[str, str, str, str, str]] = [
     (
         "a secret is kept",
         MEMORY,
-        '    if secret is not None:\n        raise NoteRefused("secret", SECRET_MESSAGE, secret)',
-        '    if False:\n        raise NoteRefused("secret", SECRET_MESSAGE, secret)',
+        '        raise NoteRefused("secret", SECRET_MESSAGE, secret)\n'
+        "    if len(cleaned) > MAX_NOTE_CHARS:",
+        "        pass\n    if len(cleaned) > MAX_NOTE_CHARS:",
         f"{RULES}::test_a_note_that_looks_like_a_secret_is_refused_in_plain_words",
     ),
     (
@@ -327,8 +319,10 @@ CASES: list[tuple[str, str, str, str, str]] = [
     (
         "invisible characters are kept",
         MEMORY,
-        "    if _hidden(cleaned):",
-        "    if False:",
+        '    if _hidden(cleaned):\n        raise NoteRefused(\n            "hidden",\n'
+        '            "A note is one line',
+        '    if False:\n        raise NoteRefused(\n            "hidden",\n'
+        '            "A note is one line',
         f"{RULES}::test_a_note_cannot_hold_a_control_or_invisible_character",
     ),
     (
@@ -348,15 +342,17 @@ CASES: list[tuple[str, str, str, str, str]] = [
     (
         "the same words are kept twice",
         STORE,
-        '                twin = next((r for r in kept if note_key(r["text"]) == wanted), None)',
-        "                twin = None",
+        'if note_key(r["text"]) == wanted',
+        "if False",
         f"{STORING}::test_the_same_words_are_not_kept_twice_and_the_limit_is_kept",
     ),
     (
         "the limit is not kept",
         STORE,
-        "                if total >= limit:",
-        "                if False:",
+        "                if total >= limit:\n                    raise MemoryFull(limit)\n"
+        "                self._insert_note(db, note)",
+        "                if False:\n                    raise MemoryFull(limit)\n"
+        "                self._insert_note(db, note)",
         f"{STORING}::test_the_same_words_are_not_kept_twice_and_the_limit_is_kept",
     ),
     (
@@ -369,8 +365,10 @@ CASES: list[tuple[str, str, str, str, str]] = [
     (
         "notes made together have no order",
         STORE,
-        "                if latest is not None and note.created_at <= latest:",
-        "                if False:",
+        "        if latest is not None and note.created_at <= latest:\n"
+        "            note.created_at = note.updated_at = latest + 1e-6\n"
+        "        if note.valid_from is None:",
+        "        if note.valid_from is None:",
         f"{STORING}::test_notes_made_in_the_same_instant_are_still_newest_first",
     ),
     # --- search and the command --------------------------------------------
@@ -412,6 +410,119 @@ CASES: list[tuple[str, str, str, str, str]] = [
         "",
         f"{STORING}::test_a_schema_9_file_gains_memory_and_keeps_every_chat",
     ),
+    # --- memory v2 (MV1) ----------------------------------------------------
+    (
+        "notes that are not always used go in the pinned block",
+        MEMORY,
+        'if n.status == "active" and is_always(n) and not is_past(n, today)]',
+        'if n.status == "active" and not is_past(n, today)]',
+        f"{V2}::test_the_pinned_block_holds_only_notes_always_used_and_their_bodies_while_they_fit",
+    ),
+    (
+        "a frozen copy from before MV1 is trusted",
+        MEMORY,
+        '                or data.get("version") != SNAPSHOT_VERSION\n',
+        "",
+        f"{V2}::test_the_pinned_block_holds_only_notes_always_used_and_their_bodies_while_they_fit",
+    ),
+    (
+        "a turn's notes are not said to be data",
+        MEMORY,
+        "    inner = [RELEVANT_INTRO] + [",
+        "    inner = [] + [",
+        f"{V2}::test_a_turns_block_is_data_in_its_own_delimiter_and_one_long_note_crowds_out_no_other",
+    ),
+    (
+        "a model notes may not reach is sent the pinned block, a turn's notes and the tool",
+        ROUTES,
+        "    if not decision.send:\n        return None, None",
+        "    if False:\n        return None, None",
+        f"{V2}::test_search_memory_runs_for_the_model_and_is_withheld_after_the_chat_moves_outside",
+    ),
+    (
+        "a kept search_memory result is replayed where notes may not go",
+        TOOLS,
+        'if not notes and call.get("serverId") == MEMORY_SERVER:',
+        "if False:",
+        f"{V2}::test_a_search_memory_result_is_withheld_where_notes_may_not_go_and_hidden_from_the_owner",
+    ),
+    (
+        "the owner reads what a turn was sent",
+        API,
+        '    if isinstance(used, dict):\n        out["memoryUsed"] = {',
+        '    if False:\n        out["memoryUsed"] = {',
+        f"{V2}::test_a_search_memory_result_is_withheld_where_notes_may_not_go_and_hidden_from_the_owner",
+    ),
+    (
+        "a deleted note's passages stay in the index",
+        ROUTES,
+        "    await _unindex(state, owner, chain)\n",
+        "",
+        f"{V2}::test_a_long_note_and_its_tags_round_trip_and_a_delete_leaves_no_words_in_the_index",
+    ),
+    (
+        "an index that lags sends a note's old words",
+        RELEVANCE,
+        'if n.status == "active" and held.get(n.id) == notes_index.digest(n)',
+        'if n.status == "active"',
+        f"{V2}::test_an_index_that_lags_behind_an_edit_never_sends_the_old_words",
+    ),
+    (
+        "a replaced note stays current",
+        STORE,
+        "\"UPDATE memory_notes SET status = 'superseded', superseded_at = ?, superseded_by = ?, \"",
+        "\"UPDATE memory_notes SET status = 'active', superseded_at = ?, superseded_by = ?, \"",
+        f"{V2}::test_a_new_version_keeps_the_old_as_history_and_deleting_takes_the_chain",
+    ),
+    (
+        "the schema 22 rebuild leaves the notes behind",
+        STORE,
+        "f\"SELECT rowid, {', '.join(carried)}, created_at FROM memory_notes_v1\"",
+        "f\"SELECT rowid, {', '.join(carried)}, created_at FROM memory_notes_v1 WHERE 0\"",
+        f"{V2}::test_a_schema_21_store_keeps_every_note_and_takes_the_v2_shape",
+    ),
+    (
+        "a note goes to an outside search model",
+        MEANING,
+        "BATCH, notes=model.local, documents=settings.enabled",
+        "BATCH, notes=True, documents=settings.enabled",
+        "tests/test_meaning_worker.py::test_a_note_is_never_sent_to_a_search_model_outside_the_machines",
+    ),
+    (
+        "a deleted note stays in the answers' records and a kept search",
+        STORE,
+        "                self._drop_from_answers(db, owner, titles)\n",
+        "",
+        f"{V2}::test_deleting_a_note_takes_it_out_of_a_kept_search_and_every_answers_record",
+    ),
+    (
+        "a note pinned mid-chat goes with the turn before Refresh",
+        RELEVANCE,
+        "            and (not memory.is_always(n) or n.id in bodies)\n",
+        "",
+        f"{HTTP}::test_every_turn_sends_the_same_bytes_until_the_person_refreshes",
+    ),
+    (
+        "a withheld search keeps the query the model wrote",
+        TOOLS,
+        "        if not notes:\n            mine = ",
+        "        if False:\n            mine = ",
+        f"{V2}::test_a_search_memory_result_is_withheld_where_notes_may_not_go_and_hidden_from_the_owner",
+    ),
+    (
+        "a new version is kept past the limit",
+        ROUTES,
+        "                person.sub, note_id, new, limit=install.max_notes\n",
+        "                person.sub, note_id, new\n",
+        f"{V2}::test_a_new_version_at_the_cap_is_refused_and_keeps_the_note_as_it_was",
+    ),
+    (
+        "a description that starts a formula is written as one",
+        ROUTES,
+        '        writer.writerow([t["tag"], _csv_cell(t["description"])])',
+        '        writer.writerow([t["tag"], t["description"]])',
+        f"{V2}::test_a_tag_cannot_start_a_formula_and_a_description_that_does_round_trips_through_csv",
+    ),
 ]
 
 ENV = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUTF8": "1"}
@@ -449,7 +560,11 @@ def main() -> int:
     anchors()
     if "--anchors" in sys.argv:
         return 0
-    checks = sorted({check for *_, check in CASES})
+    wanted = [a for i, a in enumerate(sys.argv) if i > 1 and sys.argv[i - 1] == "--label"]
+    cases = [c for c in CASES if not wanted or any(w in c[0] for w in wanted)]
+    if not cases:
+        raise SystemExit(f"No case's label has {wanted}.")
+    checks = sorted({check for *_, check in cases})
     for check in checks:
         passed, output = run(check)
         if not passed:
@@ -459,7 +574,7 @@ def main() -> int:
     backup = Path(tempfile.mkdtemp(prefix="workbench-memory-sabotage-"))
     print(f"Exact backups: {backup}", flush=True)
     caught = 0
-    for index, (label, name, before, after, check) in enumerate(CASES):
+    for index, (label, name, before, after, check) in enumerate(cases):
         path = ROOT / name
         original = path.read_bytes()
         (backup / f"{index}-{path.name}").write_bytes(original)
@@ -479,8 +594,8 @@ def main() -> int:
         if not passed:
             print(output)
             raise SystemExit(f"Restored baseline failed ({check}).")
-    print(f"{caught}/{len(CASES)} caught; restored baseline passes.")
-    return 0 if caught == len(CASES) else 1
+    print(f"{caught}/{len(cases)} caught; restored baseline passes.")
+    return 0 if caught == len(cases) else 1
 
 
 if __name__ == "__main__":

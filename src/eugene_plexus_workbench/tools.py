@@ -25,7 +25,7 @@ from mcp.client.streamable_http import streamable_http_client
 from referencing import Registry
 from referencing.exceptions import NoSuchResource
 
-from . import a2ui_state, folder_io, folders, mcp_ui
+from . import a2ui_state, folder_io, folders, mcp_ui, memory
 from .content import CONTENT_VERSION, Keeper, normalize
 from .local_tools import LocalProcesses, LocalToolError, unavailable
 from .node_folders import FILES as SITE_FILES
@@ -48,6 +48,10 @@ ASK_META = "eugene-plexus/ask"
 SIGNED_META = "eugene-plexus/signed"
 MAX_ARGUMENTS = 16_384
 MAX_RESPONSE = 2_097_152
+#: `search_memory` (MV1): the one tool Workbench runs itself, over the asking person's own
+#: notes. Its server id is what a kept call is known by, to withhold or hide its results.
+MEMORY_SERVER = "memory"
+MEMORY_TOOL_NAME = memory.SEARCH_TOOL
 
 
 class ToolError(Exception):
@@ -146,19 +150,31 @@ def _constant(value: str) -> Any:
     raise ValueError("non-finite JSON number")
 
 
-def transcript(rounds: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def transcript(rounds: list[dict[str, Any]], *, notes: bool = True) -> list[dict[str, Any]]:
+    """Kept tool rounds as messages. Without `notes` (the request may not carry the person's
+    notes: an outside model, memory turned off), a `search_memory` result is withheld, and so
+    are the call's arguments: the query a model wrote can hold the words of the notes it had."""
     out: list[dict[str, Any]] = []
     for turn in rounds:
-        out.append(turn["assistant"])
-        for call in turn["calls"]:
-            out.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": call["id"],
-                    "content": call["result"]
-                    or "This call did not finish. Do not assume it succeeded.",
+        assistant = turn["assistant"]
+        if not notes:
+            mine = {c["id"] for c in turn["calls"] if c.get("serverId") == MEMORY_SERVER}
+            if mine and assistant.get("tool_calls"):
+                assistant = {
+                    **assistant,
+                    "tool_calls": [
+                        {**c, "function": {**c["function"], "arguments": "{}"}}
+                        if c.get("id") in mine
+                        else c
+                        for c in assistant["tool_calls"]
+                    ],
                 }
-            )
+        out.append(assistant)
+        for call in turn["calls"]:
+            result = call["result"] or "This call did not finish. Do not assume it succeeded."
+            if not notes and call.get("serverId") == MEMORY_SERVER:
+                result = memory.WITHHELD
+            out.append({"role": "tool", "tool_call_id": call["id"], "content": result})
     return out
 
 
@@ -210,6 +226,8 @@ class Tools:
         self.tls = ssl.create_default_context()
         self.apps: McpApps | None = None
         self.a2ui: A2UI | None = None
+        #: Runs one `search_memory` call for a person (`memory_api.run_search_tool`).
+        self.memory_search: Callable[[str, dict[str, Any]], Awaitable[str]] | None = None
 
     @asynccontextmanager
     async def connect(
@@ -495,6 +513,8 @@ class ToolSession:
         self.person = person
         self.apps = tools.apps
         self.a2ui = tools.a2ui
+        self.memory_search = tools.memory_search
+        self.memory_calls = 0
         self.metadata: dict[str, dict[str, Any]] = {}
         self.descriptors: dict[tuple[str, str], dict[str, Any]] = {}
         self.model_names: set[str] = set()
@@ -544,6 +564,32 @@ class ToolSession:
                     "name": name,
                     "description": f"{server['name']}: {tool}. {description}"[:4000],
                     "parameters": schema,
+                },
+            }
+        )
+
+    def add_memory_search(self) -> None:
+        """Offer `search_memory` (MV1): Workbench runs it over the asking person's own notes,
+        without asking them first (it reads only what is theirs and changes nothing)."""
+        if self.memory_search is None or MEMORY_TOOL_NAME in self.tools:
+            return
+        server = {"id": MEMORY_SERVER, "name": "Memory", "transport": "memory"}
+        self.tools[MEMORY_TOOL_NAME] = (
+            server,
+            None,
+            MEMORY_TOOL_NAME,
+            memory.SEARCH_TOOL_SCHEMA,
+        )
+        self.asks[MEMORY_TOOL_NAME] = False
+        self.metadata[MEMORY_TOOL_NAME] = {}
+        self.model_names.add(MEMORY_TOOL_NAME)
+        self.definitions.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": MEMORY_TOOL_NAME,
+                    "description": memory.SEARCH_TOOL_DESCRIPTION,
+                    "parameters": memory.SEARCH_TOOL_SCHEMA,
                 },
             }
         )
@@ -613,6 +659,22 @@ class ToolSession:
         and returns what to send again, or None when they declined. A result's
         pictures, sounds and files are kept by `keeper` (content.py)."""
         server, client, tool, _ = self.tools[call["name"]]
+        if server["transport"] == "memory":
+            self.memory_calls += 1
+            if self.memory_search is None or self.person is None:
+                call.update(status="failed", result="Searching notes is unavailable.")
+            elif self.memory_calls > memory.SEARCH_TOOL_CALLS:
+                call.update(
+                    status="failed",
+                    result=(
+                        f"This answer has searched the notes {memory.SEARCH_TOOL_CALLS} times, "
+                        "the most it may. Answer with what was found."
+                    ),
+                )
+            else:
+                text = await self.memory_search(self.person.sub, call["arguments"])
+                call.update(status="done", result=text)
+            return
         if server["transport"] == "site":
             try:
                 if self.node_folders is None:

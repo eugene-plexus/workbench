@@ -10,6 +10,7 @@ import type {
   ChatMemoryView,
   ExternalChoice,
   MemoryNote,
+  MemoryPage,
   NoteKind,
   Refusal,
 } from "./types";
@@ -35,7 +36,15 @@ export const KINDS: { kind: NoteKind; label: string; help: string }[] = [
   { kind: "instruction", label: "Instruction", help: "How you want answers written. Always used." },
   { kind: "project", label: "Project", help: "Something you are working on." },
   { kind: "event", label: "Event", help: "Something with a date." },
+  {
+    kind: "procedure",
+    label: "Procedure",
+    help: "Steps, a brief or a checklist. Can be long.",
+  },
 ];
+
+/** The kinds a model may suggest: a procedure is only ever the person's own. */
+export const SUGGESTED_KINDS = KINDS.filter((k) => k.kind !== "procedure");
 
 export function kindLabel(kind: NoteKind): string {
   return KINDS.find((k) => k.kind === kind)?.label ?? kind;
@@ -107,6 +116,52 @@ export function setByWords(setBy: "owner" | "you" | "default"): string {
 /** `1 note`, `3 notes`, with thousands grouped. */
 export function plural(count: number, one: string, many = `${one}s`): string {
   return `${count.toLocaleString()} ${count === 1 ? one : many}`;
+}
+
+/** The Memory page's usage line: what the pinned block takes, and what relevant memory may. */
+export function usageWords(usage: MemoryPage["usage"]): string {
+  const pinned = `Pinned: ${usage.pinned.tokens.toLocaleString()} of ${usage.pinned.budget.toLocaleString()} tokens, in every chat.`;
+  const { budget, from, how } = usage.relevant;
+  const room = budget.toLocaleString();
+  const relevant =
+    how === "all"
+      ? `Relevant: up to ${room} tokens a turn; every note that fits is used.`
+      : `Relevant: up to ${room} tokens a turn, chosen from ${plural(from, "note")} by ${how}.`;
+  return `${pinned} ${relevant}`;
+}
+
+/** Tags typed in one box, as a list: split at commas, trimmed, empty ones dropped, a repeat
+ * (ignoring case) left out. */
+export function tagsFrom(text: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const piece of text.split(",")) {
+    const tag = piece.trim();
+    const key = tagKey(tag);
+    if (!tag || seen.has(key)) continue;
+    seen.add(key);
+    out.push(tag);
+  }
+  return out;
+}
+
+/** How tags are matched: ignoring case, as the server does. */
+export const tagKey = (tag: string): string => tag.normalize("NFKC").toLowerCase();
+
+/** "Showing the newest 200 of 1,204". */
+export function showingWords(shown: number, total: number): string {
+  return `Showing the newest ${shown.toLocaleString()} of ${total.toLocaleString()}`;
+}
+
+/** The text of a file the person chose. */
+export function readText(file: Blob): Promise<string> {
+  if (typeof file.text === "function") return file.text();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(reader.error ?? new Error("The file could not be read."));
+    reader.readAsText(file);
+  });
 }
 
 /** "Using 412 of 1,000 tokens". */

@@ -10,6 +10,8 @@ import type {
   MemoryNote,
   MemoryPage,
   MemoryPrefs,
+  MemoryTag,
+  MemoryTurn,
   NotSentNote,
   SentNote,
 } from "./lib/types";
@@ -32,8 +34,19 @@ export function note(over: Partial<MemoryNote> = {}): MemoryNote {
     updatedAt: NOW - 3600,
     lastUsedAt: null,
     useCount: 0,
+    status: "active",
+    tags: [],
+    bodyChars: 0,
+    validFrom: NOW - 3600,
+    supersededAt: null,
+    supersededBy: null,
     ...over,
   };
+}
+
+export function tag(over: Partial<MemoryTag> = {}): MemoryTag {
+  const name = over.tag ?? "cooking";
+  return { tag: name, key: name.toLowerCase(), description: "", notes: 0, ...over };
 }
 
 export function prefs(
@@ -46,6 +59,8 @@ export function prefs(
     enabled: true,
     external: null,
     budgetTokens: null,
+    relevantBudgetTokens: null,
+    searchTool: true,
     learn: null,
     useMode: "relevant",
     ...rest,
@@ -54,7 +69,8 @@ export function prefs(
       disabledBy: null,
       external: "ask",
       externalSetBy: "default",
-      budgetTokens: 1000,
+      budgetTokens: 2000,
+      relevantBudgetTokens: 6000,
       learn: "off",
       learnSetBy: "default",
       learnByModel: true,
@@ -79,24 +95,39 @@ export function page(
     sections: {
       always: notes.filter((n) => n.always),
       other: notes.filter((n) => !n.always),
+      otherTotal: notes.filter((n) => !n.always).length,
     },
+    tags: [],
     usage: {
       tokens: notes.length ? 150 + notes.length * 12 : 0,
-      budget: 1000,
+      budget: 2000,
       notes: notes.length,
       maxNotes: 300,
       sent: notes.length,
       notSent: 0,
+      pinned: {
+        tokens: notes.length ? 150 + notes.length * 12 : 0,
+        budget: 2000,
+        notes: notes.length,
+      },
+      relevant: { budget: 6000, from: notes.filter((n) => !n.always).length, how: "words" },
       ...usage,
     },
     limits: {
       maxChars: 240,
+      maxBodyChars: 20000,
       maxNotes: 300,
-      kinds: ["fact", "preference", "instruction", "project", "event"],
+      kinds: ["fact", "preference", "instruction", "project", "event", "procedure"],
       minWindow: 4096,
-      budgetCeiling: 1000,
-      budgetSharePercent: 8,
+      budgetCeiling: 2000,
+      budgetSharePercent: 4,
       budgetFloor: 200,
+      relevantCeiling: 6000,
+      relevantSharePercent: 10,
+      maxTagChars: 40,
+      maxTagsPerNote: 10,
+      maxDescriptionChars: 200,
+      pageNotes: 200,
     },
     ...rest,
   };
@@ -120,6 +151,32 @@ export function notSent(over: Partial<NotSentNote> = {}): NotSentNote {
     ...note(over),
     reason: "over_budget",
     reasonText: "Did not fit this model's memory budget (655 tokens).",
+    ...over,
+  };
+}
+
+/** What one answer's turn was sent: one note, chosen by words. */
+export function turn(over: Partial<MemoryTurn> = {}): MemoryTurn {
+  return {
+    messageId: "a1",
+    tokens: 90,
+    budget: 3277,
+    didNotFit: 0,
+    notes: [
+      {
+        id: "n2",
+        text: "Cedar is the wood for the birdhouse",
+        kind: "project",
+        tags: ["woodwork"],
+        passages: [],
+        via: "words",
+      },
+    ],
+    how: "words",
+    why: null,
+    from: 12,
+    window: 32768,
+    room: 20000,
     ...over,
   };
 }

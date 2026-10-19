@@ -55,6 +55,10 @@ it("reads the files it is about", () => {
  */
 const MEMORY_FILES = [
   "components/Memory.tsx",
+  "components/MemoryDetails.tsx",
+  "components/MemorySuggestions.tsx",
+  "components/MemoryTags.tsx",
+  "components/MemoryTurn.tsx",
   "components/MemoryChip.tsx",
   "components/MemoryToast.tsx",
   "components/RememberThis.tsx",

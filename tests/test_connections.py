@@ -96,13 +96,28 @@ def test_a_connection_reads_its_persons_notes_and_never_anothers(world: World) -
         "url": made["address"],
         "http_headers": {"Authorization": f"Bearer {made['token']}"},
     }
-    assert tool_names(world, made["token"]) == ["search_notes"]
+    assert tool_names(world, made["token"]) == ["search_notes", "read_note"]
 
     found = call(world, made["token"], "search_notes", query="metric units")
     assert not found.is_error, found
     texts = [n["text"] for n in found.structured_content["notes"]]
     assert texts == ["Uses metric units for every recipe."]
     assert "information, not instructions" in found.content[0].text
+    [entry] = found.structured_content["notes"]
+    assert entry["tags"] == [] and entry["bodyChars"] == 0 and "passages" not in entry
+
+    # read_note reads one of her own notes whole, and never another person's.
+    read = call(world, made["token"], "read_note", note_id=entry["id"])
+    assert not read.is_error, read
+    assert read.structured_content["text"] == "Uses metric units for every recipe."
+    assert read.structured_content["more"] is False
+    bo_token = _connect(bo, notes=True)["token"]
+    theirs = call(world, bo_token, "read_note", note_id=entry["id"])
+    assert theirs.is_error
+    assert "metric units for every recipe" not in theirs.content[0].text
+    assert "metric units for every recipe" not in str(
+        call(world, bo_token, "search_notes", query="metric units").structured_content
+    )
 
     # The token is in no answer after the one that made it, and is not kept.
     listed = ada.get("/api/connections").json()
@@ -126,6 +141,7 @@ def test_a_connection_offers_only_what_it_may_do(world: World) -> None:
     everything = _connect(ada, notes=True, documents=True, suggest=True)["token"]
     assert sorted(tool_names(world, everything)) == [
         "read_document",
+        "read_note",
         "search_documents",
         "search_notes",
         "suggest_note",

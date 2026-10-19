@@ -17,7 +17,7 @@ import pytest
 from eugene_plexus_workbench import memory_learn
 
 from .conftest import MODEL, World, search_model
-from .test_memory_api import ask, database, drawer, keep, signed_in
+from .test_memory_api import ask, database, drawer, keep, last_user, reaches, signed_in
 
 
 @pytest.fixture(autouse=True)
@@ -150,7 +150,8 @@ def test_keep_edit_and_dismiss(world: World) -> None:
 def test_a_suggestion_that_replaces_a_note(world: World) -> None:
     ada = signed_in(world)
     learn(ada)
-    paris = keep(ada, "Lives in Paris.")
+    paris = keep(ada, "Lives in Paris.", pinned=True, body="The flat is on the left bank.")
+    assert ada.patch(f"/api/memory/notes/{paris['id']}", json={"tags": ["Home"]}).status_code == 200
     world.gateway.suggest_answer = notes(
         note("Lives in Lyon.", "I've just moved from Paris to Lyon", replaces=1)
     )
@@ -161,9 +162,15 @@ def test_a_suggestion_that_replaces_a_note(world: World) -> None:
     assert lyon["replaces"]["id"] == paris["id"]
     kept = ada.post(f"/api/memory/suggestions/{lyon['id']}/keep", json={"replace": True})
     assert kept.json()["replaced"] == paris["id"]
-    assert [n["text"] for n in ada.get("/api/memory").json()["sections"]["other"]] == [
-        "Lives in Lyon."
-    ]
+    # Keep new carries the old note's pin, body and tags; only the title is the suggestion's.
+    new = ada.get(f"/api/memory/notes/{kept.json()['note']['id']}").json()
+    assert new["note"]["text"] == "Lives in Lyon."
+    assert (new["note"]["pinned"], new["note"]["body"], new["note"]["tags"]) == (
+        True,
+        "The flat is on the left bank.",
+        ["Home"],
+    )
+    assert [n["id"] for n in new["earlier"]] == [paris["id"]]
 
 
 def test_at_most_three_a_chat(world: World) -> None:
@@ -225,8 +232,8 @@ def test_past_events_leave_the_prompt_and_projects_ask_still_true(world: World) 
     assert [n["id"] for n in page["revisit"]] == [nas["id"]]
     chat = chat_of(ada)
     sent = ask(world, ada, chat, "Hello")
-    system = next(m["content"] for m in sent["messages"] if m["role"] == "system")
-    assert "Building a NAS." in system and "Has an exam." not in system
+    assert "Building a NAS." in last_user(sent)
+    assert not reaches(sent, "Has an exam."), "a past event is sent nowhere"
     answered = ada.post("/api/memory/revisit", json={"noteId": nas["id"], "answer": "yes"})
     assert answered.status_code == 200
     page = ada.get("/api/memory").json()
@@ -262,10 +269,14 @@ def test_without_a_search_model_every_note_that_fits_is_used(world: World) -> No
     for w in ("cooking", "registry", "weather"):
         keep(ada, f"Knows about {w}.")
     chat = chat_of(ada)
-    ask(world, ada, chat, "What should I make for lunch?")
+    request = ask(world, ada, chat, "What should I make for lunch?")
     shown = drawer(ada, chat)
-    assert shown["relevance"]["how"] == "all" and "search model" in shown["relevance"]["why"]
-    assert shown["counts"]["sent"] == 3
+    turn = shown["turn"]
+    # No search model: by words, then the newest, so a few notes all go.
+    assert turn["how"] == "words" and "search model" in turn["why"]
+    assert len(turn["notes"]) == 3 and turn["didNotFit"] == 0
+    for w in ("cooking", "registry", "weather"):
+        assert f"Knows about {w}." in last_user(request)
 
 
 def test_relevant_notes_by_meaning_when_a_search_model_runs(world: World) -> None:
@@ -286,20 +297,26 @@ def test_relevant_notes_by_meaning_when_a_search_model_runs(world: World) -> Non
             "logbook",
         )
     ]
+    # Room for a few notes a turn, so what is chosen shows.
+    ada.put("/api/memory/prefs", json={"relevantBudgetTokens": 200})
     chat = chat_of(ada)
     sent = ask(world, ada, chat, "What should I make for lunch?")
-    system = next(m["content"] for m in sent["messages"] if m["role"] == "system")
-    assert food["text"] in system
+    assert food["text"] in last_user(sent)
     shown = drawer(ada, chat)
-    assert shown["relevance"]["how"] == "meaning and words", shown["relevance"]
-    left_out = [n for n in shown["notSent"] if n["reason"] == "not_relevant"]
-    assert left_out and all(n["id"] in {o["id"] for o in others} for n in left_out)
-    assert left_out[0]["reasonText"] == "Not about what this chat started with."
+    turn = shown["turn"]
+    assert turn["how"] == "meaning and words", turn
+    assert turn["notes"][0]["id"] == food["id"], "the note about the question comes first"
+    left_out = {o["id"] for o in others} - {n["id"] for n in turn["notes"]}
+    assert turn["didNotFit"] > 0 and left_out, "the rest did not fit the turn's budget"
+    for note in others:
+        assert (note["text"] in last_user(sent)) == (note["id"] not in left_out)
     # Everything that fits, when the person asks for that.
-    ada.put("/api/memory/prefs", json={"useMode": "all"})
+    ada.put("/api/memory/prefs", json={"useMode": "all", "relevantBudgetTokens": None})
     chat = chat_of(ada)
-    ask(world, ada, chat, "What should I make for lunch?")
-    assert drawer(ada, chat)["counts"]["sent"] == 10
+    everything = ask(world, ada, chat, "What should I make for lunch?")
+    assert drawer(ada, chat)["turn"]["how"] == "all"
+    assert len(drawer(ada, chat)["turn"]["notes"]) == 10
+    assert all(n["text"] in last_user(everything) for n in [food, *others])
 
 
 def test_words_read_while_off_are_never_sent_later(world: World) -> None:

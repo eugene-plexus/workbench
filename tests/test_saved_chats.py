@@ -264,7 +264,7 @@ def test_documents_and_notes_each_in_their_place_and_the_notes_are_the_same_byte
     world: World,
 ) -> None:
     ada = start(world)
-    ada.post("/api/memory/notes", json={"text": "I like short answers", "kind": "preference"})
+    ada.post("/api/memory/notes", json={"text": "I like short answers", "kind": "instruction"})
     keep(ada, ("survey.pdf", survey_pdf(CODE)))
     chat = chat_on(ada)
     ask(ada, chat, QUESTION)
@@ -652,7 +652,7 @@ def test_a_chat_that_fills_the_window_has_no_room_and_says_the_numbers_and_the_n
 ) -> None:
     world.gateway.more_chat_models = [chat_model("small", locality="local", window=4096)]
     ada = start(world)
-    ada.post("/api/memory/notes", json={"text": "I like short answers", "kind": "preference"})
+    ada.post("/api/memory/notes", json={"text": "I like short answers", "kind": "instruction"})
     keep(ada, ("survey.pdf", survey_pdf(CODE)))
     chat = chat_on(ada, model="small", instructions="Be careful. " * 1000)
     answer = ask(ada, chat, QUESTION, model="small")
@@ -810,7 +810,7 @@ def test_the_owners_never_is_final_and_a_persons_own_choice_stands_over_the_owne
 def test_notes_and_documents_are_held_back_separately_for_a_model_outside(world: World) -> None:
     outside(world)
     ada = start(world)
-    ada.post("/api/memory/notes", json={"text": "I like short answers", "kind": "preference"})
+    ada.post("/api/memory/notes", json={"text": "I like short answers", "kind": "instruction"})
     keep(ada, ("survey.pdf", survey_pdf(CODE)))
     chat = chat_on(ada, model="cloud", memoryExternal=True)
     ask(ada, chat, QUESTION, model="cloud")

@@ -121,6 +121,8 @@ def request_for(
     documents: Mapping[str, SentDocument] | None = None,
     lean: bool = False,
     retrieved: str | None = None,
+    memory_turn: str | None = None,
+    memory_allowed: bool = True,
 ) -> dict[str, Any]:
     """The body of `POST /v1/chat/completions` for the next answer.
 
@@ -139,7 +141,11 @@ def request_for(
     answer (`context.render_passages`). They go in **the latest user message only**,
     after any attached document and before the person's words, and are never sent
     again: the next request has none in that message, so every earlier turn is the
-    bytes it was and the engine's cache is lost only from the last turn on."""
+    bytes it was and the engine's cache is lost only from the last turn on.
+
+    `memory_turn` is the person's notes chosen for this turn (MV1, `memory.render_relevant`),
+    placed the same way, before the passages. Without `memory_allowed` (this request may not
+    carry notes), a `search_memory` result kept from an earlier turn is withheld."""
     by_id = {r.id: r for r in records}
     last_user = history[-1] if history and history[-1].role == "user" else None
     messages: list[dict[str, Any]] = []
@@ -158,12 +164,14 @@ def request_for(
                         root,
                         documents,
                         lean,
-                        retrieved if message is last_user else None,
+                        "\n\n".join(p for p in (memory_turn, retrieved) if p)
+                        if message is last_user
+                        else None,
                     ),
                 }
             )
         elif message.role == "assistant":
-            messages.extend(transcript(message.tool_rounds))
+            messages.extend(transcript(message.tool_rounds, notes=memory_allowed))
             answer = (
                 message.content[message.answer_from or 0 :].lstrip()
                 if message.tool_rounds

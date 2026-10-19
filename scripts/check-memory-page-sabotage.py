@@ -79,8 +79,8 @@ CASES: list[tuple[str, str, str, str, str, str]] = [
     (
         "an export is asked for without the request secret",
         API,
-        '    await fetch(path, { credentials: "same-origin", headers: headers() }),',
-        '    await fetch(path, { credentials: "same-origin" }),',
+        '    await fetch(path, { credentials: "same-origin", headers: headers() }),\n  );\n  const named',
+        '    await fetch(path, { credentials: "same-origin" }),\n  );\n  const named',
         T_API,
         "is asked for with the request secret",
     ),
@@ -413,8 +413,8 @@ CASES: list[tuple[str, str, str, str, str, str]] = [
     (
         "the chip is not read again after a send",
         CHAT,
-        "            say(outcomeOf(notes));\n            void memory.reload();",
-        "            say(outcomeOf(notes));",
+        "              say(outcomeOf(notes));\n              void memory.reload();",
+        "              say(outcomeOf(notes));",
         T_CHAT,
         "says what was kept, in a toast over the thread",
     ),
@@ -495,8 +495,9 @@ CASES: list[tuple[str, str, str, str, str, str]] = [
     (
         "the back button forgets the page",
         APP,
-        "      setMemoryOpen(memoryFromPath(window.location.pathname));\n      setMediaPerson(null);",
-        "      setMediaPerson(null);",
+        "      setMemoryOpen(memoryFromPath(window.location.pathname));\n"
+        "      setDocumentsOpen(documentsFromPath(window.location.pathname));",
+        "      setDocumentsOpen(documentsFromPath(window.location.pathname));",
         T_APP,
         "follows the browser's back button",
     ),
@@ -512,8 +513,8 @@ CASES: list[tuple[str, str, str, str, str, str]] = [
     (
         "a deleted note cannot be had back",
         PAGE,
-        "              setUndo(note);",
-        "              void 0;",
+        "                setUndo(whole.note);",
+        "                void 0;",
         T_PAGE,
         "deletes a note for real at once",
     ),
@@ -552,8 +553,8 @@ CASES: list[tuple[str, str, str, str, str, str]] = [
     (
         "where the owner turned memory off a note can be added",
         PAGE,
-        "{!off && notes.length > 0 && <AddNote busy={busy} working={working} />}",
-        "{notes.length > 0 && <AddNote busy={busy} working={working} />}",
+        "{!off && notes.length > 0 && (\n              <AddNote",
+        "{notes.length > 0 && (\n              <AddNote",
         T_PAGE,
         "leaves notes the person already has",
     ),
@@ -632,8 +633,8 @@ CASES: list[tuple[str, str, str, str, str, str]] = [
     (
         "a note is added with its spaces",
         PAGE,
-        "{ text: text.trim(), kind, pinned }),",
-        "{ text, kind, pinned }),",
+        "          text: text.trim(),\n          kind,\n          pinned,",
+        "          text,\n          kind,\n          pinned,",
         T_PAGE,
         "keeps the note with its kind",
     ),
@@ -648,8 +649,8 @@ CASES: list[tuple[str, str, str, str, str, str]] = [
     (
         "the notes are said to be used when relevant",
         PAGE,
-        "                  Used when there is room",
-        "                  Used when relevant",
+        '"Used when relevant" : "Used when there is room"}',
+        '"Used when relevant" : "Used when relevant"}',
         T_PAGE,
         "does not say they are used when relevant",
     ),
@@ -663,9 +664,9 @@ CASES: list[tuple[str, str, str, str, str, str]] = [
     ),
     (
         "the tokens and the room are the wrong way round",
-        PAGE,
-        "{tokenWords(usage.tokens, usage.budget)}",
-        "{tokenWords(usage.budget, usage.tokens)}",
+        MEMORY,
+        "${usage.pinned.tokens.toLocaleString()} of ${usage.pinned.budget.toLocaleString()}",
+        "${usage.pinned.budget.toLocaleString()} of ${usage.pinned.tokens.toLocaleString()}",
         T_PAGE,
         "says tokens and notes the way the design does",
     ),
@@ -903,8 +904,8 @@ READING_CASES: list[tuple[str, str, str, str]] = [
     (
         "the title is squeezed beside the chip on a tablet",
         CHAT,
-        'max-sm:basis-full md:max-lg:basis-full"',
-        'max-sm:basis-full"',
+        'tracking-[-0.01em] max-lg:basis-full"',
+        'tracking-[-0.01em]"',
     ),
     (
         "the Memory page's first line is too faint to read",
@@ -926,8 +927,8 @@ BROWSER_CASES: list[tuple[str, str, str, str]] = [
     (
         "the chip is not read again after a send",
         CHAT,
-        "            say(outcomeOf(notes));\n            void memory.reload();",
-        "            say(outcomeOf(notes));",
+        "              say(outcomeOf(notes));\n              void memory.reload();",
+        "              say(outcomeOf(notes));",
     ),
     (
         "what a command did is not said",
