@@ -109,7 +109,7 @@ def set_chat(person: Browser, chat: str, **settings: Any) -> dict[str, Any]:
 def test_a_person_keeps_lists_edits_pins_and_deletes_a_note(world: World) -> None:
     ada = signed_in(world)
     empty = ada.get("/api/memory").json()
-    assert empty["sections"] == {"always": [], "other": []}
+    assert empty["sections"] == {"always": [], "other": [], "past": []}
     assert empty["usage"] == {
         "tokens": 0,
         "budget": 1000,
@@ -160,7 +160,7 @@ def test_a_person_keeps_lists_edits_pins_and_deletes_a_note(world: World) -> Non
     assert (
         again.status_code == 404 and again.json()["detail"]["message"] == "There is no such note."
     )
-    assert ada.get("/api/memory").json()["sections"] == {"always": [], "other": []}
+    assert ada.get("/api/memory").json()["sections"] == {"always": [], "other": [], "past": []}
 
 
 def test_instructions_are_always_used_whatever_else_is_pinned(world: World) -> None:
@@ -324,12 +324,18 @@ def test_a_persons_own_memory_settings_and_what_is_in_effect(world: World) -> No
         "enabled": True,
         "external": None,  # not chosen: the owner's default, which is ask
         "budgetTokens": None,
+        "learn": None,  # MR8: not chosen
+        "useMode": "relevant",
         "effective": {
             "enabled": True,
             "disabledBy": None,
             "external": "ask",
             "externalSetBy": "default",
             "budgetTokens": 1000,
+            "learn": "off",
+            "learnSetBy": "default",
+            "learnByModel": True,
+            "suggestionsAllowed": True,
         },
     }
     changed = ada.put("/api/memory/prefs", json={"external": "never"}).json()
@@ -540,7 +546,7 @@ def test_a_note_that_is_not_yours_is_a_note_that_does_not_exist(world: World) ->
     missing = bo.get("/api/chats/does-not-exist/memory")
     assert missing.json() == bo.get(f"/api/chats/{ada_chat}/memory").json()
     # What he reads, exports and searches is his.
-    assert bo.get("/api/memory").json()["sections"] == {"always": [], "other": []}
+    assert bo.get("/api/memory").json()["sections"] == {"always": [], "other": [], "past": []}
     assert "plum" not in bo.get("/api/memory/export?format=md").text
     assert bo.get("/api/memory/export?format=json").json()["notes"] == []
     assert bo.delete("/api/memory/notes?confirm=all").json() == {"deleted": 0}
@@ -589,7 +595,11 @@ def test_the_owner_cannot_read_a_persons_notes_even_where_they_read_her_chats(
             == 404
         )
         # Their own page is their own.
-        assert owner.get("/api/memory").json()["sections"] == {"always": [], "other": []}
+        assert owner.get("/api/memory").json()["sections"] == {
+            "always": [],
+            "other": [],
+            "past": [],
+        }
         assert "plum" not in owner.get("/api/memory/export?format=md").text
         assert "plum" not in owner.get("/api/memory/export?format=json").text
         # And the list of people says nothing of anyone's notes.

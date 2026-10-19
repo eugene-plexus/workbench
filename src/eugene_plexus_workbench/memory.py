@@ -67,6 +67,8 @@ CHARS_PER_TOKEN = 3.0
 
 OVER_BUDGET = "over_budget"
 ADDED_SINCE = "added_since"
+#: MR8: a note not about what the chat began with, when only relevant notes are used.
+NOT_RELEVANT = "not_relevant"
 
 #: The sentence every refusal of a secret says (more is in `looksLike`).
 SECRET_MESSAGE = "That looks like a password or key, so Workbench will not keep it"
@@ -132,6 +134,25 @@ def over_budget_reason(budget: int) -> str:
 
 def added_since_reason() -> str:
     return "Added after this chat started. Refresh memory to include it."
+
+
+def not_relevant_reason() -> str:
+    return "Not about what this chat started with."
+
+
+def reason_text(reason: str, budget: int) -> str:
+    """A reason a note was not sent, in words a person reads."""
+    if reason == NOT_RELEVANT:
+        return not_relevant_reason()
+    if reason == ADDED_SINCE:
+        return added_since_reason()
+    return over_budget_reason(budget)
+
+
+def is_past(note: MemoryNote, today: str | None) -> bool:
+    """An event whose day has gone (MR8): it leaves the prompt and the page shows it
+    under Past. `today` and `expires_at` are ISO dates, which sort as dates."""
+    return bool(today and note.kind == "event" and note.expires_at and note.expires_at < today)
 
 
 # --------------------------------------------------------------------------- #
@@ -491,6 +512,8 @@ def build_snapshot(
     window: int | None,
     model: str | None,
     now: float,
+    relevant: Sequence[str] | None = None,
+    today: str | None = None,
 ) -> Snapshot:
     """Choose what fits the budget and write it, as one `Snapshot`.
 
@@ -498,14 +521,33 @@ def build_snapshot(
     the rest newest first -- and the first that does not fit ends the taking:
     what is left out is the oldest of its kind, a clean line rather than a
     patchwork, and every note left out is named. `text` is "" when nothing
-    fits or there is nothing to send."""
+    fits or there is nothing to send.
+
+    With `relevant` (MR8: note ids, most relevant first), the rest are only
+    those, in that order; every other one is named `not_relevant`. An event
+    past `today` is not sent at all (`is_past`): it is no longer true."""
     fixed = _counts(HEADER + "\n" + "\n" + FOOTER)
     other, cjk = fixed
     chosen: list[MemoryNote] = []
     dropped: list[Dropped] = []
     titled: set[str] = set()
     full = False
-    for note in sorted((n for n in notes if n.status == "active"), key=_priority):
+    usable = [n for n in notes if n.status == "active" and not is_past(n, today)]
+    if relevant is None:
+        ordered = sorted(usable, key=_priority)
+    else:
+        rank = {note_id: i for i, note_id in enumerate(relevant)}
+        always = sorted((n for n in usable if is_always(n)), key=_priority)
+        found = sorted(
+            (n for n in usable if not is_always(n) and n.id in rank), key=lambda n: rank[n.id]
+        )
+        dropped.extend(
+            Dropped(n.id, NOT_RELEVANT)
+            for n in sorted(usable, key=_priority)
+            if not is_always(n) and n.id not in rank
+        )
+        ordered = always + found
+    for note in ordered:
         if full:
             dropped.append(Dropped(note.id, OVER_BUDGET))
             continue

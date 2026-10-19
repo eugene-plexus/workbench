@@ -32,6 +32,7 @@ import { Composer } from "./Composer";
 import { DocumentsChip, DocumentsDrawer, DocumentsHint } from "./DocumentsChip";
 import { Mascot } from "./Mascot";
 import { MemoryChip, MemoryDrawer } from "./MemoryChip";
+import { MemoryOffer } from "./MemoryOffer";
 import { MemoryToast, outcomeOf, type ToastOutcome } from "./MemoryToast";
 import { MessageView } from "./MessageView";
 import type { RememberProps } from "./RememberThis";
@@ -496,7 +497,10 @@ export function ChatView({
         >
           <div ref={content} className="mx-auto flex max-w-3xl flex-col gap-4">
             {messages.length === 0 && (
-              <p className="py-10 text-center text-muted">Ask anything to start.</p>
+              <>
+                <p className="py-10 text-center text-muted">Ask anything to start.</p>
+                <MemoryOffer onOpenMemory={onOpenMemory} />
+              </>
             )}
             {messages.map((message: Message) => (
               <Fragment key={message.id}>

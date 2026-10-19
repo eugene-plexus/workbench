@@ -89,7 +89,7 @@ from .agui_store import AGUIStore, allow_chat_write
 from .interaction_store import SCHEMA as INTERACTION_SCHEMA
 from .interaction_store import InteractionStore
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 #: The oldest schema this migrates from: what Workbench v0.1.0 wrote. Schema 1 predates
 #: it, and nobody holds one.
@@ -345,6 +345,46 @@ def _sources_get_kinds(db: sqlite3.Connection) -> None:
         db.execute("UPDATE messages SET sources = ? WHERE id = ?", (json.dumps(rebuilt), row["id"]))
 
 
+#: Memory suggestions (MR8, schema 20), as `(table, column, declaration)`: the note a
+#: proposal would replace; whether a person chose Learn from my chats themselves (so a
+#: default can follow the model until they do), turned the offer away, and when they
+#: were last asked whether a project is still true; how far a chat's messages have
+#: been read for suggestions, and how many it has made.
+_MEMORY_LEARNING_COLUMNS: list[tuple[str, str, str]] = [
+    ("memory_notes", "replaces", "TEXT"),
+    ("memory_prefs", "learn_set", "INTEGER NOT NULL DEFAULT 0 CHECK (learn_set IN (0, 1))"),
+    (
+        "memory_prefs",
+        "offer_dismissed",
+        "INTEGER NOT NULL DEFAULT 0 CHECK (offer_dismissed IN (0, 1))",
+    ),
+    ("memory_prefs", "revisit_asked_at", "REAL"),
+    ("chats", "memory_read_at", "REAL"),
+    ("chats", "memory_suggested", "INTEGER NOT NULL DEFAULT 0"),
+]
+
+
+def _memory_learning(db: sqlite3.Connection) -> None:
+    """Schema 20's columns, and the words of proposals a person turned away.
+
+    A function, not statements, because memory's tables are made by the same list
+    for a new store and for migration 10, so the columns are added wherever they
+    are missing. A turned-away proposal keeps only its content words' stems
+    (`memory_suggest`'s rule), enough never to propose it again and not the
+    sentence the person said no to."""
+    for table, column, declaration in _MEMORY_LEARNING_COLUMNS:
+        have = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+        if column not in have:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS memory_dismissed (owner TEXT NOT NULL, words TEXT NOT NULL, "
+        "at REAL NOT NULL)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS memory_dismissed_by_owner ON memory_dismissed (owner, at)"
+    )
+
+
 #: What brings a store written at version N-1 to N, for N above `OLDEST_SCHEMA`.
 #: `_SCHEMA` already holds the result, for a store made new. A step is a statement,
 #: or a function of the connection for what SQL alone cannot say.
@@ -470,6 +510,8 @@ _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
         "ALTER TABLE messages ADD COLUMN reasoning_tokens INTEGER",
         "ALTER TABLE messages ADD COLUMN reasoning_seconds REAL",
     ],
+    # Memory suggestions (MR8, 2026-10-18): new columns and one new table only.
+    20: [_memory_learning],
 }
 
 
@@ -597,6 +639,7 @@ def _initialize_schema(
                 db.execute(statement)
         for statement in [*_MEMORY_SCHEMA, *INTERACTION_SCHEMA, *AGUI_SCHEMA]:
             db.execute(statement)
+        _memory_learning(db)
         db.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?)",
             (str(SCHEMA_VERSION),),
@@ -675,6 +718,8 @@ class MemoryNote:
     revisit_at: str | None = None
     last_used_at: float | None = None
     use_count: int = 0
+    #: For a suggestion: the id of the note it would replace ("Keep new").
+    replaces: str | None = None
 
 
 @dataclass
@@ -902,6 +947,7 @@ def _note(row: sqlite3.Row) -> MemoryNote:
         quote=row["quote"],
         expires_at=row["expires_at"],
         revisit_at=row["revisit_at"],
+        replaces=row["replaces"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         last_used_at=row["last_used_at"],
@@ -917,6 +963,12 @@ MEMORY_PREFS_DEFAULT: dict[str, Any] = {
     "external": None,
     "use_mode": "relevant",
     "budget_tokens": None,
+    # MR8: whether learn is the person's own choice (else it follows the install and the
+    # model), whether they turned the offer of suggestions away, and when they were last
+    # asked whether a project is still true.
+    "learn_set": False,
+    "offer_dismissed": False,
+    "revisit_asked_at": None,
 }
 
 
@@ -1565,6 +1617,12 @@ class Store:
                 db.execute("DELETE FROM artifacts WHERE chat_id = ?", (chat_id,))
                 db.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
                 db.execute("DELETE FROM files WHERE chat_id = ?", (chat_id,))
+                # Suggestions waiting from it go with it (their quotes are its words); notes
+                # kept from it stay, as the delete dialog says.
+                db.execute(
+                    "DELETE FROM memory_notes WHERE source_chat_id = ? AND status = 'pending'",
+                    (chat_id,),
+                )
                 db.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
                 db.execute("COMMIT")
             except BaseException:
@@ -2314,7 +2372,9 @@ class Store:
                     db.execute("COMMIT")
                     return _note(twin), False
                 total = db.execute(
-                    "SELECT COUNT(*) AS n FROM memory_notes WHERE owner = ?", (note.owner,)
+                    "SELECT COUNT(*) AS n FROM memory_notes "
+                    "WHERE owner = ? AND status != 'pending'",
+                    (note.owner,),
                 ).fetchone()["n"]
                 if total >= limit:
                     raise MemoryFull(limit)
@@ -2329,8 +2389,8 @@ class Store:
                 db.execute(
                     "INSERT INTO memory_notes (id, owner, text, kind, status, pinned, source, "
                     "source_chat_id, source_message_id, quote, expires_at, revisit_at, "
-                    "created_at, updated_at, last_used_at, use_count) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "created_at, updated_at, last_used_at, use_count, replaces) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         note.id,
                         note.owner,
@@ -2348,6 +2408,7 @@ class Store:
                         note.updated_at,
                         note.last_used_at,
                         note.use_count,
+                        note.replaces,
                     ),
                 )
                 self._event(db, note.owner, note.id, "add", actor, None, note.text)
@@ -2450,6 +2511,7 @@ class Store:
                     (time.time(), owner),
                 )
                 count = db.execute("DELETE FROM memory_notes WHERE owner = ?", (owner,)).rowcount
+                db.execute("DELETE FROM memory_dismissed WHERE owner = ?", (owner,))
                 self._drop_from_chats(db, owner, None)
                 db.execute("COMMIT")
             except BaseException:
@@ -2508,6 +2570,9 @@ class Store:
                 "external": row["external"],
                 "use_mode": row["use_mode"],
                 "budget_tokens": row["budget_tokens"],
+                "learn_set": bool(row["learn_set"]),
+                "offer_dismissed": bool(row["offer_dismissed"]),
+                "revisit_asked_at": row["revisit_asked_at"],
             }
 
         return await self._run(go)
@@ -2547,6 +2612,278 @@ class Store:
             cursor = self._conn().execute(
                 "UPDATE chats SET memory_snapshot = ? WHERE id = ? AND owner = ?",
                 (json.dumps(snapshot) if snapshot is not None else None, chat_id, owner),
+            )
+            return cursor.rowcount == 1
+
+        return await self._run(go)
+
+    # --- memory suggestions (MR8) -------------------------------------------
+    #
+    # A suggestion is a note with `status = 'pending'` and `source = 'suggested'`: the
+    # person keeps it (it becomes `active`) or turns it away (it is deleted, and only
+    # its words' stems are kept, in `memory_dismissed`). Nothing a model proposed is
+    # ever active until the person says so.
+
+    async def memory_learning(self, chat_id: str, owner: str) -> tuple[float | None, int] | None:
+        """How far this chat's messages have been read for suggestions, and how many
+        it has made: `(read_at, suggested)`. None when the person has no such chat."""
+
+        def go() -> tuple[float | None, int] | None:
+            row = (
+                self._conn()
+                .execute(
+                    "SELECT memory_read_at, memory_suggested FROM chats WHERE id = ? AND owner = ?",
+                    (chat_id, owner),
+                )
+                .fetchone()
+            )
+            return (row["memory_read_at"], int(row["memory_suggested"])) if row else None
+
+        return await self._run(go)
+
+    async def suggested_since(self, owner: str, since: float) -> int:
+        """How many suggestions the person has been offered since `since`."""
+
+        def go() -> int:
+            row = (
+                self._conn()
+                .execute(
+                    "SELECT COUNT(*) AS n FROM memory_events "
+                    "WHERE owner = ? AND event = 'suggest' AND ts >= ?",
+                    (owner, since),
+                )
+                .fetchone()
+            )
+            return int(row["n"])
+
+        return await self._run(go)
+
+    async def add_suggestions(
+        self,
+        owner: str,
+        chat_id: str,
+        notes: Sequence[MemoryNote],
+        *,
+        read_at: float,
+        limit: int,
+        per_chat: int | None = None,
+        per_day: int | None = None,
+        since: float = 0.0,
+    ) -> list[MemoryNote]:
+        """Offer these notes to the person, and mark the chat read up to `read_at`.
+
+        In one step: a note whose words the person already has (kept or offered) is
+        not offered twice, no more are offered than `limit` notes in all leaves room
+        for, nor than `per_chat` this chat has left or `per_day` the person has left since
+        `since` (counted here, so chats read at once cannot pass them together), and the
+        chat counts what it offered. Returns what was offered."""
+
+        def go() -> list[MemoryNote]:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                if (
+                    db.execute(
+                        "SELECT 1 FROM chats WHERE id = ? AND owner = ?", (chat_id, owner)
+                    ).fetchone()
+                    is None
+                ):
+                    db.execute("COMMIT")
+                    return []
+                held = {
+                    note_key(r["text"])
+                    for r in db.execute(
+                        "SELECT text FROM memory_notes WHERE owner = ? AND status != 'dismissed'",
+                        (owner,),
+                    )
+                }
+                total = db.execute(
+                    "SELECT COUNT(*) AS n FROM memory_notes WHERE owner = ?", (owner,)
+                ).fetchone()["n"]
+                latest = db.execute(
+                    "SELECT MAX(created_at) AS at FROM memory_notes WHERE owner = ?", (owner,)
+                ).fetchone()["at"]
+                room = len(notes)
+                if per_chat is not None:
+                    made = db.execute(
+                        "SELECT memory_suggested AS n FROM chats WHERE id = ?", (chat_id,)
+                    ).fetchone()["n"]
+                    room = min(room, per_chat - int(made))
+                if per_day is not None:
+                    today = db.execute(
+                        "SELECT COUNT(*) AS n FROM memory_events "
+                        "WHERE owner = ? AND event = 'suggest' AND ts >= ?",
+                        (owner, since),
+                    ).fetchone()["n"]
+                    room = min(room, per_day - int(today))
+                offered: list[MemoryNote] = []
+                for note in notes:
+                    key = note_key(note.text)
+                    if key in held or total >= limit or len(offered) >= room:
+                        continue
+                    if latest is not None and note.created_at <= latest:
+                        note.created_at = note.updated_at = latest + 1e-6
+                    latest = note.created_at
+                    db.execute(
+                        "INSERT INTO memory_notes (id, owner, text, kind, status, pinned, source, "
+                        "source_chat_id, source_message_id, quote, expires_at, revisit_at, "
+                        "created_at, updated_at, replaces) "
+                        "VALUES (?, ?, ?, ?, 'pending', 0, 'suggested', ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            note.id,
+                            owner,
+                            note.text,
+                            note.kind,
+                            chat_id,
+                            note.source_message_id,
+                            note.quote,
+                            note.expires_at,
+                            note.revisit_at,
+                            note.created_at,
+                            note.updated_at,
+                            note.replaces,
+                        ),
+                    )
+                    # The words are in the note; the log says only that it was offered.
+                    self._event(db, owner, note.id, "suggest", "model", None, None)
+                    note.status, note.source, note.source_chat_id = "pending", "suggested", chat_id
+                    held.add(key)
+                    total += 1
+                    offered.append(note)
+                db.execute(
+                    "UPDATE chats SET memory_read_at = MAX(COALESCE(memory_read_at, 0), ?), "
+                    "memory_suggested = memory_suggested + ? WHERE id = ? AND owner = ?",
+                    (read_at, len(offered), chat_id, owner),
+                )
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return offered
+
+        return await self._run(go)
+
+    async def keep_suggestion(
+        self,
+        owner: str,
+        note_id: str,
+        *,
+        text: str | None = None,
+        kind: str | None = None,
+        replace: bool = False,
+    ) -> tuple[MemoryNote, str | None] | None:
+        """Keep a suggestion as a note, with the person's own edits: `(the note, the id
+        of the note it replaced, if any)`. With `replace`, the note it names is
+        forgotten as `delete_memory_note` forgets one. None when the person has no
+        such suggestion."""
+
+        def go() -> tuple[MemoryNote, str | None] | None:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute(
+                    "SELECT * FROM memory_notes WHERE id = ? AND owner = ? AND status = 'pending'",
+                    (note_id, owner),
+                ).fetchone()
+                if row is None:
+                    db.execute("COMMIT")
+                    return None
+                words = text if text is not None else row["text"]
+                db.execute(
+                    "UPDATE memory_notes SET status = 'active', text = ?, kind = ?, "
+                    "replaces = NULL, updated_at = ? WHERE id = ?",
+                    (words, kind or row["kind"], time.time(), note_id),
+                )
+                self._event(
+                    db,
+                    owner,
+                    note_id,
+                    "keep",
+                    "person",
+                    row["text"] if words != row["text"] else None,
+                    words if words != row["text"] else None,
+                )
+                replaced = None
+                if replace and row["replaces"]:
+                    gone = db.execute(
+                        "DELETE FROM memory_notes WHERE id = ? AND owner = ? AND status = 'active'",
+                        (row["replaces"], owner),
+                    ).rowcount
+                    if gone:
+                        replaced = row["replaces"]
+                        self._event(db, owner, replaced, "delete", "person", None, None)
+                        self._drop_from_chats(db, owner, {replaced})
+                fresh = db.execute("SELECT * FROM memory_notes WHERE id = ?", (note_id,)).fetchone()
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return _note(fresh), replaced
+
+        return await self._run(go)
+
+    async def dismiss_suggestion(self, owner: str, note_id: str, words: str) -> bool:
+        """Turn a suggestion away: the note goes (its log keeps no words), and `words`,
+        its stems, are kept so it is never offered again. At most 500 are kept, the
+        newest. False when the person has no such suggestion."""
+
+        def go() -> bool:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                gone = db.execute(
+                    "DELETE FROM memory_notes WHERE id = ? AND owner = ? AND status = 'pending'",
+                    (note_id, owner),
+                ).rowcount
+                if gone:
+                    self._event(db, owner, note_id, "dismiss", "person", None, None)
+                    db.execute(
+                        "INSERT INTO memory_dismissed (owner, words, at) VALUES (?, ?, ?)",
+                        (owner, words, time.time()),
+                    )
+                    db.execute(
+                        "DELETE FROM memory_dismissed WHERE owner = ? AND rowid NOT IN ("
+                        "SELECT rowid FROM memory_dismissed WHERE owner = ? "
+                        "ORDER BY at DESC LIMIT 500)",
+                        (owner, owner),
+                    )
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return bool(gone)
+
+        return await self._run(go)
+
+    async def expire_suggestions(self, owner: str, before: float) -> int:
+        """Forget suggestions the person has left waiting since before `before`."""
+
+        def go() -> int:
+            cursor = self._conn().execute(
+                "DELETE FROM memory_notes "
+                "WHERE owner = ? AND status = 'pending' AND created_at < ?",
+                (owner, before),
+            )
+            return int(cursor.rowcount)
+
+        return await self._run(go)
+
+    async def dismissed_words(self, owner: str) -> list[str]:
+        def go() -> list[str]:
+            rows = self._conn().execute(
+                "SELECT words FROM memory_dismissed WHERE owner = ? ORDER BY at DESC", (owner,)
+            )
+            return [r["words"] for r in rows]
+
+        return await self._run(go)
+
+    async def set_revisit(self, owner: str, note_id: str, revisit_at: str | None) -> bool:
+        """When a project is next asked about ("Still true?"). False when it is not theirs."""
+
+        def go() -> bool:
+            cursor = self._conn().execute(
+                "UPDATE memory_notes SET revisit_at = ? WHERE id = ? AND owner = ?",
+                (revisit_at, note_id, owner),
             )
             return cursor.rowcount == 1
 

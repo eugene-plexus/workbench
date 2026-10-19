@@ -424,6 +424,13 @@ export function MemoryDrawer({
                       this model&apos;s memory room.
                     </p>
                   ) : null}
+                  {own.relevance && (
+                    <p data-testid="memory-relevance" className="help">
+                      {own.relevance.how === "meaning and words"
+                        ? "Chosen for what this chat started with, by meaning and words."
+                        : (own.relevance.why ?? "Every note that fits, as you chose.")}
+                    </p>
+                  )}
                   <ul data-testid="memory-sent" className="divide-y divide-line text-sm">
                     {own.sent.map((note) => (
                       <NoteRow key={note.id} note={note} />

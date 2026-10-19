@@ -38,14 +38,14 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
-from . import config, memory
+from . import config, memory, memory_learn, memory_relevance
 from .api import _new_id, _own_chat, _person, _problem, _readable_chat, _state
 from .hub import Hub, HubError
 from .media_api import _common as served
@@ -109,6 +109,19 @@ def note_view(note: MemoryNote) -> dict[str, Any]:
         "updatedAt": note.updated_at,
         "lastUsedAt": note.last_used_at,
         "useCount": note.use_count,
+        # MR8: an event leaves chats after `expiresAt`; a project is asked about from `revisitAt`.
+        "expiresAt": note.expires_at,
+        "revisitAt": note.revisit_at,
+    }
+
+
+def suggestion_view(note: MemoryNote, replaces: MemoryNote | None) -> dict[str, Any]:
+    """A suggestion as the inbox shows it: the note, the person's words it came from, and
+    the note it would replace, if the model said one."""
+    return {
+        **note_view(note),
+        "quote": note.quote,
+        "replaces": note_view(replaces) if replaces is not None else None,
     }
 
 
@@ -119,16 +132,28 @@ def prefs_view(prefs: dict[str, Any], install: config.MemorySettings) -> dict[st
     that comes to. The page shows `effective`, never a stand-in that looks like
     a choice (settings never lie)."""
     external, set_by = resolve_external(install.external, prefs["external"])
+    learn, learn_by = memory_learn.effective(install, prefs, None)
     return {
         "enabled": prefs["enabled"],
         "external": prefs["external"],
         "budgetTokens": prefs["budget_tokens"],
+        # MR8: `learn` is null until the person chooses; `useMode` is theirs, `relevant` until
+        # they choose `all`.
+        "learn": ("off" if prefs["learn"] == "off" else "suggest")
+        if prefs.get("learn_set")
+        else None,
+        "useMode": prefs.get("use_mode") or "relevant",
         "effective": {
             "enabled": install.enabled and prefs["enabled"],
             "disabledBy": ("owner" if not install.enabled else None if prefs["enabled"] else "you"),
             "external": external,
             "externalSetBy": set_by,
             "budgetTokens": prefs["budget_tokens"] or memory.BUDGET_CEILING,
+            # For no model in particular; a chat on a measured model may differ (`learnByModel`).
+            "learn": learn,
+            "learnSetBy": learn_by,
+            "learnByModel": install.suggestions == "measured" and not prefs.get("learn_set"),
+            "suggestionsAllowed": install.enabled and install.suggestions != "off",
         },
     }
 
@@ -162,16 +187,40 @@ async def get_memory(request: Request) -> dict[str, Any]:
     install = await config.memory_settings(store)
     prefs = await store.memory_prefs(person.sub)
     notes = await store.memory_notes(person.sub)
+    today = _today()
     budget = memory.budget_for(None, prefs["budget_tokens"])
-    shown = memory.build_snapshot(notes, budget=budget, window=None, model=None, now=0.0)
+    shown = memory.build_snapshot(
+        notes, budget=budget, window=None, model=None, now=0.0, today=today
+    )
+    current = [n for n in notes if not memory.is_past(n, today)]
+    by_id = {n.id: n for n in notes}
+    # A suggestion left waiting a month is not one they want: it goes, quote and all.
+    await store.expire_suggestions(person.sub, time.time() - SUGGESTION_DAYS * 86_400.0)
+    pending = await store.memory_notes(person.sub, status="pending")
     return {
         "installEnabled": install.enabled,
         "ownerReadsChats": await config.owner_reads_chats(store),
         "prefs": prefs_view(prefs, install),
         "sections": {
-            "always": [note_view(n) for n in notes if memory.is_always(n)],
-            "other": [note_view(n) for n in notes if not memory.is_always(n)],
+            "always": [note_view(n) for n in current if memory.is_always(n)],
+            "other": [note_view(n) for n in current if not memory.is_always(n)],
+            # MR8: events whose day has gone, kept until the person deletes them.
+            "past": [note_view(n) for n in notes if memory.is_past(n, today)],
         },
+        "suggestions": [
+            suggestion_view(n, by_id.get(n.replaces) if n.replaces else None) for n in pending
+        ],
+        "revisit": [note_view(n) for n in _due_revisits(notes, prefs, today)],
+        # Whether "only what is relevant" can be done now (settings never lie).
+        "relevance": dict(
+            zip(
+                ("available", "why"),
+                await memory_relevance.available(
+                    getattr(getattr(_state(request), "saved", None), "meaning", None)
+                ),
+                strict=True,
+            )
+        ),
         "usage": {
             "tokens": shown.tokens,
             "budget": budget,
@@ -207,6 +256,10 @@ class PrefsUpdate(BaseModel):
     enabled: StrictBool | None = None
     external: Literal["never", "ask", "always"] | None = None
     budgetTokens: int | None = Field(default=None, ge=memory.BUDGET_FLOOR, le=20000, strict=True)
+    #: MR8. `null` returns Learn from my chats to the install's default.
+    learn: Literal["off", "suggest"] | None = None
+    useMode: Literal["relevant", "all"] | None = None
+    offerDismissed: StrictBool | None = None
 
 
 def _vetted(text: str) -> str:
@@ -316,13 +369,139 @@ async def put_prefs(request: Request, body: PrefsUpdate) -> dict[str, Any]:
     person = await _person(request)
     store = _store(request)
     values: dict[str, Any] = {}
-    defaults = {"enabled": True, "external": None, "budgetTokens": None}
-    columns = {"enabled": "enabled", "external": "external", "budgetTokens": "budget_tokens"}
+    defaults = {
+        "enabled": True,
+        "external": None,
+        "budgetTokens": None,
+        "learn": "off",
+        "useMode": "relevant",
+        "offerDismissed": False,
+    }
+    columns = {
+        "enabled": "enabled",
+        "external": "external",
+        "budgetTokens": "budget_tokens",
+        "learn": "learn",
+        "useMode": "use_mode",
+        "offerDismissed": "offer_dismissed",
+    }
     for key in body.model_fields_set:
         given = getattr(body, key)
         values[columns[key]] = defaults[key] if given is None else given
+        if key == "learn":
+            values["learn_set"] = given is not None
     prefs = await store.put_memory_prefs(person.sub, **values)
     return prefs_view(prefs, await config.memory_settings(store))
+
+
+# --------------------------------------------------------------------------- #
+# suggestions (MR8): the inbox, "Still true?", and the offer
+# --------------------------------------------------------------------------- #
+
+#: "Still true?" is asked about at most one project a week.
+REVISIT_EVERY_SECONDS = 7 * 86_400.0
+#: The offer of suggestions is made after this many chats.
+OFFER_AFTER_CHATS = 5
+#: A suggestion waits this many days for the person, then goes.
+SUGGESTION_DAYS = 30
+
+
+def _due_revisits(notes: list[MemoryNote], prefs: dict[str, Any], today: str) -> list[MemoryNote]:
+    """The project to ask "Still true?" about now: the one longest due, unless the person
+    was asked within the week."""
+    asked = prefs.get("revisit_asked_at")
+    if asked is not None and time.time() - asked < REVISIT_EVERY_SECONDS:
+        return []
+    due = sorted(
+        (n for n in notes if n.kind == "project" and n.revisit_at and n.revisit_at <= today),
+        key=lambda n: (n.revisit_at or "", n.created_at),
+    )
+    return due[:1]
+
+
+class KeepSuggestion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    #: The person's own edit of the words, and of the kind, before keeping it.
+    text: str | None = Field(default=None, max_length=2000)
+    kind: Literal["fact", "preference", "instruction", "project", "event"] | None = None
+    #: For a suggestion that replaces a note: Keep new (true) or Keep both (false).
+    replace: StrictBool = False
+
+
+@router.post("/api/memory/suggestions/{note_id}/keep")
+async def keep_suggestion(request: Request, note_id: str, body: KeepSuggestion) -> dict[str, Any]:
+    """Keep a suggestion as a note, as it is or as the person edited it. With `replace`, the
+    note it would replace is forgotten (as Delete forgets one). 404 when the person has no
+    such suggestion; 422 names why edited words cannot be kept."""
+    person = await _person(request)
+    store = _store(request)
+    if not (await config.memory_settings(store)).enabled:
+        raise _refused(status.HTTP_403_FORBIDDEN, {"message": _OWNER_OFF, "reason": "off"})
+    text = _vetted(body.text) if body.text is not None else None
+    kept = await store.keep_suggestion(
+        person.sub, note_id, text=text, kind=body.kind, replace=body.replace
+    )
+    if kept is None:
+        raise _problem(status.HTTP_404_NOT_FOUND, "There is no such suggestion.")
+    note, replaced = kept
+    return {"note": note_view(note), "replaced": replaced}
+
+
+@router.post("/api/memory/suggestions/{note_id}/dismiss", status_code=status.HTTP_204_NO_CONTENT)
+async def dismiss_suggestion(request: Request, note_id: str) -> Response:
+    """Turn a suggestion away: it goes, and it is never suggested again (only its words'
+    stems are kept for that). 404 when the person has no such suggestion."""
+    person = await _person(request)
+    store = _store(request)
+    note = await store.memory_note(person.sub, note_id)
+    if note is None or note.status != "pending":
+        raise _problem(status.HTTP_404_NOT_FOUND, "There is no such suggestion.")
+    if not await store.dismiss_suggestion(
+        person.sub, note_id, memory_learn.dismissed_words(note.text)
+    ):
+        raise _problem(status.HTTP_404_NOT_FOUND, "There is no such suggestion.")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+class Revisit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    noteId: str = Field(max_length=200)
+    #: `yes`, still true (asked again in 60 days); `no`, forget it; `later`, ask next week.
+    answer: Literal["yes", "no", "later"]
+
+
+@router.post("/api/memory/revisit")
+async def revisit(request: Request, body: Revisit) -> dict[str, Any]:
+    """The person's answer to "Still true?" about one of their projects."""
+    person = await _person(request)
+    store = _store(request)
+    note = await store.memory_note(person.sub, body.noteId)
+    if note is None or note.status != "active":
+        raise _problem(status.HTTP_404_NOT_FOUND, "There is no such note.")
+    if body.answer == "yes":
+        days = memory_learn.memory_suggest.PROJECT_REVISIT_DAYS
+        later = (datetime.now().date() + timedelta(days=days)).isoformat()
+        await store.set_revisit(person.sub, note.id, later)
+    elif body.answer == "no":
+        await store.delete_memory_note(person.sub, note.id)
+    await store.put_memory_prefs(person.sub, revisit_asked_at=time.time())
+    return {"answer": body.answer}
+
+
+@router.get("/api/memory/offer")
+async def offer(request: Request) -> dict[str, Any]:
+    """Whether to offer Learn from my chats now: after the person's fifth chat, while it is
+    off only because nobody chose (not because they or the owner turned it off), until they
+    answer the offer."""
+    person = await _person(request)
+    store = _store(request)
+    install = await config.memory_settings(store)
+    prefs = await store.memory_prefs(person.sub)
+    learn, by = memory_learn.effective(install, prefs, None)
+    if learn != "off" or by != memory_learn.DEFAULT or prefs.get("offer_dismissed"):
+        return {"show": False}
+    chats = len(await store.chats(person.sub))
+    return {"show": chats >= OFFER_AFTER_CHATS, "chats": chats}
 
 
 def _day(moment: float) -> str:
@@ -503,22 +682,65 @@ async def _decide(request: Request, person: Person, chat: Chat, model_id: str | 
     return _placement(facts, install, prefs, chat)
 
 
+def _today() -> str:
+    """Today on this machine, as the dates events and projects carry are written."""
+    return datetime.now().date().isoformat()
+
+
+async def _relevance(
+    request: Request, person: Person, chat: Chat, notes: list[MemoryNote], prefs: dict[str, Any]
+) -> memory_relevance.Relevance:
+    """Which notes this chat is about (MR8), from the person's latest message in it: every
+    note that fits when they asked for that (`use_mode = all`) or when relevance cannot run."""
+    if prefs.get("use_mode") == "all":
+        return memory_relevance.Relevance(None, memory_relevance.ALL_THAT_FIT)
+    state = _state(request)
+    store = _store(request)
+    messages = await store.messages(chat.id)
+    question = next(
+        (m.content for m in reversed(messages) if m.role == "user" and m.content.strip()), ""
+    )
+    if not question:
+        return memory_relevance.Relevance(None, memory_relevance.ALL_THAT_FIT)
+    saved = getattr(state, "saved", None)
+    vectors = getattr(state, "note_vectors", None)
+    if vectors is None:
+        vectors = state.note_vectors = memory_relevance.NoteVectors()
+    return await memory_relevance.relevant(
+        store, getattr(saved, "meaning", None), vectors, person.sub, notes, question
+    )
+
+
+def _relevance_view(relevance: memory_relevance.Relevance) -> dict[str, Any]:
+    return {"how": relevance.how, "why": relevance.why, "ids": relevance.ids}
+
+
 async def _freeze(
-    store: Store, person: Person, chat: Chat, facts: ModelFacts, prefs: dict[str, Any]
+    request: Request,
+    store: Store,
+    person: Person,
+    chat: Chat,
+    facts: ModelFacts,
+    prefs: dict[str, Any],
 ) -> memory.Snapshot:
     """Choose the notes for this chat and model, and keep what was chosen with
     the chat. Nothing is kept when there is nothing to send."""
     notes = await store.memory_notes(person.sub)
     now = time.time()
+    relevance = await _relevance(request, person, chat, notes, prefs)
     snapshot = memory.build_snapshot(
         notes,
         budget=memory.budget_for(facts.window, prefs["budget_tokens"]),
         window=facts.window,
         model=facts.id,
         now=now,
+        relevant=relevance.ids,
+        today=_today(),
     )
     if snapshot.text:
-        await store.set_memory_snapshot(chat.id, person.sub, snapshot.to_json())
+        await store.set_memory_snapshot(
+            chat.id, person.sub, {**snapshot.to_json(), "relevance": _relevance_view(relevance)}
+        )
         await store.mark_memory_used(person.sub, snapshot.ids, now)
         log.info(
             "%d memory note(s), %d of %d tokens, went with a chat's first request%s",
@@ -554,14 +776,18 @@ async def block_for(
             return None
         if snapshot is None or snapshot.model != model_id:
             if freeze:
-                snapshot = await _freeze(store, person, chat, facts, prefs)
+                snapshot = await _freeze(request, store, person, chat, facts, prefs)
             else:
+                notes = await store.memory_notes(person.sub)
+                relevance = await _relevance(request, person, chat, notes, prefs)
                 snapshot = memory.build_snapshot(
-                    await store.memory_notes(person.sub),
+                    notes,
                     budget=memory.budget_for(facts.window, prefs["budget_tokens"]),
                     window=facts.window,
                     model=facts.id,
                     now=time.time(),
+                    relevant=relevance.ids,
+                    today=_today(),
                 )
         return snapshot.text or None
     except Exception as exc:
@@ -645,20 +871,28 @@ async def chat_memory(
         return out
     facts = decision.facts
     snapshot = saved if saved is not None and saved.model == facts.id else None
+    relevance_seen: dict[str, Any] | None = None
     if snapshot is None:
         if refresh:
-            snapshot = await _freeze(store, person, chat, facts, prefs)
+            snapshot = await _freeze(request, store, person, chat, facts, prefs)
+            fresh = await store.chat(chat.id)
+            relevance_seen = ((fresh.memory_snapshot if fresh else None) or {}).get("relevance")
         else:
+            relevance = await _relevance(request, person, chat, notes, prefs)
+            relevance_seen = _relevance_view(relevance)
             snapshot = memory.build_snapshot(
                 notes,
                 budget=memory.budget_for(facts.window, prefs["budget_tokens"]),
                 window=facts.window,
                 model=facts.id,
                 now=time.time(),
+                relevant=relevance.ids,
+                today=_today(),
             )
         frozen = refresh and bool(snapshot.text)
     else:
         frozen = True
+        relevance_seen = (chat.memory_snapshot or {}).get("relevance")
     kept = {n.id: n for n in notes}
     not_sent: list[dict[str, Any]] = []
     sent_ids = set(snapshot.ids)
@@ -668,7 +902,7 @@ async def chat_memory(
                 {
                     **note_view(note),
                     "reason": dropped.reason,
-                    "reasonText": memory.over_budget_reason(snapshot.budget),
+                    "reasonText": memory.reason_text(dropped.reason, snapshot.budget),
                 }
             )
     seen = sent_ids | {d.id for d in snapshot.dropped}
@@ -682,14 +916,20 @@ async def chat_memory(
             for n in notes
             if n.id not in seen
         )
+        kept_relevance = (chat.memory_snapshot or {}).get("relevance") or {}
         live = memory.build_snapshot(
             notes,
             budget=snapshot.budget,
             window=snapshot.window,
             model=snapshot.model,
             now=snapshot.frozen_at,
+            relevant=kept_relevance.get("ids"),
+            today=_today(),
         )
         out["changed"] = live.hash != snapshot.hash
+    out["relevance"] = (
+        {k: v for k, v in relevance_seen.items() if k != "ids"} if relevance_seen else None
+    )
     out.update(
         frozen=frozen,
         frozenAt=snapshot.frozen_at if frozen else None,

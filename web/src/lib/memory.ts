@@ -63,6 +63,38 @@ export function externalLabel(choice: ExternalChoice): string {
   return EXTERNAL_CHOICES.find((c) => c.value === choice)?.label ?? choice;
 }
 
+/** Learn from my chats (MR8): the two choices a person has. */
+export const LEARN_CHOICES: { value: "off" | "suggest"; label: string; help: string }[] = [
+  { value: "off", label: "Off", help: "Notes are only what you write yourself." },
+  {
+    value: "suggest",
+    label: "Suggest notes",
+    help: "When a chat goes quiet, its model may suggest up to three notes from what you wrote. Nothing is kept until you keep it.",
+  },
+];
+
+/** Which notes a chat is given. */
+export const USE_CHOICES: { value: "relevant" | "all"; label: string; help: string }[] = [
+  {
+    value: "relevant",
+    label: "Only what is relevant",
+    help: "Instructions and pinned notes, then notes about what the chat starts with. Needs a search model; without one, every note that fits is used.",
+  },
+  {
+    value: "all",
+    label: "Everything that fits",
+    help: "Every note, newest first, as many as fit the room a model has for notes.",
+  },
+];
+
+/** Whose word Learn from my chats is, as a sentence that follows it. */
+export function learnSetByWords(setBy: "owner" | "you" | "measured" | "default"): string {
+  if (setBy === "owner") return "The owner of this Workbench has turned suggestions off.";
+  if (setBy === "you") return "You chose this.";
+  if (setBy === "measured") return "On because this chat's model passed Eugene's measurement.";
+  return "Nobody has chosen, so it is off. It turns on by itself only for models that passed Eugene's measurement of suggestions.";
+}
+
 /** Whose word a setting is, as a sentence that follows it. */
 export function setByWords(setBy: "owner" | "you" | "default"): string {
   if (setBy === "owner") {

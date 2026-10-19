@@ -49,6 +49,7 @@ import {
 } from "../lib/memory";
 import type { Chat, ExternalChoice, MemoryNote, MemoryPage, NoteKind } from "../lib/types";
 import { useKeepFocus } from "../lib/useKeepFocus";
+import { LearnSettings, StillTrue, Suggestions } from "./MemorySuggestions";
 
 /** The lines of a box, one note each: trimmed, with the empty ones left out. */
 function linesOf(text: string): string[] {
@@ -198,7 +199,13 @@ export function Memory({
   }
 
   const off = !data.installEnabled;
-  const notes = [...data.sections.always, ...data.sections.other];
+  const past = data.sections.past ?? [];
+  const notes = [...data.sections.always, ...data.sections.other, ...past];
+  // "Used when relevant" is said only when it is what happens: the person asked for it and a
+  // search model runs to do it. Otherwise the notes are used when there is room, and why is said.
+  const relevantOnly = data.prefs.useMode === "relevant" && data.relevance?.available === true;
+  const relevanceWhy =
+    data.prefs.useMode === "relevant" && !relevantOnly ? data.relevance?.why : null;
   // Where the owner has turned Memory off and the person has no notes, there is
   // nothing to show but that.
   const bare = off && notes.length === 0;
@@ -321,6 +328,24 @@ export function Memory({
             onPrefs={(body) => void act(() => put("/api/memory/prefs", body).then(() => undefined))}
           />
         )}
+        {!off &&
+          (data.revisit ?? []).map((note) => (
+            <StillTrue
+              key={note.id}
+              note={note}
+              busy={busy}
+              working={working}
+              onProblem={setProblem}
+            />
+          ))}
+        <Suggestions
+          suggestions={data.suggestions ?? []}
+          busy={busy}
+          locked={off}
+          from={whereFrom}
+          working={working}
+          onProblem={setProblem}
+        />
         {!bare && (
           <section aria-labelledby={`${uid}-notes`} className="section">
             <h2 id={`${uid}-notes`} tabIndex={-1} className="title-section">
@@ -394,17 +419,39 @@ export function Memory({
                   className="flex flex-col gap-2"
                 >
                   <h3 id={`${uid}-other`} className="title-card">
-                    Used when there is room
+                    {relevantOnly ? "Used when relevant" : "Used when there is room"}
                   </h3>
                   <p className="help">
-                    The newest first, as many as fit the room a model has for notes.
+                    {relevantOnly
+                      ? "A chat is given the ones about what it starts with, as many as fit the room a model has for notes."
+                      : "The newest first, as many as fit the room a model has for notes."}
                   </p>
+                  {relevanceWhy && (
+                    <p data-testid="memory-relevance-why" className="help">
+                      {relevanceWhy}
+                    </p>
+                  )}
                   {data.sections.other.length === 0 ? (
                     <p className="empty">Nothing here yet.</p>
                   ) : (
                     list(data.sections.other)
                   )}
                 </section>
+                {past.length > 0 && (
+                  <section
+                    aria-labelledby={`${uid}-past`}
+                    data-testid="memory-section-past"
+                    className="flex flex-col gap-2"
+                  >
+                    <h3 id={`${uid}-past`} className="title-card">
+                      Past
+                    </h3>
+                    <p className="help">
+                      Events whose day has gone. No chat is given them; delete them when you like.
+                    </p>
+                    {list(past)}
+                  </section>
+                )}
               </>
             )}
             {!off && notes.length > 0 && <AddNote busy={busy} working={working} />}
@@ -442,6 +489,8 @@ function Settings({
     enabled?: boolean;
     external?: ExternalChoice | null;
     budgetTokens?: number | null;
+    learn?: "off" | "suggest" | null;
+    useMode?: "relevant" | "all";
   }) => void;
 }) {
   const uid = useId();
@@ -526,6 +575,7 @@ function Settings({
           </button>
         )}
       </fieldset>
+      <LearnSettings data={data} busy={busy} onPrefs={onPrefs} />
       <details className="group/b text-sm" data-testid="memory-budget-details">
         <summary
           data-testid="memory-budget-summary"

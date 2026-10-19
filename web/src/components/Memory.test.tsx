@@ -1059,7 +1059,10 @@ describe("the settings", () => {
     });
     await opened();
     expect(screen.getByRole("radio", { name: "Never send them" })).toBeChecked();
-    for (const radio of screen.getAllByRole("radio")) expect(radio).toBeDisabled();
+    for (const radio of screen
+      .getAllByRole("radio")
+      .filter((r) => r.getAttribute("name")?.endsWith("-external")))
+      expect(radio).toBeDisabled();
     expect(screen.getByTestId("memory-external-effective")).toHaveTextContent(
       "The owner of this Workbench set this, and it cannot be changed here.",
     );
