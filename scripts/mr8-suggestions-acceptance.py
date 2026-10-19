@@ -847,7 +847,9 @@ def main() -> int:
         # Ada's own chats may be read meanwhile (hers is on): what matters is that none of the
         # calls carries Bo's words.
         later = suggestion_calls(WB_SENT)[calls_before:]
-        note(f"suggestion calls while Bo's chat went quiet: {len(later)} (Ada's chats are read too)")
+        note(
+            f"suggestion calls while Bo's chat went quiet: {len(later)} (Ada's chats are read too)"
+        )
         check(
             "Bo's chat made no suggestion call: no call carries his words",
             all("Bergen" not in user_text(b) for b in suggestion_calls(WB_SENT)),
