@@ -48,13 +48,13 @@ interface Made {
   connection: Connection;
   token: string;
   address: string;
-  setups: { claudeCode: string; json: string };
+  setups: { claudeCode: string; codex: string; json: string };
 }
 
 const RIGHT_WORDS: [keyof ConnectionRights, string][] = [
   ["notes", "Reads your notes"],
   ["documents", "Searches your documents"],
-  ["suggest", "Suggests notes to your inbox"],
+  ["suggest", "Suggests notes for you to keep or dismiss"],
 ];
 
 function rightsWords(rights: ConnectionRights): string {
@@ -319,7 +319,8 @@ function MakeForm({
               {words}
               {key === "suggest" && allowed.suggest && (
                 <span className="help block">
-                  Suggestions wait in your inbox until you keep or dismiss them.
+                  Suggestions wait under Suggested notes on this page until you keep or dismiss
+                  them.
                 </span>
               )}
               {!allowed[key] && <span className="help block">{why[key]}</span>}
@@ -438,6 +439,24 @@ function Token({ made, onDone }: { made: Made; onDone: () => void }) {
           >
             <Copy size={14} aria-hidden />
             Copy the command
+          </button>
+        </div>
+      </div>
+      <div className="field">
+        <span className="field-label">Codex</span>
+        <p className="help">
+          Add this to <code>.codex/config.toml</code> in your home folder. The Codex app in your
+          editor reads the same file.
+        </p>
+        <pre className="wrap-anywhere whitespace-pre-wrap">{made.setups.codex}</pre>
+        <div>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => void copy(made.setups.codex, "Codex settings")}
+          >
+            <Copy size={14} aria-hidden />
+            Copy the Codex settings
           </button>
         </div>
       </div>

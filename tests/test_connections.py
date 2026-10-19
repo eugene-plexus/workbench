@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import time
+import tomllib
 from typing import Any
 
 import httpx
@@ -89,6 +90,12 @@ def test_a_connection_reads_its_persons_notes_and_never_anothers(world: World) -
     assert made["token"].startswith("wbc_")
     assert made["address"] == f"{world.workbench}/mcp"
     assert made["token"] in made["setups"]["claudeCode"]
+    # Codex's own settings file reads it as written (Codex 0.162 checked live, 2026-10-19).
+    codex = tomllib.loads(made["setups"]["codex"])["mcp_servers"]["workbench"]
+    assert codex == {
+        "url": made["address"],
+        "http_headers": {"Authorization": f"Bearer {made['token']}"},
+    }
     assert tool_names(world, made["token"]) == ["search_notes"]
 
     found = call(world, made["token"], "search_notes", query="metric units")
