@@ -191,6 +191,7 @@ def prefs_view(prefs: dict[str, Any], install: config.MemorySettings) -> dict[st
         "budgetTokens": prefs["budget_tokens"],
         "relevantBudgetTokens": prefs.get("relevant_budget_tokens"),
         "searchTool": bool(prefs.get("search_tool", True)),
+        "chatsTool": bool(prefs.get("chats_tool", True)),
         # MR8: `learn` is null until the person chooses; `useMode` is theirs, `relevant` until
         # they choose `all`.
         "learn": ("off" if prefs["learn"] == "off" else "suggest")
@@ -420,6 +421,8 @@ class PrefsUpdate(BaseModel):
         default=None, ge=memory.BUDGET_FLOOR, le=20000, strict=True
     )
     searchTool: StrictBool | None = None
+    #: MV2: whether models may search the person's past chats (`search_chats`).
+    chatsTool: StrictBool | None = None
     #: MR8. `null` returns Learn from my chats to the install's default.
     learn: Literal["off", "suggest"] | None = None
     useMode: Literal["relevant", "all"] | None = None
@@ -658,6 +661,7 @@ async def put_prefs(request: Request, body: PrefsUpdate) -> dict[str, Any]:
         "budgetTokens": None,
         "relevantBudgetTokens": None,
         "searchTool": True,
+        "chatsTool": True,
         "learn": "off",
         "useMode": "relevant",
         "offerDismissed": False,
@@ -668,6 +672,7 @@ async def put_prefs(request: Request, body: PrefsUpdate) -> dict[str, Any]:
         "budgetTokens": "budget_tokens",
         "relevantBudgetTokens": "relevant_budget_tokens",
         "searchTool": "search_tool",
+        "chatsTool": "chats_tool",
         "learn": "learn",
         "useMode": "use_mode",
         "offerDismissed": "offer_dismissed",
@@ -1376,12 +1381,14 @@ async def turn_for(
     *,
     used: int,
     reserve: int,
+    spent: int = 0,
 ) -> TurnMemory:
     """Relevant memory for the turn about to be asked: chosen from the person's latest
-    message (and the one before it), in budget, and in the room the window has left after
-    `used` tokens and the answer's `reserve`. Never raises: memory does not stop an answer."""
+    message (and the one before it), in budget less what past chats took of it (`spent`,
+    MV2), and in the room the window has left after `used` tokens and the answer's
+    `reserve`. Never raises: memory does not stop an answer."""
     try:
-        return await _turn_for(request, person, chat, history, model_id, used, reserve)
+        return await _turn_for(request, person, chat, history, model_id, used, reserve, spent)
     except Exception as exc:
         log.warning(
             "a turn's relevant notes were left out of its request: %s: %s", type(exc).__name__, exc
@@ -1397,6 +1404,7 @@ async def _turn_for(
     model_id: str,
     used: int,
     reserve: int,
+    spent: int = 0,
 ) -> TurnMemory:
     store = _store(request)
     fresh = await store.chat(chat.id) or chat
@@ -1414,7 +1422,10 @@ async def _turn_for(
     latest = users[-1].content if users else ""
     if not latest.strip() or not (others or deferred):
         return out
-    budget = memory.relevant_budget_for(facts.window, prefs.get("relevant_budget_tokens"))
+    budget = max(
+        0,
+        memory.relevant_budget_for(facts.window, prefs.get("relevant_budget_tokens")) - spent,
+    )
     room = None if facts.window is None else max(0, facts.window - used - reserve)
     allowed = budget if room is None else min(budget, room)
     chosen = await _finder(_state(request)).choose(
@@ -1457,10 +1468,19 @@ async def _turn_for(
 # --------------------------------------------------------------------------- #
 
 
-async def run_search_tool(state: Any, owner: str, arguments: dict[str, Any]) -> str:
+async def run_search_tool(
+    state: Any,
+    person: Person,
+    chat_id: str,
+    model_id: str | None,
+    arguments: dict[str, Any],
+) -> str:
     """One `search_memory` call for this person: the notes that match, as the same delimited
-    data a turn carries, at most `SEARCH_TOOL_TOKENS`. Never raises: what went wrong is the
-    result, in words."""
+    data a turn carries, at most `SEARCH_TOOL_TOKENS`. The decision is asked again as the
+    call runs (MV2 found it was not): a switch turned off, or the chat moved to a model
+    notes may not go to, while the answer ran, withholds it. Never raises: what went wrong
+    is the result, in words."""
+    owner = person.sub
     query = str(arguments.get("query") or "").strip()[:500]
     limit = arguments.get("limit") or 8
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 20:
@@ -1468,6 +1488,11 @@ async def run_search_tool(state: Any, owner: str, arguments: dict[str, Any]) -> 
     if not query:
         return "Nothing to search for: give a query."
     try:
+        chat = await state.store.chat(chat_id)
+        if chat is None or chat.owner != owner:
+            return "This chat is gone."
+        if not (await decide(state, person, chat, model_id)).send:
+            return memory.WITHHELD
         notes = await state.store.memory_notes(owner)
         chosen = await _finder(state).search(owner, query, notes, today=_today())
         turn = memory.pack_relevant(chosen.candidates[:limit], memory.SEARCH_TOOL_TOKENS)
@@ -1538,6 +1563,7 @@ async def chat_memory(
                     "notes": len(turn.get("notes") or []),
                     "tokens": turn.get("tokens"),
                     "budget": turn.get("budget"),
+                    "pastChats": len((turn.get("pastChats") or {}).get("exchanges") or []),
                 }
                 if turn
                 else None
@@ -1594,6 +1620,8 @@ async def chat_memory(
         "turns": turns,
         "relevantBudget": None,
         "searchTool": None,
+        # MV2: Use past chats in this chat, and whether this chat's model may receive them.
+        "pastChats": await _past_chats_state(request, person, chat),
     }
     if decision.send and not notes:
         out["reason"], out["reasonCode"] = "You have no notes yet.", "no_notes"
@@ -1662,6 +1690,33 @@ async def chat_memory(
     )
     out["counts"] = {"notes": len(notes), "sent": len(snapshot.sent), "notSent": len(not_sent)}
     return out
+
+
+async def _past_chats_state(request: Request, person: Person, chat: Chat) -> dict[str, Any]:
+    """What the drawer says of past chats in this chat (MV2): whether the person turned them
+    on, whether this chat's model may receive them and why not, and whether models may
+    search them."""
+    from . import past_chats
+
+    state = _state(request)
+    decision = await past_chats.decide(state, person, chat, chat.model)
+    prefs = await _store(request).memory_prefs(person.sub)
+    return {
+        "on": chat.settings.get("pastChats") is True,
+        "allowed": decision.send,
+        "reason": None if decision.send else decision.reason,
+        "reasonCode": None if decision.send else decision.code,
+        "hint": None if decision.send else decision.hint,
+        "searchTool": bool(prefs.get("chats_tool", True))
+        and decision.send
+        and bool(decision.facts and decision.facts.tools),
+        "budget": (
+            memory.relevant_budget_for(decision.facts.window, prefs.get("relevant_budget_tokens"))
+            // past_chats.TURN_SHARE
+            if decision.send and decision.facts
+            else None
+        ),
+    }
 
 
 @router.get("/api/chats/{chat_id}/memory")

@@ -33,6 +33,7 @@ import type {
 import { useKeepFocus } from "../lib/useKeepFocus";
 import { FOCUSABLE, useOverlay } from "./ChatSettings";
 import { ReadOnlyTurn, ThisTurn } from "./MemoryTurn";
+import { PastChatsSection } from "./PastChatsDrawer";
 import { ScrollText } from "./ScrollText";
 
 const TONE: Record<ChipTone, string> = {
@@ -446,6 +447,14 @@ export function MemoryDrawer({
                 </section>
               )}
               {own.sending && <ThisTurn chatId={chatId} view={own} />}
+              {own.pastChats && (
+                <PastChatsSection
+                  state={own.pastChats}
+                  turn={own.turn?.pastChats}
+                  busy={busy}
+                  onSwitch={(on) => void change({ pastChats: on ? true : null })}
+                />
+              )}
               {own.notSent.length > 0 && (
                 <section aria-labelledby={`${uid}-not-sent`} className="flex flex-col gap-1">
                   <h3 id={`${uid}-not-sent`} className="eyebrow text-muted">

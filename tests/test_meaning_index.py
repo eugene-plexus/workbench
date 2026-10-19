@@ -510,9 +510,13 @@ async def test_notes_and_documents_are_owed_meaning_apart_and_the_cap_counts_doc
     assert index is not None
     await two_sections(index, "doc00001", ready=False)
     await two_sections(index, "note0001", scope=index_module.NOTES, ready=False)
-    assert {p.doc_id for p in (await index.pending_meaning(16))[0]} == {"doc00001", "note0001"}
+    # A past chat's exchange (MV2) is the person's memory too: apart from documents, after notes.
+    await two_sections(index, "xchg0001", scope=index_module.EXCHANGES, ready=False)
+    owed = [p.doc_id for p in (await index.pending_meaning(16))[0]]
+    assert set(owed) == {"doc00001", "note0001", "xchg0001"}
+    assert owed.index("note0001") < owed.index("xchg0001")
     assert (await index.pending_meaning(16, notes=False, documents=False))[0] == []
     only_notes = (await index.pending_meaning(16, documents=False))[0]
-    assert {p.doc_id for p in only_notes} == {"note0001"}
+    assert {p.doc_id for p in only_notes} == {"note0001", "xchg0001"}
     assert {p.doc_id for p in (await index.pending_meaning(16, notes=False))[0]} == {"doc00001"}
     assert await index.passages_total() == 2

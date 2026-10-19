@@ -126,6 +126,7 @@ def test_a_connection_reads_its_persons_notes_and_never_anothers(world: World) -
         "notes": True,
         "documents": False,
         "suggest": False,
+        "chats": False,
     }
     database = (world.data / "workbench.sqlite3").read_bytes()
     assert made["token"].encode() not in database

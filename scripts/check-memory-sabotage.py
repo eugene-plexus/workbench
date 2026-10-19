@@ -35,6 +35,11 @@ V2 = "tests/test_memory_v2.py"
 TOOLS = SRC + "tools.py"
 RELEVANCE = SRC + "memory_relevance.py"
 MEANING = SRC + "knowledge/meaning.py"
+PAST = SRC + "past_chats.py"
+EXCHANGES_INDEX = SRC + "exchanges_index.py"
+INDEX = SRC + "knowledge/index.py"
+CONNECTIONS = SRC + "connections.py"
+MV2 = "tests/test_past_chats.py"
 
 # (label, file, before, after, check)
 CASES: list[tuple[str, str, str, str, str]] = [
@@ -442,15 +447,15 @@ CASES: list[tuple[str, str, str, str, str]] = [
     (
         "a kept search_memory result is replayed where notes may not go",
         TOOLS,
-        'if not notes and call.get("serverId") == MEMORY_SERVER:',
+        'if call.get("serverId") in held:',
         "if False:",
         f"{V2}::test_a_search_memory_result_is_withheld_where_notes_may_not_go_and_hidden_from_the_owner",
     ),
     (
         "the owner reads what a turn was sent",
         API,
-        '    if isinstance(used, dict):\n        out["memoryUsed"] = {',
-        '    if False:\n        out["memoryUsed"] = {',
+        '    if isinstance(used, dict):\n        past = used.get("pastChats")\n',
+        '    if False:\n        past = used.get("pastChats")\n',
         f"{V2}::test_a_search_memory_result_is_withheld_where_notes_may_not_go_and_hidden_from_the_owner",
     ),
     (
@@ -505,7 +510,7 @@ CASES: list[tuple[str, str, str, str, str]] = [
     (
         "a withheld search keeps the query the model wrote",
         TOOLS,
-        "        if not notes:\n            mine = ",
+        "        if held:\n            mine = ",
         "        if False:\n            mine = ",
         f"{V2}::test_a_search_memory_result_is_withheld_where_notes_may_not_go_and_hidden_from_the_owner",
     ),
@@ -522,6 +527,84 @@ CASES: list[tuple[str, str, str, str, str]] = [
         '        writer.writerow([t["tag"], _csv_cell(t["description"])])',
         '        writer.writerow([t["tag"], t["description"]])',
         f"{V2}::test_a_tag_cannot_start_a_formula_and_a_description_that_does_round_trips_through_csv",
+    ),
+    # --- past chats (MV2) --------------------------------------------------
+    (
+        "MV2: a deleted chat's exchanges stay in the index",
+        EXCHANGES_INDEX,
+        "        return int(await index.delete_exchanges(chat_id=chat_id))\n",
+        "        return 0\n",
+        f"{MV2}::test_deleting_a_chat_leaves_no_word_in_the_index_or_in_any_answer",
+    ),
+    (
+        "MV2: a version not shown is read",
+        STORE,
+        '                    "AND a.chosen = 1 AND u.chosen = 1",\n',
+        '                    "",\n',
+        f"{MV2}::test_a_version_not_shown_is_never_read_and_a_delete_removes_twice",
+    ),
+    (
+        "MV2: Rebuild search leaves past chats empty",
+        SRC + "saved_api.py",
+        "        exchanges.refill(person.sub)\n",
+        "        pass\n",
+        f"{MV2}::test_rebuild_search_puts_the_past_chats_back",
+    ),
+    (
+        "MV2: a kept search_chats result survives its chat's delete",
+        STORE,
+        '                    _drop_chat_from_answers(db, found["owner"], chat_id)\n',
+        "                    pass\n",
+        f"{MV2}::test_deleting_a_chat_takes_it_out_of_every_other_answers_record_and_kept_search",
+    ),
+    (
+        "MV2: a withheld search_chats call replays its query",
+        TOOLS,
+        "({CHATS_SERVER} if not chats else set())",
+        "set()",
+        f"{MV2}::test_a_kept_search_chats_call_is_withheld_where_past_chats_may_not_go_and_hidden_from_owner",
+    ),
+    (
+        "MV2: past chats go where documents may never go",
+        PAST,
+        '    if choice == "never":\n',
+        "    if False:\n",
+        f"{MV2}::test_search_chats_runs_and_is_withheld_after_the_chat_moves_outside",
+    ),
+    (
+        "MV2: Use past chats sends this chat's own exchanges",
+        PAST,
+        "        found = await find(state, person.sub, latest, besides=chat.id, query=query)\n",
+        "        found = await find(state, person.sub, latest, besides=None, query=query)\n",
+        f"{MV2}::test_use_past_chats_is_off_by_default_and_then_carries_a_match_from_another_chat",
+    ),
+    (
+        "MV2: Use past chats is on without the person",
+        PAST,
+        '    if chat.settings.get("pastChats") is not True or not others:\n',
+        "    if not others:\n",
+        f"{MV2}::test_use_past_chats_is_off_by_default_and_then_carries_a_match_from_another_chat",
+    ),
+    (
+        "MV2: an exchange is owed meaning from an outside search model",
+        INDEX,
+        '                else f" AND scope NOT IN ({_PRIVATE_MARKS})"\n',
+        "                else f\" AND scope != '{NOTES}'\"\n",
+        "tests/test_meaning_index.py::test_notes_and_documents_are_owed_meaning_apart_and_the_cap_counts_documents_only",
+    ),
+    (
+        "MV2: a connection searches past chats without the right",
+        CONNECTIONS,
+        '    "search_chats": "search_chats",\n}',
+        '    "search_chats": "read_notes",\n}',
+        f"{MV2}::test_a_connection_searches_past_chats_only_with_the_right",
+    ),
+    (
+        "MV2: the owner's view keeps a past-chats search",
+        API,
+        "_PRIVATE_SERVERS = (MEMORY_SERVER, CHATS_SERVER)",
+        "_PRIVATE_SERVERS = (MEMORY_SERVER,)",
+        f"{MV2}::test_a_kept_search_chats_call_is_withheld_where_past_chats_may_not_go_and_hidden_from_owner",
     ),
 ]
 

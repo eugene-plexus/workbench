@@ -123,6 +123,8 @@ def request_for(
     retrieved: str | None = None,
     memory_turn: str | None = None,
     memory_allowed: bool = True,
+    past_turn: str | None = None,
+    chats_allowed: bool | None = None,
 ) -> dict[str, Any]:
     """The body of `POST /v1/chat/completions` for the next answer.
 
@@ -145,7 +147,11 @@ def request_for(
 
     `memory_turn` is the person's notes chosen for this turn (MV1, `memory.render_relevant`),
     placed the same way, before the passages. Without `memory_allowed` (this request may not
-    carry notes), a `search_memory` result kept from an earlier turn is withheld."""
+    carry notes), a `search_memory` result kept from an earlier turn is withheld.
+
+    `past_turn` is the person's past chats chosen for this turn (MV2, `past_chats.render`),
+    after the notes. Without `chats_allowed` (this request may not carry past chats; it
+    follows `memory_allowed` when not given), a kept `search_chats` result is withheld."""
     by_id = {r.id: r for r in records}
     last_user = history[-1] if history and history[-1].role == "user" else None
     messages: list[dict[str, Any]] = []
@@ -164,14 +170,20 @@ def request_for(
                         root,
                         documents,
                         lean,
-                        "\n\n".join(p for p in (memory_turn, retrieved) if p)
+                        "\n\n".join(p for p in (memory_turn, past_turn, retrieved) if p)
                         if message is last_user
                         else None,
                     ),
                 }
             )
         elif message.role == "assistant":
-            messages.extend(transcript(message.tool_rounds, notes=memory_allowed))
+            messages.extend(
+                transcript(
+                    message.tool_rounds,
+                    notes=memory_allowed,
+                    chats=memory_allowed if chats_allowed is None else chats_allowed,
+                )
+            )
             answer = (
                 message.content[message.answer_from or 0 :].lstrip()
                 if message.tool_rounds

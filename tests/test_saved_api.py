@@ -195,7 +195,10 @@ def test_the_same_name_replaces_the_old_file_and_its_old_words_are_gone_from_ans
     ask(ada, chat, f"What is {SECOND}?")
     assert SECOND in block_of(world)[1] and RARE not in block_of(world)[1]
     with raw(world) as db:
-        assert db.execute("SELECT COUNT(*) FROM documents").fetchone() == (1,)
+        # The person's own questions are in their index as past chats (MV2), not documents.
+        assert db.execute(
+            "SELECT COUNT(*) FROM documents WHERE scope != 'exchanges'"
+        ).fetchone() == (1,)
     assert not any(first["id"] in p.name for p in knowledge_files(world)), "and its files"
 
 
@@ -383,6 +386,9 @@ def test_removing_a_document_removes_everything_of_it_and_it_is_gone_from_answer
     assert ada.delete(f"/api/documents/{a['id']}").status_code == 404
     ask(ada, chat, f"What is {RARE}?")
     assert not has_block(world), "gone from answers at once"
+    # The person's own questions are in their index too, as their past chats (MV2): the
+    # chat goes, so what is left is the documents'.
+    assert ada.delete(f"/api/chats/{chat}").status_code == 204
     with raw(world) as db:
         assert db.execute("SELECT COUNT(*) FROM documents").fetchone() == (1,)
         assert db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] >= 1

@@ -73,6 +73,17 @@ CHAT = "chat:"
 #: written by `Index.put_note` from the main store and never read from a file. Not a document
 #: the person keeps: the Documents screen, its counts and its cap leave this scope out.
 NOTES = "notes"
+#: A person's past chats (MV2): one document an exchange (their message and the answer's
+#: opening), by the answer's id, its `source` the chat's id, written by `Index.put_exchange`
+#: from the main store. Not a document either.
+EXCHANGES = "exchanges"
+#: The scopes that are the person's memory rather than their documents: kept out of the
+#: Documents screen, its counts, its cap and its order, and given meaning only by a search
+#: model on the install's own machines.
+PRIVATE: tuple[str, ...] = (NOTES, EXCHANGES)
+#: What a chat's signature is kept under in `meta` (`exchanges_index`).
+SIGNATURE = "exchanges:"
+_PRIVATE_MARKS = ", ".join("?" for _ in PRIVATE)
 #: What a document's `source` starts with when it was read from a folder the person was granted
 #: (MR7): `folder:<grant id>/<path below the folder>`. A document is the same document while
 #: its source is, so an edited file replaces the one it was and a deleted one is found by its path.
@@ -820,7 +831,9 @@ class Index:
         def go(db: sqlite3.Connection) -> int:
             return int(
                 db.execute(
-                    "SELECT COALESCE(SUM(chunks), 0) FROM documents WHERE scope != ?", (NOTES,)
+                    "SELECT COALESCE(SUM(chunks), 0) FROM documents WHERE scope NOT IN "
+                    f"({_PRIVATE_MARKS})",
+                    PRIVATE,
                 ).fetchone()[0]
             )
 
@@ -1047,8 +1060,8 @@ class Index:
                 others = int(
                     db.execute(
                         "SELECT COALESCE(SUM(chunks), 0) FROM documents WHERE id != ? "
-                        "AND scope != ?",
-                        (doc_id, NOTES),
+                        f"AND scope NOT IN ({_PRIVATE_MARKS})",
+                        (doc_id, *PRIVATE),
                     ).fetchone()[0]
                 )
                 if others + len(passages) > cap:
@@ -1198,12 +1211,20 @@ class Index:
                 return owed, self.epoch
             # A person's notes go to a search model on their own machines only, and are
             # added whether or not the owner has documents on (`Meaning._work` says which).
-            only = "" if notes and documents else " AND scope = ?" if notes else " AND scope != ?"
+            # Past chats (MV2) are the person's memory too, and come after their notes.
+            only = (
+                ""
+                if notes and documents
+                else f" AND scope IN ({_PRIVATE_MARKS})"
+                if notes
+                else f" AND scope NOT IN ({_PRIVATE_MARKS})"
+            )
             docs = db.execute(
                 "SELECT id, name, scope FROM documents WHERE status IN ('searchable', 'embedding') "
                 f"AND chunks > embedded{only} ORDER BY CASE WHEN scope = 'library' THEN 1 "
-                f"WHEN scope = '{NOTES}' THEN 2 ELSE 0 END, added_at, rowid",
-                () if notes and documents else (NOTES,),
+                f"WHEN scope = '{NOTES}' THEN 2 WHEN scope = '{EXCHANGES}' THEN 3 ELSE 0 END, "
+                "added_at, rowid",
+                () if notes and documents else PRIVATE,
             ).fetchall()
             for doc in docs:
                 rows = db.execute(
@@ -1425,8 +1446,9 @@ class Index:
             rows = db.execute(
                 "SELECT id, chunks - embedded AS owed FROM documents "
                 "WHERE status IN ('searchable', 'embedding') AND chunks > embedded "
-                "AND scope != ? ORDER BY (scope = 'library'), added_at, rowid",
-                (NOTES,),
+                f"AND scope NOT IN ({_PRIVATE_MARKS}) ORDER BY (scope = 'library'), "
+                "added_at, rowid",
+                PRIVATE,
             )
             return [(r["id"], r["owed"]) for r in rows]
 
@@ -1703,6 +1725,159 @@ class Index:
                         f"DELETE FROM documents WHERE scope = ? AND id IN ({marks})",
                         (NOTES, *part),
                     ).rowcount
+                return gone
+
+            count = self._transaction(db, body)
+            if count:
+                self._scrub(db)
+            return int(count)
+
+        return await self._run(go)
+
+    # --- past chats (MV2) ---------------------------------------------------
+
+    async def put_exchange(
+        self,
+        exchange_id: str,
+        chat_id: str,
+        sha256: str,
+        title: str,
+        passages: Sequence[chunk.Passage],
+    ) -> bool:
+        """Make the index hold this version of an exchange: one document in `EXCHANGES` by
+        the answer's id, its `source` the chat's id, its passages searchable by words at once
+        and owed their meaning. False when it already holds this version."""
+
+        def go(db: sqlite3.Connection) -> bool:
+            def body() -> bool:
+                row = db.execute(
+                    "SELECT sha256, scope, source FROM documents WHERE id = ?", (exchange_id,)
+                ).fetchone()
+                if row is not None and row["scope"] != EXCHANGES:
+                    raise IndexDamaged("an exchange's id is a document's")
+                if row is not None and row["sha256"] == sha256 and row["source"] == chat_id:
+                    return False
+                db.execute("DELETE FROM documents WHERE id = ?", (exchange_id,))
+                now = time.time()
+                db.execute(
+                    "INSERT INTO documents (id, scope, name, media_type, bytes, sha256, source, "
+                    "status, kind, added_at, read_at, indexed_at, chunks, tokens_est) "
+                    "VALUES (?, ?, ?, 'text/markdown', ?, ?, ?, 'searchable', 'exchange', "
+                    "?, ?, ?, ?, ?)",
+                    (
+                        exchange_id,
+                        EXCHANGES,
+                        title[:240],
+                        sum(len(p.text) for p in passages),
+                        sha256,
+                        chat_id,
+                        now,
+                        now,
+                        now,
+                        len(passages),
+                        sum(p.tokens_est for p in passages),
+                    ),
+                )
+                db.executemany(
+                    _INSERT_CHUNK,
+                    [
+                        (
+                            exchange_id,
+                            p.ord,
+                            p.heading_path,
+                            p.page_start,
+                            p.page_end,
+                            p.line_start,
+                            p.line_end,
+                            p.char_start,
+                            p.char_end,
+                            p.text,
+                            p.tokens_est,
+                        )
+                        for p in passages
+                    ],
+                )
+                return True
+
+            return self._transaction(db, body)
+
+        return await self._run(go)
+
+    async def exchange_digests(self, chat_id: str | None = None) -> dict[str, tuple[str, str]]:
+        """Each exchange the index holds (of one chat, or every one), by id: `(chat id,
+        sha256)`."""
+
+        def go(db: sqlite3.Connection) -> dict[str, tuple[str, str]]:
+            sql, params = "SELECT id, source, sha256 FROM documents WHERE scope = ?", [EXCHANGES]
+            if chat_id is not None:
+                sql, params = sql + " AND source = ?", [EXCHANGES, chat_id]
+            return {r["id"]: (r["source"], r["sha256"]) for r in db.execute(sql, params)}
+
+        return await self._run(go)
+
+    async def exchange_count(self, *, besides: str | None = None) -> int:
+        """How many exchanges the index holds, leaving out one chat's."""
+
+        def go(db: sqlite3.Connection) -> int:
+            return int(
+                db.execute(
+                    "SELECT COUNT(*) FROM documents WHERE scope = ? AND source != ?",
+                    (EXCHANGES, besides or ""),
+                ).fetchone()[0]
+            )
+
+        return await self._run(go)
+
+    async def signatures(self) -> dict[str, str]:
+        """Each chat's signature as it was when its exchanges were last put, by chat id."""
+
+        def go(db: sqlite3.Connection) -> dict[str, str]:
+            return {
+                r["key"][len(SIGNATURE) :]: r["value"]
+                for r in db.execute(
+                    "SELECT key, value FROM meta WHERE substr(key, 1, ?) = ?",
+                    (len(SIGNATURE), SIGNATURE),
+                )
+            }
+
+        return await self._run(go)
+
+    async def delete_exchanges(
+        self,
+        *,
+        chat_id: str | None = None,
+        ids: Sequence[str] = (),
+        signature: str | None = None,
+    ) -> int:
+        """Take exchanges out of the index for real, in one transaction: every one of a chat
+        (and its signature), or these. With `chat_id` and `signature`, the chat's signature
+        is kept as that in the same transaction (a sync); with `chat_id` alone, it goes. How
+        many it held."""
+        wanted = list(dict.fromkeys(ids))
+
+        def go(db: sqlite3.Connection) -> int:
+            def body() -> int:
+                gone = 0
+                if chat_id is not None and signature is None:
+                    gone += db.execute(
+                        "DELETE FROM documents WHERE scope = ? AND source = ?",
+                        (EXCHANGES, chat_id),
+                    ).rowcount
+                for start in range(0, len(wanted), 500):
+                    part = wanted[start : start + 500]
+                    marks = ", ".join("?" for _ in part)
+                    gone += db.execute(
+                        f"DELETE FROM documents WHERE scope = ? AND id IN ({marks})",
+                        (EXCHANGES, *part),
+                    ).rowcount
+                if chat_id is not None:
+                    if signature is None:
+                        db.execute("DELETE FROM meta WHERE key = ?", (SIGNATURE + chat_id,))
+                    else:
+                        db.execute(
+                            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                            (SIGNATURE + chat_id, signature),
+                        )
                 return gone
 
             count = self._transaction(db, body)

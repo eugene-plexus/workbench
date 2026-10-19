@@ -36,6 +36,7 @@ export function ReadOnlyTurn({ view }: { view: ChatMemoryReadOnly }) {
     <p data-testid="memory-turn-counts" className="help">
       The latest answer was sent {plural(turn.notes, "note")} chosen for it
       {turn.budget ? `. ${tokenWords(turn.tokens ?? 0, turn.budget)}.` : "."}
+      {turn.pastChats ? ` It was also sent ${plural(turn.pastChats, "past exchange")}.` : ""}
     </p>
   );
 }
@@ -69,7 +70,9 @@ export function ThisTurn({ chatId, view }: { chatId: string; view: ChatMemory })
     }
   }
 
-  const turn = picked ?? latest;
+  const chosen = picked ?? latest;
+  // A turn sent past chats and no notes keeps no notes' record (MV2).
+  const turn = chosen && Array.isArray(chosen.notes) ? chosen : null;
   if (!turn && view.relevantBudget == null) return null;
   return (
     <section
@@ -97,7 +100,7 @@ export function ThisTurn({ chatId, view }: { chatId: string; view: ChatMemory })
           <select
             id={`${uid}-pick`}
             data-testid="memory-turn-pick"
-            value={turn?.messageId ?? ""}
+            value={chosen?.messageId ?? ""}
             onChange={(event) => void pick(event.target.value)}
             className="control w-56 max-w-full"
           >

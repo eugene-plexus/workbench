@@ -243,6 +243,9 @@ class Finder:
         model = resolved.model
         if model is None or not model.local:
             return None, NO_SEARCH_MODEL
+        # A search model that came after the notes were put is noticed here (MV2's live run:
+        # passages left words only by a restart waited until something else woke the worker).
+        await meaning.touch(index)
         if not (await index.meaning_counts(NOTES)).embedded:
             # Nothing of the notes is searchable by meaning yet (just upgraded, or just
             # started): what meaning would find is nothing, which is not an answer.

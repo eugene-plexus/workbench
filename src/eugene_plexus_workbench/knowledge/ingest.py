@@ -345,8 +345,8 @@ class Ingest:
                 done.orphan_files += 1
         done.requeued += await index.requeue_interrupted()
         for doc in await index.documents():
-            if doc.scope == index_module.NOTES:
-                continue  # a note is written from the store, and has no file of its own
+            if doc.scope in index_module.PRIVATE:
+                continue  # a note or an exchange is written from the store: no file
             if doc.status in FOUND and not index.text_path(doc.id).is_file():
                 log.warning("the text of saved document %s is gone; reading it again", doc.id)
                 if await index.requeue(doc.id) is not None:

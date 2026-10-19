@@ -77,6 +77,8 @@ class Preparation:
     memory_used: dict[str, Any] | None = None
     #: Whether the model is offered `search_memory` (MV1): the answer then runs with tools.
     memory_tool: bool = False
+    #: Whether the model is offered `search_chats` (MV2), likewise.
+    chats_tool: bool = False
     #: How a `reply` ends, as a message's `finish` says it.
     finish: str = "documents_only"
 
@@ -281,6 +283,9 @@ class Answers:
         self._tools = tools
         self._running: dict[str, Running] = {}
         self._watchers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
+        #: Told the chat's id when an answer ends, whatever its outcome (MV2: its
+        #: exchange goes in the person's index). Never in an answer's way.
+        self.on_finished: Callable[[str], None] | None = None
 
     def running(self, chat_id: str) -> Running | None:
         return self._running.get(chat_id)
@@ -434,11 +439,12 @@ class Answers:
             if value is not None:
                 self.publish(chat_id, {"type": "progress", "id": m.id, "progress": value})
 
-        memory_tool = False
+        memory_tool = chats_tool = False
         try:
             if prepare is not None:
                 prepared = await prepare(progress)
                 memory_tool = prepared.memory_tool
+                chats_tool = prepared.chats_tool
                 running.progress = None
                 told: dict[str, Any] = {}
                 if prepared.sources:
@@ -467,9 +473,14 @@ class Answers:
             if context:
                 # Ordinary user context, before the current explicit request.
                 body["messages"][-1:-1] = context
-            if tool_servers or folder_grants or memory_tool:
+            if tool_servers or folder_grants or memory_tool or chats_tool:
                 await self._with_tools(
-                    running, body, tool_servers, folder_grants, memory_tool=memory_tool
+                    running,
+                    body,
+                    tool_servers,
+                    folder_grants,
+                    memory_tool=memory_tool,
+                    chats_tool=chats_tool,
                 )
             else:
                 await self._stream(running, body)
@@ -510,6 +521,9 @@ class Answers:
             finally:
                 self._running.pop(chat_id, None)
                 self.publish(chat_id, {"type": "done", "message": message_view(m)})
+                if self.on_finished is not None:
+                    with contextlib.suppress(Exception):
+                        self.on_finished(chat_id)
 
     async def _stream(self, running: Running, body: dict[str, Any]) -> list[dict[str, Any]]:
         body = {
@@ -578,6 +592,7 @@ class Answers:
         folder_ids: list[str],
         *,
         memory_tool: bool = False,
+        chats_tool: bool = False,
     ) -> None:
         if self._tools is None:
             raise ToolError("Tools are unavailable. Restart Workbench and try again.")
@@ -586,7 +601,9 @@ class Answers:
         person = running.person or (await self._store.person(chat.owner) if chat else None)
         async with self._tools.connect(server_ids, person, folder_ids) as session:
             if memory_tool and person is not None:
-                session.add_memory_search()
+                session.add_memory_search(running.chat_id, body.get("model"))
+            if chats_tool and person is not None:
+                session.add_chats_search(running.chat_id, body.get("model"))
             if not session.definitions:
                 raise ToolError("The selected servers offer no tools. Check them in Tools.")
             body["tools"] = session.definitions

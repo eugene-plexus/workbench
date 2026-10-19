@@ -58,7 +58,7 @@ test("making one shows the token once, with the address, and says where the text
     expect(path).toBe("/api/connections");
     expect(body).toEqual({
       name: "Claude Code on my laptop",
-      rights: { notes: true, documents: true, suggest: false },
+      rights: { notes: true, documents: true, suggest: false, chats: false },
       days: 90,
     });
     page = served({ connections: [made] });

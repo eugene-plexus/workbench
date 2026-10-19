@@ -72,6 +72,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -89,7 +90,7 @@ from .agui_store import AGUIStore, allow_chat_write
 from .interaction_store import SCHEMA as INTERACTION_SCHEMA
 from .interaction_store import InteractionStore
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 #: The oldest schema this migrates from: what Workbench v0.1.0 wrote. Schema 1 predates
 #: it, and nobody holds one.
@@ -495,6 +496,32 @@ def _memory_v2(db: sqlite3.Connection) -> None:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
 
+#: Schema 23's columns (MV2, past chats): whether a connection may search the person's past
+#: chats (off for every connection until they tick it), and whether models may search them
+#: (`search_chats`, on until the person turns it off).
+_PAST_CHATS_COLUMNS: list[tuple[str, str, str]] = [
+    (
+        "connections",
+        "search_chats",
+        "INTEGER NOT NULL DEFAULT 0 CHECK (search_chats IN (0, 1))",
+    ),
+    (
+        "memory_prefs",
+        "chats_tool",
+        "INTEGER NOT NULL DEFAULT 1 CHECK (chats_tool IN (0, 1))",
+    ),
+]
+
+
+def _past_chats(db: sqlite3.Connection) -> None:
+    """Schema 23 (MV2): two columns. A person's exchanges are in their knowledge index, not
+    here: the store keeps no copy of them."""
+    for table, column, declaration in _PAST_CHATS_COLUMNS:
+        present = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+        if column not in present:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+
 #: What brings a store written at version N-1 to N, for N above `OLDEST_SCHEMA`.
 #: `_SCHEMA` already holds the result, for a store made new. A step is a statement,
 #: or a function of the connection for what SQL alone cannot say.
@@ -633,6 +660,8 @@ _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
         "WHERE budget_tokens IS NOT NULL",
         "UPDATE chats SET memory_snapshot = NULL WHERE memory_snapshot IS NOT NULL",
     ],
+    # Past chats (MV2, 2026-10-19): two new columns only.
+    23: [_past_chats],
 }
 
 
@@ -763,6 +792,7 @@ def _initialize_schema(
         _memory_learning(db)
         _connections(db)
         _memory_v2(db)
+        _past_chats(db)
         db.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?)",
             (str(SCHEMA_VERSION),),
@@ -903,6 +933,10 @@ class TagListFull(Exception):
 MAX_TAGS = 1000
 #: What a kept `search_memory` result becomes when a note it named is deleted (MV1).
 FORGOTTEN_RESULT = "A note this search found was deleted since, so its result is not kept."
+#: What a kept `search_chats` result becomes when a chat it quoted is deleted (MV2).
+FORGOTTEN_CHAT = "A chat this search found was deleted since, so its result is not kept."
+#: The server id a kept `search_chats` call is known by (`tools.CHATS_SERVER`).
+CHATS_SERVER = "past-chats"
 
 
 def tag_key(tag: str) -> str:
@@ -1157,6 +1191,8 @@ class ConnectionRecord:
     last_used_at: float | None = None
     calls_day: str | None = None
     calls_today: int = 0
+    #: MV2: whether it may search the person's past chats (`search_chats`).
+    search_chats: bool = False
 
 
 def _connection(row: sqlite3.Row) -> ConnectionRecord:
@@ -1172,6 +1208,7 @@ def _connection(row: sqlite3.Row) -> ConnectionRecord:
         last_used_at=row["last_used_at"],
         calls_day=row["calls_day"],
         calls_today=int(row["calls_today"]),
+        search_chats=bool(row["search_chats"]),
     )
 
 
@@ -1193,6 +1230,8 @@ MEMORY_PREFS_DEFAULT: dict[str, Any] = {
     # turn; and whether models may search the person's notes (`search_memory`).
     "relevant_budget_tokens": None,
     "search_tool": True,
+    # MV2: whether models may search the person's past chats (`search_chats`).
+    "chats_tool": True,
 }
 
 
@@ -1546,6 +1585,51 @@ def versions(tree: list[Message]) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _drop_chat_from_answers(db: sqlite3.Connection, owner: str, chat_id: str) -> None:
+    """Take a deleted chat out of what the person's other answers kept of it (MV2): a turn's
+    record of the past-chat excerpts it was sent loses that chat's (counted `forgotten`), and
+    a kept `search_chats` result that quoted it is replaced, so neither the page nor a later
+    request carries a deleted chat's words."""
+    rows = db.execute(
+        "SELECT m.id, m.memory_used, m.tool_rounds FROM messages AS m "
+        "JOIN chats AS c ON c.id = m.chat_id WHERE c.owner = ? AND m.chat_id != ? "
+        "AND m.role = 'assistant' AND (m.memory_used LIKE ? OR m.tool_rounds LIKE ?)",
+        (owner, chat_id, '%"pastChats"%', f'%"{CHATS_SERVER}"%'),
+    ).fetchall()
+    for row in rows:
+        changes: dict[str, str] = {}
+        used = _snapshot(row["memory_used"])
+        past = used.get("pastChats") if used is not None else None
+        if used is not None and isinstance(past, dict):
+            listed = [e for e in past.get("exchanges") or [] if isinstance(e, dict)]
+            kept = [e for e in listed if e.get("chatId") != chat_id]
+            if len(kept) != len(listed):
+                past["exchanges"] = kept
+                past["forgotten"] = int(past.get("forgotten") or 0) + len(listed) - len(kept)
+                changes["memory_used"] = json.dumps(used)
+        try:
+            rounds = json.loads(row["tool_rounds"] or "[]")
+        except ValueError:
+            rounds = []
+        touched = False
+        for turn in rounds if isinstance(rounds, list) else []:
+            for call in turn.get("calls") or [] if isinstance(turn, dict) else []:
+                if not isinstance(call, dict) or call.get("serverId") != CHATS_SERVER:
+                    continue
+                if chat_id in (call.get("chats") or []):
+                    call["result"] = FORGOTTEN_CHAT
+                    call["content"] = []
+                    call["chats"] = [c for c in call.get("chats") or [] if c != chat_id]
+                    touched = True
+        if touched:
+            changes["tool_rounds"] = json.dumps(rounds)
+        if changes:
+            columns = ", ".join(f"{k} = ?" for k in changes)
+            db.execute(
+                f"UPDATE messages SET {columns} WHERE id = ?", (*changes.values(), row["id"])
+            )
+
+
 def _choose(db: sqlite3.Connection, chat_id: str, message_id: str) -> bool:
     """Put `message_id` on the path: it, and each message before it on its
     own branch, becomes the chosen version in its group. A group already
@@ -1834,10 +1918,18 @@ class Store:
         await self._run(go)
 
     async def delete_chat(self, chat_id: str) -> None:
+        """Delete a chat and everything of it, and (MV2) every copy of its exchanges the
+        person's other answers kept, in one transaction: a turn's record of the excerpts it
+        was sent (`memory_used.pastChats`) and a kept `search_chats` result that quoted it.
+        Its exchanges in the person's index go first, by the route (`exchanges_index`)."""
+
         def go() -> None:
             db = self._conn()
             db.execute("BEGIN")
             try:
+                found = db.execute("SELECT owner FROM chats WHERE id = ?", (chat_id,)).fetchone()
+                if found is not None:
+                    _drop_chat_from_answers(db, found["owner"], chat_id)
                 db.execute(
                     "DELETE FROM artifact_revisions WHERE artifact_id IN "
                     "(SELECT id FROM artifacts WHERE chat_id = ?)",
@@ -1945,6 +2037,104 @@ class Store:
     async def messages(self, chat_id: str, via: str | None = None) -> list[Message]:
         """The chat's path (see `path`): what is shown and what the model is sent."""
         return path(await self.tree(chat_id), via)
+
+    # --- past chats (MV2) -------------------------------------------------
+
+    async def exchange_tree(self, chat_id: str) -> list[Message]:
+        """Every row of a chat with only what its exchanges are made of (`exchanges_index`):
+        no reasoning, tool rounds or records, which can be most of a chat's bytes."""
+
+        def go() -> list[Message]:
+            rows = self._conn().execute(
+                "SELECT id, chat_id, seq, role, status, created_at, content, answer_from, "
+                "parent_id, chosen FROM messages WHERE chat_id = ? ORDER BY seq",
+                (chat_id,),
+            )
+            return [
+                Message(
+                    id=r["id"],
+                    chat_id=r["chat_id"],
+                    seq=r["seq"],
+                    role=r["role"],
+                    status=r["status"],
+                    created_at=r["created_at"],
+                    content=r["content"],
+                    answer_from=r["answer_from"],
+                    parent_id=r["parent_id"],
+                    chosen=bool(r["chosen"]),
+                )
+                for r in rows
+            ]
+
+        return await self._run(go)
+
+    async def chat_signatures(self, owner: str, chat_id: str | None = None) -> dict[str, str]:
+        """Each of the person's chats, newest first, by id: a signature that moves whenever
+        what its exchanges are could have (its title, its rows, which are chosen, which are
+        running). One grouped query for every chat."""
+
+        def go() -> dict[str, str]:
+            rows = self._conn().execute(
+                "SELECT c.id, c.title, COUNT(m.id) AS n, COALESCE(MAX(m.seq), 0) AS last, "
+                "COALESCE(SUM(CASE WHEN m.chosen THEN m.seq ELSE 0 END), 0) AS chosen, "
+                "COALESCE(SUM(m.status = 'running'), 0) AS running "
+                "FROM chats AS c LEFT JOIN messages AS m ON m.chat_id = c.id "
+                f"WHERE c.owner = ?{' AND c.id = ?' if chat_id is not None else ''} "
+                "GROUP BY c.id ORDER BY c.updated_at DESC, c.id",
+                (owner,) if chat_id is None else (owner, chat_id),
+            )
+            return {
+                r["id"]: hashlib.sha256(
+                    json.dumps(
+                        [r["title"], r["n"], r["last"], r["chosen"], r["running"]],
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                ).hexdigest()[:32]
+                for r in rows
+            }
+
+        return await self._run(go)
+
+    async def chat_people(self) -> list[str]:
+        """Everyone with a chat."""
+
+        def go() -> list[str]:
+            return [
+                r[0] for r in self._conn().execute("SELECT DISTINCT owner FROM chats ORDER BY 1")
+            ]
+
+        return await self._run(go)
+
+    async def exchange_rows(
+        self, owner: str, answer_ids: Sequence[str]
+    ) -> dict[str, dict[str, Any]]:
+        """The exchanges these answers end, as the store has them now, by answer id: only
+        answers that exist, in one of `owner`'s chats, after a message of the person's, and
+        are not running. What past chats show or send is read here, never from the index."""
+        ids = list(dict.fromkeys(answer_ids))
+        if not ids:
+            return {}
+
+        def go() -> dict[str, dict[str, Any]]:
+            out: dict[str, dict[str, Any]] = {}
+            for start in range(0, len(ids), 500):
+                part = ids[start : start + 500]
+                marks = ", ".join("?" for _ in part)
+                rows = self._conn().execute(
+                    "SELECT a.id, a.chat_id, a.content AS answer, a.answer_from, "
+                    "u.content AS question, u.created_at, c.title, u.id AS question_id "
+                    "FROM messages AS a JOIN messages AS u ON u.id = a.parent_id "
+                    "AND u.chat_id = a.chat_id JOIN chats AS c ON c.id = a.chat_id "
+                    f"WHERE a.id IN ({marks}) AND c.owner = ? AND a.role = 'assistant' "
+                    "AND u.role = 'user' AND a.status != 'running' "
+                    "AND a.chosen = 1 AND u.chosen = 1",
+                    (*part, owner),
+                )
+                for r in rows:
+                    out[r["id"]] = dict(r)
+            return out
+
+        return await self._run(go)
 
     async def choose(self, chat_id: str, message_id: str) -> bool:
         """Show this version, and the branch it remembers after it. False when
@@ -3346,6 +3536,7 @@ class Store:
                 "revisit_asked_at": row["revisit_asked_at"],
                 "relevant_budget_tokens": row["relevant_budget_tokens"],
                 "search_tool": bool(row["search_tool"]),
+                "chats_tool": bool(row["chats_tool"]),
             }
 
         return await self._run(go)
@@ -3713,8 +3904,8 @@ class Store:
                     return None
                 db.execute(
                     "INSERT INTO connections (id, owner, name, token_hash, read_notes, "
-                    "search_documents, suggest_notes, created_at, expires_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "search_documents, suggest_notes, created_at, expires_at, search_chats) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         record.id,
                         record.owner,
@@ -3725,6 +3916,7 @@ class Store:
                         int(record.suggest_notes),
                         record.created_at,
                         record.expires_at,
+                        int(record.search_chats),
                     ),
                 )
                 db.execute("COMMIT")
