@@ -638,6 +638,8 @@ export interface MemoryNote {
   source: NoteSource;
   sourceChatId: string | null;
   sourceMessageId: string | null;
+  /** MR9b: the connection that suggested it, by the name it had then. */
+  sourceConnection?: string | null;
   /** Epoch seconds, as everywhere in Workbench's API. */
   createdAt: number;
   updatedAt: number;

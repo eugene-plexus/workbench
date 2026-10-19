@@ -89,7 +89,7 @@ from .agui_store import AGUIStore, allow_chat_write
 from .interaction_store import SCHEMA as INTERACTION_SCHEMA
 from .interaction_store import InteractionStore
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 #: The oldest schema this migrates from: what Workbench v0.1.0 wrote. Schema 1 predates
 #: it, and nobody holds one.
@@ -385,6 +385,39 @@ def _memory_learning(db: sqlite3.Connection) -> None:
     )
 
 
+#: Schema 21's columns on a note: the connection that suggested it (MR9b), and that
+#: connection's name when it did, so a kept note still says where it came from after the
+#: connection is revoked.
+_CONNECTION_NOTE_COLUMNS: list[tuple[str, str]] = [
+    ("source_connection_id", "TEXT"),
+    ("source_connection", "TEXT"),
+]
+
+
+def _connections(db: sqlite3.Connection) -> None:
+    """Schema 21 (MR9b): the connections a person made for outside apps, and where a
+    note a connection suggested came from.
+
+    A connection keeps the SHA-256 of its token, never the token. Its rights are three
+    switches; what it did is counted per day, never what it asked."""
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS connections ("
+        "id TEXT PRIMARY KEY, owner TEXT NOT NULL, "
+        "name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 80), "
+        "token_hash TEXT NOT NULL UNIQUE, "
+        "read_notes INTEGER NOT NULL CHECK (read_notes IN (0, 1)), "
+        "search_documents INTEGER NOT NULL CHECK (search_documents IN (0, 1)), "
+        "suggest_notes INTEGER NOT NULL CHECK (suggest_notes IN (0, 1)), "
+        "created_at REAL NOT NULL, expires_at REAL NOT NULL, last_used_at REAL, "
+        "calls_day TEXT, calls_today INTEGER NOT NULL DEFAULT 0)"
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS connections_by_owner ON connections (owner)")
+    have = {row[1] for row in db.execute("PRAGMA table_info(memory_notes)")}
+    for column, declaration in _CONNECTION_NOTE_COLUMNS:
+        if column not in have:
+            db.execute(f"ALTER TABLE memory_notes ADD COLUMN {column} {declaration}")
+
+
 #: What brings a store written at version N-1 to N, for N above `OLDEST_SCHEMA`.
 #: `_SCHEMA` already holds the result, for a store made new. A step is a statement,
 #: or a function of the connection for what SQL alone cannot say.
@@ -512,6 +545,8 @@ _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
     ],
     # Memory suggestions (MR8, 2026-10-18): new columns and one new table only.
     20: [_memory_learning],
+    # Connections (MR9b, 2026-10-18): one new table and two new note columns.
+    21: [_connections],
 }
 
 
@@ -640,6 +675,7 @@ def _initialize_schema(
         for statement in [*_MEMORY_SCHEMA, *INTERACTION_SCHEMA, *AGUI_SCHEMA]:
             db.execute(statement)
         _memory_learning(db)
+        _connections(db)
         db.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?)",
             (str(SCHEMA_VERSION),),
@@ -720,6 +756,9 @@ class MemoryNote:
     use_count: int = 0
     #: For a suggestion: the id of the note it would replace ("Keep new").
     replaces: str | None = None
+    #: For a note a connection suggested (MR9b): its id, and its name at the time.
+    source_connection_id: str | None = None
+    source_connection: str | None = None
 
 
 @dataclass
@@ -948,10 +987,46 @@ def _note(row: sqlite3.Row) -> MemoryNote:
         expires_at=row["expires_at"],
         revisit_at=row["revisit_at"],
         replaces=row["replaces"],
+        source_connection_id=row["source_connection_id"],
+        source_connection=row["source_connection"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         last_used_at=row["last_used_at"],
         use_count=row["use_count"],
+    )
+
+
+@dataclass
+class ConnectionRecord:
+    """A connection a person made for an outside app (MR9b, `connections.py`): what it may
+    do, until when, and how much it was used. The token itself is never kept."""
+
+    id: str
+    owner: str
+    name: str
+    read_notes: bool
+    search_documents: bool
+    suggest_notes: bool
+    created_at: float
+    expires_at: float
+    last_used_at: float | None = None
+    calls_day: str | None = None
+    calls_today: int = 0
+
+
+def _connection(row: sqlite3.Row) -> ConnectionRecord:
+    return ConnectionRecord(
+        id=row["id"],
+        owner=row["owner"],
+        name=row["name"],
+        read_notes=bool(row["read_notes"]),
+        search_documents=bool(row["search_documents"]),
+        suggest_notes=bool(row["suggest_notes"]),
+        created_at=row["created_at"],
+        expires_at=row["expires_at"],
+        last_used_at=row["last_used_at"],
+        calls_day=row["calls_day"],
+        calls_today=int(row["calls_today"]),
     )
 
 
@@ -2886,6 +2961,194 @@ class Store:
                 (revisit_at, note_id, owner),
             )
             return cursor.rowcount == 1
+
+        return await self._run(go)
+
+    # --- connections (MR9b) -------------------------------------------------
+    #
+    # A connection is found by its token's hash and nothing else; every other read and
+    # write names its owner, so a person's id never reaches another person's connection.
+
+    async def add_connection(
+        self, record: ConnectionRecord, token_hash: str, *, limit: int
+    ) -> ConnectionRecord | None:
+        """Keep a new connection, or None when the person already has `limit`."""
+
+        def go() -> ConnectionRecord | None:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                held = db.execute(
+                    "SELECT COUNT(*) AS n FROM connections WHERE owner = ?", (record.owner,)
+                ).fetchone()["n"]
+                if int(held) >= limit:
+                    db.execute("COMMIT")
+                    return None
+                db.execute(
+                    "INSERT INTO connections (id, owner, name, token_hash, read_notes, "
+                    "search_documents, suggest_notes, created_at, expires_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        record.id,
+                        record.owner,
+                        record.name,
+                        token_hash,
+                        int(record.read_notes),
+                        int(record.search_documents),
+                        int(record.suggest_notes),
+                        record.created_at,
+                        record.expires_at,
+                    ),
+                )
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return record
+
+        return await self._run(go)
+
+    async def connections(self, owner: str) -> list[ConnectionRecord]:
+        def go() -> list[ConnectionRecord]:
+            rows = self._conn().execute(
+                "SELECT * FROM connections WHERE owner = ? ORDER BY created_at DESC, id",
+                (owner,),
+            )
+            return [_connection(r) for r in rows]
+
+        return await self._run(go)
+
+    async def connection_by_token(self, token_hash: str) -> ConnectionRecord | None:
+        """The connection whose token hashes to this, whoever holds it."""
+
+        def go() -> ConnectionRecord | None:
+            row = (
+                self._conn()
+                .execute("SELECT * FROM connections WHERE token_hash = ?", (token_hash,))
+                .fetchone()
+            )
+            return _connection(row) if row is not None else None
+
+        return await self._run(go)
+
+    async def connection_used(self, connection_id: str, at: float, day: str) -> None:
+        """Count one call: `last_used_at`, and today's calls (a new day starts at one)."""
+
+        def go() -> None:
+            self._conn().execute(
+                "UPDATE connections SET last_used_at = ?, "
+                "calls_today = CASE WHEN calls_day = ? THEN calls_today + 1 ELSE 1 END, "
+                "calls_day = ? WHERE id = ?",
+                (at, day, day, connection_id),
+            )
+
+        await self._run(go)
+
+    async def delete_connection(self, owner: str, connection_id: str) -> bool:
+        """Revoke: the connection goes, with the suggestions of its the person has not kept.
+        False when the person has no such connection."""
+
+        def go() -> bool:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                gone = db.execute(
+                    "DELETE FROM connections WHERE id = ? AND owner = ?", (connection_id, owner)
+                ).rowcount
+                if gone:
+                    db.execute(
+                        "DELETE FROM memory_notes WHERE owner = ? AND status = 'pending' "
+                        "AND source_connection_id = ?",
+                        (owner, connection_id),
+                    )
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return bool(gone)
+
+        return await self._run(go)
+
+    async def add_connection_suggestion(
+        self,
+        owner: str,
+        connection: ConnectionRecord,
+        note: MemoryNote,
+        *,
+        limit: int,
+        per_day: int,
+        since: float,
+    ) -> str | None:
+        """Offer one note a connection suggested; None when it is offered, else why not:
+        `revoked` (the connection was revoked or ran out since its call was let in),
+        `duplicate` (the person has those words, kept or offered), `full` (no room under
+        `limit`) or `daily` (the person's `per_day` suggestions since `since` are used up,
+        counted here with every chat's, so neither can pass the cap)."""
+
+        def go() -> str | None:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                # Checked in the write, so a call let in before Revoke leaves nothing behind.
+                live = db.execute(
+                    "SELECT 1 FROM connections WHERE id = ? AND owner = ? AND expires_at > ?",
+                    (connection.id, owner, time.time()),
+                ).fetchone()
+                if live is None:
+                    db.execute("COMMIT")
+                    return "revoked"
+                held = {
+                    note_key(r["text"])
+                    for r in db.execute(
+                        "SELECT text FROM memory_notes WHERE owner = ? AND status != 'dismissed'",
+                        (owner,),
+                    )
+                }
+                total = db.execute(
+                    "SELECT COUNT(*) AS n FROM memory_notes WHERE owner = ?", (owner,)
+                ).fetchone()["n"]
+                today = db.execute(
+                    "SELECT COUNT(*) AS n FROM memory_events "
+                    "WHERE owner = ? AND event = 'suggest' AND ts >= ?",
+                    (owner, since),
+                ).fetchone()["n"]
+                why = (
+                    "duplicate"
+                    if note_key(note.text) in held
+                    else "full"
+                    if int(total) >= limit
+                    else "daily"
+                    if int(today) >= per_day
+                    else None
+                )
+                if why is None:
+                    latest = db.execute(
+                        "SELECT MAX(created_at) AS at FROM memory_notes WHERE owner = ?", (owner,)
+                    ).fetchone()["at"]
+                    if latest is not None and note.created_at <= latest:
+                        note.created_at = note.updated_at = latest + 1e-6
+                    db.execute(
+                        "INSERT INTO memory_notes (id, owner, text, kind, status, pinned, source, "
+                        "quote, created_at, updated_at, source_connection_id, source_connection) "
+                        "VALUES (?, ?, ?, ?, 'pending', 0, 'suggested', NULL, ?, ?, ?, ?)",
+                        (
+                            note.id,
+                            owner,
+                            note.text,
+                            note.kind,
+                            note.created_at,
+                            note.updated_at,
+                            connection.id,
+                            connection.name,
+                        ),
+                    )
+                    # The words are in the note; the log says only that it was offered.
+                    self._event(db, owner, note.id, "suggest", "connection", None, None)
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return why
 
         return await self._run(go)
 

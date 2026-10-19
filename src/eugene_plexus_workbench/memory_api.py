@@ -104,6 +104,8 @@ def note_view(note: MemoryNote) -> dict[str, Any]:
         "always": memory.is_always(note),
         "source": note.source,
         "sourceChatId": note.source_chat_id,
+        # MR9b: the connection that suggested it, by the name it had then.
+        "sourceConnection": note.source_connection,
         "sourceMessageId": note.source_message_id,
         "createdAt": note.created_at,
         "updatedAt": note.updated_at,

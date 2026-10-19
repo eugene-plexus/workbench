@@ -7,13 +7,15 @@ agent hands Workbench at each start, and nothing else: no person signed
 in to Workbench can change these, the owner included -- they are changed
 from Eugene's console, by its operator.
 
-Eighteen settings. `ownerReadsChats` (W13): whether the owner may read the chats
+Nineteen settings. `ownerReadsChats` (W13): whether the owner may read the chats
 of the people they give Workbench to (Troy, C3 call 3: each business
 decides). Three are memory's (`memory.py`, MR1): whether people
 may keep notes at all, how many each may keep, and whether notes may be sent
 to a model that runs outside this install's machines. Memory is not covered
 by `ownerReadsChats`: no setting here lets anyone read another person's
-notes. Five are documents' (`context.py`, MR2 and MR4): whether Workbench reads
+notes. One is connections' (MR9b, `connections.py`): whether people may connect
+other apps to their own notes and documents. Five are documents' (`context.py`,
+MR2 and MR4): whether Workbench reads
 documents at all (the files people attach, and the ones they keep), the most it
 takes of one file, how long a file may be and still be read whole by default,
 how many passages one person may keep, and whether passages of their saved
@@ -61,6 +63,7 @@ MEMORY_MAX_NOTES = "memoryMaxNotes"
 MEMORY_EXTERNAL_MODELS = "memoryExternalModels"
 MEMORY_SUGGESTIONS = "memorySuggestions"
 SUGGESTION_CHOICES = ("off", "choose", "measured")
+CONNECTIONS = "connections"
 DOCUMENTS_ENABLED = "documentsEnabled"
 DOCUMENTS_MAX_FILE_MB = "documentsMaxFileMB"
 DOCUMENTS_WHOLE_UP_TO_TOKENS = "documentsWholeUpToTokens"
@@ -187,6 +190,24 @@ FIELDS = [
         enumValues=list(SUGGESTION_CHOICES),
         enumLabels=["Off", "Each person chooses", "On for measured models"],
         default="measured",
+    ),
+    ConfigField(
+        key=CONNECTIONS,
+        label="People may connect other apps to their notes and documents",
+        description=(
+            "Lets people connect apps such as Claude Code to their own notes and documents.\n\n"
+            "A connection lets an app such as Claude Code, Codex or Open WebUI read the "
+            "person's own notes and search their own documents through Workbench.\n\n"
+            "Nothing is reachable until a person makes a connection and chooses what it may "
+            "do. A connection reads only its own person's notes and documents, works only "
+            "while they are signed in to Workbench, and can suggest notes only to their "
+            "inbox. The app may send what it reads to a model outside your machines.\n\n"
+            "- **On**: people may make connections.\n"
+            "- **Off**: every connection stops at once, and no one can make one."
+        ),
+        category="memory",
+        valueType=ConfigValueType.boolean,
+        default=True,
     ),
     ConfigField(
         key=DOCUMENTS_ENABLED,
@@ -439,6 +460,7 @@ DEFAULTS: dict[str, Any] = {
     MEMORY_MAX_NOTES: 300,
     MEMORY_EXTERNAL_MODELS: "ask",
     MEMORY_SUGGESTIONS: "measured",
+    CONNECTIONS: True,
     DOCUMENTS_ENABLED: True,
     DOCUMENTS_MAX_FILE_MB: 50,
     DOCUMENTS_WHOLE_UP_TO_TOKENS: 6000,
@@ -454,6 +476,11 @@ DEFAULTS: dict[str, Any] = {
     DOCUMENTS_FOLDER_MAX_MB: 2_048,
     DOCUMENTS_FOLDER_MAX_DEPTH: 12,
 }
+
+
+async def connections_enabled(store: Store) -> bool:
+    value = await store.setting(CONNECTIONS)
+    return bool(value) if value is not None else bool(DEFAULTS[CONNECTIONS])
 
 
 async def owner_reads_chats(store: Store) -> bool:
@@ -709,6 +736,7 @@ async def get_config(request: Request) -> ConfigDocument:
             MEMORY_MAX_NOTES: memory.max_notes,
             MEMORY_EXTERNAL_MODELS: memory.external,
             MEMORY_SUGGESTIONS: memory.suggestions,
+            CONNECTIONS: await connections_enabled(store),
             DOCUMENTS_ENABLED: documents.enabled,
             DOCUMENTS_MAX_FILE_MB: documents.max_file_mb,
             DOCUMENTS_WHOLE_UP_TO_TOKENS: documents.whole_up_to_tokens,
@@ -730,7 +758,13 @@ async def get_config(request: Request) -> ConfigDocument:
 def _problem_with(key: str, value: Any) -> str | None:
     """Why `value` is not one this setting takes, or None when it is. A
     `bool` is not an integer here, whatever Python says."""
-    if key in (OWNER_READS_CHATS, MEMORY_ENABLED, DOCUMENTS_ENABLED, DOCUMENTS_EXTERNAL_EMBEDDING):
+    if key in (
+        OWNER_READS_CHATS,
+        MEMORY_ENABLED,
+        CONNECTIONS,
+        DOCUMENTS_ENABLED,
+        DOCUMENTS_EXTERNAL_EMBEDDING,
+    ):
         return None if isinstance(value, bool) else "Must be true or false."
     if key == DOCUMENTS_EMBEDDING_MODEL:
         if isinstance(value, str) and value.strip() and len(value.strip()) <= MAX_MODEL_ID:

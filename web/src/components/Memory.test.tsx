@@ -6,6 +6,9 @@ import type { Chat, MemoryNote, MemoryPrefs } from "../lib/types";
 import { NOW, note, page, prefs } from "../test-memory";
 import { Memory } from "./Memory";
 
+// Connections (MR9b) has its own tests; this page's do not serve it.
+vi.mock("./Connections", () => ({ Connections: () => null }));
+
 vi.mock("../lib/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/api")>()),
   api: vi.fn(),
