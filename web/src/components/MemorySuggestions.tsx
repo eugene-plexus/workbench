@@ -134,8 +134,10 @@ export function Suggestions({
         Suggested notes
       </h2>
       <p className="help">
-        Your chats&apos; models suggested these from what you wrote. Keep the ones that are right;
-        nothing here is given to a model until you do.
+        {suggestions.some((s) => s.sourceConnection)
+          ? "Your chats' models, or apps you connected, suggested these."
+          : "Your chats' models suggested these from what you wrote."}{" "}
+        Keep the ones that are right; nothing here is given to a model until you do.
       </p>
       <ul className="divide-y divide-line rounded-plexus border border-line bg-panel">
         {suggestions.map((s) => (
@@ -256,6 +258,11 @@ function SuggestionItem({
             {suggestion.quote}
             {"”"} {from}
           </span>
+        </p>
+      )}
+      {suggestion.sourceConnection && (
+        <p data-testid="memory-suggestion-connection" className="help wrap-anywhere">
+          Suggested by {suggestion.sourceConnection}, an app you connected.
         </p>
       )}
       {suggestion.replaces && (

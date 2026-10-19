@@ -49,6 +49,7 @@ import {
 } from "../lib/memory";
 import type { Chat, ExternalChoice, MemoryNote, MemoryPage, NoteKind } from "../lib/types";
 import { useKeepFocus } from "../lib/useKeepFocus";
+import { Connections } from "./Connections";
 import { LearnSettings, StillTrue, Suggestions } from "./MemorySuggestions";
 
 /** The lines of a box, one note each: trimmed, with the empty ones left out. */
@@ -212,6 +213,7 @@ export function Memory({
 
   /** Where a note came from: a link to its chat, or the reason there is none. */
   function whereFrom(note: MemoryNote): ReactNode {
+    if (note.sourceConnection) return `Suggested by ${note.sourceConnection}`;
     if (!note.sourceChatId) return note.source === "typed" ? "Written here" : "Kept in a chat";
     const title = titles.get(note.sourceChatId);
     if (title === undefined) return chatsLoaded ? "From a chat that was deleted" : "From a chat";
@@ -457,6 +459,7 @@ export function Memory({
             {!off && notes.length > 0 && <AddNote busy={busy} working={working} />}
           </section>
         )}
+        <Connections />
         {!bare && (
           <YourData
             count={notes.length}

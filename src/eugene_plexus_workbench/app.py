@@ -9,6 +9,9 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
+from starlette.responses import JSONResponse
+from starlette.routing import Route
+from starlette.types import Receive, Scope, Send
 
 from . import (
     a2ui_state,
@@ -16,6 +19,7 @@ from . import (
     api,
     artifacts_api,
     config,
+    connections_api,
     content,
     documents_api,
     folder_docs_api,
@@ -33,6 +37,7 @@ from ._http import ssl_context
 from .a2ui import A2UI
 from .agui import AGUI
 from .answers import Answers
+from .connections import Connections
 from .hub import Hub
 from .interaction_store import InteractionError
 from .interactions import Interactions
@@ -79,6 +84,22 @@ def why_the_store_did_not_open(store: Store, exc: Exception) -> tuple[str, str]:
         f"them: {cause}{kept}",
         f"Workbench could not open its chat store: {public_cause(exc)}.{beside}",
     )
+
+
+class _Mcp:
+    """`/mcp`, answered by the running `Connections`, or a 503 while there is none (starting,
+    stopping, or a store that did not open). An object, so the route hands it the raw ASGI call."""
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        door = getattr(scope["app"].state, "connections", None)
+        if door is None:
+            response = JSONResponse(
+                {"error": "Workbench is not ready for connections. Try again in a moment."},
+                status_code=503,
+            )
+            await response(scope, receive, send)
+            return
+        await door(scope, receive, send)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -212,6 +233,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         tools.a2ui = A2UI(tools, app.state.interactions, tools.apps)
         app.state.interactions.adapters[(a2ui_state.PROTOCOL, a2ui_state.VERSION)] = tools.a2ui
         await store.interactions.sweep(restart=True)
+        # Connections (MR9b): other apps reach a person's own notes and documents at `/mcp`.
+        mcp_door = app.state.connections = Connections(app.state)
         for problem in (provider.why_not(), hub.why_not()):
             if problem:
                 log.warning("%s", problem)
@@ -223,7 +246,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             settings.oidc_issuer or "(none)",
         )
         try:
-            yield
+            async with mcp_door.running():
+                yield
         finally:
             await app.state.agui.aclose()
             await app.state.interactions.aclose()
@@ -265,6 +289,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(tools_api.router)
     app.include_router(folders_api.router)
     app.include_router(job_sites_api.router)
+    app.include_router(connections_api.router)
+    # The MCP door (MR9b): its own authentication, never the session cookie.
+    app.router.routes.append(Route("/mcp", endpoint=_Mcp(), methods=["GET", "POST", "DELETE"]))
     app.add_exception_handler(job_sites_api.HeldAtTheMachine, job_sites_api.held_response)
     app.add_exception_handler(IndexUnavailable, saved_api.index_unavailable)
     app.add_exception_handler(RequestValidationError, web.invalid_request)

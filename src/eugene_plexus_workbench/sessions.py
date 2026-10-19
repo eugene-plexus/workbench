@@ -225,6 +225,27 @@ class Sessions:
             )
         return row.access_token
 
+    async def for_connection(self, sub: str) -> Person:
+        """The person a connection acts for, through their newest live sign-in (MR9b).
+
+        A connection holds no sign-in of its own: it works while its person has one here,
+        and that sign-in is checked with Eugene as a page's is (refreshed once its access is
+        ten minutes old), so a person Eugene turned off, whose password changed or whose
+        sign-ins were ended, loses every connection within those minutes. `SignedOut` when
+        there is none; a 503 when Eugene cannot be asked."""
+        row = await self._store.latest_session(sub, time.time())
+        if row is None:
+            raise SignedOut(
+                "none", "Sign in to Workbench again to use your connections to other apps."
+            )
+        if time.time() >= row.access_expires_at - _EARLY:
+            await self._refresh(row)
+        person = await self._store.person(sub)
+        if person is None:
+            raise SignedOut("none", "Sign in to Workbench again to use your connections.")
+        person_context.set((person.sub, row.id_hash))
+        return replace(person, session_id=row.id_hash)
+
     async def current(self, session_id: str | None, sub: str) -> Person:
         """Recheck an already authenticated action's sign-in before dispatch."""
         row = await self._store.session(session_id) if session_id else None

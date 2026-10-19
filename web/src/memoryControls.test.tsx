@@ -17,6 +17,9 @@ import type { Chat, ChatMemoryView, MemoryNote, MemoryPage, Message } from "./li
 import { controlsIn, lacking, wrong } from "./test-controls";
 import { held, note, notSent, owners, page, prefs, sending } from "./test-memory";
 
+// Connections (MR9b) has its own tests; this page's do not serve it.
+vi.mock("./components/Connections", () => ({ Connections: () => null }));
+
 vi.mock("./lib/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./lib/api")>()),
   api: vi.fn(),
