@@ -46,7 +46,7 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.types import TextContent
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import config, memory, memory_api, memory_suggest, memory_write
+from . import config, memory, memory_api, memory_suggest, memory_write, projects
 from .answers import answer_text
 from .store import Chat, Message, Person, Store
 
@@ -597,6 +597,9 @@ async def content_for(
     prefs = await store.memory_prefs(owner)
     if not install.enabled or not prefs["enabled"] or chat.settings.get("memory") == "off":
         return None, "memory is off"
+    if chat.project_id is not None:
+        # MV7: what is said in a project stays in it; the server is the person's general one.
+        return None, "the chat is in a project"
     policy, _ = memory_write.policy_for(install, prefs)
     asked = next(
         (m for m in reversed(path) if m.role == "user" and m.id == answer.parent_id), None
@@ -847,6 +850,8 @@ async def _turn_for(
     decision = await memory_api.decide(state, person, chat, model_id)
     if not decision.send or decision.facts is None:
         return ServerTurn()
+    if not (await projects.place_of(store, chat)).general:
+        return ServerTurn()  # MV7: a project kept to itself is given no general memory
     facts = decision.facts
     name = server["name"] or "Your memory server"
     if facts.locality != "local":

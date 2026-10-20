@@ -1,10 +1,14 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import { api } from "../lib/api";
-import type { Chat, Me } from "../lib/types";
+import { ApiError } from "../lib/api";
+import type { Chat, Me, Project } from "../lib/types";
 import { Sidebar } from "./Sidebar";
 
-vi.mock("../lib/api", () => ({ api: vi.fn() }));
+vi.mock("../lib/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/api")>()),
+  api: vi.fn(),
+}));
 
 const me: Me = { sub: "ada", name: "Ada", owner: false, ownerReadsChats: false, username: null };
 const owner: Me = { ...me, owner: true, ownerReadsChats: true };
@@ -30,6 +34,12 @@ function sidebar(
     current?: string | null;
     error?: string | null;
     onRetry?: () => void;
+    projects?: Project[];
+    projectsError?: string | null;
+    onOpen?: (id: string) => void;
+    onOpenProject?: (id: string) => void;
+    onNewChatIn?: (id: string) => void;
+    onNewProject?: (name: string) => Promise<void>;
   } = {},
 ) {
   render(
@@ -38,7 +48,7 @@ function sidebar(
       chats={over.chats ?? []}
       chatsLoaded={chatsLoaded}
       current={over.current ?? null}
-      onOpen={vi.fn()}
+      onOpen={over.onOpen ?? vi.fn()}
       onOpenMedia={vi.fn()}
       onClose={vi.fn()}
       onNew={vi.fn()}
@@ -46,6 +56,11 @@ function sidebar(
       creating={false}
       error={over.error ?? null}
       onRetry={over.onRetry ?? vi.fn()}
+      projects={over.projects}
+      projectsError={over.projectsError}
+      onOpenProject={over.onOpenProject}
+      onNewChatIn={over.onNewChatIn}
+      onNewProject={over.onNewProject}
     />,
   );
 }
@@ -253,4 +268,111 @@ it("never offers account administration to a member", () => {
   expect(
     screen.queryByRole("link", { name: /Manage accounts and groups/ }),
   ).not.toBeInTheDocument();
+});
+
+describe("projects (MV7)", () => {
+  const project = (id: string, name: string): Project => ({
+    id,
+    name,
+    generalMemory: true,
+    generalDocuments: true,
+    createdAt: 1,
+    updatedAt: 1,
+    chats: 0,
+    notes: 0,
+  });
+  const garden = project("p1", "Garden plans");
+  const now = Date.now() / 1000;
+  const chats = [
+    chat({ id: "loose", title: "Recipes", updatedAt: now }),
+    chat({ id: "old", title: "Compost", projectId: "p1", updatedAt: now - 500 }),
+    chat({ id: "new", title: "Beds for tomatoes", projectId: "p1", updatedAt: now - 10 }),
+  ];
+
+  it("lists a project above Chats, with its chats under it newest first, not by date", () => {
+    sidebar(me, true, { chats, projects: [garden], onNewChatIn: vi.fn() });
+    const heads = screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent);
+    expect(heads.indexOf("Projects")).toBeLessThan(heads.indexOf("Chats"));
+    fireEvent.click(screen.getByRole("button", { name: "Show the chats in Garden plans" }));
+    const inside = within(screen.getByTestId("project-chats"));
+    expect(inside.getAllByRole("button").map((b) => b.textContent?.trim())).toEqual([
+      "Beds for tomatoes",
+      "Compost",
+      "New chat in this project",
+    ]);
+    // The date groups hold only the chat in no project.
+    const dated = within(screen.getByTestId("chat-list"));
+    expect(dated.getByText("Recipes")).toBeInTheDocument();
+    expect(dated.queryByText("Compost")).toBeNull();
+    expect(dated.queryByText("Beds for tomatoes")).toBeNull();
+  });
+
+  it("starts closed, and opens by itself for the project that holds the open chat", () => {
+    sidebar(me, true, { chats, projects: [garden], current: "old" });
+    expect(screen.getByRole("button", { name: "Hide the chats in Garden plans" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: "Compost" })).toHaveAttribute("aria-current", "page");
+  });
+
+  it("keeps the sidebar search over all chats, a project's too", () => {
+    sidebar(me, true, { chats, projects: [garden] });
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "compost" } });
+    expect(
+      within(screen.getByTestId("chat-list")).getByRole("button", { name: "Compost" }),
+    ).toBeInTheDocument();
+  });
+
+  it("opens a chat, opens the project, and starts a chat in it", () => {
+    const calls = { onOpen: vi.fn(), onOpenProject: vi.fn(), onNewChatIn: vi.fn() };
+    sidebar(me, true, { chats, projects: [garden], ...calls });
+    fireEvent.click(screen.getByTestId("project-open"));
+    expect(calls.onOpenProject).toHaveBeenCalledWith("p1");
+    fireEvent.click(screen.getByTestId("project-toggle"));
+    fireEvent.click(screen.getByRole("button", { name: "Compost" }));
+    expect(calls.onOpen).toHaveBeenCalledWith("old");
+    fireEvent.click(screen.getByTestId("project-new-chat"));
+    expect(calls.onNewChatIn).toHaveBeenCalledWith("p1");
+  });
+
+  it("says there are no projects yet", () => {
+    sidebar(me, true, { chats: [], projects: [] });
+    expect(screen.getByText(/No projects yet/)).toBeInTheDocument();
+  });
+
+  it("says why the projects did not load", () => {
+    sidebar(me, true, { projects: [], projectsError: "Workbench answered 502." });
+    expect(screen.getByTestId("projects-problem")).toHaveTextContent("Workbench answered 502.");
+  });
+
+  it("makes a project from a name alone", async () => {
+    const make = vi.fn().mockResolvedValue(undefined);
+    sidebar(me, true, { projects: [], onNewProject: make });
+    fireEvent.click(screen.getByTestId("new-project"));
+    const create = screen.getByTestId("new-project-create");
+    expect(create).toBeDisabled();
+    fireEvent.change(screen.getByRole("textbox", { name: "Project name" }), {
+      target: { value: "Taxes" },
+    });
+    fireEvent.click(create);
+    await waitFor(() => expect(make).toHaveBeenCalledWith("Taxes"));
+    await waitFor(() => expect(screen.queryByRole("textbox", { name: "Project name" })).toBeNull());
+  });
+
+  it("shows the server's refusal and keeps the name for another try", async () => {
+    const make = vi
+      .fn()
+      .mockRejectedValue(new ApiError("You have a project of that name already.", 409));
+    sidebar(me, true, { projects: [garden], onNewProject: make });
+    fireEvent.click(screen.getByTestId("new-project"));
+    fireEvent.change(screen.getByRole("textbox", { name: "Project name" }), {
+      target: { value: "Garden plans" },
+    });
+    fireEvent.click(screen.getByTestId("new-project-create"));
+    expect(await screen.findByTestId("projects-problem")).toHaveTextContent(
+      "You have a project of that name already.",
+    );
+    expect(screen.getByRole("textbox", { name: "Project name" })).toHaveValue("Garden plans");
+  });
 });

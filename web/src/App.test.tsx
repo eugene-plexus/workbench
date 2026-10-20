@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 
 import App, { documentsFromPath, memoryFromPath, queryFromSearch, settingsFromPath } from "./App";
 import { api, patch, post } from "./lib/api";
-import type { Chat, Me, Models } from "./lib/types";
+import type { Chat, Me, Models, Project } from "./lib/types";
 
 vi.mock("./lib/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./lib/api")>()),
@@ -111,6 +111,23 @@ vi.mock("./components/PastChats", () => ({
     </section>
   ),
 }));
+vi.mock("./components/Project", () => ({
+  ProjectPage: ({
+    projectId,
+    onNewChat,
+    onClose,
+  }: {
+    projectId: string;
+    onNewChat: () => void;
+    onClose: () => void;
+  }) => (
+    <section>
+      <h1 id="view-heading">The project {projectId}</h1>
+      <button onClick={onNewChat}>New chat here</button>
+      <button onClick={onClose}>Back to chat</button>
+    </section>
+  ),
+}));
 vi.mock("./components/Tools", () => ({
   Tools: ({ onClose }: { onClose: () => void }) => (
     <section>
@@ -164,10 +181,13 @@ const served: Models = {
   webSearch: { available: false, reason: null },
 };
 
-function serve(over: { me?: Partial<Me>; chats?: Chat[]; models?: Models | Error } = {}) {
+function serve(
+  over: { me?: Partial<Me>; chats?: Chat[]; models?: Models | Error; projects?: Project[] } = {},
+) {
   vi.mocked(api).mockImplementation((async (path: string) => {
     if (path === "/api/me") return { ...me, ...over.me };
     if (path === "/api/chats") return { chats: over.chats ?? [] };
+    if (path === "/api/projects") return { projects: over.projects ?? [] };
     if (path === "/api/models") {
       if (over.models instanceof Error) throw over.models;
       return over.models ?? served;
@@ -968,5 +988,62 @@ describe("the words an address gives Search chats", () => {
     ["", null],
   ])("%j gives %j", (search, words) => {
     expect(queryFromSearch(search)).toBe(words);
+  });
+});
+
+describe("projects (MV7)", () => {
+  const garden: Project = {
+    id: "p1",
+    name: "Garden plans",
+    generalMemory: true,
+    generalDocuments: true,
+    createdAt: 1,
+    updatedAt: 1,
+    chats: 1,
+    notes: 0,
+  };
+
+  it("opens a project's page at /projects/<id>, and back to the chat list", async () => {
+    await open("/projects/p1", { projects: [garden] });
+    expect(await screen.findByRole("heading", { name: "The project p1" })).toBeInTheDocument();
+    expect(document.title).toBe("Project · Workbench");
+    fireEvent.click(back());
+    expect(await screen.findByRole("heading", { name: "Start your first chat" })).toBeVisible();
+    expect(window.location.pathname).toBe("/");
+  });
+
+  it("opens the page from the sidebar and follows the back button", async () => {
+    await open("/", { projects: [garden] });
+    fireEvent.click(await screen.findByTestId("project-open"));
+    expect(await screen.findByRole("heading", { name: "The project p1" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/projects/p1");
+    act(() => {
+      window.history.replaceState(null, "", "/memory");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    expect(await screen.findByText("The memory page")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "The project p1" })).toBeNull();
+  });
+
+  it("makes a chat in the project from the sidebar", async () => {
+    vi.mocked(post).mockResolvedValue({ ...chat, projectId: "p1" });
+    await open("/", { projects: [garden] });
+    fireEvent.click(await screen.findByTestId("project-toggle"));
+    fireEvent.click(screen.getByTestId("project-new-chat"));
+    await waitFor(() => expect(post).toHaveBeenCalledWith("/api/chats", { projectId: "p1" }));
+  });
+
+  it("makes a project from the sidebar and opens its page", async () => {
+    vi.mocked(post).mockResolvedValue(garden);
+    await open("/");
+    fireEvent.click(await screen.findByTestId("new-project"));
+    fireEvent.change(screen.getByRole("textbox", { name: "Project name" }), {
+      target: { value: "Garden plans" },
+    });
+    fireEvent.click(screen.getByTestId("new-project-create"));
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith("/api/projects", { name: "Garden plans" }),
+    );
+    expect(await screen.findByRole("heading", { name: "The project p1" })).toBeInTheDocument();
   });
 });

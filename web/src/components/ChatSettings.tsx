@@ -7,7 +7,7 @@
 import { Check, CircleAlert } from "lucide-react";
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 
-import type { ChatSettings as Settings } from "../lib/types";
+import type { ChatSettings as Settings, Project } from "../lib/types";
 import { ToolSelection } from "./Tools";
 import { FolderSelection } from "./Folders";
 
@@ -73,10 +73,19 @@ export function ChatSettings({
   settings,
   onSave,
   onClose,
+  projects,
+  projectId = null,
+  onMove,
 }: {
   settings: Settings;
   onSave: (next: Settings) => Promise<void>;
   onClose: () => void;
+  /** MV7: the person's projects, once read; null while they are being read. */
+  projects?: Project[] | null;
+  /** The project this chat is in now. */
+  projectId?: string | null;
+  /** Puts the chat in a project, or in none; a refusal is thrown with the server's words. */
+  onMove?: (projectId: string | null) => Promise<void>;
 }) {
   const uid = useId();
   const overlay = useOverlay();
@@ -97,6 +106,27 @@ export function ChatSettings({
     NonNullable<Settings["repetitionMode"]> | ""
   >(settings.repetitionMode ?? "");
   const alertId = `${uid}-problem`;
+  const [target, setTarget] = useState(projectId ?? "");
+  const [moveProblem, setMoveProblem] = useState<string | null>(null);
+  const [moved, setMoved] = useState(false);
+  const [moving, setMoving] = useState(false);
+  // What the chat is in is what the box shows, once it has been moved or re-read.
+  useEffect(() => setTarget(projectId ?? ""), [projectId]);
+
+  async function move() {
+    if (!onMove || moving) return;
+    setMoving(true);
+    setMoveProblem(null);
+    setMoved(false);
+    try {
+      await onMove(target || null);
+      setMoved(true);
+    } catch (error) {
+      setMoveProblem(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMoving(false);
+    }
+  }
 
   // Over the whole window the sheet is a dialog: focus goes into it, and back
   // to the button that opened it when it closes (also when it is a panel).
@@ -257,6 +287,62 @@ export function ChatSettings({
               </p>
             </div>
           </fieldset>
+          {onMove && (
+            <fieldset className="flex min-w-0 flex-col gap-2" data-testid="chat-project-field">
+              <legend className="eyebrow mb-3 text-muted">Project</legend>
+              <div className="flex flex-wrap items-end gap-2">
+                <div className="field">
+                  <label htmlFor={`${uid}-project`} className="field-label">
+                    Move to project
+                  </label>
+                  <select
+                    id={`${uid}-project`}
+                    data-testid="chat-project-select"
+                    value={target}
+                    disabled={moving}
+                    onChange={(e) => {
+                      setTarget(e.target.value);
+                      setMoved(false);
+                    }}
+                    aria-describedby={`${uid}-project-help`}
+                    className="control"
+                  >
+                    <option value="">No project</option>
+                    {(projects ?? []).map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <button
+                  type="button"
+                  data-testid="chat-project-move"
+                  disabled={moving || target === (projectId ?? "")}
+                  onClick={() => void move()}
+                  className="btn"
+                >
+                  Move
+                </button>
+              </div>
+              <p id={`${uid}-project-help`} className="help">
+                The next answer is given the notes of where the chat is: a project&apos;s, and your
+                general notes unless the project leaves them out.
+              </p>
+              {moveProblem && (
+                <p role="alert" data-testid="chat-project-problem" className="notice notice--error">
+                  <CircleAlert size={16} aria-hidden />
+                  {moveProblem}
+                </p>
+              )}
+              {moved && (
+                <p role="status" className="flex items-center gap-1.5 text-sm text-ok">
+                  <Check size={14} aria-hidden />
+                  Moved.
+                </p>
+              )}
+            </fieldset>
+          )}
           <div className="subsection">
             <ToolSelection
               selected={toolServers}

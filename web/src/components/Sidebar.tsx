@@ -1,11 +1,22 @@
-import { CircleAlert, Eye, LogOut, Plus, Search, X } from "lucide-react";
-import { useState } from "react";
+import {
+  ChevronDown,
+  ChevronRight,
+  CircleAlert,
+  Eye,
+  FolderOpen,
+  LogOut,
+  Plus,
+  Search,
+  X,
+} from "lucide-react";
+import { type FormEvent, useState } from "react";
 
 import { consolePage } from "../lib/documentMeaning";
 
 import { api } from "../lib/api";
 import { chatGroups } from "../lib/conveniences";
-import type { Chat, Me, Person } from "../lib/types";
+import { chatsIn, problemWords } from "../lib/projects";
+import type { Chat, Me, Person, Project } from "../lib/types";
 import {
   DEV_MODE,
   DEV_MODE_EXPLAINED,
@@ -30,6 +41,12 @@ export function Sidebar({
   onRetry,
   chatsLoaded = true,
   onRunPreviews,
+  projects,
+  projectsError = null,
+  currentProject = null,
+  onOpenProject,
+  onNewChatIn,
+  onNewProject,
 }: {
   me: Me;
   chats: Chat[];
@@ -49,9 +66,25 @@ export function Sidebar({
   chatsLoaded?: boolean;
   /** Keep whether the person's previews run when shown (rich content RC6). */
   onRunPreviews?: (on: boolean) => Promise<void>;
+  /** MV7: the person's projects. Their chats are listed under them, not by date. */
+  projects?: Project[];
+  /** Why the projects did not load, in the server's words. */
+  projectsError?: string | null;
+  /** The project whose page is open. */
+  currentProject?: string | null;
+  onOpenProject?: (id: string) => void;
+  onNewChatIn?: (id: string) => void;
+  /** Makes a project; a refusal is thrown with the server's words. */
+  onNewProject?: (name: string) => Promise<void>;
 }) {
   const [query, setQuery] = useState("");
-  const groups = chatGroups(chats, query);
+  const kept = new Set((projects ?? []).map((p) => p.id));
+  // Searching looks at every chat, a project's too; the list otherwise leaves a project's chats
+  // under their project.
+  const groups = chatGroups(
+    query.trim() ? chats : chats.filter((c) => !c.projectId || !kept.has(c.projectId)),
+    query,
+  );
   const dev = me.installMode === "dev";
   return (
     <nav
@@ -115,6 +148,19 @@ export function Sidebar({
           <Eye size={16} aria-hidden />
           {OWNER_READS}
         </div>
+      )}
+      {projects && (
+        <ProjectsList
+          projects={projects}
+          chats={chats}
+          current={current}
+          currentProject={currentProject}
+          error={projectsError}
+          onOpen={onOpen}
+          onOpenProject={onOpenProject}
+          onNewChatIn={onNewChatIn}
+          onNewProject={onNewProject}
+        />
       )}
       <h2 className="eyebrow px-4 pb-1 pt-4 text-muted">Chats</h2>
       <div className="mx-2 mb-2 flex items-center gap-1 rounded-plexus border border-line-strong bg-soft px-2 focus-within:border-accent focus-within:ring-1 focus-within:ring-accent">
@@ -263,6 +309,208 @@ export function Sidebar({
         </button>
       </div>
     </nav>
+  );
+}
+
+/** The Projects list (MV7): each project opens to its chats, newest first. */
+function ProjectsList({
+  projects,
+  chats,
+  current,
+  currentProject,
+  error,
+  onOpen,
+  onOpenProject,
+  onNewChatIn,
+  onNewProject,
+}: {
+  projects: Project[];
+  chats: Chat[];
+  current: string | null;
+  currentProject: string | null;
+  error: string | null;
+  onOpen: (id: string) => void;
+  onOpenProject?: (id: string) => void;
+  onNewChatIn?: (id: string) => void;
+  onNewProject?: (name: string) => Promise<void>;
+}) {
+  // What a person opened or closed; a project holding the open chat is open until closed.
+  const [opened, setOpened] = useState<Record<string, boolean>>({});
+  const [naming, setNaming] = useState<string | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  async function make(event: FormEvent) {
+    event.preventDefault();
+    if (naming === null || saving || !onNewProject) return;
+    setSaving(true);
+    setProblem(null);
+    try {
+      await onNewProject(naming);
+      setNaming(null);
+    } catch (failure) {
+      setProblem(problemWords(failure));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section aria-labelledby="projects-heading" data-testid="projects" className="px-2">
+      <div className="flex items-center">
+        <h2 id="projects-heading" className="eyebrow px-2 pb-1 pt-4 text-muted">
+          Projects
+        </h2>
+        {onNewProject && naming === null && (
+          <button
+            type="button"
+            data-testid="new-project"
+            onClick={() => setNaming("")}
+            className="btn btn-quiet ml-auto mt-3"
+          >
+            <Plus size={14} aria-hidden className="text-accent" /> New project
+          </button>
+        )}
+      </div>
+      {naming !== null && (
+        <form
+          aria-label="New project"
+          className="mb-1 flex flex-col gap-1 px-1"
+          onSubmit={(event) => void make(event)}
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && !saving) setNaming(null);
+          }}
+        >
+          <input
+            autoFocus
+            aria-label="Project name"
+            data-testid="new-project-name"
+            value={naming}
+            maxLength={400}
+            placeholder="Project name"
+            disabled={saving}
+            onChange={(event) => setNaming(event.target.value)}
+            className="control min-w-0"
+          />
+          <div className="flex gap-1">
+            <button
+              type="submit"
+              data-testid="new-project-create"
+              disabled={saving || !naming.trim()}
+              className="btn btn-primary"
+            >
+              {saving ? "Creating…" : "Create project"}
+            </button>
+            <button
+              type="button"
+              disabled={saving}
+              onClick={() => {
+                setNaming(null);
+                setProblem(null);
+              }}
+              className="btn btn-quiet"
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+      {(problem || error) && (
+        <p role="alert" data-testid="projects-problem" className="notice notice--error mb-1">
+          <CircleAlert size={16} aria-hidden />
+          {problem ?? error}
+        </p>
+      )}
+      {projects.length === 0 && !error && (
+        <p className="px-2 pb-1 text-sm text-muted">
+          No projects yet. A project groups chats and the notes kept to them.
+        </p>
+      )}
+      <ul className="flex max-h-[40vh] flex-col gap-0.5 overflow-y-auto">
+        {projects.map((project) => {
+          const mine = chatsIn(chats, project.id);
+          const isOpen = opened[project.id] ?? mine.some((c) => c.id === current);
+          const here = project.id === currentProject;
+          return (
+            <li key={project.id} data-testid="project">
+              <div className="flex items-center gap-0.5">
+                <button
+                  type="button"
+                  data-testid="project-toggle"
+                  aria-expanded={isOpen}
+                  aria-label={`${isOpen ? "Hide" : "Show"} the chats in ${project.name}`}
+                  onClick={() => setOpened((now) => ({ ...now, [project.id]: !isOpen }))}
+                  className="icon-btn shrink-0"
+                >
+                  {isOpen ? (
+                    <ChevronDown size={14} aria-hidden />
+                  ) : (
+                    <ChevronRight size={14} aria-hidden />
+                  )}
+                </button>
+                <button
+                  type="button"
+                  data-testid="project-open"
+                  title={project.name}
+                  aria-current={here ? "page" : undefined}
+                  onClick={() => onOpenProject?.(project.id)}
+                  className={`flex min-w-0 flex-1 items-center gap-2 rounded-plexus py-1.5 pr-2 text-left text-sm pointer-coarse:py-2.5 ${
+                    here
+                      ? "border-l-[3px] border-accent bg-tint pl-[5px] font-medium"
+                      : "pl-2 hover:bg-hover"
+                  }`}
+                >
+                  <FolderOpen size={14} aria-hidden className="shrink-0 text-accent" />
+                  <span className="truncate">{project.name}</span>
+                </button>
+              </div>
+              {isOpen && (
+                <ul className="ml-6 flex flex-col gap-0.5" data-testid="project-chats">
+                  {mine.map((chat) => (
+                    <li key={chat.id}>
+                      <button
+                        type="button"
+                        onClick={() => onOpen(chat.id)}
+                        aria-current={chat.id === current ? "page" : undefined}
+                        title={chat.title}
+                        className={`flex w-full items-center gap-2 rounded-plexus py-1.5 pr-2 text-left text-sm pointer-coarse:py-2.5 ${
+                          chat.id === current
+                            ? "border-l-[3px] border-accent bg-tint pl-[5px] font-medium"
+                            : "pl-2 hover:bg-hover"
+                        }`}
+                      >
+                        {chat.running && (
+                          <span
+                            role="img"
+                            aria-label="An answer is being written"
+                            className="run-dot h-2 w-2 shrink-0 animate-pulse rounded-full bg-accent"
+                          />
+                        )}
+                        <span className="truncate">{chat.title}</span>
+                      </button>
+                    </li>
+                  ))}
+                  {onNewChatIn && (
+                    <li>
+                      <button
+                        type="button"
+                        data-testid="project-new-chat"
+                        aria-label={`New chat in ${project.name}`}
+                        onClick={() => onNewChatIn(project.id)}
+                        className="btn btn-quiet w-full justify-start"
+                      >
+                        <Plus size={14} aria-hidden className="text-accent" /> New chat in this
+                        project
+                      </button>
+                    </li>
+                  )}
+                </ul>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </section>
   );
 }
 

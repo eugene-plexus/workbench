@@ -17,6 +17,7 @@ import type {
   NoteDocument,
   NotesFound,
   NoteWhole,
+  Project,
 } from "../lib/types";
 import { ScrollText } from "./ScrollText";
 import { TagChips } from "./MemoryTags";
@@ -333,10 +334,17 @@ export function Details({
 export function NoteSearch({
   data,
   list,
+  where = "all",
+  onWhere,
+  projects = [],
 }: {
   data: MemoryPage;
   /** The same list the page draws its notes with. */
   list: (notes: MemoryNote[]) => ReactNode;
+  /** MV7: where the notes are kept: `all`, `general`, or a project's id. */
+  where?: string;
+  onWhere?: (where: string) => void;
+  projects?: Project[];
 }) {
   const uid = useId();
   const [query, setQuery] = useState("");
@@ -355,6 +363,7 @@ export function NoteSearch({
     const params = new URLSearchParams();
     if (what.query) params.set("query", what.query);
     if (what.tag) params.set("tag", what.tag);
+    if (where !== "all") params.set("where", where);
     params.set("offset", String(offset));
     params.set("limit", String(limit));
     setReading(true);
@@ -428,6 +437,28 @@ export function NoteSearch({
             className="control w-64 max-w-full"
           />
         </div>
+        {onWhere && (projects.length > 0 || where !== "all") && (
+          <div className="field">
+            <label htmlFor={`${uid}-where`} className="field-label">
+              Where
+            </label>
+            <select
+              id={`${uid}-where`}
+              data-testid="memory-where"
+              value={where}
+              onChange={(event) => onWhere(event.target.value)}
+              className="control"
+            >
+              <option value="all">All</option>
+              <option value="general">General</option>
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
         {data.tags.length > 0 && (
           <div className="field">
             <label htmlFor={`${uid}-tag`} className="field-label">

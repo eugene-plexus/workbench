@@ -34,7 +34,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Request
 
-from . import config, memory, memory_api
+from . import config, memory, memory_api, projects
 from .api import _person, _problem, _state
 from .exchanges_index import cut, final_text, opening
 from .knowledge.index import EXCHANGES, Hit, IndexUnavailable
@@ -226,10 +226,14 @@ async def find(
     before: str | None = None,
     query: Query | None = None,
     meaning: bool = True,
+    place: projects.Place | None = None,
 ) -> Found:
     """The person's exchanges that match, best first, read from the store: never one of
-    `besides` (a chat's own), and only between `after` and `before` (days, inclusive).
-    Raises `IndexUnavailable` when the index cannot be read."""
+    `besides` (a chat's own), and only between `after` and `before` (days, inclusive). With
+    `place` (MV7), only chats a chat there may be given: a project's chats, and chats in no
+    project while it uses general memory; for a chat in no project, chats in no project. The
+    person's own Search chats passes none and finds them all. Raises `IndexUnavailable` when
+    the index cannot be read."""
     saved = getattr(state, "saved", None)
     index = saved.index(owner, create=False) if saved is not None else None
     if index is None:
@@ -249,6 +253,8 @@ async def find(
     for exchange_id in ranked:
         row = rows.get(exchange_id)
         if row is None or row["chat_id"] == besides:
+            continue
+        if place is not None and not _in(place, row.get("project_id")):
             continue
         date = _day_of(row["created_at"])
         if (after and date < after) or (before and date > before):
@@ -274,6 +280,13 @@ async def find(
 # --------------------------------------------------------------------------- #
 # what a model is sent
 # --------------------------------------------------------------------------- #
+
+
+def _in(place: projects.Place, project_id: str | None) -> bool:
+    """Whether a chat in `project_id` (None: in no project) may be given to one in `place`."""
+    if place.project_id is None:
+        return project_id is None
+    return project_id == place.project_id or (project_id is None and place.general)
 
 
 def _excerpt(nonce: str, n: int, r: Result) -> str:
@@ -397,7 +410,14 @@ async def _turn_for(
     room = None if facts.window is None else max(0, facts.window - used - reserve)
     allowed = budget if room is None else min(budget, room)
     try:
-        found = await find(state, person.sub, latest, besides=chat.id, query=query)
+        found = await find(
+            state,
+            person.sub,
+            latest,
+            besides=chat.id,
+            query=query,
+            place=await projects.place_of(state.store, chat),
+        )
     except IndexUnavailable as exc:
         log.warning("past chats could not be searched for a turn: %s", exc.message)
         found = Found(why=f"Your past chats could not be searched: {exc.message}")
@@ -460,6 +480,7 @@ async def run_tool(
             besides=chat_id,
             after=valid_day(arguments.get("after")),
             before=valid_day(arguments.get("before")),
+            place=await projects.place_of(state.store, chat),
         )
         packed = pack(found.results, TOOL_TOKENS, limit)
     except Exception as exc:

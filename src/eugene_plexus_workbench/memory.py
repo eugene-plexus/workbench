@@ -517,8 +517,9 @@ def is_always(note: MemoryNote) -> bool:
     return note.pinned or note.kind == "instruction"
 
 
-def _priority(note: MemoryNote) -> tuple[int, float, str]:
-    return (0 if is_always(note) else 1, -note.created_at, note.id)
+def _priority(note: MemoryNote) -> tuple[int, int, float, str]:
+    # MV7: in a project's chat, its own notes are chosen before general ones.
+    return (0 if is_always(note) else 1, 0 if note.project_id else 1, -note.created_at, note.id)
 
 
 def _layout(note: MemoryNote) -> tuple[int, float, str]:

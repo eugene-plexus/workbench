@@ -48,8 +48,13 @@ def _stems(note: MemoryNote) -> frozenset[str]:
 
 
 def _same(a: MemoryNote, b: MemoryNote) -> bool:
-    """Two notes of one kind that may say the same thing; two events, on the same day."""
-    return a.kind == b.kind and (a.kind != "event" or a.expires_at == b.expires_at)
+    """Two notes of one kind and one place (MV7) that may say the same thing; two events, on
+    the same day."""
+    return (
+        a.kind == b.kind
+        and a.project_id == b.project_id
+        and (a.kind != "event" or a.expires_at == b.expires_at)
+    )
 
 
 def _prefix(size: int) -> int:
@@ -64,10 +69,10 @@ def duplicates(notes: list[MemoryNote]) -> list[tuple[str, str]]:
     order = {n.id: i for i, n in enumerate(current)}
     by_id = {n.id: n for n in current}
     pairs: set[tuple[str, str]] = set()
-    same: dict[tuple[str, str, str | None], list[str]] = defaultdict(list)
+    same: dict[tuple[str, str, str | None, str | None], list[str]] = defaultdict(list)
     for n in current:
         day = n.expires_at if n.kind == "event" else None
-        same[(n.kind, note_key(n.text), day)].append(n.id)
+        same[(n.kind, note_key(n.text), day, n.project_id)].append(n.id)
     for ids in same.values():
         pairs.update((ids[0], other) for other in ids[1:])
     words = {n.id: _stems(n) for n in current}

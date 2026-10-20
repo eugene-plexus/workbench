@@ -48,6 +48,9 @@ RRF_K = 60
 WORDS_LIMIT = 200
 MEANING_LIMIT = 200
 MEANING_TOP = 8
+#: How much further each search reaches than it keeps, so that the notes of the pool it
+#: is given (MV7: a chat's place) are among what it keeps.
+SPREAD = 5
 MEANING_SECONDS = 3.0
 #: Passages of one note's body sent in one turn.
 PASSAGES_PER_NOTE = 3
@@ -231,9 +234,14 @@ class Finder:
         expression = memory.match_expression(memory.search_words(query.asked or query.text))
         if expression is None:
             return []
-        return [n.id for n in await self.store.search_memory(owner, expression, limit=WORDS_LIMIT)]
+        return [
+            n.id
+            for n in await self.store.search_memory(owner, expression, limit=WORDS_LIMIT * SPREAD)
+        ]
 
-    async def _meaning(self, index: Any, query: Query) -> tuple[list[Hit] | None, str | None]:
+    async def _meaning(
+        self, index: Any, query: Query, pool: set[str] | None = None
+    ) -> tuple[list[Hit] | None, str | None]:
         """Hits by meaning, or `(None, why not)`. A search model outside the machines is
         never asked: not for a note, and not for the question that would find one."""
         meaning = getattr(self.saved, "meaning", None)
@@ -252,12 +260,17 @@ class Finder:
             return None, NOT_YET
         try:
             hits = await asyncio.wait_for(
-                meaning.signal.search(index, query, [NOTES], MEANING_LIMIT), MEANING_SECONDS
+                meaning.signal.search(index, query, [NOTES], MEANING_LIMIT * SPREAD),
+                MEANING_SECONDS,
             )
         except TimeoutError:
             return None, f"Chosen by words: the search model {model.id} took too long."
         except SignalUnavailable as exc:
             return None, f"Chosen by words: {exc.message}" if exc.message else NO_SEARCH_MODEL
+        if pool is not None:
+            # Only the pool's notes count towards the cuts below (MV7).
+            hits = [h for h in hits if h.doc_id in pool]
+        hits = hits[:MEANING_LIMIT]
         floor = await meaning.floor(index)
         if floor is not None:
             return [h for h in hits if h.score > floor], None
@@ -282,7 +295,9 @@ class Finder:
     ) -> Chosen:
         by_id = {n.id: n for n in pool}
         titles = (
-            [i for i in await self._titles(owner, query) if i in by_id] if not query.empty else []
+            [i for i in await self._titles(owner, query) if i in by_id][:WORDS_LIMIT]
+            if not query.empty
+            else []
         )
         index = self.saved.index(owner, create=False) if self.saved is not None else None
         why: str | None = None
@@ -293,8 +308,14 @@ class Finder:
         else:
             try:
                 if not query.empty:
-                    words_hits = await WordSignal().search(index, query, [NOTES], WORDS_LIMIT)
-                meaning_hits, why = await self._meaning(index, query)
+                    words_hits = [
+                        h
+                        for h in await WordSignal().search(
+                            index, query, [NOTES], WORDS_LIMIT * SPREAD
+                        )
+                        if h.doc_id in by_id
+                    ][:WORDS_LIMIT]
+                meaning_hits, why = await self._meaning(index, query, set(by_id))
             except IndexUnavailable as exc:
                 log.warning(
                     "a person's notes could not be searched in their index: %s", exc.message

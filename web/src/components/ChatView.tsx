@@ -4,6 +4,7 @@ import {
   CircleAlert,
   Download,
   Eye,
+  FolderOpen,
   Pencil,
   SlidersHorizontal,
   Trash2,
@@ -22,6 +23,7 @@ import { InteractionSurfaces } from "./InteractionSurfaces";
 import { del, patch } from "../lib/api";
 import { exportChat, saveDraft } from "../lib/conveniences";
 import { failureWords } from "../lib/memory";
+import { placeName, projectPath, useProjects } from "../lib/projects";
 import { hideHint, hintCount, hintHidden } from "../lib/savedDocuments";
 import type { ChatSettings as Settings, Me, Message, Models } from "../lib/types";
 import { useChat } from "../lib/useChat";
@@ -48,6 +50,7 @@ export function ChatView({
   onDeleted,
   onOpenMemory,
   onOpenDocuments,
+  onOpenProject,
   at = null,
 }: {
   chatId: string;
@@ -64,6 +67,8 @@ export function ChatView({
   onOpenMemory: () => void;
   /** Open the Documents screen (from the drawer, and from an answer's search that went wrong). */
   onOpenDocuments: () => void;
+  /** MV7: open a project's page, from the header's project name. */
+  onOpenProject?: (id: string) => void;
 }) {
   const { detail, update, progress, error, reload, look, learned } = useChat(chatId);
   const interactive = useInteractions(
@@ -81,6 +86,8 @@ export function ChatView({
   // the chat, and only one is open at a time (on a phone each covers the whole window).
   const [panel, setPanel] = useState<"settings" | "memory" | "documents" | null>(null);
   const showSettings = panel === "settings";
+  // The projects are read for the header's name of the chat's own, and for the list in its settings.
+  const projectList = useProjects(Boolean(detail?.chat.projectId) || showSettings);
   const [toast, setToast] = useState<{ id: number; outcome: ToastOutcome } | null>(null);
   const toasts = useRef(0);
   // The notes this chat's next message carries. It is read again when the
@@ -228,6 +235,15 @@ export function ChatView({
     update((shown) => ({ ...shown, chat: { ...updated, running: shown.chat.running } }));
   }
 
+  /** Put the chat in a project, or in none; the next turn is given where it now is. */
+  async function moveToProject(projectId: string | null) {
+    const updated = await patch<typeof chat>(`/api/chats/${chat.id}`, { projectId });
+    update((shown) => ({ ...shown, chat: { ...updated, running: shown.chat.running } }));
+    void projectList.reload();
+    void memory.reload();
+    onChanged();
+  }
+
   async function turnOnDocuments() {
     setTurningOn(true);
     setHintProblem(null);
@@ -314,6 +330,23 @@ export function ChatView({
             >
               {chat.title}
             </h1>
+          )}
+          {renaming === null && chat.projectId && (
+            <a
+              href={projectPath(chat.projectId)}
+              data-testid="chat-project"
+              title="Open this chat's project"
+              className="badge link shrink-0 max-lg:order-first"
+              onClick={(event) => {
+                if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey) return;
+                if (!onOpenProject) return;
+                event.preventDefault();
+                onOpenProject(chat.projectId!);
+              }}
+            >
+              <FolderOpen size={12} aria-hidden />
+              {placeName(projectList.projects ?? [], chat.projectId) ?? "Project"}
+            </a>
           )}
           {renaming === null && !confirmDelete && (
             <DocumentsChip
@@ -465,6 +498,9 @@ export function ChatView({
           settings={chat.settings}
           onSave={saveSettings}
           onClose={() => setPanel(null)}
+          projects={projectList.projects}
+          projectId={chat.projectId ?? null}
+          onMove={moveToProject}
         />
       )}
       {panel === "documents" && (

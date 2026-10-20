@@ -53,6 +53,9 @@ MV5 = "tests/test_memory_servers.py"
 PROVENANCE = SRC + "memory_provenance.py"
 TIDY = SRC + "memory_tidy.py"
 MV6 = "tests/test_memory_mv6.py"
+PROJECTS = SRC + "projects.py"
+PROJECTS_API = SRC + "projects_api.py"
+MV7 = "tests/test_memory_mv7.py"
 
 # (label, file, before, after, check)
 CASES: list[tuple[str, str, str, str, str]] = [
@@ -212,15 +215,15 @@ CASES: list[tuple[str, str, str, str, str]] = [
     (
         "the oldest note is taken first",
         MEMORY,
-        "    return (0 if is_always(note) else 1, -note.created_at, note.id)",
-        "    return (0 if is_always(note) else 1, note.created_at, note.id)",
+        "    return (0 if is_always(note) else 1, 0 if note.project_id else 1, -note.created_at, note.id)",
+        "    return (0 if is_always(note) else 1, 0 if note.project_id else 1, note.created_at, note.id)",
         f"{RULES}::test_the_budget_is_spent_in_priority_order_newest_first",
     ),
     (
         "instructions are not used first",
         MEMORY,
-        "    return (0 if is_always(note) else 1, -note.created_at, note.id)",
-        "    return (0 if note.pinned else 1, -note.created_at, note.id)",
+        "    return (0 if is_always(note) else 1, 0 if note.project_id else 1, -note.created_at, note.id)",
+        "    return (0 if note.pinned else 1, 0 if note.project_id else 1, -note.created_at, note.id)",
         f"{RULES}::test_the_budget_is_spent_in_priority_order_newest_first",
     ),
     (
@@ -400,8 +403,8 @@ CASES: list[tuple[str, str, str, str, str]] = [
     (
         "forget deletes on a guess",
         ROUTES,
-        "            found = await store.search_memory(person.sub, expression, limit=5)\n",
-        "            found = await store.search_memory(person.sub, expression, limit=5)\n"
+        "            )[:5]\n",
+        "            )[:5]\n"
         "            for guess in found[:1]:\n"
         "                await store.delete_memory_note(person.sub, guess.id)\n",
         f"{HTTP}::test_forget_finds_candidates_and_never_deletes_on_a_guess",
@@ -587,8 +590,8 @@ CASES: list[tuple[str, str, str, str, str]] = [
     (
         "MV2: Use past chats sends this chat's own exchanges",
         PAST,
-        "        found = await find(state, person.sub, latest, besides=chat.id, query=query)\n",
-        "        found = await find(state, person.sub, latest, besides=None, query=query)\n",
+        "            besides=chat.id,\n            query=query,\n",
+        "            besides=None,\n            query=query,\n",
         f"{MV2}::test_use_past_chats_is_off_by_default_and_then_carries_a_match_from_another_chat",
     ),
     (
@@ -914,8 +917,8 @@ CASES: list[tuple[str, str, str, str, str]] = [
     (
         "MV6: tidy pairs notes of different kinds",
         TIDY,
-        "        same[(n.kind, note_key(n.text), day)].append(n.id)",
-        '        same[("", note_key(n.text), day)].append(n.id)',
+        "        same[(n.kind, note_key(n.text), day, n.project_id)].append(n.id)",
+        '        same[("", note_key(n.text), day, n.project_id)].append(n.id)',
         f"{MV6}::test_duplicates_are_the_same_words_or_most_of_them_within_one_kind",
     ),
     (
@@ -966,6 +969,111 @@ CASES: list[tuple[str, str, str, str, str]] = [
         "    if timer:\n        # The timer's one project a week",
         "    if True:\n        # The timer's one project a week",
         f"{MV6}::test_a_removed_document_asks_later_puts_it_off_and_yes_drops_the_link",
+    ),
+    # --- MV7: projects ------------------------------------------------------------
+    (
+        "MV7: a project's notes reach chats outside it",
+        PROJECTS,
+        "        return [n for n in held if n.project_id is None]",
+        "        return held",
+        f"{MV7}::test_a_projects_notes_reach_only_its_chats_and_general_ones_as_it_says",
+    ),
+    (
+        "MV7: general notes reach a project kept to itself",
+        PROJECTS,
+        "    if not place.general:",
+        "    if False:",
+        f"{MV7}::test_a_projects_notes_reach_only_its_chats_and_general_ones_as_it_says",
+    ),
+    (
+        "MV7: a note said in a project is kept to General",
+        ROUTES,
+        "                    project_id=chat.project_id,",
+        "                    project_id=None,",
+        f"{MV7}::test_a_note_belongs_where_it_was_said",
+    ),
+    (
+        "MV7: a moved chat keeps the notes it froze",
+        STORE,
+        '"UPDATE chats SET project_id = ?, memory_snapshot = NULL "',
+        '"UPDATE chats SET project_id = ? "',
+        f"{MV7}::test_moving_a_chat_takes_its_notes_again_from_where_it_is",
+    ),
+    (
+        "MV7: a connection is given a project's notes",
+        CONNECTIONS,
+        "            if n.project_id is None and not memory.is_past(n, today)",
+        "            if not memory.is_past(n, today)",
+        f"{MV7}::test_a_connection_is_given_general_notes_only",
+    ),
+    (
+        "MV7: a project's chat is sent to the memory server",
+        SERVERS,
+        "    if chat.project_id is not None:",
+        "    if False:",
+        f"{MV7}::test_a_chat_in_a_project_is_not_sent_to_a_memory_server",
+    ),
+    (
+        "MV7: tidy merges notes of two places",
+        TIDY,
+        "        and a.project_id == b.project_id",
+        "        and True",
+        f"{MV7}::test_the_tidy_pass_stays_within_one_place",
+    ),
+    (
+        "MV7: deleting a project leaves its notes",
+        PROJECTS_API,
+        "    for note in [n for n in await store.memory_notes(person.sub) if n.project_id == project.id]:",
+        "    for note in []:",
+        f"{MV7}::test_deleting_a_project_keeps_or_takes_what_was_in_it",
+    ),
+    (
+        "MV7: a project's past chats reach chats outside it",
+        PAST,
+        '        if place is not None and not _in(place, row.get("project_id")):',
+        "        if False:",
+        f"{MV7}::test_past_chats_of_a_project_reach_only_its_chats",
+    ),
+    (
+        "MV7: other places' notes crowd a project's out of a search",
+        RELEVANCE,
+        "            hits = [h for h in hits if h.doc_id in pool]\n",
+        "            hits = list(hits)\n",
+        f"{MV7}::test_a_projects_note_is_found_by_meaning_however_many_other_notes_outrank_it",
+    ),
+    (
+        "MV7: forget offers another place's notes",
+        ROUTES,
+        "            found = projects.in_place(\n",
+        "            found = (lambda found, _: found)(\n",
+        f"{MV7}::test_forget_offers_only_the_notes_this_chat_may_be_given",
+    ),
+    (
+        "MV7: a connection reads a project's note by its id",
+        CONNECTIONS,
+        '        if note is None or note.status != "active" or note.project_id is not None:',
+        '        if note is None or note.status != "active":',
+        f"{MV7}::test_a_connection_cannot_read_a_projects_note_by_its_id",
+    ),
+    (
+        "MV7: the same words in another place are not offered",
+        STORE,
+        "                    if (note.project_id, key) in held or total >= limit",
+        "                    if any(k == key for _, k in held) or total >= limit",
+        f"{MV7}::test_the_same_words_are_offered_in_another_place",
+    ),
+    (
+        "MV7: a deleted project leaves notes under its id",
+        STORE,
+        '                    "UPDATE memory_notes SET project_id = NULL WHERE owner = ? AND project_id = ?",\n'
+        "                    (owner, project_id),\n"
+        "                )\n"
+        "                done = db.execute(",
+        '                    "SELECT ? AND ?",\n'
+        "                    (owner, project_id),\n"
+        "                )\n"
+        "                done = db.execute(",
+        f"{MV7}::test_nothing_is_left_under_a_deleted_projects_id",
     ),
 ]
 

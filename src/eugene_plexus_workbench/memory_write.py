@@ -24,7 +24,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from . import config, memory_models, memory_policy, memory_suggest
+from . import config, memory_models, memory_policy, memory_suggest, projects
 from .store import MemoryNote, Message, Person, Store, note_key
 
 log = logging.getLogger(__name__)
@@ -178,7 +178,9 @@ def note_of(
     policy: memory_policy.Policy,
     tags: Sequence[str],
     now: float,
+    project_id: str | None = None,
 ) -> MemoryNote:
+    """A model's proposal as a note, kept where its chat is (MV7: the chat's project)."""
     p = routed.proposal
     return MemoryNote(
         id=uuid.uuid4().hex,
@@ -199,6 +201,7 @@ def note_of(
         model=model,
         policy=policy.to_json(),
         auto=routed.action == memory_policy.KEEP,
+        project_id=project_id,
     )
 
 
@@ -288,10 +291,11 @@ async def _remember(
     sources, messages = sources_for(path, theirs, policy)
     # Everything the model had in its context: the chat's path, and this turn so far.
     untrusted = context.untrusted or untrusted_in(path, answers_too=True)
+    # MV7: what the chat may be given is all it may repeat or replace.
     held = [
         n
         for status in ("active", "pending")
-        for n in await store.memory_notes(owner, status=status)
+        for n in await projects.chat_notes(store, owner, chat, status=status)
     ]
     title = arguments.get("replaces")
     replaced = next(
@@ -354,6 +358,7 @@ async def _remember(
         policy,
         memory_suggest.tags_for(routed.proposal.text, tags),
         now,
+        chat.project_id,
     )
     written = await store.add_suggestions(
         owner,

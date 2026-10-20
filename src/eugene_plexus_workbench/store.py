@@ -91,7 +91,7 @@ from .agui_store import AGUIStore, allow_chat_write
 from .interaction_store import SCHEMA as INTERACTION_SCHEMA
 from .interaction_store import InteractionStore
 
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 
 #: The oldest schema this migrates from: what Workbench v0.1.0 wrote. Schema 1 predates
 #: it, and nobody holds one.
@@ -621,6 +621,25 @@ def _provenance(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE memory_prefs ADD COLUMN tidy_at REAL")
 
 
+def _projects(db: sqlite3.Connection) -> None:
+    """Schema 27 (MV7): a person's projects, and the project a chat or a note is in (null for
+    none: a general note, a chat in no project)."""
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS projects ("
+        "id TEXT PRIMARY KEY, owner TEXT NOT NULL, "
+        "name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 80), "
+        "general_memory INTEGER NOT NULL DEFAULT 1 CHECK (general_memory IN (0, 1)), "
+        "general_documents INTEGER NOT NULL DEFAULT 1 CHECK (general_documents IN (0, 1)), "
+        "created_at REAL NOT NULL, updated_at REAL NOT NULL)"
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS projects_by_owner ON projects (owner)")
+    for table in ("chats", "memory_notes"):
+        present = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+        if "project_id" not in present:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN project_id TEXT")
+        db.execute(f"CREATE INDEX IF NOT EXISTS {table}_by_project ON {table} (owner, project_id)")
+
+
 #: What brings a store written at version N-1 to N, for N above `OLDEST_SCHEMA`.
 #: `_SCHEMA` already holds the result, for a store made new. A step is a statement,
 #: or a function of the connection for what SQL alone cannot say.
@@ -766,6 +785,8 @@ _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
     25: [_memory_servers],
     # Provenance and tidy (MV6, 2026-10-19): two new tables, a trigger and one column.
     26: [_provenance],
+    # Projects (MV7, 2026-10-19): one new table and two new columns; nothing moves.
+    27: [_projects],
 }
 
 
@@ -900,6 +921,7 @@ def _initialize_schema(
         _learning(db)
         _memory_servers(db)
         _provenance(db)
+        _projects(db)
         db.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?)",
             (str(SCHEMA_VERSION),),
@@ -953,6 +975,23 @@ class Chat:
     #: turn sends the same bytes (the engine's prompt cache) and the page can
     #: say exactly what was sent (`memory.Snapshot`'s JSON). None until then.
     memory_snapshot: dict[str, Any] | None = None
+    #: MV7: the project the chat is in, or None.
+    project_id: str | None = None
+
+
+@dataclass
+class Project:
+    """A person's project (MV7): a named group of chats with its own notes."""
+
+    id: str
+    owner: str
+    name: str
+    created_at: float
+    updated_at: float
+    #: Whether its chats are given the person's general notes too.
+    general_memory: bool = True
+    #: Whether its chats search My documents too (MV7b).
+    general_documents: bool = True
 
 
 @dataclass
@@ -1002,6 +1041,8 @@ class MemoryNote:
     policy: str | None = None
     auto: bool = False
     seen_at: float | None = None
+    #: MV7: the project the note is kept to, or None for a general note.
+    project_id: str | None = None
 
 
 @dataclass
@@ -1065,7 +1106,7 @@ _NOTE_LIST = (
     "id, owner, text, kind, status, pinned, source, source_chat_id, source_message_id, quote, "
     "expires_at, revisit_at, created_at, updated_at, last_used_at, use_count, replaces, "
     "source_connection_id, source_connection, length(body) AS body_chars, valid_from, "
-    "superseded_at, superseded_by, proposed_tags, model, policy, auto, seen_at"
+    "superseded_at, superseded_by, proposed_tags, model, policy, auto, seen_at, project_id"
 )
 
 
@@ -1249,6 +1290,7 @@ def _chat(row: sqlite3.Row) -> Chat:
         settings=json.loads(row["settings"] or "{}"),
         search=bool(row["search"]),
         memory_snapshot=_snapshot(row["memory_snapshot"]),
+        project_id=row["project_id"] if "project_id" in row.keys() else None,  # noqa: SIM118
     )
 
 
@@ -1284,6 +1326,7 @@ def _note(row: sqlite3.Row) -> MemoryNote:
         policy=row["policy"] if "policy" in keys else None,
         auto=bool(row["auto"]) if "auto" in keys else False,
         seen_at=row["seen_at"] if "seen_at" in keys else None,
+        project_id=row["project_id"] if "project_id" in keys else None,
     )
 
 
@@ -1568,7 +1611,7 @@ _MESSAGE_FIELDS = {
     "reasoning_tokens",
     "reasoning_seconds",
 }
-_CHAT_FIELDS = {"title", "model", "settings", "search", "updated_at"}
+_CHAT_FIELDS = {"title", "model", "settings", "search", "updated_at", "project_id"}
 _JSON_FIELDS = {
     "attachments",
     "sources",
@@ -2001,7 +2044,7 @@ class Store:
         def go() -> None:
             self._conn().execute(
                 "INSERT INTO chats (id, owner, title, model, settings, search, created_at, "
-                "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "updated_at, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     chat.id,
                     chat.owner,
@@ -2011,6 +2054,7 @@ class Store:
                     int(chat.search),
                     chat.created_at,
                     chat.updated_at,
+                    chat.project_id,
                 ),
             )
 
@@ -2045,6 +2089,246 @@ class Store:
             self._conn().execute(f"UPDATE chats SET {columns} WHERE id = ?", (*params, chat_id))
 
         await self._run(go)
+
+    # --- MV7: projects -----------------------------------------------------
+
+    @staticmethod
+    def _project(row: sqlite3.Row) -> Project:
+        return Project(
+            id=row["id"],
+            owner=row["owner"],
+            name=row["name"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            general_memory=bool(row["general_memory"]),
+            general_documents=bool(row["general_documents"]),
+        )
+
+    async def projects(self, owner: str) -> list[Project]:
+        """The person's projects, by name."""
+
+        def go() -> list[Project]:
+            rows = self._conn().execute(
+                "SELECT * FROM projects WHERE owner = ? ORDER BY name COLLATE NOCASE, id",
+                (owner,),
+            )
+            return [self._project(r) for r in rows]
+
+        return await self._run(go)
+
+    async def project(self, owner: str, project_id: str) -> Project | None:
+        def go() -> Project | None:
+            row = (
+                self._conn()
+                .execute("SELECT * FROM projects WHERE owner = ? AND id = ?", (owner, project_id))
+                .fetchone()
+            )
+            return self._project(row) if row is not None else None
+
+        return await self._run(go)
+
+    async def put_project(
+        self, project: Project, *, limit: int, retake: bool = False
+    ) -> str | None:
+        """Make or rename a project: None when done, else why not (`limit` reached, or another
+        of the person's projects has that name once case and spacing are set aside). With
+        `retake`, its chats' frozen pinned blocks go in the same step (the general memory
+        switch changed what they are given)."""
+
+        def go() -> str | None:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                same = [
+                    r["id"]
+                    for r in db.execute(
+                        "SELECT id, name FROM projects WHERE owner = ?", (project.owner,)
+                    )
+                    if note_key(r["name"]) == note_key(project.name) and r["id"] != project.id
+                ]
+                if same:
+                    db.execute("COMMIT")
+                    return "taken"
+                held = db.execute(
+                    "SELECT 1 FROM projects WHERE owner = ? AND id = ?", (project.owner, project.id)
+                ).fetchone()
+                if held is None:
+                    count = db.execute(
+                        "SELECT COUNT(*) AS n FROM projects WHERE owner = ?", (project.owner,)
+                    ).fetchone()["n"]
+                    if int(count) >= limit:
+                        db.execute("COMMIT")
+                        return "full"
+                    db.execute(
+                        "INSERT INTO projects (id, owner, name, general_memory, "
+                        "general_documents, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            project.id,
+                            project.owner,
+                            project.name,
+                            int(project.general_memory),
+                            int(project.general_documents),
+                            project.created_at,
+                            project.updated_at,
+                        ),
+                    )
+                else:
+                    db.execute(
+                        "UPDATE projects SET name = ?, general_memory = ?, general_documents = ?, "
+                        "updated_at = ? WHERE owner = ? AND id = ?",
+                        (
+                            project.name,
+                            int(project.general_memory),
+                            int(project.general_documents),
+                            project.updated_at,
+                            project.owner,
+                            project.id,
+                        ),
+                    )
+                if retake:
+                    db.execute(
+                        "UPDATE chats SET memory_snapshot = NULL "
+                        "WHERE owner = ? AND project_id = ?",
+                        (project.owner, project.id),
+                    )
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return None
+
+        return await self._run(go)
+
+    async def move_chat(self, owner: str, chat_id: str, project_id: str | None) -> bool:
+        """Put a chat of the person's in a project, or in none. Its frozen pinned block goes:
+        the next turn is given the notes of where it is now."""
+
+        def go() -> bool:
+            return bool(
+                self._conn()
+                .execute(
+                    "UPDATE chats SET project_id = ?, memory_snapshot = NULL "
+                    "WHERE owner = ? AND id = ?",
+                    (project_id, owner, chat_id),
+                )
+                .rowcount
+            )
+
+        return await self._run(go)
+
+    async def move_notes(self, owner: str, note_ids: Sequence[str], project_id: str | None) -> int:
+        """Keep these notes of the person's to a project, or make them general. The chats that
+        froze a copy of them take it again."""
+
+        def go() -> int:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                done = 0
+                for one in note_ids:
+                    done += db.execute(
+                        "UPDATE memory_notes SET project_id = ?, updated_at = ? "
+                        "WHERE owner = ? AND id = ?",
+                        (project_id, time.time(), owner, one),
+                    ).rowcount
+                self._drop_from_chats(db, owner, set(note_ids))
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return done
+
+        return await self._run(go)
+
+    async def release_project(self, owner: str, project_id: str) -> tuple[int, int]:
+        """Delete a project and keep what was in it: its chats and notes become general.
+        `(chats, notes)` released; nothing is left under its id."""
+
+        def go() -> tuple[int, int]:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                chats = db.execute(
+                    "UPDATE chats SET project_id = NULL, memory_snapshot = NULL "
+                    "WHERE owner = ? AND project_id = ?",
+                    (owner, project_id),
+                ).rowcount
+                released = {
+                    r["id"]
+                    for r in db.execute(
+                        "SELECT id FROM memory_notes WHERE owner = ? AND project_id = ?",
+                        (owner, project_id),
+                    )
+                }
+                notes = db.execute(
+                    "UPDATE memory_notes SET project_id = NULL WHERE owner = ? AND project_id = ?",
+                    (owner, project_id),
+                ).rowcount
+                db.execute("DELETE FROM projects WHERE owner = ? AND id = ?", (owner, project_id))
+                # A chat that froze a copy of them takes it again (its project's were cleared).
+                Store._drop_from_chats(db, owner, released)
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return int(chats), int(notes)
+
+        return await self._run(go)
+
+    async def drop_project_row(self, owner: str, project_id: str) -> bool:
+        """The project itself, once its chats and notes are gone. Whatever is still under its
+        id (a suggestion waiting from a chat moved out of it, an earlier version, a chat made
+        while it was being deleted) becomes general in the same step: nothing is left under an
+        id that no longer exists."""
+
+        def go() -> bool:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                db.execute(
+                    "UPDATE chats SET project_id = NULL, memory_snapshot = NULL "
+                    "WHERE owner = ? AND project_id = ?",
+                    (owner, project_id),
+                )
+                db.execute(
+                    "UPDATE memory_notes SET project_id = NULL WHERE owner = ? AND project_id = ?",
+                    (owner, project_id),
+                )
+                done = db.execute(
+                    "DELETE FROM projects WHERE owner = ? AND id = ?", (owner, project_id)
+                ).rowcount
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return bool(done)
+
+        return await self._run(go)
+
+    async def project_counts(self, owner: str) -> tuple[dict[str, int], dict[str, int]]:
+        """How many chats, and how many current notes, each of the person's projects holds."""
+
+        def go() -> tuple[dict[str, int], dict[str, int]]:
+            db = self._conn()
+            chats = {
+                r[0]: int(r[1])
+                for r in db.execute(
+                    "SELECT project_id, COUNT(*) FROM chats WHERE owner = ? "
+                    "AND project_id IS NOT NULL GROUP BY project_id",
+                    (owner,),
+                )
+            }
+            notes = {
+                r[0]: int(r[1])
+                for r in db.execute(
+                    "SELECT project_id, COUNT(*) FROM memory_notes WHERE owner = ? "
+                    "AND status = 'active' AND project_id IS NOT NULL GROUP BY project_id",
+                    (owner,),
+                )
+            }
+            return chats, notes
+
+        return await self._run(go)
 
     async def delete_chat(self, chat_id: str) -> None:
         """Delete a chat and everything of it, and (MV2) every copy of its exchanges the
@@ -2264,7 +2548,8 @@ class Store:
                 marks = ", ".join("?" for _ in part)
                 rows = self._conn().execute(
                     "SELECT a.id, a.chat_id, a.content AS answer, a.answer_from, "
-                    "u.content AS question, u.created_at, c.title, u.id AS question_id "
+                    "u.content AS question, u.created_at, c.title, u.id AS question_id, "
+                    "c.project_id "
                     "FROM messages AS a JOIN messages AS u ON u.id = a.parent_id "
                     "AND u.chat_id = a.chat_id JOIN chats AS c ON c.id = a.chat_id "
                     f"WHERE a.id IN ({marks}) AND c.owner = ? AND a.role = 'assistant' "
@@ -3117,8 +3402,9 @@ class Store:
             "source_chat_id, source_message_id, quote, expires_at, revisit_at, "
             "created_at, updated_at, last_used_at, use_count, replaces, body, valid_from, "
             "source_connection_id, source_connection, proposed_tags, model, policy, auto, "
-            "seen_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "seen_at, project_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+            "?)",
             (
                 note.id,
                 note.owner,
@@ -3146,6 +3432,7 @@ class Store:
                 note.policy,
                 int(note.auto),
                 note.seen_at,
+                note.project_id,
             ),
         )
 
@@ -3169,8 +3456,8 @@ class Store:
                         r
                         for r in db.execute(
                             "SELECT id, text FROM memory_notes "
-                            "WHERE owner = ? AND status = 'active'",
-                            (note.owner,),
+                            "WHERE owner = ? AND status = 'active' AND project_id IS ?",
+                            (note.owner, note.project_id),
                         ).fetchall()
                         if note_key(r["text"]) == wanted
                         and db.execute(
@@ -3895,10 +4182,11 @@ class Store:
                 ):
                     db.execute("COMMIT")
                     return []
+                # The same words twice is one note within one place (MV7).
                 held = {
-                    note_key(r["text"])
+                    (r["project_id"], note_key(r["text"]))
                     for r in db.execute(
-                        "SELECT text FROM memory_notes WHERE owner = ? "
+                        "SELECT text, project_id FROM memory_notes WHERE owner = ? "
                         "AND status IN ('active', 'pending')",
                         (owner,),
                     )
@@ -3925,7 +4213,7 @@ class Store:
                 offered: list[MemoryNote] = []
                 for note in notes:
                     key = note_key(note.text)
-                    if key in held or total >= limit or len(offered) >= room:
+                    if (note.project_id, key) in held or total >= limit or len(offered) >= room:
                         continue
                     if latest is not None and note.created_at <= latest:
                         note.created_at = note.updated_at = latest + 1e-6
@@ -3935,9 +4223,9 @@ class Store:
                         "INSERT INTO memory_notes (id, owner, text, kind, status, pinned, source, "
                         "source_chat_id, source_message_id, quote, expires_at, revisit_at, "
                         "created_at, updated_at, replaces, proposed_tags, model, policy, auto, "
-                        "valid_from) "
+                        "valid_from, project_id) "
                         "VALUES (?, ?, ?, ?, ?, 0, 'suggested', ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                        "?, ?, ?, ?)",
+                        "?, ?, ?, ?, ?)",
                         (
                             note.id,
                             owner,
@@ -3959,6 +4247,7 @@ class Store:
                             note.policy,
                             int(auto),
                             note.created_at if auto else None,
+                            note.project_id,
                         ),
                     )
                     # The words are in the note; the log says only that it was offered or kept.
@@ -3969,7 +4258,7 @@ class Store:
                         self._keep_learned(db, owner, note)
                     note.status = "active" if auto else "pending"
                     note.source, note.source_chat_id = "suggested", chat_id
-                    held.add(key)
+                    held.add((note.project_id, key))
                     total += 1
                     offered.append(note)
                 db.execute(
@@ -4770,11 +5059,13 @@ class Store:
                 if live is None:
                     db.execute("COMMIT")
                     return "revoked"
+                # A connection's note is general (MV7-C4): only general notes are its twins,
+                # so its answer never says a project holds the words.
                 held = {
                     note_key(r["text"])
                     for r in db.execute(
                         "SELECT text FROM memory_notes WHERE owner = ? "
-                        "AND status IN ('active', 'pending')",
+                        "AND status IN ('active', 'pending') AND project_id IS NULL",
                         (owner,),
                     )
                 }
