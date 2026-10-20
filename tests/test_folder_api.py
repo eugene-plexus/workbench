@@ -426,8 +426,13 @@ def test_a_file_that_is_touched_but_says_the_same_is_not_read_again(
 
 
 def test_a_file_too_new_to_trust_is_looked_at_again_so_a_second_edit_in_the_same_tick_is_not_missed(
-    world: World, notes: Path
+    world: World, notes: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # "Too new" is read within `RACY_NS` of being written; a slow runner (Windows CI) can take
+    # longer than that to read it the first time, and the file is then old enough to trust.
+    from eugene_plexus_workbench.knowledge import folder_sync
+
+    monkeypatch.setattr(folder_sync, "RACY_NS", 120_000_000_000)
     no_search_model(world)
     path = plan_file(notes, "plan.md", f"The {RARE} plan, the old one.")
     owner, ada = owner_and_ada(world)

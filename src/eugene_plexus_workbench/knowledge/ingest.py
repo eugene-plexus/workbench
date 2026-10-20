@@ -50,7 +50,7 @@ from pathlib import Path
 
 from . import chunk, extract
 from . import index as index_module
-from .index import CHAT, FOUND, PENDING, Document, Index, IndexUnavailable
+from .index import CHAT, FOUND, PENDING, PROJECT, Document, Index, IndexUnavailable
 from .reader import Reader, summarize
 
 log = logging.getLogger(__name__)
@@ -300,7 +300,9 @@ class Ingest:
 
     # --- boot -----------------------------------------------------------
 
-    async def resume(self, chat_owners: ChatOwners) -> Reconciled:
+    async def resume(
+        self, chat_owners: ChatOwners, project_owners: ChatOwners | None = None
+    ) -> Reconciled:
         """Boot: put what a stop left right, and start what is waiting.
 
         For every person who has an index: documents a stop cut off while they were
@@ -319,7 +321,7 @@ class Ingest:
             index = self.indexes.get(sub)
             assert index is not None
             try:
-                await self._reconcile(index, sub, chat_owners, done)
+                await self._reconcile(index, sub, chat_owners, done, project_owners)
             except IndexUnavailable as exc:
                 log.warning("saved documents of one person were not checked: %s", exc.message)
                 done.unreadable += 1
@@ -331,14 +333,37 @@ class Ingest:
         return done
 
     async def _reconcile(
-        self, index: Index, sub: str, chat_owners: ChatOwners, done: Reconciled
+        self,
+        index: Index,
+        sub: str,
+        chat_owners: ChatOwners,
+        done: Reconciled,
+        project_owners: ChatOwners | None = None,
     ) -> None:
-        scopes = [s for s in await index.scopes() if s.startswith(CHAT)]
+        held = await index.scopes()
+        scopes = [s for s in held if s.startswith(CHAT)]
         if scopes:
             owners = await chat_owners({s[len(CHAT) :] for s in scopes})
             for scope in scopes:
                 if owners.get(scope[len(CHAT) :]) != sub:
                     done.chat_documents += len(await index.delete_where(scope))
+        # MV7b: a project's documents whose project is gone, as a chat's whose chat is.
+        scopes = [s for s in held if s.startswith(PROJECT)]
+        if scopes and project_owners is not None:
+            owners = await project_owners({s[len(PROJECT) :] for s in scopes})
+            if not any(owner == sub for owner in owners.values()):
+                # Not one of these projects is there: a store restored from before them, as
+                # likely as a person who deleted them all. Files the person kept are not
+                # deleted on a guess; they wait, unsearched, and the log says so.
+                log.warning(
+                    "a person's index holds %d projects' documents and the store none of those "
+                    "projects; they were kept",
+                    len(scopes),
+                )
+            else:
+                for scope in scopes:
+                    if owners.get(scope[len(PROJECT) :]) != sub:
+                        done.chat_documents += len(await index.delete_where(scope))
         for path in await index.orphans():
             with contextlib.suppress(OSError):
                 path.unlink(missing_ok=True)

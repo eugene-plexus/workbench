@@ -40,6 +40,7 @@ from .. import files
 from .index import (
     CHAT,
     LIBRARY,
+    PROJECT,
     Added,
     DeleteFailed,
     Document,
@@ -49,6 +50,7 @@ from .index import (
     NewDocument,
     chat_scope,
     folder_source,
+    project_scope,
 )
 from .ingest import ChatOwners, Ingest, Owed, Reconciled
 from .listing import Listing
@@ -141,10 +143,12 @@ class SavedDocuments:
         self.ingest = Ingest(self.indexes, reader, cap, owed=owed)
         self.retriever = retriever or Retriever()
 
-    async def start(self, chat_owners: ChatOwners) -> Reconciled:
+    async def start(
+        self, chat_owners: ChatOwners, project_owners: ChatOwners | None = None
+    ) -> Reconciled:
         """Boot: put right what a stop left (`Ingest.resume`), then begin reading, and
         adding meaning to what has none (`Meaning.resume`: the passages whose vector is NULL)."""
-        done = await self.ingest.resume(chat_owners)
+        done = await self.ingest.resume(chat_owners, project_owners)
         self.ingest.start()
         if self.meaning is not None:
             await self.meaning.resume()
@@ -376,6 +380,38 @@ class SavedDocuments:
         await self._cancel(sub, found)
         return len(await index.delete_where(chat_scope(chat_id)))
 
+    async def drop_project(self, sub: str, project_id: str) -> int:
+        """A project is deleted with everything: so are its documents (MV7b). How many."""
+        index = self.indexes.get(sub, create=False)
+        if index is None:
+            return 0
+        scope = project_scope(project_id)
+        found = [d.id for d in await index.documents(scope)]
+        await self._cancel(sub, found)
+        return len(await index.delete_where(scope))
+
+    async def release_project(self, sub: str, project_id: str) -> tuple[int, int]:
+        """A project is deleted and what was in it kept: its documents move to My documents,
+        where one of the same name is replaced (MV7b). `(moved, replaced)`."""
+        index = self.indexes.get(sub, create=False)
+        if index is None:
+            return 0, 0
+        # A file of My documents it will replace stops being read first: nothing of it is
+        # written after its files are gone.
+        names = {d.name.casefold() for d in await index.documents(project_scope(project_id))}
+        await self._cancel(
+            sub,
+            [
+                d.id
+                for d in await index.documents(LIBRARY, only="upload")
+                if d.name.casefold() in names
+            ],
+        )
+        moved, replaced = await index.rescope(project_scope(project_id), LIBRARY)
+        if self.meaning is not None:
+            self.meaning.cache.drop(sub)
+        return len(moved), len(replaced)
+
     async def drop_attachment(self, sub: str, chat_id: str, file_id: str) -> int:
         """A file is no longer searched: the document made from it, if there is one, goes."""
         index = self.indexes.get(sub, create=False)
@@ -388,7 +424,9 @@ class SavedDocuments:
         await self._cancel(sub, found)
         return len(await index.delete_where(scope, source))
 
-    async def rebuild(self, sub: str, chat_owners: ChatOwners) -> Rebuilt:
+    async def rebuild(
+        self, sub: str, chat_owners: ChatOwners, project_owners: ChatOwners | None = None
+    ) -> Rebuilt:
         """Make a person's index again from their own files ("Rebuild"): the index that
         is there, damaged or not, is thrown away, and every document that its files still
         describe (`Index.sidecars`: its name and type beside its original) is made again,
@@ -403,9 +441,16 @@ class SavedDocuments:
         await index.discard()
         chat_ids = {d.scope[len(CHAT) :] for d in found if d.scope.startswith(CHAT)}
         owners = await chat_owners(chat_ids) if chat_ids else {}
+        # MV7b: a project's document is made again only in a project of the person's.
+        project_ids = {d.scope[len(PROJECT) :] for d in found if d.scope.startswith(PROJECT)}
+        projects = (
+            await project_owners(project_ids) if project_ids and project_owners is not None else {}
+        )
         made = 0
         for meta in found:
             if meta.scope.startswith(CHAT) and owners.get(meta.scope[len(CHAT) :]) != sub:
+                continue
+            if meta.scope.startswith(PROJECT) and projects.get(meta.scope[len(PROJECT) :]) != sub:
                 continue
             added = await index.add(meta)
             made += 0 if added.unchanged else 1

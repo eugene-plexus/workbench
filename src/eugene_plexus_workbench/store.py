@@ -5250,6 +5250,26 @@ class Store:
 
         return await self._run(go)
 
+    async def project_owners(self, project_ids: Iterable[str]) -> dict[str, str]:
+        """Whose each of these projects is, for the ones that exist: what the boot reconcile
+        asks to find a project's documents whose project is gone (MV7b)."""
+        ids = list(project_ids)
+        if not ids:
+            return {}
+
+        def go() -> dict[str, str]:
+            found: dict[str, str] = {}
+            for start in range(0, len(ids), 500):
+                part = ids[start : start + 500]
+                marks = ", ".join("?" for _ in part)
+                for row in self._conn().execute(
+                    f"SELECT id, owner FROM projects WHERE id IN ({marks})", part
+                ):
+                    found[row["id"]] = row["owner"]
+            return found
+
+        return await self._run(go)
+
     async def chat_owners(self, chat_ids: Iterable[str]) -> dict[str, str]:
         """Whose each of these chats is, for the ones that exist: what the boot
         reconcile asks to find a chat's own documents whose chat is gone."""

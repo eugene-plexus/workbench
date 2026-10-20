@@ -182,7 +182,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         saved = SavedDocuments(
             settings.data_dir, reader, passage_limit, gateway=hub, settings=document_settings
         )
-        reconciled = await saved.start(store.chat_owners)
+        reconciled = await saved.start(store.chat_owners, store.project_owners)
 
         async def folder_settings() -> config.FolderSettings:
             return await config.folder_settings(store)
