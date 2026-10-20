@@ -400,8 +400,7 @@ class SavedDocuments:
         await self._cancel(sub, [d.id for d in found])  # whatever is being read
         if self.meaning is not None:
             self.meaning.cache.drop(sub)
-        await index.close()
-        await asyncio.to_thread(index.quarantine)
+        await index.discard()
         chat_ids = {d.scope[len(CHAT) :] for d in found if d.scope.startswith(CHAT)}
         owners = await chat_owners(chat_ids) if chat_ids else {}
         made = 0

@@ -157,6 +157,28 @@ async def test_a_new_index_is_versioned_owned_and_records_how_its_passages_were_
     assert '"structure-first"' in meta["chunker"] and '"version": 1' in meta["chunker"]
 
 
+async def test_rebuild_takes_the_file_away_while_no_read_can_open_it_again(
+    indexes: Indexes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A worker that read between closing the index and removing its file opened it again,
+    and Windows does not remove an open file (Rebuild search answered 500 on Windows CI)."""
+    index = indexes.get(ADA)
+    assert index is not None
+    assert await index.documents() == []
+    held: list[bool] = []
+    quarantine = index.quarantine
+
+    def watched() -> None:
+        held.append(index._lock.locked())
+        quarantine()
+
+    monkeypatch.setattr(index, "quarantine", watched)
+    await index.discard()
+    assert held == [True], "the file goes under the lock every read takes"
+    assert not index.path.exists()
+    assert await index.documents() == [], "and a new one is made in its place"
+
+
 async def test_foreign_keys_are_on_so_a_passage_cannot_outlive_its_document(
     indexes: Indexes,
 ) -> None:

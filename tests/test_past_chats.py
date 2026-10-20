@@ -242,17 +242,25 @@ def _index(world: World, sub: str) -> dict[str, str]:
     if not path.is_file():
         return {}
     found: dict[str, str] = {}
-    db = sqlite3.connect(path)
-    try:
-        rows = db.execute(
-            "SELECT d.id, c.text FROM documents d JOIN chunks c ON c.doc_id = d.id "
-            "WHERE d.scope = 'exchanges' ORDER BY d.id, c.ord"
-        ).fetchall()
-    except sqlite3.OperationalError:
-        # The file exists a moment before its tables do (seen on Windows CI).
-        return {}
-    finally:
-        db.close()
+    rows: list[tuple[str, str]] = []
+    for attempt in range(50):
+        db = sqlite3.connect(path)
+        try:
+            rows = db.execute(
+                "SELECT d.id, c.text FROM documents d JOIN chunks c ON c.doc_id = d.id "
+                "WHERE d.scope = 'exchanges' ORDER BY d.id, c.ord"
+            ).fetchall()
+            break
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc):
+                # The file exists a moment before its tables do (seen on Windows CI).
+                return {}
+            # Busy or locked while a worker writes (Windows): read again, never "empty".
+            if attempt == 49:
+                raise
+            time.sleep(0.1)
+        finally:
+            db.close()
     for doc_id, text in rows:
         found[doc_id] = found.get(doc_id, "") + " " + text
     return found
