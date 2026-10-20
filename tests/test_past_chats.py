@@ -430,15 +430,18 @@ def test_an_exchange_the_index_still_holds_is_never_shown_once_its_chat_is_gone(
     async def lagging(owner: str, chat_id: str) -> int:
         return 0  # the index is not told: it still holds the exchange
 
-    remove = keeper.remove_chat
-    keeper.remove_chat = lagging
+    async def stalled(owner: str, chat_id: str, signature: str | None = None) -> tuple[int, int]:
+        return 0, 0  # nor does a sync touched by the delete catch up (seen on Windows CI)
+
+    remove, sync = keeper.remove_chat, keeper.sync_chat
+    keeper.remove_chat, keeper.sync_chat = lagging, stalled
     try:
         assert ada.delete(f"/api/chats/{old}").status_code == 204
+        assert len(_index(world, "p-ada")) == 1  # still in the index...
+        found = ada.get("/api/past-chats", params={"q": "spare house key"}).json()
+        assert found["results"] == []  # ...and never shown: the store is read
     finally:
-        keeper.remove_chat = remove
-    assert len(_index(world, "p-ada")) == 1  # still in the index...
-    found = ada.get("/api/past-chats", params={"q": "spare house key"}).json()
-    assert found["results"] == []  # ...and never shown: the store is read
+        keeper.remove_chat, keeper.sync_chat = remove, sync
     # The backfill takes it out.
     world.restart_workbench()
     assert settle(world, "p-ada", lambda h: not h) == {}
