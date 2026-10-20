@@ -1246,13 +1246,18 @@ describe("the machine's audit log", () => {
 
   it("says when nothing has been asked, and when the read failed", async () => {
     vi.mocked(api).mockResolvedValue({ sites: [site], canInvite: true });
-    vi.mocked(post)
-      .mockResolvedValueOnce({ workspaces: [] })
-      .mockResolvedValueOnce({ entries: [] });
+    // Answer by path, not by call order: the workspace list can be read more than once on a slow
+    // runner, and an order-based mock then hands the audit read the wrong answer.
+    let auditFails = false;
+    vi.mocked(post).mockImplementation(async (path: string) => {
+      if (path.endsWith("/workspaces/list")) return { workspaces: [] };
+      if (auditFails) throw new Error("desk did not answer.");
+      return { entries: [] };
+    });
     render(<JobSites onClose={() => undefined} />);
     fireEvent.click(await screen.findByRole("button", { name: "Show what desk was asked" }));
     expect(await screen.findByText("Nothing has been asked of it yet.")).toBeInTheDocument();
-    vi.mocked(post).mockRejectedValueOnce(new Error("desk did not answer."));
+    auditFails = true;
     fireEvent.click(screen.getByRole("button", { name: "Refresh what desk was asked" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("desk did not answer.");
   });
