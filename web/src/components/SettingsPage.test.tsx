@@ -14,6 +14,7 @@ vi.mock("./Connections", () => ({
   ),
 }));
 vi.mock("./MemoryModels", () => ({ MemoryModels: () => null }));
+vi.mock("./MemoryServer", () => ({ MemoryServer: () => null }));
 
 vi.mock("../lib/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/api")>()),

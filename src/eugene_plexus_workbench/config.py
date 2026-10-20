@@ -69,6 +69,9 @@ SUGGESTION_CHOICES = ("off", "choose", "measured")
 #: MV3b: the memory write policy, whether people may loosen it, and Custom's rows.
 MEMORY_WRITE_POLICY = "memoryWritePolicy"
 MEMORY_POLICY_PEOPLE = "memoryPolicyPeople"
+#: MV5: which memory servers people may connect: none, those off this host, or any address.
+MEMORY_SERVERS = "memoryServers"
+SERVER_CHOICES = ("off", "outside", "any")
 POLICY_ROW_KEYS = {
     "source": "memoryPolicySource",
     "secrets": "memoryPolicySecrets",
@@ -570,6 +573,23 @@ POLICY_FIELDS = [
         enumLabels=["Stricter only", "Any"],
         default=memory_policy.STRICTER_ONLY,
     ),
+    ConfigField(
+        key=MEMORY_SERVERS,
+        label="Memory servers people may connect",
+        description=(
+            "Whether people may connect their own memory server, which receives their chats "
+            "and is asked for memory each turn. Eugene cannot check what it keeps.\n\n"
+            "- **Off**: none.\n"
+            "- **Off this host**: any https address, or http on a private network; never this "
+            "host or loopback.\n"
+            "- **Any address**: loopback too; for testing."
+        ),
+        category="memory",
+        valueType=ConfigValueType.enum,
+        enumValues=list(SERVER_CHOICES),
+        enumLabels=["Off", "Off this host", "Any address"],
+        default="outside",
+    ),
     *[
         ConfigField(
             key=POLICY_ROW_KEYS[row],
@@ -596,6 +616,7 @@ DEFAULTS: dict[str, Any] = {
     MEMORY_SUGGESTIONS: "measured",
     MEMORY_WRITE_POLICY: memory_policy.STANDARD,
     MEMORY_POLICY_PEOPLE: memory_policy.STRICTER_ONLY,
+    MEMORY_SERVERS: "outside",
     **{
         key: memory_policy.PRESETS[memory_policy.STANDARD][row]
         for row, key in POLICY_ROW_KEYS.items()
@@ -647,6 +668,8 @@ class MemorySettings:
         default_factory=lambda: dict(memory_policy.PRESETS[memory_policy.STANDARD])
     )
     policy_people: str = memory_policy.STRICTER_ONLY
+    #: MV5: which memory servers people may connect (`SERVER_CHOICES`).
+    servers: str = "outside"
 
     @property
     def policy(self) -> memory_policy.Policy:
@@ -664,6 +687,7 @@ async def memory_settings(store: Store) -> MemorySettings:
     suggestions = await store.setting(MEMORY_SUGGESTIONS)
     name = await store.setting(MEMORY_WRITE_POLICY)
     people = await store.setting(MEMORY_POLICY_PEOPLE)
+    servers = await store.setting(MEMORY_SERVERS)
     rows = {row: await store.setting(key) for row, key in POLICY_ROW_KEYS.items()}
     return MemorySettings(
         policy_name=str(name) if name in memory_policy.NAMES else memory_policy.STANDARD,
@@ -673,6 +697,7 @@ async def memory_settings(store: Store) -> MemorySettings:
             if people in (memory_policy.STRICTER_ONLY, memory_policy.ANY)
             else memory_policy.STRICTER_ONLY
         ),
+        servers=str(servers) if servers in SERVER_CHOICES else str(DEFAULTS[MEMORY_SERVERS]),
         suggestions=(
             str(suggestions)
             if suggestions in SUGGESTION_CHOICES
@@ -907,6 +932,7 @@ async def get_config(request: Request) -> ConfigDocument:
             MEMORY_SUGGESTIONS: memory.suggestions,
             MEMORY_WRITE_POLICY: memory.policy_name,
             MEMORY_POLICY_PEOPLE: memory.policy_people,
+            MEMORY_SERVERS: memory.servers,
             **{key: memory.policy_rows[row] for row, key in POLICY_ROW_KEYS.items()},
             CONNECTIONS: await connections_enabled(store),
             DOCUMENTS_ENABLED: documents.enabled,
@@ -1024,6 +1050,8 @@ def _problem_with(key: str, value: Any) -> str | None:
             if value in (memory_policy.STRICTER_ONLY, memory_policy.ANY)
             else ("Must be stricter or any.")
         )
+    if key == MEMORY_SERVERS:
+        return None if value in SERVER_CHOICES else "Must be off, outside or any."
     for row, row_key in POLICY_ROW_KEYS.items():
         if key == row_key:
             values = memory_policy.ROWS[row]

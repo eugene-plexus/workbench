@@ -22,6 +22,7 @@ import {
 import type { ExternalChoice, MemoryPage, WritePolicyName } from "../lib/types";
 import { useKeepFocus } from "../lib/useKeepFocus";
 import { MemoryModels } from "./MemoryModels";
+import { MemoryServer } from "./MemoryServer";
 import { WritePolicy } from "./MemoryLearned";
 import { LearnSettings } from "./MemorySuggestions";
 
@@ -148,6 +149,7 @@ export function MemorySettings({ onOpenMemory }: { onOpenMemory: () => void }) {
         )}
       </section>
       {data && !off && <MemoryModels />}
+      {data && !off && <MemoryServer />}
     </>
   );
 }

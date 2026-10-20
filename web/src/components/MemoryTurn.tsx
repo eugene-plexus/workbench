@@ -10,7 +10,7 @@ import { useEffect, useId, useState } from "react";
 
 import { api } from "../lib/api";
 import { failureWords, kindLabel, plural, tokenWords } from "../lib/memory";
-import type { ChatMemory, ChatMemoryReadOnly, MemoryTurn } from "../lib/types";
+import type { ChatMemory, ChatMemoryReadOnly, MemoryServerTurn, MemoryTurn } from "../lib/types";
 
 const VIA: Record<MemoryTurn["notes"][number]["via"], string> = {
   words: "Found by words",
@@ -37,6 +37,9 @@ export function ReadOnlyTurn({ view }: { view: ChatMemoryReadOnly }) {
       The latest answer was sent {plural(turn.notes, "note")} chosen for it
       {turn.budget ? `. ${tokenWords(turn.tokens ?? 0, turn.budget)}.` : "."}
       {turn.pastChats ? ` It was also sent ${plural(turn.pastChats, "past exchange")}.` : ""}
+      {turn.memoryServer
+        ? ` It was also sent ${plural(turn.memoryServer, "memory", "memories")} from the person's memory server.`
+        : ""}
     </p>
   );
 }
@@ -73,7 +76,8 @@ export function ThisTurn({ chatId, view }: { chatId: string; view: ChatMemory })
   const chosen = picked ?? latest;
   // A turn sent past chats and no notes keeps no notes' record (MV2).
   const turn = chosen && Array.isArray(chosen.notes) ? chosen : null;
-  if (!turn && view.relevantBudget == null) return null;
+  // A person with no notes may still have been sent their memory server's results (MV5).
+  if (!turn && view.relevantBudget == null && !chosen?.memoryServer) return null;
   return (
     <section
       aria-labelledby={`${uid}-turn`}
@@ -163,6 +167,40 @@ export function ThisTurn({ chatId, view }: { chatId: string; view: ChatMemory })
       ) : (
         <p className="help">No answer in this chat has been sent notes yet.</p>
       )}
+      {chosen?.memoryServer && <ServerTurn server={chosen.memoryServer} />}
     </section>
+  );
+}
+
+/** What the person's own memory server gave the turn (MV5), or why it gave nothing. */
+function ServerTurn({ server }: { server: MemoryServerTurn }) {
+  const name = server.name || "Your memory server";
+  return (
+    <div data-testid="memory-turn-server" className="flex flex-col gap-1">
+      <h4 className="text-sm font-medium">From {name}</h4>
+      {server.why ? (
+        <p className="help">{server.why}</p>
+      ) : (
+        <p className="help">
+          {server.memories.length === 0
+            ? "It returned nothing for this turn."
+            : `${plural(server.memories.length, "memory", "memories")} sent.`}
+          {server.dropped
+            ? ` Left out for looking like a password or key: ${plural(server.dropped, "result")}.`
+            : ""}
+          {server.didNotFit ? ` ${server.didNotFit.toLocaleString()} more did not fit.` : ""}
+        </p>
+      )}
+      {server.memories.length > 0 && (
+        <ul className="divide-y divide-line text-sm">
+          {server.memories.map((one, index) => (
+            <li key={index} dir="auto" className="py-2 wrap-anywhere">
+              {one.text}
+              {one.date && <span className="text-xs text-muted"> ({one.date})</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }

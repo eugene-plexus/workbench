@@ -10,6 +10,7 @@ import { MemorySettings } from "./MemorySettings";
 // Connections (MR9b) has its own tests; this page's do not serve it.
 vi.mock("./Connections", () => ({ Connections: () => null }));
 vi.mock("./MemoryModels", () => ({ MemoryModels: () => null }));
+vi.mock("./MemoryServer", () => ({ MemoryServer: () => null }));
 
 vi.mock("../lib/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/api")>()),

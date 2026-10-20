@@ -90,7 +90,7 @@ from .agui_store import AGUIStore, allow_chat_write
 from .interaction_store import SCHEMA as INTERACTION_SCHEMA
 from .interaction_store import InteractionStore
 
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 
 #: The oldest schema this migrates from: what Workbench v0.1.0 wrote. Schema 1 predates
 #: it, and nobody holds one.
@@ -562,6 +562,31 @@ def _learning(db: sqlite3.Connection) -> None:
     )
 
 
+def _memory_servers(db: sqlite3.Connection) -> None:
+    """Schema 25 (MV5): a person's memory server, and each exchange sent to it or waiting to
+    be (`send`), kept there (`sent`), or to be forgotten there since its chat was deleted
+    (`forget`). Only ids are kept of an exchange, never its words."""
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS memory_servers ("
+        "owner TEXT PRIMARY KEY, url TEXT NOT NULL, token TEXT NOT NULL DEFAULT '', "
+        "name TEXT NOT NULL DEFAULT '', verbs TEXT NOT NULL DEFAULT '{}', "
+        "connected_at REAL NOT NULL, last_ok_at REAL, last_error TEXT, last_error_at REAL, "
+        "skipped INTEGER NOT NULL DEFAULT 0)"
+    )
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS memory_server_sent ("
+        "document_id TEXT PRIMARY KEY, owner TEXT NOT NULL, chat_id TEXT NOT NULL, "
+        "message_id TEXT NOT NULL, state TEXT NOT NULL CHECK (state IN ('send','sent','forget')), "
+        "attempts INTEGER NOT NULL DEFAULT 0, next_at REAL NOT NULL, created_at REAL NOT NULL)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS memory_server_sent_due ON memory_server_sent (state, next_at)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS memory_server_sent_by_chat ON memory_server_sent (chat_id)"
+    )
+
+
 #: What brings a store written at version N-1 to N, for N above `OLDEST_SCHEMA`.
 #: `_SCHEMA` already holds the result, for a store made new. A step is a statement,
 #: or a function of the connection for what SQL alone cannot say.
@@ -704,6 +729,7 @@ _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
     23: [_past_chats],
     # Learning and the write policy (MV3, 2026-10-19): new columns and two new tables.
     24: [_learning],
+    25: [_memory_servers],
 }
 
 
@@ -836,6 +862,7 @@ def _initialize_schema(
         _memory_v2(db)
         _past_chats(db)
         _learning(db)
+        _memory_servers(db)
         db.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?)",
             (str(SCHEMA_VERSION),),
@@ -2002,6 +2029,19 @@ class Store:
                 db.execute(
                     "DELETE FROM memory_notes WHERE source_chat_id = ? AND status = 'pending'",
                     (chat_id,),
+                )
+                # MV5: what was sent to the person's memory server is to be forgotten there;
+                # what was waiting to be sent is not sent.
+                db.execute(
+                    "DELETE FROM memory_server_sent WHERE chat_id = ? AND state = 'send'",
+                    (chat_id,),
+                )
+                # Its day to be forgotten in starts now, not when it was sent.
+                now = time.time()
+                db.execute(
+                    "UPDATE memory_server_sent SET state = 'forget', attempts = 0, next_at = ?, "
+                    "created_at = ? WHERE chat_id = ? AND state = 'sent'",
+                    (now, now, chat_id),
                 )
                 db.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
                 db.execute("COMMIT")
@@ -4522,6 +4562,203 @@ class Store:
             return found
 
         return await self._run(go)
+
+    # --- memory servers (MV5) -------------------------------------------
+
+    async def memory_server(self, owner: str) -> dict[str, Any] | None:
+        """A person's memory server, with its verbs decoded, or None."""
+
+        def go() -> dict[str, Any] | None:
+            row = (
+                self._conn()
+                .execute("SELECT * FROM memory_servers WHERE owner = ?", (owner,))
+                .fetchone()
+            )
+            if row is None:
+                return None
+            server = dict(row)
+            server["verbs"] = json.loads(server["verbs"] or "{}")
+            return server
+
+        return await self._run(go)
+
+    async def put_memory_server(
+        self, owner: str, url: str, token: str, name: str, verbs: dict[str, str]
+    ) -> None:
+        """Connect a person's server, replacing any they had. At another address, what was
+        recorded of the old one goes (it can no longer be asked to forget anything); at the same
+        address (a new token), what it is still to forget stays."""
+
+        def go() -> None:
+            db = self._conn()
+            db.execute("BEGIN")
+            try:
+                old = db.execute(
+                    "SELECT url FROM memory_servers WHERE owner = ?", (owner,)
+                ).fetchone()
+                if old is None or old["url"] != url:
+                    db.execute("DELETE FROM memory_server_sent WHERE owner = ?", (owner,))
+                db.execute(
+                    "INSERT OR REPLACE INTO memory_servers (owner, url, token, name, verbs, "
+                    "connected_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (owner, url, token, name, json.dumps(verbs), time.time()),
+                )
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+
+        await self._run(go)
+
+    async def delete_memory_server(self, owner: str) -> None:
+        def go() -> None:
+            db = self._conn()
+            db.execute("BEGIN")
+            try:
+                db.execute("DELETE FROM memory_server_sent WHERE owner = ?", (owner,))
+                db.execute("DELETE FROM memory_servers WHERE owner = ?", (owner,))
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+
+        await self._run(go)
+
+    async def memory_server_reached(self, owner: str, error: str | None) -> None:
+        """Record what the last call to a person's server came to: reached, or the reason."""
+
+        def go() -> None:
+            if error is None:
+                self._conn().execute(
+                    "UPDATE memory_servers SET last_ok_at = ?, last_error = NULL, "
+                    "last_error_at = NULL WHERE owner = ?",
+                    (time.time(), owner),
+                )
+            else:
+                self._conn().execute(
+                    "UPDATE memory_servers SET last_error = ?, last_error_at = ? WHERE owner = ?",
+                    (error[:300], time.time(), owner),
+                )
+
+        await self._run(go)
+
+    async def memory_server_skipped(self, owner: str) -> None:
+        """Count one turn not sent because it looked like a secret."""
+        await self._run(
+            lambda: self._conn().execute(
+                "UPDATE memory_servers SET skipped = skipped + 1 WHERE owner = ?", (owner,)
+            )
+        )
+
+    async def queue_memory_server_send(self, owner: str, chat_id: str, message_id: str) -> bool:
+        """Queue an answered exchange for the person's server, when they have one. Whether
+        it was queued."""
+
+        def go() -> bool:
+            now = time.time()
+            cursor = self._conn().execute(
+                "INSERT OR IGNORE INTO memory_server_sent (document_id, owner, chat_id, "
+                "message_id, state, next_at, created_at) SELECT ?, ?, ?, ?, 'send', ?, ? "
+                "WHERE EXISTS (SELECT 1 FROM memory_servers WHERE owner = ?)",
+                (f"{chat_id}:{message_id}", owner, chat_id, message_id, now, now, owner),
+            )
+            return cursor.rowcount > 0
+
+        return await self._run(go)
+
+    async def memory_server_due(self, now: float, limit: int = 20) -> list[dict[str, Any]]:
+        """Exchanges waiting to be sent or forgotten, oldest first."""
+
+        def go() -> list[dict[str, Any]]:
+            return [
+                dict(row)
+                for row in self._conn().execute(
+                    "SELECT * FROM memory_server_sent WHERE state IN ('send','forget') "
+                    "AND next_at <= ? ORDER BY next_at LIMIT ?",
+                    (now, limit),
+                )
+            ]
+
+        return await self._run(go)
+
+    async def memory_server_settled(self, document_id: str, state: str) -> bool:
+        """A send or forget the server confirmed: a sent exchange is kept as `sent`, a
+        forgotten one goes. False when the row had gone meanwhile (its chat was deleted while
+        it was being sent)."""
+
+        def go() -> bool:
+            db = self._conn()
+            if state == "forget":
+                cursor = db.execute(
+                    "DELETE FROM memory_server_sent WHERE document_id = ? AND state = 'forget'",
+                    (document_id,),
+                )
+            else:
+                cursor = db.execute(
+                    "UPDATE memory_server_sent SET state = 'sent', attempts = 0 "
+                    "WHERE document_id = ? AND state = 'send'",
+                    (document_id,),
+                )
+            return cursor.rowcount > 0
+
+        return await self._run(go)
+
+    async def memory_server_forget_later(self, row: dict[str, Any]) -> None:
+        """An exchange sent while its chat was being deleted: to be forgotten, from now."""
+        now = time.time()
+        await self._run(
+            lambda: self._conn().execute(
+                "INSERT OR REPLACE INTO memory_server_sent (document_id, owner, chat_id, "
+                "message_id, state, attempts, next_at, created_at) "
+                "VALUES (?, ?, ?, ?, 'forget', 0, ?, ?)",
+                (row["document_id"], row["owner"], row["chat_id"], row["message_id"], now, now),
+            )
+        )
+
+    async def memory_server_unsent(self, owner: str) -> None:
+        """Delete all memory: what waits to be sent is not sent."""
+        await self._run(
+            lambda: self._conn().execute(
+                "DELETE FROM memory_server_sent WHERE owner = ? AND state = 'send'", (owner,)
+            )
+        )
+
+    async def memory_server_retry(self, document_id: str, next_at: float) -> None:
+        await self._run(
+            lambda: self._conn().execute(
+                "UPDATE memory_server_sent SET attempts = attempts + 1, next_at = ? "
+                "WHERE document_id = ?",
+                (next_at, document_id),
+            )
+        )
+
+    async def memory_server_drop(self, document_id: str) -> None:
+        await self._run(
+            lambda: self._conn().execute(
+                "DELETE FROM memory_server_sent WHERE document_id = ?", (document_id,)
+            )
+        )
+
+    async def memory_server_counts(self, owner: str) -> dict[str, int]:
+        """How many exchanges are sent, waiting to be sent, and waiting to be forgotten."""
+
+        def go() -> dict[str, int]:
+            counts = {"send": 0, "sent": 0, "forget": 0}
+            for row in self._conn().execute(
+                "SELECT state, COUNT(*) AS n FROM memory_server_sent WHERE owner = ? "
+                "GROUP BY state",
+                (owner,),
+            ):
+                counts[row["state"]] = row["n"]
+            return counts
+
+        return await self._run(go)
+
+    async def memory_server_cleared(self, owner: str) -> None:
+        """After the server was cleared (Delete all memory): nothing of it is recorded."""
+        await self._run(
+            lambda: self._conn().execute("DELETE FROM memory_server_sent WHERE owner = ?", (owner,))
+        )
 
     # --- settings -------------------------------------------------------
 

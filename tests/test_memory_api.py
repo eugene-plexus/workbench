@@ -711,7 +711,14 @@ def test_the_owner_cannot_read_a_persons_notes_even_where_they_read_her_chats(
             "counts",
             "turn",
         }
-        assert set(view["turn"]) == {"messageId", "notes", "tokens", "budget", "pastChats"}
+        assert set(view["turn"]) == {
+            "messageId",
+            "notes",
+            "tokens",
+            "budget",
+            "pastChats",
+            "memoryServer",
+        }
         assert view["turn"]["pastChats"] == 0
         assert view["turn"]["notes"] == 1 and view["turn"]["tokens"] > 0
         for word in ("plum", "code word", "Denver"):
