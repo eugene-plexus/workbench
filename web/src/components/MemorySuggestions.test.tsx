@@ -1,8 +1,9 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import { api, post, put } from "../lib/api";
+import { noteDate } from "../lib/memory";
 import type { MemoryPage, MemorySuggestion } from "../lib/types";
-import { note, page, prefs } from "../test-memory";
+import { note, page, prefs, revisit } from "../test-memory";
 import { Memory } from "./Memory";
 import { MemorySettings } from "./MemorySettings";
 import { MemoryOffer } from "./MemoryOffer";
@@ -185,7 +186,7 @@ describe("suggested notes", () => {
 
 describe("Still true?", () => {
   it("asks about the project that is due and sends the answer", async () => {
-    const nas = note({ id: "p1", text: "Building a NAS.", kind: "project" });
+    const nas = revisit({ id: "p1", text: "Building a NAS.", kind: "project" });
     shown = page([nas], { revisit: [nas] });
     await opened();
     expect(screen.getByTestId("memory-revisit")).toHaveTextContent("Still true?“Building a NAS.”");
@@ -193,6 +194,31 @@ describe("Still true?", () => {
     await waitFor(() =>
       expect(post).toHaveBeenCalledWith("/api/memory/revisit", { noteId: "p1", answer: "yes" }),
     );
+  });
+});
+
+describe("Still true? from changed documents", () => {
+  const at = Date.UTC(2026, 9, 14, 12) / 1000;
+
+  it("says why, for every entry", async () => {
+    const nas = revisit({ id: "p1", text: "Building a NAS.", kind: "project" }, [
+      { docId: "d1", name: "plan.pdf", change: "changed", at },
+      { docId: "d2", name: "costs.md", change: "removed", at: null },
+    ]);
+    const trip = revisit({ id: "p2", text: "Planning a trip.", kind: "project" });
+    shown = page([nas, trip], { revisit: [nas, trip] });
+    await opened();
+    expect(screen.getAllByTestId("memory-revisit")).toHaveLength(2);
+    const reasons = screen.getAllByTestId("memory-revisit-reason").map((r) => r.textContent);
+    expect(reasons).toEqual([`“plan.pdf” changed on ${noteDate(at)}`, "“costs.md” was removed"]);
+  });
+
+  it("opens the note for editing", async () => {
+    const nas = revisit({ id: "p1", text: "Building a NAS.", kind: "project" });
+    shown = page([nas], { revisit: [nas] });
+    await opened();
+    fireEvent.click(screen.getByTestId("memory-revisit-edit"));
+    expect(await screen.findByRole("form", { name: /Edit/ })).toBeTruthy();
   });
 });
 

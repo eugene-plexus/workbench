@@ -793,6 +793,33 @@ class Index:
 
         return await self._run(go)
 
+    async def at_origin(self, scope: str, source: str, name: str) -> Document | None:
+        """The document now where one was (MV6): a folder's file by its path, a file of My
+        documents by its name (one of the same name replaces it, `add`), a chat's by its
+        `source`. The newest, or None. The same rule `add` uses to find what it replaces."""
+
+        def go(db: sqlite3.Connection) -> Document | None:
+            if source.startswith(FOLDER):
+                row = db.execute(
+                    "SELECT * FROM documents WHERE source = ? ORDER BY added_at DESC, rowid DESC",
+                    (source,),
+                ).fetchone()
+            elif scope == LIBRARY:
+                row = db.execute(
+                    "SELECT * FROM documents WHERE scope = ? AND name = ? COLLATE NOCASE "
+                    "AND source NOT LIKE 'folder:%' ORDER BY added_at DESC, rowid DESC",
+                    (LIBRARY, name),
+                ).fetchone()
+            else:
+                row = db.execute(
+                    "SELECT * FROM documents WHERE scope = ? AND source = ? "
+                    "ORDER BY added_at DESC, rowid DESC",
+                    (scope, source),
+                ).fetchone()
+            return _document(row) if row is not None else None
+
+        return await self._run(go)
+
     async def document(self, doc_id: str) -> Document | None:
         def go(db: sqlite3.Connection) -> Document | None:
             row = db.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()

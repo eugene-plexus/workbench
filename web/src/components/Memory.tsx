@@ -55,6 +55,7 @@ import { useKeepFocus } from "../lib/useKeepFocus";
 import { Details, NoteSearch, readWhole } from "./MemoryDetails";
 import { RecentlyLearned } from "./MemoryLearned";
 import { StillTrue, Suggestions } from "./MemorySuggestions";
+import { TidyProposals } from "./MemoryTidy";
 import { TagChips, Tags, TagsField } from "./MemoryTags";
 
 /** The lines of a box, one note each: trimmed, with the empty ones left out. */
@@ -99,6 +100,8 @@ export function Memory({
   const keepFocus = useKeepFocus(busy);
   const [undo, setUndo] = useState<MemoryNote | null>(null);
   const [focusId, setFocusId] = useState<string | null>(null);
+  // A note that Still true? asked to open for editing.
+  const [editId, setEditId] = useState<string | null>(null);
   // The two boxes of a person with no notes stay on the page while some lines
   // have not been kept, though other lines were: the ones left are theirs to fix.
   const [starting, setStarting] = useState(false);
@@ -271,6 +274,8 @@ export function Memory({
           limits={data.limits}
           tags={data.tags}
           onSaid={setSaid}
+          wantsEdit={editId === note.id}
+          onEditStarted={() => setEditId(null)}
           onPin={() =>
             void act(
               () => patch(`/api/memory/notes/${note.id}`, { pinned: !note.pinned }),
@@ -381,8 +386,17 @@ export function Memory({
               busy={busy}
               working={working}
               onProblem={setProblem}
+              onEdit={() => setEditId(note.id)}
             />
           ))}
+        {!off && (
+          <TidyProposals
+            proposals={data.tidy ?? []}
+            busy={busy}
+            working={working}
+            onProblem={setProblem}
+          />
+        )}
         <Suggestions
           suggestions={data.suggestions ?? []}
           busy={busy}
@@ -648,8 +662,13 @@ function NoteItem({
   onPin,
   onDelete,
   onSaid,
+  wantsEdit,
+  onEditStarted,
 }: {
   note: MemoryNote;
+  /** Still true? asked for this note to open for editing. */
+  wantsEdit?: boolean;
+  onEditStarted?: () => void;
   /** The owner has turned Memory off: a note can be read and deleted, not changed. */
   locked: boolean;
   busy: boolean;
@@ -712,6 +731,14 @@ function NoteItem({
       setReading(false);
     }
   }
+
+  useEffect(() => {
+    if (!wantsEdit) return;
+    onEditStarted?.();
+    if (!locked) void startEdit();
+    // Once per request.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wantsEdit]);
 
   if (draft) {
     const length = characters(draft.text);

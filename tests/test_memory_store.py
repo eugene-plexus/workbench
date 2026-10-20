@@ -494,14 +494,19 @@ def test_a_schema_9_file_gains_memory_and_keeps_every_chat(tmp_path: Path) -> No
 
     run(path, body)
     with sqlite3.connect(path) as db:
-        assert db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone() == ("25",)
+        assert db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone() == ("26",)
         tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         triggers = {
             r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'")
         }
         columns = {r[1] for r in db.execute("PRAGMA table_info(chats)")}
     assert {"memory_notes", "memory_events", "memory_prefs", "memory_notes_fts"} <= tables
-    assert triggers == {"memory_notes_ai", "memory_notes_ad", "memory_notes_au"}
+    assert triggers == {
+        "memory_notes_ai",
+        "memory_notes_ad",
+        "memory_notes_au",
+        "memory_notes_documents_ad",
+    }
     assert "memory_snapshot" in columns
     # A second boot repeats nothing that fails.
     run(path, lambda store: store.open())

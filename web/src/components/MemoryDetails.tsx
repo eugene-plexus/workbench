@@ -7,9 +7,17 @@
 import { CircleAlert } from "lucide-react";
 import { type FormEvent, type ReactNode, useEffect, useId, useRef, useState } from "react";
 
-import { api, del } from "../lib/api";
+import { api, del, post } from "../lib/api";
 import { excerpt, failureWords, kindLabel, noteDate, plural } from "../lib/memory";
-import type { MemoryNote, MemoryPage, NotesFound, NoteWhole } from "../lib/types";
+import type {
+  DocumentPlace,
+  DocumentsPage,
+  MemoryNote,
+  MemoryPage,
+  NoteDocument,
+  NotesFound,
+  NoteWhole,
+} from "../lib/types";
 import { ScrollText } from "./ScrollText";
 import { TagChips } from "./MemoryTags";
 
@@ -18,7 +26,180 @@ type Working = <T>(work: () => Promise<T>) => Promise<T>;
 /** One note whole, and the versions it replaced. */
 export async function readWhole(id: string): Promise<NoteWhole> {
   const got = await api<NoteWhole>(`/api/memory/notes/${encodeURIComponent(id)}`);
-  return { note: got.note, earlier: got.earlier ?? [] };
+  return { note: got.note, earlier: got.earlier ?? [], documents: got.documents ?? [] };
+}
+
+/** Where in a document an answer found it: "page 4", "pages 4-5", "lines 9-12", then the heading. */
+export function placeWords(place: DocumentPlace): string {
+  const parts: string[] = [];
+  const span = (one: string, many: string, from?: number | null, to?: number | null) => {
+    if (from == null) return;
+    parts.push(to != null && to !== from ? `${many} ${from}-${to}` : `${one} ${from}`);
+  };
+  span("page", "pages", place.page_start, place.page_end);
+  span("line", "lines", place.line_start, place.line_end);
+  if (place.heading) parts.push(place.heading);
+  return parts.join(", ");
+}
+
+/** The states in which a document's words can be read, so a note may be based on it. */
+// A document can be linked once it has been read: not while it waits or is read, nor when it
+// could not be.
+const NOT_READ = new Set(["queued", "reading", "skipped", "failed"]);
+
+/** The documents a note is based on, and the one place to link another. */
+function BasedOn({
+  note,
+  documents,
+  busy,
+  working,
+  onChanged,
+}: {
+  note: MemoryNote;
+  documents: NoteDocument[];
+  busy: boolean;
+  working: Working;
+  onChanged: () => void;
+}) {
+  const uid = useId();
+  const [mine, setMine] = useState<DocumentsPage["documents"]>([]);
+  const [choice, setChoice] = useState("");
+  const [problem, setProblem] = useState<string | null>(null);
+  const linked = new Set(documents.map((d) => d.docId));
+  const options = mine.filter((d) => !NOT_READ.has(d.state) && !linked.has(d.id));
+
+  // The person's documents are read once, for the picker; a failure says why it is empty.
+  useEffect(() => {
+    let live = true;
+    api<DocumentsPage>("/api/documents").then(
+      (got) => {
+        if (live) setMine(got.documents ?? []);
+      },
+      (failure: unknown) => {
+        if (live) setProblem(`Your documents could not be listed: ${failureWords(failure)}`);
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  async function link() {
+    if (!choice) return;
+    setProblem(null);
+    try {
+      await working(() =>
+        post(`/api/memory/notes/${encodeURIComponent(note.id)}/documents`, { docId: choice }),
+      );
+    } catch (failure) {
+      setProblem(failureWords(failure));
+      return;
+    }
+    setChoice("");
+    onChanged();
+  }
+
+  async function unlink(doc: NoteDocument) {
+    setProblem(null);
+    try {
+      await working(() =>
+        del(
+          `/api/memory/notes/${encodeURIComponent(note.id)}/documents/${encodeURIComponent(doc.docId)}`,
+        ),
+      );
+    } catch (failure) {
+      setProblem(failureWords(failure));
+      return;
+    }
+    onChanged();
+  }
+
+  return (
+    <section
+      aria-labelledby={`${uid}-documents`}
+      data-testid="memory-documents"
+      className="flex flex-col gap-1"
+    >
+      <h4 id={`${uid}-documents`} className="eyebrow text-muted">
+        Based on a document
+      </h4>
+      {documents.length === 0 ? (
+        <p data-testid="memory-documents-none" className="help">
+          This note is not based on a document.
+        </p>
+      ) : (
+        <ul className="divide-y divide-line">
+          {documents.map((doc) => {
+            const where = doc.how === "answer" ? doc.place.map(placeWords).filter(Boolean) : [];
+            return (
+              <li
+                key={doc.docId}
+                data-testid="memory-document"
+                className="flex flex-wrap items-center gap-x-2 gap-y-1 py-2"
+              >
+                <span dir="auto" className="min-w-0 wrap-anywhere">
+                  {doc.name}
+                </span>
+                {where.length > 0 && (
+                  <span data-testid="memory-document-place" className="text-xs text-muted">
+                    {where.join("; ")}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  data-testid="memory-doc-unlink"
+                  aria-label={`Unlink document: ${doc.name}`}
+                  disabled={busy}
+                  onClick={() => void unlink(doc)}
+                  className="btn btn-quiet"
+                >
+                  Unlink
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {problem && (
+        <p role="alert" data-testid="memory-documents-problem" className="notice notice--error">
+          <CircleAlert size={16} aria-hidden />
+          {problem}
+        </p>
+      )}
+      {options.length > 0 && (
+        <div className="flex flex-wrap items-end gap-2">
+          <div className="field">
+            <label htmlFor={`${uid}-pick`} className="field-label">
+              Link a document
+            </label>
+            <select
+              id={`${uid}-pick`}
+              data-testid="memory-doc-pick"
+              value={choice}
+              onChange={(event) => setChoice(event.target.value)}
+              className="control max-w-full"
+            >
+              <option value="">Choose a document</option>
+              {options.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <button
+            type="button"
+            data-testid="memory-doc-link"
+            disabled={busy || !choice}
+            onClick={() => void link()}
+            className="btn"
+          >
+            Link
+          </button>
+        </div>
+      )}
+    </section>
+  );
 }
 
 export function Details({
@@ -133,6 +314,15 @@ export function Details({
               </ul>
             )}
           </section>
+          {whole.note.status === "active" && (
+            <BasedOn
+              note={whole.note}
+              documents={whole.documents ?? []}
+              busy={busy}
+              working={working}
+              onChanged={() => setAgain((n) => n + 1)}
+            />
+          )}
         </>
       )}
     </div>

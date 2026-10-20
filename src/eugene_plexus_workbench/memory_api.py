@@ -56,7 +56,16 @@ from fastapi import APIRouter, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
-from . import config, memory, memory_learn, memory_policy, memory_relevance, memory_write
+from . import (
+    config,
+    memory,
+    memory_learn,
+    memory_policy,
+    memory_provenance,
+    memory_relevance,
+    memory_tidy,
+    memory_write,
+)
 from .api import _new_id, _own_chat, _person, _problem, _readable_chat, _state
 from .hub import Hub, HubError
 from .media_api import _common as served
@@ -346,7 +355,9 @@ async def get_memory(request: Request) -> dict[str, Any]:
             suggestion_view(n, by_id.get(n.replaces) if n.replaces else None, listed)
             for n in pending
         ],
-        "revisit": [note_view(n) for n in _due_revisits(notes, prefs, today)],
+        "revisit": await _revisits(request, person.sub, notes, prefs, today),
+        # MV6: what the tidy pass proposes, each with its notes.
+        "tidy": await _tidy(request, person.sub, today),
         # MV3b: what models kept by themselves lately, each with its model and an Undo.
         "learned": [
             note_view(n)
@@ -433,7 +444,65 @@ async def get_note(request: Request, note_id: str) -> dict[str, Any]:
     if note is None or note.status not in ("active", "superseded"):
         raise _problem(status.HTTP_404_NOT_FOUND, "There is no such note.")
     history = await store.note_history(person.sub, note_id)
-    return {"note": note_view(note), "earlier": [note_view(n) for n in history]}
+    links = (await store.note_documents(person.sub, [note_id])).get(note_id, [])
+    return {
+        "note": note_view(note),
+        "earlier": [note_view(n) for n in history],
+        # MV6: the documents it rests on, as they were when linked.
+        "documents": [memory_provenance.link_view(link) for link in links],
+    }
+
+
+class NoteDocument(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    docId: str = Field(min_length=1, max_length=200)
+
+
+@router.post("/api/memory/notes/{note_id}/documents")
+async def link_document(request: Request, note_id: str, body: NoteDocument) -> dict[str, Any]:
+    """Based on a document (MV6): the person names one of their documents (My documents or a
+    folder's file) a current note of theirs rests on. 409 at `MAX_LINKS`."""
+    person = await _person(request)
+    store = _store(request)
+    if not (await config.memory_settings(store)).enabled:
+        raise _refused(status.HTTP_403_FORBIDDEN, {"message": _OWNER_OFF, "reason": "off"})
+    saved = getattr(_state(request), "saved", None)
+    index = saved.index(person.sub, create=False) if saved is not None else None
+    doc = await index.document(body.docId) if index is not None else None
+    if doc is None or doc.scope != "library":
+        raise _problem(status.HTTP_404_NOT_FOUND, "There is no such document in your documents.")
+    held = (await store.note_documents(person.sub, [note_id])).get(note_id, [])
+    if len(held) >= memory_provenance.MAX_LINKS and all(h["doc_id"] != doc.id for h in held):
+        raise _problem(
+            status.HTTP_409_CONFLICT,
+            f"A note can rest on at most {memory_provenance.MAX_LINKS} documents.",
+        )
+    link = {
+        "doc_id": doc.id,
+        "scope": doc.scope,
+        "source": doc.source,
+        "name": doc.name,
+        "sha256": doc.sha256,
+        "place": [],
+    }
+    count = await store.link_note_documents(
+        person.sub, note_id, [link], "person", memory_provenance.MAX_LINKS
+    )
+    if count < 0:
+        raise _problem(status.HTTP_404_NOT_FOUND, "There is no such note.")
+    links = (await store.note_documents(person.sub, [note_id])).get(note_id, [])
+    return {"documents": [memory_provenance.link_view(x) for x in links]}
+
+
+@router.delete(
+    "/api/memory/notes/{note_id}/documents/{doc_id}", status_code=status.HTTP_204_NO_CONTENT
+)
+async def unlink_document(request: Request, note_id: str, doc_id: str) -> Response:
+    """The note no longer rests on that document. The document is not touched."""
+    person = await _person(request)
+    if not await _store(request).unlink_note_document(person.sub, note_id, doc_id):
+        raise _problem(status.HTTP_404_NOT_FOUND, "The note does not name that document.")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 _KIND = Literal["fact", "preference", "instruction", "project", "event", "procedure"]
@@ -539,6 +608,7 @@ async def add_note(request: Request, body: NoteCreate) -> JSONResponse:
     note_body = _vetted_body(body.body, install)
     tags = _vetted_tags(body.tags)
     chat_id = message_id = None
+    answer: Message | None = None
     if body.chatId is not None:
         chat = await _own_chat(request, person, body.chatId)
         chat_id = chat.id
@@ -547,6 +617,7 @@ async def add_note(request: Request, body: NoteCreate) -> JSONResponse:
             if message is None or message.chat_id != chat.id:
                 raise _problem(status.HTTP_404_NOT_FOUND, "There is no such message in this chat.")
             message_id = message.id
+            answer = message if message.role == "assistant" else None
     elif body.messageId is not None:
         raise _problem(status.HTTP_400_BAD_REQUEST, "A message needs the chat it is in.")
     now = time.time()
@@ -572,6 +643,9 @@ async def add_note(request: Request, body: NoteCreate) -> JSONResponse:
         raise _refused(status.HTTP_409_CONFLICT, _tags_full(exc.limit)) from None
     if created:
         await _reindex(_state(request), person.sub, [kept.id])
+        if answer is not None:
+            # MV6: kept from an answer, it rests on the documents the answer cited.
+            await memory_provenance.link_answer(_state(request), person.sub, kept.id, answer)
     return JSONResponse(
         {"note": note_view(kept), "created": created},
         status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
@@ -618,6 +692,8 @@ async def edit_note(request: Request, note_id: str, body: NoteUpdate) -> dict[st
             if kept is None:
                 raise _problem(status.HTTP_404_NOT_FOUND, "There is no such note.")
             await _reindex(state, person.sub, [kept.id, note_id])
+            # MV6: the new version rests on its documents as they are now.
+            await memory_provenance.settle_all(state, person.sub, kept.id)
             return {"note": note_view(kept), "replaced": note_id}
         note = await store.update_memory_note(
             person.sub,
@@ -1007,6 +1083,51 @@ SUGGESTION_DAYS = 30
 LEARNED_DAYS = 30
 
 
+async def _revisits(
+    request: Request,
+    owner: str,
+    notes: list[MemoryNote],
+    prefs: dict[str, Any],
+    today: str,
+) -> list[dict[str, Any]]:
+    """Still true?: every note whose documents changed, each with why (MV6, at once), then the
+    project the timer is due on, if the week allows."""
+    changed = await memory_provenance.due(_state(request), owner)
+    by_id = {n.id: n for n in notes}
+    out = [
+        {**note_view(by_id[k]), "reasons": [c.view() for c in v if not c.snoozed]}
+        for k, v in changed.items()
+        if k in by_id
+    ]
+    asked = {o["id"] for o in out}
+    out += [
+        {**note_view(n), "reasons": []}
+        for n in _due_revisits(notes, prefs, today)
+        if n.id not in asked
+    ]
+    return out
+
+
+def tidy_view(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": item["id"],
+        "kind": item["kind"],
+        "notes": [note_view(n) for n in item["notes"]],
+    }
+
+
+async def _tidy(request: Request, owner: str, today: str) -> list[dict[str, Any]]:
+    """Run the tidy pass if it is due (once a day), and what waits from it. Never raises: the
+    page is read whatever the pass came to."""
+    store = _store(request)
+    try:
+        await memory_tidy.run(store, owner, today)
+        return [tidy_view(i) for i in await memory_tidy.proposals(store, owner, today)]
+    except Exception as exc:
+        log.warning("the tidy pass did not run: %s: %s", type(exc).__name__, exc)
+        return []
+
+
 def _due_revisits(notes: list[MemoryNote], prefs: dict[str, Any], today: str) -> list[MemoryNote]:
     """The project to ask "Still true?" about now: the one longest due, unless the person
     was asked within the week."""
@@ -1155,12 +1276,19 @@ class Revisit(BaseModel):
 
 @router.post("/api/memory/revisit")
 async def revisit(request: Request, body: Revisit) -> dict[str, Any]:
-    """The person's answer to "Still true?" about one of their projects."""
+    """The person's answer to "Still true?": about one of their projects (the timer), or about
+    a note whose documents changed (MV6: `yes` moves its links to the documents as they are
+    now, `later` puts them off a week)."""
     person = await _person(request)
     store = _store(request)
     note = await store.memory_note(person.sub, body.noteId)
     if note is None or note.status != "active":
         raise _problem(status.HTTP_404_NOT_FOUND, "There is no such note.")
+    if body.answer != "no":
+        await memory_provenance.answer(_state(request), person.sub, note.id, body.answer)
+    timer = note.kind == "project" and note.revisit_at is not None and note.revisit_at <= _today()
+    if not timer and body.answer != "no":
+        return {"answer": body.answer}
     if body.answer == "yes":
         days = memory_learn.memory_suggest.PROJECT_REVISIT_DAYS
         later = (datetime.now().date() + timedelta(days=days)).isoformat()
@@ -1174,8 +1302,64 @@ async def revisit(request: Request, body: Revisit) -> dict[str, Any]:
                 "Workbench could not remove this note's words from your search index, so it "
                 f"was kept ({type(exc).__name__}). Try again in a moment.",
             ) from None
-    await store.put_memory_prefs(person.sub, revisit_asked_at=time.time())
+    if timer:
+        # The timer's one project a week; a question a document raised is not held to it.
+        await store.put_memory_prefs(person.sub, revisit_asked_at=time.time())
     return {"answer": body.answer}
+
+
+class TidyAnswer(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    #: `keep` (two notes: keep `keepId`, the other becomes its earliest version), `keep_both`;
+    #: `remove` (an event long past: forget it), `keep_event`.
+    action: Literal["keep", "keep_both", "remove", "keep_event"]
+    keepId: str | None = Field(default=None, max_length=200)
+
+
+@router.post("/api/memory/tidy/{tidy_id}")
+async def answer_tidy(request: Request, tidy_id: str, body: TidyAnswer) -> dict[str, Any]:
+    """The person's answer to what the tidy pass proposed (MV6). 404 when nothing waits under
+    that id; 409 when its notes changed since it was proposed (it is dropped)."""
+    person = await _person(request)
+    store = _store(request)
+    state = _state(request)
+    waiting = {i["id"]: i for i in await memory_tidy.proposals(store, person.sub, _today())}
+    item = waiting.get(tidy_id)
+    if item is None:
+        raise _problem(status.HTTP_404_NOT_FOUND, "Nothing waits under that id.")
+    ids = [n.id for n in item["notes"]]
+    if item["kind"] == "duplicate":
+        if body.action == "keep_both":
+            await store.settle_tidy(person.sub, tidy_id, "kept")
+            return {"action": body.action}
+        keep = body.keepId
+        if body.action != "keep" or keep is None or keep not in ids:
+            raise _problem(status.HTTP_400_BAD_REQUEST, "Say which of the two notes to keep.")
+        if not (await config.memory_settings(store)).enabled:
+            raise _refused(status.HTTP_403_FORBIDDEN, {"message": _OWNER_OFF, "reason": "off"})
+        other = next(i for i in ids if i != keep)
+        kept = await store.merge_memory_notes(person.sub, keep, other)
+        if kept is None:
+            await store.drop_tidy(person.sub, [tidy_id])
+            raise _problem(status.HTTP_409_CONFLICT, "These notes changed since; nothing was done.")
+        await _reindex(state, person.sub, [kept.id, other])
+        await store.settle_tidy(person.sub, tidy_id, "merged")
+        return {"action": body.action, "note": note_view(kept), "replaced": other}
+    if body.action == "keep_event":
+        await store.settle_tidy(person.sub, tidy_id, "kept")
+        return {"action": body.action}
+    if body.action != "remove":
+        raise _problem(status.HTTP_400_BAD_REQUEST, "Remove the event, or keep it.")
+    try:
+        gone = await forget(state, person.sub, ids[0])
+    except Exception as exc:
+        raise _problem(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Workbench could not remove this note's words from your search index, so it "
+            f"was kept ({type(exc).__name__}). Try again in a moment.",
+        ) from None
+    await store.settle_tidy(person.sub, tidy_id, "removed")
+    return {"action": body.action, "removed": gone}
 
 
 @router.get("/api/memory/offer")
@@ -1214,6 +1398,8 @@ async def export(request: Request, format: Literal["md", "json"] = "md") -> Resp
     notes = [n for n in every if n.status == "active"]
     earlier = [n for n in every if n.status == "superseded"]
     tags = await store.memory_tags(person.sub)
+    # MV6: the documents each note rests on.
+    links = await store.note_documents(person.sub)
     # MV5: what the person's own memory server lists, or why it is not here.
     from . import memory_servers
 
@@ -1236,6 +1422,16 @@ async def export(request: Request, format: Literal["md", "json"] = "md") -> Resp
                 "validFrom": _stamp(n.valid_from),
                 "supersededAt": _stamp(n.superseded_at),
                 "supersededBy": n.superseded_by,
+                "documents": [
+                    {
+                        "name": link["name"],
+                        "sha256": link["sha256"],
+                        "how": link["how"],
+                        "place": link["place"],
+                        "linkedAt": _stamp(link["linked_at"]),
+                    }
+                    for link in links.get(n.id, [])
+                ],
             }
 
         return JSONResponse(

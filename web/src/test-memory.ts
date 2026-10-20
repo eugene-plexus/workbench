@@ -13,6 +13,8 @@ import type {
   MemoryTag,
   MemoryTurn,
   NotSentNote,
+  RevisitNote,
+  RevisitReason,
   SentNote,
 } from "./lib/types";
 
@@ -42,6 +44,14 @@ export function note(over: Partial<MemoryNote> = {}): MemoryNote {
     supersededBy: null,
     ...over,
   };
+}
+
+/** A note to ask "Still true?" about; a project's timer has no reasons. */
+export function revisit(
+  over: Partial<MemoryNote> = {},
+  reasons: RevisitReason[] = [],
+): RevisitNote {
+  return { ...note(over), reasons };
 }
 
 export function tag(over: Partial<MemoryTag> = {}): MemoryTag {

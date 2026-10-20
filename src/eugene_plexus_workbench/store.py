@@ -76,6 +76,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import sqlite3
 import time
 import unicodedata
@@ -90,7 +91,7 @@ from .agui_store import AGUIStore, allow_chat_write
 from .interaction_store import SCHEMA as INTERACTION_SCHEMA
 from .interaction_store import InteractionStore
 
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 
 #: The oldest schema this migrates from: what Workbench v0.1.0 wrote. Schema 1 predates
 #: it, and nobody holds one.
@@ -587,6 +588,39 @@ def _memory_servers(db: sqlite3.Connection) -> None:
     )
 
 
+def _provenance(db: sqlite3.Connection) -> None:
+    """Schema 26 (MV6): the documents a note rests on, each as it was when linked; the tidy
+    pass's proposals, with what the person answered (so a pair they kept is never proposed
+    again); and when the pass last ran for a person. A note's links go with it."""
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS memory_note_documents ("
+        "owner TEXT NOT NULL, note_id TEXT NOT NULL, doc_id TEXT NOT NULL, "
+        "scope TEXT NOT NULL, source TEXT NOT NULL, name TEXT NOT NULL, sha256 TEXT NOT NULL, "
+        "place TEXT NOT NULL DEFAULT '[]', "
+        "how TEXT NOT NULL CHECK (how IN ('answer', 'person')), "
+        "linked_at REAL NOT NULL, snoozed_until REAL, snoozed_sha TEXT, "
+        "PRIMARY KEY (note_id, doc_id))"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS memory_note_documents_by_owner ON memory_note_documents (owner)"
+    )
+    db.execute(
+        "CREATE TRIGGER IF NOT EXISTS memory_notes_documents_ad AFTER DELETE ON memory_notes "
+        "BEGIN DELETE FROM memory_note_documents WHERE note_id = old.id; END"
+    )
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS memory_tidy ("
+        "id TEXT PRIMARY KEY, owner TEXT NOT NULL, "
+        "kind TEXT NOT NULL CHECK (kind IN ('duplicate', 'past')), "
+        "pair TEXT NOT NULL, created_at REAL NOT NULL, "
+        "settled TEXT CHECK (settled IS NULL OR settled IN ('merged', 'kept', 'removed')), "
+        "settled_at REAL, UNIQUE (owner, kind, pair))"
+    )
+    present = {row[1] for row in db.execute("PRAGMA table_info(memory_prefs)")}
+    if "tidy_at" not in present:
+        db.execute("ALTER TABLE memory_prefs ADD COLUMN tidy_at REAL")
+
+
 #: What brings a store written at version N-1 to N, for N above `OLDEST_SCHEMA`.
 #: `_SCHEMA` already holds the result, for a store made new. A step is a statement,
 #: or a function of the connection for what SQL alone cannot say.
@@ -730,6 +764,8 @@ _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
     # Learning and the write policy (MV3, 2026-10-19): new columns and two new tables.
     24: [_learning],
     25: [_memory_servers],
+    # Provenance and tidy (MV6, 2026-10-19): two new tables, a trigger and one column.
+    26: [_provenance],
 }
 
 
@@ -863,6 +899,7 @@ def _initialize_schema(
         _past_chats(db)
         _learning(db)
         _memory_servers(db)
+        _provenance(db)
         db.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?)",
             (str(SCHEMA_VERSION),),
@@ -1318,7 +1355,13 @@ MEMORY_PREFS_DEFAULT: dict[str, Any] = {
     # MV3: the person's write policy, stricter than the owner's or (if the owner lets them)
     # any; None is the owner's.
     "write_policy": None,
+    # MV6: when the tidy pass last ran for the person.
+    "tidy_at": None,
 }
+
+
+#: At most this many documents a note rests on (MV6).
+MAX_NOTE_DOCUMENTS = 20
 
 
 #: What a person's saved-documents settings are until they change one. `external`
@@ -3290,6 +3333,7 @@ class Store:
                 self._link_tags(db, owner, new.id, new.tags, now)
                 self._event(db, owner, new.id, "add", actor, None, new.text)
                 self._supersede(db, owner, note_id, new.id, new.created_at, actor)
+                self._carry_documents(db, owner, note_id, new.id)
                 fresh = self._notes(db, owner, " AND id = ?", [new.id], with_body=True)[0]
                 db.execute("COMMIT")
             except BaseException:
@@ -3371,6 +3415,7 @@ class Store:
                 count = db.execute("DELETE FROM memory_notes WHERE owner = ?", (owner,)).rowcount
                 db.execute("DELETE FROM memory_note_tags WHERE owner = ?", (owner,))
                 db.execute("DELETE FROM memory_dismissed WHERE owner = ?", (owner,))
+                db.execute("DELETE FROM memory_tidy WHERE owner = ?", (owner,))
                 self._drop_from_chats(db, owner, None)
                 self._drop_from_answers(db, owner, None)
                 db.execute("COMMIT")
@@ -3657,6 +3702,7 @@ class Store:
                 "search_tool": bool(row["search_tool"]),
                 "chats_tool": bool(row["chats_tool"]),
                 "write_policy": row["write_policy"],
+                "tidy_at": row["tidy_at"],
             }
 
         return await self._run(go)
@@ -4144,6 +4190,7 @@ class Store:
                     carried = self._tags_of(db, owner, [replaced]).get(replaced, [])
                     held = self._tags_of(db, owner, [note_id]).get(note_id, [])
                     self._link_tags(db, owner, note_id, [*held, *carried], now)
+                    self._carry_documents(db, owner, replaced, note_id)
                 fresh = self._notes(db, owner, " AND id = ?", [note_id], with_body=True)[0]
                 db.execute("COMMIT")
             except BaseException:
@@ -4205,6 +4252,375 @@ class Store:
                 "SELECT words FROM memory_dismissed WHERE owner = ? ORDER BY at DESC", (owner,)
             )
             return [r["words"] for r in rows]
+
+        return await self._run(go)
+
+    # --- MV6: the documents a note rests on, and the tidy pass --------------
+
+    @staticmethod
+    def _carry_documents(db: sqlite3.Connection, owner: str, from_id: str, to_id: str) -> None:
+        """`to_id` rests on what `from_id` did: a new version, a kept replacement, a merge.
+        A document both name keeps `to_id`'s link; past `MAX_NOTE_DOCUMENTS`, the oldest
+        links of `from_id` come over first and the rest do not."""
+        held = db.execute(
+            "SELECT COUNT(*) AS n FROM memory_note_documents WHERE owner = ? AND note_id = ?",
+            (owner, to_id),
+        ).fetchone()["n"]
+        room = MAX_NOTE_DOCUMENTS - int(held)
+        if room <= 0:
+            return
+        db.execute(
+            "INSERT OR IGNORE INTO memory_note_documents (owner, note_id, doc_id, scope, source, "
+            "name, sha256, place, how, linked_at, snoozed_until, snoozed_sha) "
+            "SELECT owner, ?, doc_id, scope, source, name, sha256, place, how, linked_at, "
+            "snoozed_until, snoozed_sha FROM memory_note_documents WHERE owner = ? AND note_id = ? "
+            "AND doc_id NOT IN (SELECT doc_id FROM memory_note_documents WHERE note_id = ?) "
+            "ORDER BY linked_at, doc_id LIMIT ?",
+            (to_id, owner, from_id, to_id, room),
+        )
+
+    async def note_documents(
+        self, owner: str, note_ids: Sequence[str] | None = None, *, current: bool = False
+    ) -> dict[str, list[dict[str, Any]]]:
+        """The documents each note rests on, as they were when linked: every note of the
+        person's that has any when `note_ids` is None; with `current`, only current notes'."""
+
+        def go() -> dict[str, list[dict[str, Any]]]:
+            db = self._conn()
+            where, params = " WHERE owner = ?", [owner]
+            if current:
+                where += (
+                    " AND note_id IN (SELECT id FROM memory_notes WHERE owner = ? "
+                    "AND status = 'active')"
+                )
+                params.append(owner)
+            if note_ids is not None:
+                wanted = list(dict.fromkeys(note_ids))
+                if not wanted:
+                    return {}
+                where += f" AND note_id IN ({', '.join('?' for _ in wanted)})"
+                params += wanted
+            found: dict[str, list[dict[str, Any]]] = {}
+            for r in db.execute(
+                f"SELECT * FROM memory_note_documents{where} ORDER BY linked_at, doc_id", params
+            ):
+                try:
+                    place = json.loads(r["place"])
+                except ValueError:
+                    place = []
+                found.setdefault(r["note_id"], []).append(
+                    {
+                        "doc_id": r["doc_id"],
+                        "scope": r["scope"],
+                        "source": r["source"],
+                        "name": r["name"],
+                        "sha256": r["sha256"],
+                        "place": place if isinstance(place, list) else [],
+                        "how": r["how"],
+                        "linked_at": r["linked_at"],
+                        "snoozed_until": r["snoozed_until"],
+                        "snoozed_sha": r["snoozed_sha"],
+                    }
+                )
+            return found
+
+        return await self._run(go)
+
+    async def link_note_documents(
+        self, owner: str, note_id: str, links: Sequence[dict[str, Any]], how: str, limit: int
+    ) -> int:
+        """Name documents a current note of the person's rests on, each as it is now
+        (`doc_id`, `scope`, `source`, `name`, `sha256`, `place`), at most `limit` a note; a
+        document it already names is linked again as it is now. How many it names now; -1
+        when it is not theirs or not current."""
+
+        def go() -> int:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute(
+                    "SELECT 1 FROM memory_notes WHERE id = ? AND owner = ? AND status = 'active'",
+                    (note_id, owner),
+                ).fetchone()
+                if row is None:
+                    db.execute("COMMIT")
+                    return -1
+                now = time.time()
+                for link in links:
+                    held = db.execute(
+                        "SELECT COUNT(*) AS n FROM memory_note_documents WHERE note_id = ? "
+                        "AND doc_id != ?",
+                        (note_id, link["doc_id"]),
+                    ).fetchone()["n"]
+                    if int(held) >= limit:
+                        break
+                    db.execute(
+                        "INSERT INTO memory_note_documents (owner, note_id, doc_id, "
+                        "scope, source, name, sha256, place, how, linked_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                        "ON CONFLICT (note_id, doc_id) DO UPDATE SET scope = excluded.scope, "
+                        "source = excluded.source, name = excluded.name, "
+                        "sha256 = excluded.sha256, snoozed_until = NULL, snoozed_sha = NULL",
+                        (
+                            owner,
+                            note_id,
+                            link["doc_id"],
+                            link["scope"],
+                            link["source"],
+                            link["name"],
+                            link["sha256"],
+                            json.dumps(link.get("place") or []),
+                            how,
+                            now,
+                        ),
+                    )
+                count = db.execute(
+                    "SELECT COUNT(*) AS n FROM memory_note_documents WHERE note_id = ?",
+                    (note_id,),
+                ).fetchone()["n"]
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return int(count)
+
+        return await self._run(go)
+
+    async def unlink_note_document(self, owner: str, note_id: str, doc_id: str) -> bool:
+        def go() -> bool:
+            db = self._conn()
+            return bool(
+                db.execute(
+                    "DELETE FROM memory_note_documents WHERE owner = ? AND note_id = ? "
+                    "AND doc_id = ?",
+                    (owner, note_id, doc_id),
+                ).rowcount
+            )
+
+        return await self._run(go)
+
+    async def settle_note_documents(
+        self, owner: str, note_id: str, moved: dict[str, dict[str, Any] | None]
+    ) -> None:
+        """The person said a note is still true of its documents as they are now: each link
+        in `moved` (by the doc id it holds) moves to the document it names, or goes when that
+        is None (the document was removed), with a line in the note's history."""
+
+        def go() -> None:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                for old_id, now_doc in moved.items():
+                    row = db.execute(
+                        "SELECT name FROM memory_note_documents WHERE owner = ? AND note_id = ? "
+                        "AND doc_id = ?",
+                        (owner, note_id, old_id),
+                    ).fetchone()
+                    if row is None:
+                        continue
+                    if now_doc is None:
+                        db.execute(
+                            "DELETE FROM memory_note_documents WHERE owner = ? AND note_id = ? "
+                            "AND doc_id = ?",
+                            (owner, note_id, old_id),
+                        )
+                        self._event(
+                            db,
+                            owner,
+                            note_id,
+                            "unlink",
+                            "person",
+                            f"'{row['name']}' was removed; you said this is still true.",
+                            None,
+                        )
+                        continue
+                    if (
+                        now_doc["doc_id"] != old_id
+                        and db.execute(
+                            "SELECT 1 FROM memory_note_documents WHERE note_id = ? AND doc_id = ?",
+                            (note_id, now_doc["doc_id"]),
+                        ).fetchone()
+                    ):
+                        # The new version is linked already, as it is now: one link is enough.
+                        db.execute(
+                            "DELETE FROM memory_note_documents WHERE owner = ? AND note_id = ? "
+                            "AND doc_id = ?",
+                            (owner, note_id, old_id),
+                        )
+                        continue
+                    db.execute(
+                        "UPDATE memory_note_documents SET doc_id = ?, scope = ?, source = ?, "
+                        "name = ?, sha256 = ?, place = '[]', snoozed_until = NULL, "
+                        "snoozed_sha = NULL "
+                        "WHERE owner = ? AND note_id = ? AND doc_id = ?",
+                        (
+                            now_doc["doc_id"],
+                            now_doc["scope"],
+                            now_doc["source"],
+                            now_doc["name"],
+                            now_doc["sha256"],
+                            owner,
+                            note_id,
+                            old_id,
+                        ),
+                    )
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+
+        await self._run(go)
+
+    async def snooze_note_documents(
+        self, owner: str, note_id: str, seen: dict[str, str], until: float
+    ) -> int:
+        """Put these links off until `until`, each while its document stays as it is now:
+        `seen` maps the doc id a link holds to the `sha256` of the document now ('' when it
+        was removed), so a second change asks again at once."""
+
+        def go() -> int:
+            db = self._conn()
+            done = 0
+            for doc_id, sha in seen.items():
+                done += db.execute(
+                    "UPDATE memory_note_documents SET snoozed_until = ?, snoozed_sha = ? "
+                    "WHERE owner = ? AND note_id = ? AND doc_id = ?",
+                    (until, sha, owner, note_id, doc_id),
+                ).rowcount
+            return done
+
+        return await self._run(go)
+
+    async def tidy_rows(self, owner: str) -> list[dict[str, Any]]:
+        """Every proposal of the tidy pass the person has, answered or not, oldest first."""
+
+        def go() -> list[dict[str, Any]]:
+            rows = (
+                self._conn()
+                .execute(
+                    "SELECT * FROM memory_tidy WHERE owner = ? ORDER BY created_at, id", (owner,)
+                )
+                .fetchall()
+            )
+            return [
+                {
+                    "id": r["id"],
+                    "kind": r["kind"],
+                    "note_ids": json.loads(r["pair"]),
+                    "created_at": r["created_at"],
+                    "settled": r["settled"],
+                    "settled_at": r["settled_at"],
+                }
+                for r in rows
+            ]
+
+        return await self._run(go)
+
+    async def add_tidy(self, owner: str, kind: str, note_ids: Sequence[str]) -> bool:
+        """Propose this, unless the same was proposed before (answered or not)."""
+        pair = json.dumps(sorted(note_ids))
+
+        def go() -> bool:
+            return bool(
+                self._conn()
+                .execute(
+                    "INSERT OR IGNORE INTO memory_tidy (id, owner, kind, pair, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (secrets.token_hex(8), owner, kind, pair, time.time()),
+                )
+                .rowcount
+            )
+
+        return await self._run(go)
+
+    async def settle_tidy(self, owner: str, tidy_id: str, settled: str) -> bool:
+        def go() -> bool:
+            return bool(
+                self._conn()
+                .execute(
+                    "UPDATE memory_tidy SET settled = ?, settled_at = ? "
+                    "WHERE owner = ? AND id = ? AND settled IS NULL",
+                    (settled, time.time(), owner, tidy_id),
+                )
+                .rowcount
+            )
+
+        return await self._run(go)
+
+    async def drop_tidy(self, owner: str, tidy_ids: Sequence[str]) -> None:
+        def go() -> None:
+            db = self._conn()
+            for one in tidy_ids:
+                db.execute("DELETE FROM memory_tidy WHERE owner = ? AND id = ?", (owner, one))
+
+        await self._run(go)
+
+    async def merge_memory_notes(
+        self, owner: str, keep_id: str, other_id: str
+    ) -> MemoryNote | None:
+        """Two current notes said the same thing and the person kept `keep_id`: the other
+        becomes the earliest of its versions (so a history stays one line, and deleting the
+        kept note takes it too), never sent again. The kept note gains the other's tags and
+        documents, its pin, and its body when it had none. None when either is not a
+        current note of theirs."""
+
+        def go() -> MemoryNote | None:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                rows = {
+                    r["id"]: r
+                    for r in db.execute(
+                        "SELECT id, text, pinned, body FROM memory_notes WHERE owner = ? "
+                        "AND status = 'active' AND id IN (?, ?)",
+                        (owner, keep_id, other_id),
+                    )
+                }
+                if keep_id == other_id or set(rows) != {keep_id, other_id}:
+                    db.execute("COMMIT")
+                    return None
+                keep, other = rows[keep_id], rows[other_id]
+                now = time.time()
+                # The kept note's earliest version: the other goes below it.
+                tail, seen = keep_id, {keep_id}
+                while True:
+                    earlier = db.execute(
+                        "SELECT id FROM memory_notes WHERE owner = ? AND superseded_by = ?",
+                        (owner, tail),
+                    ).fetchone()
+                    if earlier is None or earlier["id"] in seen:
+                        break
+                    tail = earlier["id"]
+                    seen.add(tail)
+                tags = [
+                    *self._tags_of(db, owner, [keep_id]).get(keep_id, []),
+                    *self._tags_of(db, owner, [other_id]).get(other_id, []),
+                ]
+                self._link_tags(db, owner, keep_id, list(dict.fromkeys(tags)), now)
+                self._carry_documents(db, owner, other_id, keep_id)
+                db.execute(
+                    "UPDATE memory_notes SET pinned = ?, body = ?, updated_at = ? WHERE id = ?",
+                    (
+                        1 if keep["pinned"] or other["pinned"] else 0,
+                        keep["body"] or other["body"] or "",
+                        now,
+                        keep_id,
+                    ),
+                )
+                db.execute(
+                    "UPDATE memory_notes SET status = 'superseded', superseded_at = ?, "
+                    "superseded_by = ?, updated_at = ? WHERE id = ? AND owner = ?",
+                    (now, tail, now, other_id, owner),
+                )
+                self._event(db, owner, other_id, "merge", "person", None, None)
+                self._event(db, owner, keep_id, "merge", "person", None, None)
+                self._drop_from_chats(db, owner, {other_id})
+                fresh = self._notes(db, owner, " AND id = ?", [keep_id], with_body=True)[0]
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return fresh
 
         return await self._run(go)
 
