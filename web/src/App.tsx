@@ -1,4 +1,14 @@
-import { Boxes, Brain, CircleAlert, Files, Info, Keyboard, Laptop, Wrench } from "lucide-react";
+import {
+  Boxes,
+  Brain,
+  CircleAlert,
+  Files,
+  Info,
+  Keyboard,
+  Laptop,
+  Settings as SettingsIcon,
+  Wrench,
+} from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ChatView } from "./components/ChatView";
@@ -7,6 +17,7 @@ import { JobSites } from "./components/JobSites";
 import { Mascot } from "./components/Mascot";
 import { Memory } from "./components/Memory";
 import { PastChats } from "./components/PastChats";
+import { SettingsPage } from "./components/SettingsPage";
 import { type Handoff, Media } from "./components/Media";
 import { Sidebar } from "./components/Sidebar";
 import { SignIn } from "./components/SignIn";
@@ -36,6 +47,17 @@ export function memoryFromPath(path: string): boolean {
   return /^\/memory\/?$/.test(path);
 }
 
+/** Whether an address is the Settings page (MV4): `/settings`. */
+export function settingsFromPath(path: string): boolean {
+  return /^\/settings\/?$/.test(path);
+}
+
+/** The words Search chats was opened to search for (MV4, from Memory): `?q=`. */
+export function queryFromSearch(search: string): string | null {
+  const q = new URLSearchParams(search).get("q");
+  return q && q.trim() ? q : null;
+}
+
 /** Whether an address is Search chats (MV2): `/search`. */
 export function searchFromPath(path: string): boolean {
   return /^\/search\/?$/.test(path);
@@ -57,7 +79,8 @@ function onMac(): boolean {
 }
 
 /** The page a person is on, for the top bar, the tab's title and where focus goes. */
-type View = "chat" | "home" | "tools" | "media" | "documents" | "memory" | "sites" | "search";
+type View =
+  "chat" | "home" | "tools" | "media" | "documents" | "memory" | "sites" | "search" | "settings";
 
 const PAGE_TITLES = {
   tools: "Toolbox · Tools",
@@ -66,6 +89,7 @@ const PAGE_TITLES = {
   memory: "Memory",
   sites: "Job sites",
   search: "Search chats",
+  settings: "Settings",
 } as const;
 
 /** Move focus to a heading (or any element), making it a target if it is not. */
@@ -90,6 +114,10 @@ export default function App() {
     documentsFromPath(window.location.pathname),
   );
   const [searchOpen, setSearchOpen] = useState(() => searchFromPath(window.location.pathname));
+  const [searchQuery, setSearchQuery] = useState(() => queryFromSearch(window.location.search));
+  const [settingsOpen, setSettingsOpen] = useState(() =>
+    settingsFromPath(window.location.pathname),
+  );
   // The exchange a chat was opened at (MV2: `?at=`), so it opens there.
   const [chatAtId, setChatAtId] = useState(() => atFromSearch(window.location.search));
   // The owner reading someone else's bins (M3); null is one's own.
@@ -120,11 +148,13 @@ export default function App() {
           ? "documents"
           : memoryOpen
             ? "memory"
-            : searchOpen
-              ? "search"
-              : chatId
-                ? "chat"
-                : "home";
+            : settingsOpen
+              ? "settings"
+              : searchOpen
+                ? "search"
+                : chatId
+                  ? "chat"
+                  : "home";
   const lastView = useRef(view);
 
   useEffect(() => {
@@ -136,16 +166,7 @@ export default function App() {
 
   // The tab says which page it holds, as it does for a chat (ChatView).
   useEffect(() => {
-    if (
-      phase.kind !== "ready" ||
-      (view !== "tools" &&
-        view !== "media" &&
-        view !== "documents" &&
-        view !== "memory" &&
-        view !== "sites" &&
-        view !== "search")
-    )
-      return;
+    if (phase.kind !== "ready" || view === "chat" || view === "home") return;
     document.title = `${PAGE_TITLES[view]} · Workbench`;
     return () => {
       document.title = "Workbench";
@@ -167,14 +188,7 @@ export default function App() {
     const before = lastView.current;
     lastView.current = view;
     if (before === view || phase.kind !== "ready") return;
-    if (
-      view === "tools" ||
-      view === "media" ||
-      view === "documents" ||
-      view === "memory" ||
-      view === "sites" ||
-      view === "search"
-    ) {
+    if (view !== "chat" && view !== "home") {
       focusOn(document.getElementById("view-heading") ?? document.querySelector("main h1"));
     }
   }, [phase.kind, view]);
@@ -187,6 +201,7 @@ export default function App() {
     setSearchOpen(false);
     setMedia(null);
     setMemoryOpen(false);
+    setSettingsOpen(false);
     setDocumentsOpen(false);
     setMediaPerson(null);
     setShowTools(false);
@@ -201,6 +216,7 @@ export default function App() {
       setMedia({ door, id: null });
       setSearchOpen(false);
       setMemoryOpen(false);
+      setSettingsOpen(false);
       setDocumentsOpen(false);
       setMediaPerson(person);
       setShowTools(false);
@@ -213,6 +229,7 @@ export default function App() {
   const openMemory = useCallback(() => {
     if (window.location.pathname !== "/memory") window.history.pushState(null, "", "/memory");
     setMemoryOpen(true);
+    setSettingsOpen(false);
     setSearchOpen(false);
     setDocumentsOpen(false);
     setMedia(null);
@@ -229,6 +246,7 @@ export default function App() {
     setDocumentsOpen(true);
     setSearchOpen(false);
     setMemoryOpen(false);
+    setSettingsOpen(false);
     setMedia(null);
     setMediaPerson(null);
     setShowTools(false);
@@ -236,9 +254,32 @@ export default function App() {
     setShowChats(false);
   }, []);
 
-  const openSearch = useCallback(() => {
-    if (window.location.pathname !== "/search") window.history.pushState(null, "", "/search");
+  /** Search chats, with words already searched when Memory's Past chats box sent them (MV4). */
+  const openSearch = useCallback((query: string | null = null) => {
+    const path = query ? `/search?${new URLSearchParams({ q: query }).toString()}` : "/search";
+    if (window.location.pathname + window.location.search !== path) {
+      window.history.pushState(null, "", path);
+    }
+    setSearchQuery(query);
     setSearchOpen(true);
+    setDocumentsOpen(false);
+    setMemoryOpen(false);
+    setSettingsOpen(false);
+    setMedia(null);
+    setMediaPerson(null);
+    setShowTools(false);
+    setShowSites(false);
+    setShowChats(false);
+  }, []);
+
+  /** The Settings page (MV4), at the section a page's own link named. */
+  const openSettings = useCallback((section: string | null = null) => {
+    const path = section ? `/settings#${section}` : "/settings";
+    if (window.location.pathname + window.location.hash !== path) {
+      window.history.pushState(null, "", path);
+    }
+    setSettingsOpen(true);
+    setSearchOpen(false);
     setDocumentsOpen(false);
     setMemoryOpen(false);
     setMedia(null);
@@ -253,6 +294,8 @@ export default function App() {
       setChatId(chatFromPath(window.location.pathname));
       setChatAtId(atFromSearch(window.location.search));
       setSearchOpen(searchFromPath(window.location.pathname));
+      setSearchQuery(queryFromSearch(window.location.search));
+      setSettingsOpen(settingsFromPath(window.location.pathname));
       setMedia(mediaFromPath(window.location.pathname));
       setMemoryOpen(memoryFromPath(window.location.pathname));
       setDocumentsOpen(documentsFromPath(window.location.pathname));
@@ -472,7 +515,7 @@ export default function App() {
             onOpenMedia={(person) => openMedia("images", person)}
             onClose={() => setShowChats(false)}
             onNew={() => void newChat()}
-            onSearchChats={openSearch}
+            onSearchChats={() => openSearch()}
             creating={creating}
             error={chatsError}
             onRetry={() => void refreshChats()}
@@ -562,6 +605,19 @@ export default function App() {
               >
                 <Brain size={14} aria-hidden />
                 Memory
+              </button>
+              <button
+                type="button"
+                aria-current={view === "settings" ? "page" : undefined}
+                className="nav-tab"
+                data-testid="open-settings"
+                onClick={() => {
+                  if (view === "settings") return;
+                  openSettings();
+                }}
+              >
+                <SettingsIcon size={14} aria-hidden />
+                Settings
               </button>
               {!phase.me.owner && (
                 <button
@@ -665,13 +721,22 @@ export default function App() {
               me={phase.me}
               onClose={() => open(chatId)}
               onAsk={() => void askAboutDocuments()}
+              onOpenSettings={() => openSettings("documents")}
               onTools={() => {
                 setShowSites(false);
                 setShowTools(true);
               }}
             />
+          ) : settingsOpen ? (
+            <SettingsPage
+              onClose={() => open(chatId)}
+              onOpenMemory={openMemory}
+              onOpenDocuments={openDocuments}
+            />
           ) : searchOpen ? (
             <PastChats
+              key={searchQuery ?? ""}
+              initialQuery={searchQuery}
               onOpen={(id, messageId) => openChatAt(id, messageId)}
               onClose={() => open(chatId)}
             />
@@ -680,6 +745,8 @@ export default function App() {
               chats={chats}
               chatsLoaded={chatsLoaded}
               onOpenChat={open}
+              onOpenSettings={() => openSettings("memory")}
+              onSearchChats={(query) => openSearch(query)}
               onClose={() => open(chatId)}
             />
           ) : chatId ? (

@@ -4,10 +4,12 @@ import { api, post, put } from "../lib/api";
 import type { MemoryPage, MemorySuggestion } from "../lib/types";
 import { note, page, prefs } from "../test-memory";
 import { Memory } from "./Memory";
+import { MemorySettings } from "./MemorySettings";
 import { MemoryOffer } from "./MemoryOffer";
 
 // Connections (MR9b) has its own tests; this page's do not serve it.
 vi.mock("./Connections", () => ({ Connections: () => null }));
+vi.mock("./MemoryModels", () => ({ MemoryModels: () => null }));
 
 vi.mock("../lib/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/api")>()),
@@ -61,6 +63,11 @@ const chats = [
 async function opened() {
   render(<Memory chats={chats} chatsLoaded onOpenChat={vi.fn()} onClose={vi.fn()} />);
   await waitFor(() => expect(screen.queryByText("Loading your notes…")).toBeNull());
+}
+
+async function openedSettings() {
+  render(<MemorySettings onOpenMemory={vi.fn()} />);
+  await waitFor(() => expect(screen.queryByText("Loading your memory settings…")).toBeNull());
 }
 
 describe("suggested notes", () => {
@@ -189,9 +196,9 @@ describe("Still true?", () => {
   });
 });
 
-describe("the settings", () => {
+describe("the settings, on the Settings page", () => {
   it("say whose word Learn from my chats is, and send a choice", async () => {
-    await opened();
+    await openedSettings();
     expect(screen.getByTestId("memory-learn-off")).toBeChecked();
     expect(screen.getByTestId("memory-learn-effective")).toHaveTextContent(
       "Nobody has chosen, so it is off.",
@@ -209,14 +216,16 @@ describe("the settings", () => {
     shown = page([], {
       prefs: prefs({ effective: { learnSetBy: "owner", suggestionsAllowed: false } }),
     });
-    await opened();
+    await openedSettings();
     expect(screen.getByTestId("memory-learn-suggest")).toBeDisabled();
     expect(screen.getByTestId("memory-learn-effective")).toHaveTextContent(
       "The owner of this Workbench has turned suggestions off.",
     );
   });
+});
 
-  it("show past events apart", async () => {
+describe("past events", () => {
+  it("show apart", async () => {
     const past = note({ id: "e1", text: "Exam on Friday.", kind: "event" });
     shown = { ...page([]), sections: { always: [], other: [], otherTotal: 0, past: [past] } };
     await opened();

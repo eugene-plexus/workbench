@@ -12,6 +12,7 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { Attachments } from "./components/Attachments";
 import { AddDocuments } from "./components/AddDocuments";
 import { Documents } from "./components/Documents";
+import { DocumentsSettings } from "./components/DocumentsSettings";
 import { DocumentsChip, DocumentsDrawer, DocumentsHint } from "./components/DocumentsChip";
 import { MessageView } from "./components/MessageView";
 import { TestQuestion } from "./components/TestQuestion";
@@ -124,7 +125,9 @@ async function screenOf(
   // The folders (MR7) are asked for apart from the documents: none, here.
   vi.mocked(api).mockImplementation((async (path: string) =>
     path === "/api/documents/folders" ? foldersPage() : page(docs, over)) as never);
-  const view = render(<Documents onClose={vi.fn()} onAsk={vi.fn()} me={me} />);
+  const view = render(
+    <Documents onClose={vi.fn()} onAsk={vi.fn()} onOpenSettings={vi.fn()} me={me} />,
+  );
   await settle();
   return view;
 }
@@ -133,9 +136,10 @@ const OWNER = { owner: true, consoleUrl: "http://nas:8279/" };
 const PERSON = { owner: false, consoleUrl: null };
 
 describe("the Documents screen", () => {
-  it("empty: the way back, the settings, and Add files", async () => {
+  it("empty: the way back, the way to the settings, and Add files", async () => {
     const view = await screenOf([]);
-    everyControlIsNamed(view, 7);
+    expect(screen.getByTestId("documents-open-settings")).toBeInTheDocument();
+    everyControlIsNamed(view, 3);
   });
 
   it("with a document in every state, each with its own buttons", async () => {
@@ -192,18 +196,6 @@ describe("the Documents screen", () => {
     everyControlIsNamed(view);
   });
 
-  it("with the person's own choices, and Use the default to take one back", async () => {
-    const view = await screenOf([saved()], {
-      prefs: prefs({
-        newChats: true,
-        external: "never",
-        effective: { newChats: true, external: "never", externalSetBy: "you" },
-      }),
-    });
-    expect(screen.getByTestId("documents-external-default")).toBeInTheDocument();
-    everyControlIsNamed(view);
-  });
-
   it("with a search that is damaged, and with one Rebuild cannot mend", async () => {
     vi.mocked(api).mockRejectedValue(
       new ApiError("The search index for your documents is damaged.", 503, {
@@ -246,7 +238,50 @@ describe("the Documents screen", () => {
       await vi.advanceTimersByTimeAsync(600);
     });
     expect(screen.getByTestId("documents-retry")).toBeInTheDocument();
-    everyControlIsNamed(later, 10);
+    everyControlIsNamed(later, 9);
+  });
+});
+
+describe("the Documents settings, on the Settings page", () => {
+  async function settingsOf(over: Parameters<typeof page>[1] = {}) {
+    vi.mocked(api).mockImplementation((async () => page([saved()], over)) as never);
+    const view = render(<DocumentsSettings onOpenDocuments={vi.fn()} />);
+    await settle();
+    return view;
+  }
+
+  it("with the person's own choices, and Use the default to take one back", async () => {
+    const view = await settingsOf({
+      prefs: prefs({
+        newChats: true,
+        external: "never",
+        effective: { newChats: true, external: "never", externalSetBy: "you" },
+      }),
+    });
+    expect(screen.getByTestId("documents-external-default")).toBeInTheDocument();
+    expect(screen.getByTestId("settings-open-documents")).toBeInTheDocument();
+    everyControlIsNamed(view, 6);
+  });
+
+  it("with the owner's word on models outside the machines", async () => {
+    const view = await settingsOf({
+      prefs: prefs({ external: "ask", effective: { external: "never", externalSetBy: "owner" } }),
+    });
+    everyControlIsNamed(view, 5);
+  });
+
+  it("where the owner has turned documents off", async () => {
+    const view = await settingsOf({ installEnabled: false });
+    expect(screen.getByTestId("documents-owner-off")).toBeInTheDocument();
+    everyControlIsNamed(view);
+  });
+
+  it("when the documents could not be read", async () => {
+    vi.mocked(api).mockRejectedValue(new Error("Workbench answered 502."));
+    const view = render(<DocumentsSettings onOpenDocuments={vi.fn()} />);
+    await settle();
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    everyControlIsNamed(view);
   });
 });
 
@@ -1002,9 +1037,9 @@ describe("the Folders section", () => {
     });
     const view = await foldersOf(fake);
     expect(screen.getByTestId("folders-add-select")).toBeInTheDocument();
-    everyControlIsNamed(view, 20);
+    everyControlIsNamed(view, 17);
     fireEvent.click(screen.getByTestId("folders-add-rules-toggle"));
-    everyControlIsNamed(view, 20);
+    everyControlIsNamed(view, 17);
     fake.refuse.set(
       "POST /api/documents/folders",
       new ApiError("A pattern cannot start with #.", 422, {
@@ -1015,7 +1050,7 @@ describe("the Folders section", () => {
     click("folders-add-go");
     await settle();
     expect(screen.getByTestId("folders-add-error")).toBeInTheDocument();
-    everyControlIsNamed(view, 20);
+    everyControlIsNamed(view, 17);
     fake.refuse.set(
       "POST /api/documents/folders",
       new ApiError("This folder is already in your documents.", 409, {
@@ -1025,7 +1060,7 @@ describe("the Folders section", () => {
     click("folders-add-go");
     await settle();
     expect(screen.getByTestId("folders-add-problem")).toBeInTheDocument();
-    everyControlIsNamed(view, 20);
+    everyControlIsNamed(view, 17);
   });
 
   it("with a folder being removed, asked about first, and one that was withdrawn", async () => {
@@ -1034,14 +1069,14 @@ describe("the Folders section", () => {
     );
     click("folder-remove");
     expect(screen.getByTestId("folder-remove-confirm")).toBeInTheDocument();
-    everyControlIsNamed(view, 17);
+    everyControlIsNamed(view, 15);
   });
 
   it("with a deep check opened, and a refusal on the card", async () => {
     const fake = new FakeFolders([folder()]);
     const view = await foldersOf(fake);
     fireEvent.click(screen.getByTestId("folder-deep-toggle"));
-    everyControlIsNamed(view, 20);
+    everyControlIsNamed(view, 17);
     fake.refuse.set(
       "POST /api/documents/folders/g1/sync",
       new ApiError("The owner took away your access to this folder.", 409, {
@@ -1051,7 +1086,7 @@ describe("the Folders section", () => {
     click("folder-sync");
     await settle();
     expect(screen.getByTestId("folder-problem")).toBeInTheDocument();
-    everyControlIsNamed(view, 20);
+    everyControlIsNamed(view, 17);
   });
 
   it("with a folder's files open: the filters, the find box, each file's buttons and the pages", async () => {
@@ -1092,10 +1127,10 @@ describe("the Folders section", () => {
     fireEvent.click(screen.getByTestId("folder-file-text-toggle"));
     await settle();
     expect(screen.getByTestId("folder-file-text")).toBeInTheDocument();
-    everyControlIsNamed(view, 20);
+    everyControlIsNamed(view, 17);
     fireEvent.click(screen.getAllByTestId("folder-file-leave")[0]!);
     expect(screen.getByTestId("folder-file-leave-confirm")).toBeInTheDocument();
-    everyControlIsNamed(view, 20);
+    everyControlIsNamed(view, 17);
   });
 
   it("with its files that could not be read, and the retry", async () => {
@@ -1105,7 +1140,7 @@ describe("the Folders section", () => {
     click("folder-files-toggle");
     await settle();
     expect(screen.getByTestId("folder-files-retry")).toBeInTheDocument();
-    everyControlIsNamed(view, 20);
+    everyControlIsNamed(view, 17);
   });
 
   it("with what was left out open, and when it could not be read", async () => {
@@ -1114,13 +1149,13 @@ describe("the Folders section", () => {
     click("folder-left-toggle");
     await settle();
     expect(screen.getAllByTestId("folder-left-item").length).toBeGreaterThan(0);
-    everyControlIsNamed(view, 20);
+    everyControlIsNamed(view, 17);
     click("folder-left-toggle");
     fake.refuse.set("GET /api/documents/folders/g1", new Error("Workbench answered 502."));
     click("folder-left-toggle");
     await settle();
     expect(screen.getByTestId("folder-left-retry")).toBeInTheDocument();
-    everyControlIsNamed(view, 20);
+    everyControlIsNamed(view, 17);
   });
 
   it("with what was left out, long and with folders that could not be looked into", async () => {
@@ -1136,22 +1171,22 @@ describe("the Folders section", () => {
     click("folder-left-toggle");
     await settle();
     expect(screen.getByTestId("folder-left-unlisted")).toBeInTheDocument();
-    everyControlIsNamed(view, 20);
+    everyControlIsNamed(view, 17);
   });
 
   it("with the rules open, changed, saved, and refused", async () => {
     const fake = new FakeFolders([folder({ ignore: ["*.log"] })]);
     const view = await foldersOf(fake);
     click("folder-rules-toggle");
-    everyControlIsNamed(view, 20);
+    everyControlIsNamed(view, 17);
     fireEvent.change(screen.getByTestId("folder-rules-ignore"), {
       target: { value: "*.log\n*.tmp" },
     });
-    everyControlIsNamed(view, 20);
+    everyControlIsNamed(view, 17);
     fireEvent.click(screen.getByTestId("folder-rules-save"));
     await settle();
     expect(screen.getByTestId("folder-rules-saved")).toBeInTheDocument();
-    everyControlIsNamed(view, 20);
+    everyControlIsNamed(view, 17);
     fake.refuse.set(
       "PATCH /api/documents/folders/g1",
       new ApiError("A pattern is at most 200 characters.", 422, {
@@ -1164,7 +1199,7 @@ describe("the Folders section", () => {
     fireEvent.click(screen.getByTestId("folder-rules-save"));
     await settle();
     expect(screen.getByTestId("folder-rules-error")).toBeInTheDocument();
-    everyControlIsNamed(view, 20);
+    everyControlIsNamed(view, 17);
   });
 
   it("where this Workbench cannot read folders, and where the folders could not be read at all", async () => {
@@ -1200,7 +1235,7 @@ describe("the Folders section", () => {
   it("with the files of the person's own and the folders both, there is one Ask about your documents, named", async () => {
     const view = await foldersOf(new FakeFolders([folder()]), PERSON, []);
     expect(screen.getAllByTestId("documents-ask")).toHaveLength(1);
-    everyControlIsNamed(view, 15);
+    everyControlIsNamed(view, 13);
   });
 });
 

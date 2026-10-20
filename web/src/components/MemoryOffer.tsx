@@ -77,7 +77,7 @@ export function MemoryOffer({ onOpenMemory }: { onOpenMemory: () => void }) {
             onClick={() =>
               void answer(
                 { learn: "suggest" },
-                "Suggestions are on. Turn them off on the Memory page.",
+                "Suggestions are on. Turn them off in Memory settings.",
               )
             }
           >

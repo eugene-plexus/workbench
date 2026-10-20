@@ -190,8 +190,32 @@ try {
     await page.getByTestId("memory-usage-tokens").textContent(),
     /Using \d+ of 1,000 tokens/,
   );
+  // The settings are not on this page (MV4): a button goes to them, on the Settings page.
+  assert.equal(await page.getByTestId("memory-use-switch").count(), 0);
+  assert.equal(await page.getByTestId("memory-external-ask").count(), 0);
+  assert.equal(await page.getByTestId("memory-person-off").count(), 0);
+  await page.getByTestId("memory-open-settings").click();
+  await page.getByRole("heading", { name: "Settings", level: 1 }).waitFor();
+  assert.equal(new URL(page.url()).pathname, "/settings");
+  assert.equal(new URL(page.url()).hash, "#memory");
+  assert.equal(await page.title(), "Settings · Workbench");
+  await page.getByTestId("settings-memory").waitFor();
   assert.equal(await page.getByTestId("memory-use-switch").isChecked(), true);
   assert.equal(await page.getByTestId("memory-external-ask").isChecked(), true);
+  const sections = await page
+    .getByRole("heading", { level: 2 })
+    .evaluateAll((all) => all.map((h) => h.textContent.trim()));
+  assert.deepEqual(
+    sections.filter((name) => /^(Memory|Documents|Connections)/.test(name)),
+    ["Memory", "Documents", "Connections to other apps"],
+  );
+  await page.getByTestId("settings-open-memory").click();
+  await page.getByRole("heading", { name: "Memory", level: 1 }).waitFor();
+  assert.equal(new URL(page.url()).pathname, "/memory");
+  await note.waitFor();
+  log(
+    "PASS  Settings holds Memory's, Documents' and Connections' settings; the Memory page holds none",
+  );
   log("PASS  the Memory page lists the note with its kind, date and the chat it came from");
   await from.getByRole("link").click();
   await page.waitForURL(first);

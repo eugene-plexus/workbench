@@ -56,6 +56,7 @@ import {
   wordsOnlyDoc,
 } from "../test-saved";
 import { Documents } from "./Documents";
+import { DocumentsSettings } from "./DocumentsSettings";
 
 vi.mock("../lib/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/api")>()),
@@ -264,9 +265,21 @@ async function opened(over: Partial<Server> = {}, me?: Pick<Me, "owner" | "conso
   server = fresh(over);
   const onClose = vi.fn();
   const onAsk = vi.fn();
-  const view = render(<Documents onClose={onClose} onAsk={onAsk} me={me} />);
+  const onOpenSettings = vi.fn();
+  const view = render(
+    <Documents onClose={onClose} onAsk={onAsk} onOpenSettings={onOpenSettings} me={me} />,
+  );
   await wait(0);
-  return { ...view, onClose, onAsk };
+  return { ...view, onClose, onAsk, onOpenSettings };
+}
+
+/** Documents' settings, opened, and the read let in. */
+async function openedSettings(over: Partial<Server> = {}) {
+  server = fresh(over);
+  const onOpenDocuments = vi.fn();
+  const view = render(<DocumentsSettings onOpenDocuments={onOpenDocuments} />);
+  await wait(0);
+  return { ...view, onOpenDocuments };
 }
 
 const rows = () => screen.queryAllByTestId("saved-document");
@@ -667,9 +680,31 @@ describe("what the owner can read", () => {
   });
 });
 
-describe("the settings", () => {
+describe("the page holds no settings, and points to them", () => {
+  it("has none of the controls, and Documents settings opens them", async () => {
+    const { onOpenSettings } = await opened();
+    expect(screen.queryByTestId("documents-new-chats-switch")).toBeNull();
+    expect(screen.queryByTestId("documents-external-ask")).toBeNull();
+    expect(screen.queryByTestId("documents-external-effective")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Settings" })).toBeNull();
+    fireEvent.click(screen.getByTestId("documents-open-settings"));
+    expect(onOpenSettings).toHaveBeenCalledOnce();
+  });
+});
+
+describe("the settings (now on the Settings page)", () => {
+  it("say so when the owner has turned documents off, and hold no control", async () => {
+    await openedSettings({
+      installEnabled: false,
+      prefs: prefs({ effective: { enabled: false, disabledBy: "owner" } }),
+    });
+    expect(screen.getByTestId("documents-owner-off")).toBeInTheDocument();
+    expect(screen.queryByTestId("documents-new-chats-switch")).toBeNull();
+    expect(screen.queryByTestId("documents-external-ask")).toBeNull();
+  });
+
   it("show Documents in new chats as it is in effect", async () => {
-    await opened();
+    await openedSettings();
     const box = screen.getByTestId("documents-new-chats-switch");
     expect(box).toHaveAttribute("role", "switch");
     expect(box).not.toBeChecked();
@@ -679,7 +714,7 @@ describe("the settings", () => {
   });
 
   it("turn it on for new chats, show it on, and say so", async () => {
-    await opened();
+    await openedSettings();
     fireEvent.click(screen.getByTestId("documents-new-chats-switch"));
     expect(screen.getByTestId("documents-new-chats-switch")).toBeChecked();
     await wait(0);
@@ -693,18 +728,18 @@ describe("the settings", () => {
   });
 
   it("put the old value back when the change was refused, and say why", async () => {
-    await opened();
+    await openedSettings();
     vi.mocked(put).mockRejectedValueOnce(refuse("Workbench could not keep that.", 500));
     fireEvent.click(screen.getByTestId("documents-new-chats-switch"));
     await wait(0);
     expect(screen.getByTestId("documents-new-chats-switch")).not.toBeChecked();
-    expect(screen.getByTestId("documents-problem")).toHaveTextContent(
+    expect(screen.getByTestId("documents-settings-problem")).toHaveTextContent(
       "Workbench could not keep that.",
     );
   });
 
   it("show the choice about models outside the person's machines, and whose word it is", async () => {
-    await opened();
+    await openedSettings();
     expect(screen.getByTestId("documents-external-ask")).toBeChecked();
     expect(screen.getByTestId("documents-external-never")).not.toBeChecked();
     expect(screen.getByTestId("documents-external-effective")).toHaveTextContent(
@@ -714,7 +749,7 @@ describe("the settings", () => {
   });
 
   it("let the person choose, show the choice in effect with their own name on it, and take it back", async () => {
-    await opened();
+    await openedSettings();
     fireEvent.click(screen.getByTestId("documents-external-never"));
     await wait(0);
     expect(vi.mocked(put)).toHaveBeenCalledWith("/api/documents/prefs", { external: "never" });
@@ -730,7 +765,7 @@ describe("the settings", () => {
   });
 
   it("are the owner's where the owner set them: shown, said, and not for the person to change", async () => {
-    await opened({
+    await openedSettings({
       prefs: prefs({ external: "ask", effective: { external: "never", externalSetBy: "owner" } }),
     });
     expect(screen.getByTestId("documents-external-never")).toBeChecked();
@@ -745,7 +780,7 @@ describe("the settings", () => {
   });
 
   it("are held while a change is made", async () => {
-    await opened();
+    await openedSettings();
     let finish: () => void = () => undefined;
     vi.mocked(put).mockReturnValueOnce(new Promise<void>((resolve) => (finish = resolve)) as never);
     fireEvent.click(screen.getByTestId("documents-external-always"));

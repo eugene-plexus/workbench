@@ -11,6 +11,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { Memory } from "./components/Memory";
 import { MemoryChip, MemoryDrawer } from "./components/MemoryChip";
 import { MemoryToast, type ToastOutcome } from "./components/MemoryToast";
+import { MemorySettings } from "./components/MemorySettings";
 import { MessageView } from "./components/MessageView";
 import { api, del, patch, post, put } from "./lib/api";
 import type { Chat, ChatMemoryView, MemoryNote, MemoryPage, Message } from "./lib/types";
@@ -30,6 +31,7 @@ import {
 
 // Connections (MR9b) has its own tests; this page's do not serve it.
 vi.mock("./components/Connections", () => ({ Connections: () => null }));
+vi.mock("./components/MemoryModels", () => ({ MemoryModels: () => null }));
 
 vi.mock("./lib/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./lib/api")>()),
@@ -150,8 +152,25 @@ beforeEach(() => {
 
 async function opened(data: MemoryPage) {
   vi.mocked(api).mockResolvedValue(data as never);
-  const view = render(<Memory chats={chats} chatsLoaded onOpenChat={vi.fn()} onClose={vi.fn()} />);
+  const view = render(
+    <Memory
+      chats={chats}
+      chatsLoaded
+      onOpenChat={vi.fn()}
+      onClose={vi.fn()}
+      onOpenSettings={vi.fn()}
+      onSearchChats={vi.fn()}
+    />,
+  );
   await waitFor(() => expect(screen.queryByText("Loading your notes…")).toBeNull());
+  return view;
+}
+
+/** Memory's settings, on the Settings page. */
+async function openedSettings(data: MemoryPage) {
+  vi.mocked(api).mockResolvedValue(data as never);
+  const view = render(<MemorySettings onOpenMemory={vi.fn()} />);
+  await waitFor(() => expect(screen.queryByText("Loading your memory settings…")).toBeNull());
   return view;
 }
 
@@ -159,22 +178,12 @@ const ALL = (over: Parameters<typeof page>[1] = {}) => page(NOTES, over);
 
 describe("the Memory page", () => {
   it("with notes of every kind, from every source: every control", async () => {
-    const view = await opened(
-      ALL({
-        ownerReadsChats: true,
-        usage: { notSent: 2 },
-        prefs: prefs({
-          external: "never",
-          budgetTokens: 800,
-          effective: { external: "never", externalSetBy: "you", budgetTokens: 800 },
-        }),
-      }),
-    );
-    // A link back to a chat, and the buttons that offer the defaults, are among them.
+    const view = await opened(ALL({ ownerReadsChats: true, usage: { notSent: 2 } }));
+    // A link back to a chat, and the way to the settings and to the chat search, are among them.
     expect(screen.getAllByRole("link", { name: "Build a birdhouse" })).toHaveLength(2);
-    expect(screen.getByTestId("memory-external-default")).toBeInTheDocument();
-    expect(screen.getByTestId("memory-budget-default")).toBeInTheDocument();
-    expect(controlsIn(view.container).length).toBeGreaterThanOrEqual(30);
+    expect(screen.getByTestId("memory-open-settings")).toBeInTheDocument();
+    expect(screen.getByTestId("memory-past-chats-input")).toBeInTheDocument();
+    expect(controlsIn(view.container).length).toBeGreaterThanOrEqual(20);
     expect(wrong(view)).toEqual([]);
   });
 
@@ -255,21 +264,6 @@ describe("the Memory page", () => {
     expect(wrong(view)).toEqual([]);
   });
 
-  it("with the settings that are new: two budgets and the search switch", async () => {
-    const view = await opened(
-      ALL({
-        prefs: prefs({
-          relevantBudgetTokens: 3000,
-          searchTool: false,
-          effective: { relevantBudgetTokens: 3000 },
-        }),
-      }),
-    );
-    expect(screen.getByTestId("memory-search-switch")).not.toBeChecked();
-    expect(screen.getByTestId("memory-relevant-budget-default")).toBeInTheDocument();
-    expect(wrong(view)).toEqual([]);
-  });
-
   it("with nothing remembered yet: the two boxes", async () => {
     const view = await opened(page([]));
     expect(screen.getByTestId("memory-empty")).toBeInTheDocument();
@@ -288,7 +282,7 @@ describe("the Memory page", () => {
     expect(wrong(view)).toEqual([]);
   });
 
-  it("where the person turned Memory off", async () => {
+  it("where the person turned Memory off: the notice, and no switch on the page", async () => {
     const view = await opened(
       ALL({
         prefs: prefs({
@@ -297,15 +291,8 @@ describe("the Memory page", () => {
         }),
       }),
     );
-    expect(screen.getByTestId("memory-use-switch")).not.toBeChecked();
-    expect(wrong(view)).toEqual([]);
-  });
-
-  it("where the owner's word on outside models is final", async () => {
-    const view = await opened(
-      ALL({ prefs: prefs({ effective: { external: "never", externalSetBy: "owner" } }) }),
-    );
-    expect(screen.getByTestId("memory-external-ask")).toBeDisabled();
+    expect(screen.getByTestId("memory-person-off")).toBeInTheDocument();
+    expect(screen.queryByTestId("memory-use-switch")).toBeNull();
     expect(wrong(view)).toEqual([]);
   });
 
@@ -323,6 +310,67 @@ describe("the Memory page", () => {
     vi.mocked(api).mockRejectedValue(new Error("Workbench answered 502."));
     fireEvent.click(screen.getAllByTestId("memory-note-pin")[0]!);
     await screen.findByText("Could not read your notes again");
+    expect(wrong(view)).toEqual([]);
+  });
+});
+
+describe("the Memory settings", () => {
+  it("with every setting set by the person, and the buttons that offer the defaults", async () => {
+    const view = await openedSettings(
+      ALL({
+        prefs: prefs({
+          external: "never",
+          budgetTokens: 800,
+          effective: { external: "never", externalSetBy: "you", budgetTokens: 800 },
+        }),
+      }),
+    );
+    expect(screen.getByTestId("memory-external-default")).toBeInTheDocument();
+    expect(screen.getByTestId("memory-budget-default")).toBeInTheDocument();
+    expect(screen.getByTestId("settings-open-memory")).toBeInTheDocument();
+    expect(controlsIn(view.container).length).toBeGreaterThanOrEqual(15);
+    expect(wrong(view)).toEqual([]);
+  });
+
+  it("with the settings that are new: two budgets and the search switch", async () => {
+    const view = await openedSettings(
+      ALL({
+        prefs: prefs({
+          relevantBudgetTokens: 3000,
+          searchTool: false,
+          effective: { relevantBudgetTokens: 3000 },
+        }),
+      }),
+    );
+    expect(screen.getByTestId("memory-search-switch")).not.toBeChecked();
+    expect(screen.getByTestId("memory-relevant-budget-default")).toBeInTheDocument();
+    expect(wrong(view)).toEqual([]);
+  });
+
+  it("where the person turned Memory off", async () => {
+    const view = await openedSettings(
+      ALL({
+        prefs: prefs({
+          enabled: false,
+          effective: { enabled: false, disabledBy: "you" },
+        }),
+      }),
+    );
+    expect(screen.getByTestId("memory-use-switch")).not.toBeChecked();
+    expect(wrong(view)).toEqual([]);
+  });
+
+  it("where the owner's word on outside models is final", async () => {
+    const view = await openedSettings(
+      ALL({ prefs: prefs({ effective: { external: "never", externalSetBy: "owner" } }) }),
+    );
+    expect(screen.getByTestId("memory-external-ask")).toBeDisabled();
+    expect(wrong(view)).toEqual([]);
+  });
+
+  it("where the owner turned Memory off: the notice, and no control", async () => {
+    const view = await openedSettings(page([], { installEnabled: false }));
+    expect(screen.getByTestId("memory-owner-off")).toBeInTheDocument();
     expect(wrong(view)).toEqual([]);
   });
 });
