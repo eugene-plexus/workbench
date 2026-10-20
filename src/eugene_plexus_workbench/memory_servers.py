@@ -55,7 +55,10 @@ log = logging.getLogger(__name__)
 #: Each verb of the contract, and the tool names that serve it, in order of preference.
 VERB_NAMES: dict[str, tuple[str, ...]] = {
     "recall": ("recall", "search_memory"),
-    "retain": ("retain", "remember"),
+    # Hindsight's `retain` only queues: a `forget` sent before it is read deletes nothing, and
+    # the deleted chat's words are kept after it (measured, MV5b probe). `sync_retain`
+    # answers once they are kept.
+    "retain": ("sync_retain", "retain", "remember"),
     "forget": ("delete_document", "forget"),
     "purge": ("clear_memories", "purge"),
     "list": ("list_memories", "list"),
@@ -73,9 +76,11 @@ MISSING_WORDS = {
     "purge": "It cannot be cleared from Workbench: Delete all memory leaves it as it is.",
     "list": "Its memories cannot be listed, so your export does not include them.",
 }
-#: How long a turn waits for `recall`; other calls' limit; connecting's.
+#: How long a turn waits for `recall`; other calls' limit; a `retain` that reads the exchange
+#: with the server's model before it answers (up to 9 s on a 27B, MV5b probe); connecting's.
 RECALL_SECONDS = 2.0
 CALL_SECONDS = 20.0
+RETAIN_SECONDS = 120.0
 CONNECT_SECONDS = 10.0
 #: What one result may carry, and how many a turn takes.
 ITEM_CHARS = 2000
@@ -449,7 +454,9 @@ class Servers:
         return self._own
 
     @asynccontextmanager
-    async def session(self, url: str, token: str, mode: str) -> AsyncIterator[Client]:
+    async def session(
+        self, url: str, token: str, mode: str, seconds: float = CALL_SECONDS
+    ) -> AsyncIterator[Client]:
         """An MCP session with a server, every connection checked against `mode`."""
         if (problem := check_url(url)) is not None:
             raise ServerProblem(problem)
@@ -467,7 +474,7 @@ class Servers:
                 transport=transport,
                 trust_env=False,
                 follow_redirects=False,
-                timeout=CALL_SECONDS,
+                timeout=seconds,
                 headers={
                     "Accept-Encoding": "identity",
                     **({"Authorization": f"Bearer {token}"} if token else {}),
@@ -476,7 +483,7 @@ class Servers:
             ) as http,
             Client(
                 streamable_http_client(url, http_client=http, max_sse_event_size=1_048_576),
-                read_timeout_seconds=CALL_SECONDS,
+                read_timeout_seconds=seconds,
                 cache=None,
             ) as client,
         ):
@@ -546,7 +553,7 @@ class Servers:
         owner = server["owner"]
         try:
             async with asyncio.timeout(seconds):
-                async with self.session(server["url"], server["token"], mode) as client:
+                async with self.session(server["url"], server["token"], mode, seconds) as client:
                     result = await client.session.call_tool(
                         found["tool"], _arguments(found, wanted), read_timeout_seconds=seconds
                     )
@@ -747,6 +754,7 @@ class Courier:
                 "timestamp": _iso(asked_at),
                 "context": await context_for(self.store, owner, chat),
             },
+            RETAIN_SECONDS,
         )
         settled = await self.store.memory_server_settled(row["document_id"], "send")
         if not settled and "forget" in server["verbs"]:
