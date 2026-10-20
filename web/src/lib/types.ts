@@ -777,8 +777,10 @@ export interface MemoryPage {
   };
   tags: MemoryTag[];
   suggestions?: MemorySuggestion[];
-  /** The project to ask "Still true?" about now (at most one, at most weekly). */
-  revisit?: MemoryNote[];
+  /** Notes to ask "Still true?" about now: a project's timer, or a document that changed. */
+  revisit?: RevisitNote[];
+  /** MV6: notes that look the same, or an event that has passed. */
+  tidy?: TidyProposal[];
   /** MV3b: notes models kept by themselves in the last 30 days, newest first. */
   learned?: MemoryNote[];
   /** Whether only relevant notes can be chosen now (a search model runs), and why not. */
@@ -822,10 +824,53 @@ export interface NotesFound {
   search: { how: RelevantHow; why: string | null } | null;
 }
 
+/** Why a note is asked about: a document it is based on changed or went. */
+export interface RevisitReason {
+  docId: string;
+  name: string;
+  change: "changed" | "removed";
+  /** Epoch seconds; null when it is not known. */
+  at: number | null;
+}
+
+/** A note to ask "Still true?" about. A project's 60-day timer has no reasons. */
+export interface RevisitNote extends MemoryNote {
+  reasons: RevisitReason[];
+}
+
+/** MV6: two or more notes that look the same, or an event that has passed. */
+export interface TidyProposal {
+  id: string;
+  kind: "duplicate" | "past";
+  notes: MemoryNote[];
+}
+
+/** Where in a document an answer found what a note says. */
+export interface DocumentPlace {
+  page_start?: number | null;
+  page_end?: number | null;
+  line_start?: number | null;
+  line_end?: number | null;
+  heading?: string | null;
+  snippet?: string | null;
+}
+
+/** A document a note is based on: linked by the person, or from an answer. */
+export interface NoteDocument {
+  docId: string;
+  name: string;
+  scope: "library" | "chat";
+  how: "answer" | "person";
+  place: DocumentPlace[];
+  linkedAt: number;
+}
+
 /** `GET /api/memory/notes/{id}`: one note whole, and the versions it replaced, newest first. */
 export interface NoteWhole {
   note: MemoryNote;
   earlier: MemoryNote[];
+  /** The documents the note is based on. */
+  documents?: NoteDocument[];
 }
 
 /** `POST /api/memory/tags/import`: what would go (ask again to do it), or what was done. */

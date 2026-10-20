@@ -538,6 +538,22 @@ def overlap(a: str, b: str) -> float:
     return len(x & y) / len(x | y)
 
 
+def same_claim(a: str, b: str) -> bool:
+    """Whether two notes that share most of their words could say the same thing (MV6's
+    tidy pass): each says no where the other does, they carry the same numbers, and the
+    words they share come in the same order. "Has 2 kids" is not "Has 3 kids", nor
+    "Is allergic to peanuts" "Is not allergic to peanuts", nor "Prefers tabs over spaces"
+    "Prefers spaces over tabs"."""
+    if _negated(a) != _negated(b) or _numbers(a) != _numbers(b):
+        return False
+    x = [_stem(w) for w in re.findall(r"[^\W_]+", _norm(a)) if w not in _FRAME and not w.isdigit()]
+    y = [_stem(w) for w in re.findall(r"[^\W_]+", _norm(b)) if w not in _FRAME and not w.isdigit()]
+    shared = set(x) & set(y)
+    return list(dict.fromkeys(w for w in x if w in shared)) == list(
+        dict.fromkeys(w for w in y if w in shared)
+    )
+
+
 def _words(*alternatives: str) -> str:
     return "|".join(alternatives)
 

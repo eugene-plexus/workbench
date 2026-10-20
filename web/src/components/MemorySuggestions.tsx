@@ -19,10 +19,11 @@ import {
   LEARN_CHOICES,
   learnSetByWords,
   NOTE_LIMIT,
+  noteDate,
   SUGGESTED_KINDS,
   USE_CHOICES,
 } from "../lib/memory";
-import type { MemoryNote, MemoryPage, MemorySuggestion, NoteKind } from "../lib/types";
+import type { MemoryNote, MemoryPage, MemorySuggestion, NoteKind, RevisitNote } from "../lib/types";
 
 type Working = <T>(work: () => Promise<T>) => Promise<T>;
 
@@ -383,8 +384,11 @@ export function StillTrue({
   busy,
   working,
   onProblem,
+  onEdit,
 }: {
-  note: MemoryNote;
+  note: RevisitNote;
+  /** Open the note for editing. */
+  onEdit?: () => void;
   busy: boolean;
   working: Working;
   onProblem: (words: string | null) => void;
@@ -411,6 +415,22 @@ export function StillTrue({
             {"”"}
           </span>
         </span>
+        {(note.reasons ?? []).map((reason) => (
+          <p
+            key={`${reason.docId}-${reason.change}`}
+            data-testid="memory-revisit-reason"
+            className="help"
+          >
+            {"“"}
+            {reason.name}
+            {"”"}{" "}
+            {reason.change === "removed"
+              ? "was removed"
+              : reason.at == null
+                ? "changed"
+                : `changed on ${noteDate(reason.at)}`}
+          </p>
+        ))}
         <div className="flex flex-wrap gap-2">
           <button
             type="button"
@@ -439,6 +459,17 @@ export function StillTrue({
           >
             Ask me next week
           </button>
+          {onEdit && (
+            <button
+              type="button"
+              data-testid="memory-revisit-edit"
+              disabled={busy}
+              className="btn btn-quiet"
+              onClick={onEdit}
+            >
+              Edit
+            </button>
+          )}
         </div>
       </div>
     </div>

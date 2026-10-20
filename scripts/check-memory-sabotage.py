@@ -50,6 +50,9 @@ POLICY = SRC + "memory_policy.py"
 WRITE = SRC + "memory_write.py"
 SERVERS = SRC + "memory_servers.py"
 MV5 = "tests/test_memory_servers.py"
+PROVENANCE = SRC + "memory_provenance.py"
+TIDY = SRC + "memory_tidy.py"
+MV6 = "tests/test_memory_mv6.py"
 
 # (label, file, before, after, check)
 CASES: list[tuple[str, str, str, str, str]] = [
@@ -877,6 +880,92 @@ CASES: list[tuple[str, str, str, str, str]] = [
         "RECALL_SECONDS = 2.0",
         "RECALL_SECONDS = 30.0",
         f"{MV5}::test_a_slow_server_does_not_hold_the_answer",
+    ),
+    # --- MV6: provenance and tidy --------------------------------------------------
+    (
+        "MV6: a current document is taken for a changed one",
+        PROVENANCE,
+        '                if doc is not None and doc.sha256 == link["sha256"]:\n'
+        "                    continue\n",
+        "",
+        f"{MV6}::test_replacing_a_document_asks_still_true_and_yes_moves_the_link",
+    ),
+    (
+        "MV6: a replaced document is not found where it was",
+        PROVENANCE,
+        "                        there[origin] = await index.at_origin(*origin)",
+        "                        there[origin] = None",
+        f"{MV6}::test_replacing_a_document_asks_still_true_and_yes_moves_the_link",
+    ),
+    (
+        "MV6: passages an answer did not cite are linked",
+        PROVENANCE,
+        '            if source.get("cited") is True:',
+        "            if True:",
+        f"{MV6}::test_remember_on_an_answer_links_what_it_cited_and_nothing_else",
+    ),
+    (
+        "MV6: a note's documents outlive it",
+        STORE,
+        '"BEGIN DELETE FROM memory_note_documents WHERE note_id = old.id; END"',
+        '"BEGIN SELECT 1; END"',
+        f"{MV6}::test_a_new_version_carries_its_documents_as_they_are_now",
+    ),
+    (
+        "MV6: tidy pairs notes of different kinds",
+        TIDY,
+        "        same[(n.kind, note_key(n.text), day)].append(n.id)",
+        '        same[("", note_key(n.text), day)].append(n.id)',
+        f"{MV6}::test_duplicates_are_the_same_words_or_most_of_them_within_one_kind",
+    ),
+    (
+        "MV6: a pair kept both of is proposed again",
+        TIDY,
+        '    waiting = [r for r in rows if r["settled"] is None]',
+        "    waiting = rows",
+        f"{MV6}::test_keep_both_is_never_proposed_again_and_an_old_event_is_removed",
+    ),
+    (
+        "MV6: a merge branches the kept note's versions",
+        STORE,
+        "                    (now, tail, now, other_id, owner),",
+        "                    (now, keep_id, now, other_id, owner),",
+        f"{MV6}::test_merging_below_a_history_keeps_one_line_of_versions",
+    ),
+    (
+        "MV6: notes that contradict each other are proposed",
+        TIDY,
+        "            if _same(first, second) and memory_suggest.same_claim(first.text, second.text):",
+        "            if _same(first, second):",
+        f"{MV6}::test_notes_that_contradict_each_other_are_never_proposed",
+    ),
+    (
+        "MV6: the candidates are only each note's three rarest stems",
+        TIDY,
+        "        for stem in held[: _prefix(len(held))]:",
+        "        for stem in held[:3]:",
+        f"{MV6}::test_long_notes_that_share_most_words_are_found_whatever_their_rarest",
+    ),
+    (
+        "MV6: a merge logs the other note's words",
+        STORE,
+        '                self._event(db, owner, keep_id, "merge", "person", None, None)',
+        '                self._event(db, owner, keep_id, "merge", "person", other["text"], None)',
+        f"{MV6}::test_merging_keeps_one_note_with_both_notes_pins_tags_and_history",
+    ),
+    (
+        "MV6: putting off outlives a second change",
+        PROVENANCE,
+        '                ) and link.get("snoozed_sha") == ("" if doc is None else doc.sha256)',
+        "                ) and True",
+        f"{MV6}::test_put_off_holds_only_while_the_document_stays_as_it_was",
+    ),
+    (
+        "MV6: a document's question spends the project timer's week",
+        ROUTES,
+        "    if timer:\n        # The timer's one project a week",
+        "    if True:\n        # The timer's one project a week",
+        f"{MV6}::test_a_removed_document_asks_later_puts_it_off_and_yes_drops_the_link",
     ),
 ]
 
