@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     oidc_client_id: str | None = None
     oidc_secret_file: Path | None = None
     public_origin: str | None = None
+    tls_port: int | None = None
+    """LT2: the second loopback port the agent's door sends TLS connections
+    to, decrypted. A request that arrives here came from an https page."""
     oidc_backchannel: str | None = None
 
     @field_validator("public_origin")

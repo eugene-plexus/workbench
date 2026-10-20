@@ -85,6 +85,31 @@ def _secret(path: Path | None) -> str | None:
     return value or None
 
 
+def https_twin(issuer: str | None) -> str | None:
+    """The same issuer over https (LT2-C5): the console takes both on one port,
+    so a page opened over https signs in through `https://<host>:<port>/oidc`
+    and a password never goes plain from a page that had TLS. None for an
+    issuer that is https already, or none."""
+    if not issuer or not issuer.startswith("http://"):
+        return None
+    return "https://" + issuer.removeprefix("http://")
+
+
+def unverified_issuer(token: str) -> str | None:
+    """The `iss` a JWT claims, unverified: only to choose which provider then
+    verifies it, strictly, against its own issuer."""
+    import base64
+    import json
+
+    try:
+        payload = token.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    except (IndexError, ValueError):
+        return None
+    iss = claims.get("iss") if isinstance(claims, dict) else None
+    return str(iss).rstrip("/") if isinstance(iss, str) else None
+
+
 class Provider:
     """Eugene's sign-in, as one client of it sees it."""
 

@@ -81,9 +81,12 @@ def signin_path(request: Request) -> str:
 class Sessions:
     """Creates, checks, refreshes and ends sessions."""
 
-    def __init__(self, store: Store, provider: Provider) -> None:
+    def __init__(self, store: Store, provider: Provider, *others: Provider) -> None:
         self._store = store
         self._provider = provider
+        #: Every issuer this Workbench signs in through (LT2-C5): a refresh or
+        #: a revocation goes to the one that issued the token.
+        self._providers = {p.issuer: p for p in (provider, *others) if p.issuer}
         self._locks: dict[str, asyncio.Lock] = {}
 
     async def create(
@@ -118,7 +121,7 @@ class Sessions:
             return
         await self._store.delete_session(row.id_hash)
         if row.refresh_token:
-            await self._provider.revoke(row.refresh_token)
+            await self._provider_for(row.refresh_token).revoke(row.refresh_token)
 
     async def person(self, request: Request) -> Person:
         """Who is asking, or 401 saying why not. Refreshes when due."""
@@ -146,6 +149,13 @@ class Sessions:
         person_context.set((person.sub, row.id_hash))
         return replace(person, session_id=row.id_hash)
 
+    def _provider_for(self, token: str) -> Provider:
+        """The provider whose issuer issued `token`; it checks the answer's
+        issuer strictly. The configured one for a token naming no other."""
+        from .signin import unverified_issuer
+
+        return self._providers.get(unverified_issuer(token) or "", self._provider)
+
     async def _refresh(self, row: SessionRow, *, need_access: bool = False) -> None:
         lock = self._locks.setdefault(row.id_hash, asyncio.Lock())
         async with lock:
@@ -160,7 +170,9 @@ class Sessions:
                 await self._store.delete_session(row.id_hash)
                 raise SignedOut("revoked", _REVOKED)
             try:
-                identity = await self._provider.refresh(current.refresh_token)
+                identity = await self._provider_for(current.refresh_token).refresh(
+                    current.refresh_token
+                )
             except SignInRefused:
                 await self._store.delete_session(row.id_hash)
                 raise SignedOut("revoked", _REVOKED) from None

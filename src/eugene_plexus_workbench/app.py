@@ -58,7 +58,7 @@ from .past_chats import router as past_chats_router
 from .projects_api import router as projects_router
 from .sessions import Sessions
 from .settings import Settings
-from .signin import Provider
+from .signin import Provider, https_twin
 from .store import Store, public_cause
 from .tools import Tools
 
@@ -155,7 +155,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             http=http,
             backchannel=settings.oidc_backchannel,
         )
-        sessions = Sessions(store, provider)
+        # LT2-C5: behind the agent's door, an https page signs in through the
+        # same issuer over https; the agent gives this process the install
+        # CA (SSL_CERT_FILE) so `http` trusts it.
+        twin = https_twin(settings.oidc_issuer) if settings.tls_port else None
+        provider_https = (
+            Provider(
+                issuer=twin,
+                client_id=settings.oidc_client_id,
+                secret_file=settings.oidc_secret_file,
+                http=http,
+            )
+            if twin
+            else None
+        )
+        sessions = Sessions(store, provider, *([provider_https] if provider_https else []))
         hub = Hub(settings.gateway_url, settings.key_file, person_token=sessions.gateway_token)
         tools = Tools(store, settings)
         tools.node_folders = NodeFolders(store, provider, http)
@@ -219,6 +233,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.tools = tools
         app.state.store = store
         app.state.provider = provider
+        app.state.provider_https = provider_https
         app.state.hub = hub
         app.state.answers = answers
         app.state.media = media
@@ -365,6 +380,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         from .public_origin import CanonicalOrigin
 
         app.add_middleware(CanonicalOrigin, origin=settings.public_origin)
+    if settings.tls_port:
+        from .public_origin import SchemeByPort
+
+        app.add_middleware(SchemeByPort, tls_port=settings.tls_port)
     app.include_router(config.router)
     app.include_router(api.router)
     app.include_router(artifacts_api.router)

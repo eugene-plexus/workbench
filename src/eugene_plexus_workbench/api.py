@@ -78,6 +78,15 @@ def _state(request: Request) -> Any:
     return request.app.state
 
 
+def _provider(request: Request) -> Provider:
+    """The page's own issuer (LT2-C5): an https page signs in over https."""
+    state = _state(request)
+    twin = getattr(state, "provider_https", None)
+    if twin is not None and request.url.scheme == "https":
+        return twin  # type: ignore[no-any-return]
+    return state.provider  # type: ignore[no-any-return]
+
+
 async def _person(request: Request) -> Person:
     sessions: Sessions = _state(request).sessions
     return await sessions.person(request)
@@ -131,7 +140,7 @@ def _sign_in_failed(request: Request, message: str) -> RedirectResponse:
 
 @router.get("/signin")
 async def sign_in(request: Request) -> Response:
-    provider: Provider = _state(request).provider
+    provider = _provider(request)
     try:
         url, pending = await provider.start(f"{own_origin(request)}/oidc/callback")
     except SignInUnavailable as exc:
@@ -154,7 +163,7 @@ async def sign_in(request: Request) -> Response:
 
 @router.get("/oidc/callback")
 async def sign_in_callback(request: Request) -> Response:
-    provider: Provider = _state(request).provider
+    provider = _provider(request)
     sessions: Sessions = _state(request).sessions
     store: Store = _state(request).store
     query = request.query_params
