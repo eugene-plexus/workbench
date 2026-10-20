@@ -101,7 +101,9 @@ def turn_context(message: Message, interactions: bool = False) -> Any:
             for turn in message.tool_rounds
             for call in turn.get("calls") or []
         ),
-        past_chats=bool((used.get("pastChats") or {}).get("exchanges")),
+        # A memory server's results (MV5) are memory from elsewhere, read as past chats are.
+        past_chats=bool((used.get("pastChats") or {}).get("exchanges"))
+        or bool((used.get("memoryServer") or {}).get("memories")),
         interactions=interactions,
     )
 

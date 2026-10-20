@@ -52,6 +52,7 @@ from .mcp_apps import McpApps
 from .mcp_ui import PROTOCOL as MCP_APPS_PROTOCOL
 from .mcp_ui import VERSION as MCP_APPS_VERSION
 from .media import MediaJobs
+from .memory_servers import router as memory_servers_router
 from .node_folders import NodeFolders
 from .past_chats import router as past_chats_router
 from .sessions import Sessions
@@ -267,7 +268,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return text, note
 
         tools.remember = remember
-        answers.on_finished = lambda chat_id: exchanges.touch(None, chat_id)
+        # Memory servers (MV5): a person's own, sent their answered exchanges in the
+        # background and asked every turn.
+        from .memory_servers import Courier, Servers
+
+        app.state.memory_servers = Servers(store, settings)
+        courier = app.state.memory_courier = Courier(store, app.state.memory_servers)
+        courier.start()
+
+        def finished(chat_id: str) -> None:
+            exchanges.touch(None, chat_id)
+            courier.finished(chat_id)
+
+        answers.on_finished = finished
         # Learn from my chats (MR8): one timer per chat that has gone quiet.
         from .memory_learn import Learner
 
@@ -322,6 +335,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await app.state.agui.aclose()
             await app.state.interactions.aclose()
             await learner.aclose()
+            await courier.aclose()
             measurer = getattr(app.state, "measurer", None)
             if measurer is not None:
                 await measurer.aclose()
@@ -359,6 +373,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(memory_api.router)
     app.include_router(memory_models_api.router)
     app.include_router(past_chats_router)
+    app.include_router(memory_servers_router)
     app.include_router(documents_api.router)
     # Before `saved_api`: `/api/documents/folders` is not a document's id.
     app.include_router(folder_docs_api.router)

@@ -611,6 +611,7 @@ def hide_notes(view: dict[str, Any]) -> dict[str, Any]:
     out = dict(view)
     if isinstance(used, dict):
         past = used.get("pastChats")
+        server = used.get("memoryServer")
         out["memoryUsed"] = {
             "notes": len(used.get("notes") or []),
             "tokens": used.get("tokens"),
@@ -620,6 +621,17 @@ def hide_notes(view: dict[str, Any]) -> dict[str, Any]:
             **(
                 {"pastChats": {"exchanges": len(past.get("exchanges") or []), "redacted": True}}
                 if isinstance(past, dict)
+                else {}
+            ),
+            # MV5: so is what their own memory server returned.
+            **(
+                {
+                    "memoryServer": {
+                        "memories": len(server.get("memories") or []),
+                        "redacted": True,
+                    }
+                }
+                if isinstance(server, dict)
                 else {}
             ),
         }
@@ -848,6 +860,10 @@ async def delete_chat(request: Request, chat_id: str) -> Response:
                 exc,
             )
     await _state(request).reader.cancel([r.id for r in records])
+    # Its exchanges at the person's memory server are forgotten there, in the background (MV5).
+    courier = getattr(_state(request), "memory_courier", None)
+    if courier is not None:
+        courier.poke()
     # The documents made from this chat's files go with it: they are in the person's own
     # index, another store, so a failure here is said in the log and the boot reconcile
     # removes what is left. It never keeps a chat from being deleted.
@@ -1009,16 +1025,32 @@ async def _ask(
         )
         decided["past_turn"] = past.block
         decided["chats_allowed"] = past.allowed
+        # The person's own memory server (MV5), in up to a third of the relevant budget,
+        # after their notes; never waited on for more than two seconds.
+        from . import memory_servers
+
+        server = await memory_servers.turn_for(
+            _state(request),
+            person,
+            fresh,
+            history,
+            model,
+            used=prepared.used + past.tokens + turn.tokens,
+            reserve=saved_api._reserve(fresh),
+        )
+        decided["server_turn"] = server.block
         record = turn.record
         if past.record is not None:
             record = {**(record or {}), "pastChats": past.record}
+        if server.record is not None:
+            record = {**(record or {}), "memoryServer": server.record}
         found = await saved_api.retrieve(
             request,
             person,
             fresh,
             history,
             model,
-            used=prepared.used + past.tokens + turn.tokens,
+            used=prepared.used + past.tokens + turn.tokens + server.tokens,
             sent_whole=prepared.sent_whole,
             progress=progress,
             ask_anyway=ask_anyway,
@@ -1050,6 +1082,7 @@ async def _ask(
             documents=decided.get("documents"),
             retrieved=decided.get("retrieved"),
             memory_turn=decided.get("memory_turn"),
+            server_turn=decided.get("server_turn"),
             memory_allowed=bool(decided.get("memory_allowed", notes is not None)),
             past_turn=decided.get("past_turn"),
             chats_allowed=bool(decided.get("chats_allowed", False)),

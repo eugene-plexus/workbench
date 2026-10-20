@@ -48,6 +48,8 @@ LEARN = SRC + "memory_learn.py"
 MV3B = "tests/test_memory_mv3b.py"
 POLICY = SRC + "memory_policy.py"
 WRITE = SRC + "memory_write.py"
+SERVERS = SRC + "memory_servers.py"
+MV5 = "tests/test_memory_servers.py"
 
 # (label, file, before, after, check)
 CASES: list[tuple[str, str, str, str, str]] = [
@@ -804,6 +806,77 @@ CASES: list[tuple[str, str, str, str, str]] = [
         "_PRIVATE_SERVERS = (MEMORY_SERVER, CHATS_SERVER, WRITE_SERVER)",
         "_PRIVATE_SERVERS = (MEMORY_SERVER, WRITE_SERVER)",
         f"{MV2}::test_a_kept_search_chats_call_is_withheld_where_past_chats_may_not_go_and_hidden_from_owner",
+    ),
+    # --- MV5: memory servers ---------------------------------------------------
+    (
+        "MV5: loopback is allowed off this host",
+        SERVERS,
+        "    if ip.is_loopback or ip.is_unspecified:",
+        "    if False:",
+        f"{MV5}::test_loopback_is_refused_by_default_by_address_and_by_name",
+    ),
+    (
+        "MV5: the address is not checked where the connection is made",
+        SERVERS,
+        'network_backend=_CheckedBackend(mode, own, urlsplit(url).scheme == "http"),',
+        "network_backend=None,",
+        f"{MV5}::test_loopback_is_refused_by_default_by_address_and_by_name",
+    ),
+    (
+        "MV5: pasted material is sent under Standard",
+        SERVERS,
+        "        text = memory_suggest.source_text(asked.content)",
+        "        text = asked.content.strip()",
+        f"{MV5}::test_only_the_persons_own_words_are_sent_under_standard_and_the_answer_under_open",
+    ),
+    (
+        "MV5: a secret-shaped turn is sent",
+        SERVERS,
+        '    if policy.get("secrets") == "refuse" and memory.looks_like_secret(text) is not None:',
+        "    if False:",
+        f"{MV5}::test_a_secret_shaped_turn_is_not_sent_and_is_counted",
+    ),
+    (
+        "MV5: an outside model is given the server's memory",
+        SERVERS,
+        '        if policy.get("unseenLocal") == "yes":',
+        "        if False:",
+        f"{MV5}::test_an_outside_model_is_not_given_what_the_server_holds",
+    ),
+    (
+        "MV5: a deleted chat is not forgotten at the server",
+        STORE,
+        "\"UPDATE memory_server_sent SET state = 'forget', attempts = 0, next_at = ?, \"",
+        "\"UPDATE memory_server_sent SET state = 'sent', attempts = 0, next_at = ?, \"",
+        f"{MV5}::test_deleting_a_chat_forgets_its_exchanges_at_the_server",
+    ),
+    (
+        "MV5: a chat deleted days after its answer is given up at once",
+        STORE,
+        "\"created_at = ? WHERE chat_id = ? AND state = 'sent'\",",
+        "\"created_at = created_at + 0 * ? WHERE chat_id = ? AND state = 'sent'\",",
+        f"{MV5}::test_a_chat_deleted_days_after_its_answer_is_still_forgotten",
+    ),
+    (
+        "MV5: a server that still lists after clearing is said to be cleared",
+        SERVERS,
+        "    if left:",
+        "    if False:",
+        f"{MV5}::test_delete_all_memory_clears_the_server_and_checks_it",
+    ),
+    (
+        "MV5: the owner's never does not stop memory servers",
+        SERVERS,
+        '    if install.external == "never":',
+        "    if False:",
+        f"{MV5}::test_the_owner_decides_whether_servers_may_be_connected",
+    ),
+    (
+        "MV5: a slow server holds the answer",
+        SERVERS,
+        "RECALL_SECONDS = 2.0",
+        "RECALL_SECONDS = 30.0",
+        f"{MV5}::test_a_slow_server_does_not_hold_the_answer",
     ),
 ]
 

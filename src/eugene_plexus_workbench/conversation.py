@@ -122,6 +122,7 @@ def request_for(
     lean: bool = False,
     retrieved: str | None = None,
     memory_turn: str | None = None,
+    server_turn: str | None = None,
     memory_allowed: bool = True,
     past_turn: str | None = None,
     chats_allowed: bool | None = None,
@@ -149,6 +150,9 @@ def request_for(
     placed the same way, before the passages. Without `memory_allowed` (this request may not
     carry notes), a `search_memory` result kept from an earlier turn is withheld.
 
+    `server_turn` is what the person's own memory server returned for this turn (MV5,
+    `memory_servers.render`), placed the same way, after the notes.
+
     `past_turn` is the person's past chats chosen for this turn (MV2, `past_chats.render`),
     after the notes. Without `chats_allowed` (this request may not carry past chats; it
     follows `memory_allowed` when not given), a kept `search_chats` result is withheld."""
@@ -170,7 +174,9 @@ def request_for(
                         root,
                         documents,
                         lean,
-                        "\n\n".join(p for p in (memory_turn, past_turn, retrieved) if p)
+                        "\n\n".join(
+                            p for p in (memory_turn, server_turn, past_turn, retrieved) if p
+                        )
                         if message is last_user
                         else None,
                     ),

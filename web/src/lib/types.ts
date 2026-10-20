@@ -896,6 +896,41 @@ export interface MemoryTurn {
   room: number | null;
   /** MV2: the past chats the turn was sent, when the chat uses them. */
   pastChats?: PastChatsTurn;
+  /** MV5: what the person's own memory server returned for the turn. */
+  memoryServer?: MemoryServerTurn;
+}
+
+/** What a turn was sent from the person's memory server, or why nothing (MV5). */
+export interface MemoryServerTurn {
+  name: string;
+  budget?: number;
+  tokens?: number;
+  why: string | null;
+  dropped?: number;
+  didNotFit?: number;
+  memories: { text: string; date: string | null }[];
+}
+
+/** `GET /api/memory/server`: a person's own memory server (MV5). */
+export interface MemoryServerPage {
+  allowed: boolean;
+  mode: "off" | "outside" | "any";
+  why: string | null;
+  server: {
+    url: string;
+    name: string;
+    hasToken: boolean;
+    verbs: string[];
+    missing: string[];
+    connectedAt: number;
+    lastOkAt: number | null;
+    lastError: string | null;
+    lastErrorAt: number | null;
+    skipped: number;
+    sent: number;
+    waiting: number;
+    forgetting: number;
+  } | null;
 }
 
 /** `GET /api/chats/{id}/memory`, for a chat that is the asker's. */
@@ -959,6 +994,7 @@ export interface ChatMemoryReadOnly {
     budget: number | null;
     /** MV2: how many past exchanges it was sent. */
     pastChats?: number;
+    memoryServer?: number;
   } | null;
 }
 

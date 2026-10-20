@@ -523,9 +523,13 @@ export function Memory({
             count={notes.length}
             busy={busy}
             onProblem={setProblem}
-            onDeleted={(count) => {
+            onDeleted={(count, server) => {
               setUndo(null);
-              setSaid(`Deleted ${plural(count, "note")}. Nothing of them is kept.`);
+              // MV5: what clearing the person's own memory server came to, in its own words.
+              setSaid(
+                `Deleted ${plural(count, "note")}. Nothing of them is kept.` +
+                  (server ? ` ${server.message}` : ""),
+              );
               // The button that asked is gone: focus goes to the notes, which are now none.
               setFocusId(`${uid}-notes`);
             }}
@@ -1357,7 +1361,7 @@ function YourData({
   busy: boolean;
   working: Working;
   onProblem: (problem: string | null) => void;
-  onDeleted: (count: number) => void;
+  onDeleted: (count: number, server: { message: string } | undefined) => void;
 }) {
   const uid = useId();
   const [exporting, setExporting] = useState<"md" | "json" | null>(null);
@@ -1388,11 +1392,13 @@ function YourData({
     onProblem(null);
     try {
       const done = await working(() =>
-        api<{ deleted: number }>("/api/memory/notes?confirm=all", { method: "DELETE" }),
+        api<{ deleted: number; server?: { message: string } }>("/api/memory/notes?confirm=all", {
+          method: "DELETE",
+        }),
       );
       setConfirming(false);
       setTyped("");
-      onDeleted(done.deleted);
+      onDeleted(done.deleted, done.server);
     } catch (failure) {
       onProblem(failureWords(failure));
     }

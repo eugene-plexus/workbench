@@ -701,7 +701,12 @@ async def delete_all_notes(request: Request, confirm: str | None = None) -> dict
             "Workbench could not remove your notes' words from your search index, so nothing "
             f"was deleted ({type(exc).__name__}). Try again in a moment.",
         ) from None
-    return {"deleted": await store.delete_memory_notes(person.sub)}
+    deleted = await store.delete_memory_notes(person.sub)
+    # MV5: the person's own memory server is cleared too, and listed to check.
+    from . import memory_servers
+
+    cleared = await memory_servers.clear(state, person.sub)
+    return {"deleted": deleted, **({"server": cleared} if cleared is not None else {})}
 
 
 @router.put("/api/memory/prefs")
@@ -1209,6 +1214,10 @@ async def export(request: Request, format: Literal["md", "json"] = "md") -> Resp
     notes = [n for n in every if n.status == "active"]
     earlier = [n for n in every if n.status == "superseded"]
     tags = await store.memory_tags(person.sub)
+    # MV5: what the person's own memory server lists, or why it is not here.
+    from . import memory_servers
+
+    server = await memory_servers.export_items(_state(request), person.sub)
     now = time.time()
     headers = {"Cache-Control": "private, no-store"}
     if format == "json":
@@ -1235,6 +1244,7 @@ async def export(request: Request, format: Literal["md", "json"] = "md") -> Resp
                 "notes": [entry(n) for n in notes],
                 "earlierVersions": [entry(n) for n in earlier],
                 "tags": [{"tag": t["tag"], "description": t["description"]} for t in tags],
+                **({"memoryServer": server} if server is not None else {}),
             },
             headers={
                 **headers,
@@ -1271,6 +1281,16 @@ async def export(request: Request, format: Literal["md", "json"] = "md") -> Resp
     for t in tags:
         lines.append(f"- {t['tag']}" + (f": {t['description']}" if t["description"] else ""))
     lines.append("")
+    if server is not None:
+        lines += [f"## From your memory server ({server['server'] or server['url']})", ""]
+        if server["note"]:
+            lines += [server["note"], ""]
+        for item in server["memories"] or []:
+            text = " ".join(str(item["text"]).split())
+            lines.append(f"- {text}" + (f" *({item['date']})*" if item["date"] else ""))
+        if server["memories"] == []:
+            lines.append("Nothing here.")
+        lines.append("")
     return Response(
         "\n".join(lines),
         media_type="text/markdown; charset=utf-8",
@@ -1710,6 +1730,7 @@ async def chat_memory(
                     "tokens": turn.get("tokens"),
                     "budget": turn.get("budget"),
                     "pastChats": len((turn.get("pastChats") or {}).get("exchanges") or []),
+                    "memoryServer": len((turn.get("memoryServer") or {}).get("memories") or []),
                 }
                 if turn
                 else None
