@@ -160,11 +160,16 @@ export function ChatView({
     return () => observer.disconnect();
   }, [loaded]);
 
+  const reloadMemory = memory.reload;
   useEffect(() => {
-    // An answer that has just ended changes the dot in the chat list.
-    if (wasRunning.current && !running) onChanged();
+    // An answer that has just ended changes the dot in the chat list, and what its turn
+    // was sent of the person's notes (the chip and the drawer read it again).
+    if (wasRunning.current && !running) {
+      onChanged();
+      void reloadMemory();
+    }
     wasRunning.current = running;
-  }, [running, onChanged]);
+  }, [running, onChanged, reloadMemory]);
 
   // The tab says which chat it holds, so several open tabs can be told apart.
   const title = detail?.chat.title;

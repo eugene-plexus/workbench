@@ -275,7 +275,22 @@ export function chipWords(
   }
   if (view.sending) {
     const { sent, notSent } = view.counts;
-    if (sent === 0) return { label: "Memory: no notes fit", short: "", tone: "warn" };
+    // MV1: unpinned notes are chosen again each turn and sent in the latest message, so
+    // what the latest answer's turn was sent of them counts too.
+    const chosen = view.turn?.notes.length ?? 0;
+    if (chosen > 0) {
+      return {
+        label: `Memory: ${plural(sent + chosen, "note")} sent`,
+        short: String(sent + chosen),
+        tone: "on",
+      };
+    }
+    if (sent === 0) {
+      if (notSent > 0) return { label: "Memory: no notes fit", short: "", tone: "warn" };
+      return view.turn
+        ? { label: "Memory: no notes chosen this turn", short: "", tone: "quiet" }
+        : { label: "Memory: notes are chosen each turn", short: "", tone: "on" };
+    }
     const how = notSent > 0 ? `${sent} of ${sent + notSent} notes` : plural(sent, "note");
     return {
       label: `Memory: ${how} ${view.frozen ? "sent" : "ready"}`,

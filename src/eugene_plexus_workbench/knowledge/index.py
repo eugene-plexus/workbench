@@ -759,6 +759,21 @@ class Index:
 
         await asyncio.get_running_loop().run_in_executor(self._executor, shut)
 
+    async def discard(self) -> None:
+        """Close the index and take its file out of the way (`quarantine`) as one step, under
+        the lock every read takes: a worker that asks between the two would open the file again,
+        and Windows does not remove a file that is open."""
+
+        def go() -> None:
+            with self._lock:
+                if self._db is not None:
+                    with contextlib.suppress(sqlite3.Error):
+                        self._db.close()
+                    self._db = None
+                self.quarantine()
+
+        await asyncio.get_running_loop().run_in_executor(self._executor, go)
+
     def _transaction[T](self, db: sqlite3.Connection, body: Callable[[], T]) -> T:
         """`body` as one transaction: all of it, or none."""
         db.execute("BEGIN IMMEDIATE")
