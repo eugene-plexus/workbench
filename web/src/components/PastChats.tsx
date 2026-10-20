@@ -30,12 +30,15 @@ const WHEN: [When, string][] = [
 export function PastChats({
   onOpen,
   onClose,
+  initialQuery = null,
 }: {
   onOpen: (chatId: string, messageId: string) => void;
   onClose: () => void;
+  /** Words to search for at once: Memory's Past chats box sends them here (MV4). */
+  initialQuery?: string | null;
 }) {
   const uid = useId();
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(initialQuery ?? "");
   const [when, setWhen] = useState<When>("any");
   const [order, setOrder] = useState<Order>("best");
   const [found, setFound] = useState<PastChatsSearch | null>(null);
@@ -92,6 +95,13 @@ export function PastChats({
       setBusy(false);
     }
   }
+
+  // Words that came with the address are searched once, as if the person had pressed Search.
+  useEffect(() => {
+    if (initialQuery) void search(initialQuery, "any", "best");
+    // Once, when the screen opens: a new query opens it again (App keys it by the words).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function submit(event: FormEvent) {
     event.preventDefault();

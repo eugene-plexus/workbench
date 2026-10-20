@@ -134,3 +134,28 @@ test("the drawer's switch turns past chats on and names the exchanges a turn was
   );
   expect(screen.getByTestId("past-chats-effective").textContent).toContain("documents never to go");
 });
+
+test("words that come with the address are in the box and searched at once", async () => {
+  const asked: string[] = [];
+  vi.mocked(api).mockImplementation((async (path: string) => {
+    asked.push(path);
+    if (path === "/api/past-chats/status") return IDLE;
+    return found();
+  }) as never);
+  render(<PastChats onOpen={vi.fn()} onClose={() => undefined} initialQuery="custard tarts" />);
+  expect(screen.getByTestId("past-chats-query")).toHaveValue("custard tarts");
+  expect(await screen.findByTestId("past-chats-results")).toBeTruthy();
+  expect(asked).toContain("/api/past-chats?q=custard+tarts&when=any&order=best&offset=0");
+});
+
+test("without words, nothing is searched until the person asks", async () => {
+  const asked: string[] = [];
+  vi.mocked(api).mockImplementation((async (path: string) => {
+    asked.push(path);
+    return IDLE;
+  }) as never);
+  render(<PastChats onOpen={vi.fn()} onClose={() => undefined} />);
+  expect(screen.getByTestId("past-chats-query")).toHaveValue("");
+  await waitFor(() => expect(asked).toContain("/api/past-chats/status"));
+  expect(asked.some((path) => path.startsWith("/api/past-chats?"))).toBe(false);
+});

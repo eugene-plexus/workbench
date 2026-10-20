@@ -1,4 +1,4 @@
-/* global process, console, document, getComputedStyle, window, setTimeout */
+/* global process, console, document, getComputedStyle, window, setTimeout, URL */
 // Documents in Chrome (MR2): the whole of it, as a person meets it, against the
 // real app and its fake Eugene and gateway. Attaches a three-page PDF and
 // watches its chip go from reading to ready, sees why Send waits, reads the text
@@ -404,6 +404,33 @@ try {
     .click();
   await chip(page, "long-30-pages.pdf").waitFor({ state: "detached" });
   await context.close();
+
+  // --- the Documents page holds no settings; they are on the Settings page (MV4) ------
+  {
+    const { context: c, page: p } = await open("dark", DESK);
+    await p.goto(`${cfg.url}/documents`);
+    await p.getByTestId("documents-open-settings").waitFor();
+    assert.equal(await p.getByTestId("documents-new-chats-switch").count(), 0);
+    assert.equal(await p.getByTestId("documents-external-ask").count(), 0);
+    await p.getByTestId("documents-open-settings").click();
+    await p.getByTestId("settings-documents").waitFor();
+    assert.equal(new URL(p.url()).pathname, "/settings");
+    assert.equal(new URL(p.url()).hash, "#documents");
+    await p.getByTestId("documents-new-chats-switch").waitFor();
+    await p.getByTestId("documents-external-ask").waitFor();
+    const sections = await p
+      .getByRole("heading", { level: 2 })
+      .evaluateAll((all) => all.map((h) => h.textContent.trim()));
+    assert.deepEqual(
+      sections.filter((name) => /^(Memory|Documents|Connections)/.test(name)),
+      ["Memory", "Documents", "Connections to other apps"],
+    );
+    await p.getByTestId("settings-open-documents").click();
+    await p.getByTestId("documents-open-settings").waitFor();
+    assert.equal(new URL(p.url()).pathname, "/documents");
+    await c.close();
+  }
+  log("PASS  Documents holds no settings: they are on Settings, with Memory's and Connections");
 
   // --- pictures: the composer's chips, dark and light, at a desk and a phone ---------
   const sizes = [

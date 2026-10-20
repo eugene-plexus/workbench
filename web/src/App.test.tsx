@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
-import App, { documentsFromPath, memoryFromPath } from "./App";
+import App, { documentsFromPath, memoryFromPath, queryFromSearch, settingsFromPath } from "./App";
 import { api, patch, post } from "./lib/api";
 import type { Chat, Me, Models } from "./lib/types";
 
@@ -36,11 +36,13 @@ vi.mock("./components/Documents", () => ({
     onClose,
     onAsk,
     onTools,
+    onOpenSettings,
     me,
   }: {
     onClose: () => void;
     onAsk: () => void;
     onTools?: () => void;
+    onOpenSettings?: () => void;
     me?: { owner: boolean; consoleUrl?: string | null } | null;
   }) => (
     <section>
@@ -50,6 +52,7 @@ vi.mock("./components/Documents", () => ({
       </p>
       <button onClick={onAsk}>Ask about the documents</button>
       <button onClick={onTools}>Give folders in the tools page</button>
+      <button onClick={onOpenSettings}>Documents settings</button>
       <button onClick={onClose}>Back to chat</button>
     </section>
   ),
@@ -59,11 +62,15 @@ vi.mock("./components/Memory", () => ({
     chats,
     chatsLoaded,
     onOpenChat,
+    onOpenSettings,
+    onSearchChats,
     onClose,
   }: {
     chats: { id: string; title: string }[];
     chatsLoaded: boolean;
     onOpenChat: (id: string) => void;
+    onOpenSettings?: () => void;
+    onSearchChats?: (query: string) => void;
     onClose: () => void;
   }) => (
     <section>
@@ -72,7 +79,35 @@ vi.mock("./components/Memory", () => ({
         {chatsLoaded ? "loaded" : "loading"}: {chats.map((c) => c.title).join(", ")}
       </p>
       <button onClick={() => onOpenChat("one")}>Open the note's chat</button>
+      <button onClick={onOpenSettings}>Memory settings</button>
+      <button onClick={() => onSearchChats?.("custard tarts")}>Search the past chats</button>
       <button onClick={onClose}>Back to chat</button>
+    </section>
+  ),
+}));
+vi.mock("./components/SettingsPage", () => ({
+  SettingsPage: ({
+    onClose,
+    onOpenMemory,
+    onOpenDocuments,
+  }: {
+    onClose: () => void;
+    onOpenMemory: () => void;
+    onOpenDocuments: () => void;
+  }) => (
+    <section>
+      <h1 id="view-heading">The settings page</h1>
+      <button onClick={onOpenMemory}>Open Memory</button>
+      <button onClick={onOpenDocuments}>Open Documents</button>
+      <button onClick={onClose}>Back to chat</button>
+    </section>
+  ),
+}));
+vi.mock("./components/PastChats", () => ({
+  PastChats: ({ initialQuery }: { initialQuery?: string | null }) => (
+    <section>
+      <h1 id="view-heading">The chat search</h1>
+      <p data-testid="search-words">{initialQuery ?? "no words"}</p>
     </section>
   ),
 }));
@@ -487,7 +522,8 @@ describe("the Memory page", () => {
       .getAllByRole("button")
       .map((b) => b.textContent?.trim());
     expect(names.indexOf("Memory")).toBe(names.indexOf("Documents") + 1);
-    expect(names.indexOf("Job sites (your machines)")).toBe(names.indexOf("Memory") + 1);
+    expect(names.indexOf("Settings")).toBe(names.indexOf("Memory") + 1);
+    expect(names.indexOf("Job sites (your machines)")).toBe(names.indexOf("Settings") + 1);
   });
 
   it("is there for the owner as well, who has no Job sites", async () => {
@@ -833,5 +869,104 @@ describe("what an address says is the Documents page", () => {
     ["/", false],
   ])("%s is %s", (path, is) => {
     expect(documentsFromPath(path)).toBe(is);
+  });
+});
+
+describe("the Settings page", () => {
+  it("is a page in the top bar, after Memory and before Job sites, with a glyph that is only a glyph", async () => {
+    await open();
+    const settings = tab("Settings");
+    expect(settings).toHaveClass("nav-tab");
+    expect(settings).toHaveAttribute("data-testid", "open-settings");
+    expect(settings.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+    expect(settings).not.toHaveAttribute("aria-current");
+    const names = within(bar())
+      .getAllByRole("button")
+      .map((b) => b.textContent?.trim());
+    expect(names.indexOf("Settings")).toBe(names.indexOf("Memory") + 1);
+    expect(names.indexOf("Job sites (your machines)")).toBe(names.indexOf("Settings") + 1);
+  });
+
+  it("is there for the owner as well, who has no Job sites", async () => {
+    await open("/", { me: { owner: true } });
+    expect(tab("Settings")).toBeInTheDocument();
+  });
+
+  it("opens at /settings from its tab, marks it, and names the tab", async () => {
+    await open("/chats/one", { chats: [chat] });
+    fireEvent.click(tab("Settings"));
+    expect(window.location.pathname).toBe("/settings");
+    expect(screen.getByRole("heading", { name: "The settings page" })).toBeInTheDocument();
+    expect(tab("Settings")).toHaveAttribute("aria-current", "page");
+    expect(document.title).toBe("Settings · Workbench");
+    expect(screen.queryByRole("heading", { name: "Chat one" })).toBeNull();
+  });
+
+  it("opens at the address /settings, and goes back to the chat", async () => {
+    await open("/settings");
+    expect(screen.getByRole("heading", { name: "The settings page" })).toBeInTheDocument();
+    expect(tab("Settings")).toHaveAttribute("aria-current", "page");
+    fireEvent.click(back());
+    expect(screen.queryByRole("heading", { name: "The settings page" })).toBeNull();
+    expect(tab("Settings")).not.toHaveAttribute("aria-current");
+  });
+
+  it("is reached from Memory's and Documents' own links, at the section, and opens them back", async () => {
+    await open("/memory");
+    fireEvent.click(screen.getByRole("button", { name: "Memory settings" }));
+    expect(window.location.pathname + window.location.hash).toBe("/settings#memory");
+    expect(screen.getByRole("heading", { name: "The settings page" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Open Documents" }));
+    expect(window.location.pathname).toBe("/documents");
+    fireEvent.click(screen.getByRole("button", { name: "Documents settings" }));
+    expect(window.location.pathname + window.location.hash).toBe("/settings#documents");
+    fireEvent.click(screen.getByRole("button", { name: "Open Memory" }));
+    expect(window.location.pathname).toBe("/memory");
+    expect(screen.getByRole("heading", { name: "The memory page" })).toBeInTheDocument();
+  });
+});
+
+describe("Search chats, opened from Memory's Past chats box", () => {
+  it("opens at /search?q= with the words searched", async () => {
+    await open("/memory");
+    fireEvent.click(screen.getByRole("button", { name: "Search the past chats" }));
+    expect(window.location.pathname).toBe("/search");
+    expect(new URLSearchParams(window.location.search).get("q")).toBe("custard tarts");
+    expect(screen.getByTestId("search-words")).toHaveTextContent("custard tarts");
+  });
+
+  it("opens with the words an address carries, and with none at /search", async () => {
+    await open("/search?q=birdhouse+cedar");
+    expect(screen.getByTestId("search-words")).toHaveTextContent("birdhouse cedar");
+    cleanup();
+    await open("/search");
+    expect(screen.getByTestId("search-words")).toHaveTextContent("no words");
+  });
+});
+
+describe("what an address says is the Settings page", () => {
+  it.each([
+    ["/settings", true],
+    ["/settings/", true],
+    ["/settings/extra", false],
+    ["/setting", false],
+    ["/chats/settings", false],
+    ["/memory", false],
+    ["/", false],
+  ])("%s is %s", (path, is) => {
+    expect(settingsFromPath(path)).toBe(is);
+  });
+});
+
+describe("the words an address gives Search chats", () => {
+  it.each([
+    ["?q=cedar", "cedar"],
+    ["?q=birdhouse+cedar", "birdhouse cedar"],
+    ["?q=", null],
+    ["?q=%20%20", null],
+    ["?at=a1", null],
+    ["", null],
+  ])("%j gives %j", (search, words) => {
+    expect(queryFromSearch(search)).toBe(words);
   });
 });

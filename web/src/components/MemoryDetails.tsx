@@ -8,7 +8,7 @@ import { CircleAlert } from "lucide-react";
 import { type FormEvent, type ReactNode, useEffect, useId, useRef, useState } from "react";
 
 import { api, del } from "../lib/api";
-import { excerpt, failureWords, kindLabel, noteDate, plural, showingWords } from "../lib/memory";
+import { excerpt, failureWords, kindLabel, noteDate, plural } from "../lib/memory";
 import type { MemoryNote, MemoryPage, NotesFound, NoteWhole } from "../lib/types";
 import { ScrollText } from "./ScrollText";
 import { TagChips } from "./MemoryTags";
@@ -217,10 +217,6 @@ export function NoteSearch({
 
   return (
     <div data-testid="memory-search" className="flex flex-col gap-2">
-      <p data-testid="memory-showing" className="help">
-        {showingWords(data.sections.other.length, data.sections.otherTotal)}. Search to find the
-        rest.
-      </p>
       <form
         role="search"
         aria-label="Search your notes"

@@ -5,9 +5,12 @@ import { characters, saveFile } from "../lib/memory";
 import type { Chat, MemoryNote, MemoryPrefs } from "../lib/types";
 import { NOW, note, page, prefs } from "../test-memory";
 import { Memory } from "./Memory";
+import { MemorySettings } from "./MemorySettings";
 
 // Connections (MR9b) has its own tests; this page's do not serve it.
 vi.mock("./Connections", () => ({ Connections: () => null }));
+// So has MemoryModels, which the settings hold.
+vi.mock("./MemoryModels", () => ({ MemoryModels: () => null }));
 
 vi.mock("../lib/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/api")>()),
@@ -182,6 +185,13 @@ async function opened(over: { loaded?: boolean } = {}) {
   const view = open(over);
   // The page is there once it has stopped saying it is loading.
   await waitFor(() => expect(screen.queryByText("Loading your notes…")).toBeNull());
+  return view;
+}
+
+/** Memory's settings, once they have read the page. */
+async function openedSettings() {
+  const view = render(<MemorySettings onOpenMemory={vi.fn()} />);
+  await waitFor(() => expect(screen.queryByText("Loading your memory settings…")).toBeNull());
   return view;
 }
 
@@ -904,8 +914,8 @@ describe("a person with no notes", () => {
     expect(answers()).toHaveAccessibleDescription(/used in every chat/);
     expect(about()).toHaveAttribute("dir", "auto");
     expect(screen.queryByTestId("memory-section-always")).toBeNull();
-    // The settings and the usage are still there: this is a page, not a promotion.
-    expect(screen.getByTestId("memory-use-switch")).toBeInTheDocument();
+    // The usage is still there, and the settings are not: this is a page, not a promotion.
+    expect(screen.queryByTestId("memory-use-switch")).toBeNull();
     expect(screen.getByTestId("memory-usage-notes")).toHaveTextContent("0 of 300 notes");
   });
 
@@ -984,10 +994,9 @@ describe("a person with no notes", () => {
   });
 });
 
-describe("the settings", () => {
+describe("the settings (now on the Settings page)", () => {
   it("shows Use memory as it is in effect, and turning it off keeps notes and sends none", async () => {
-    server.notes = [note({ id: "a" })];
-    await opened();
+    await openedSettings();
     const use = screen.getByRole("switch", { name: "Use memory" });
     expect(use).toBeChecked();
     expect(screen.getByTestId("memory-use-effective")).toHaveTextContent("Memory is on:");
@@ -1000,15 +1009,13 @@ describe("the settings", () => {
     expect(screen.getByTestId("memory-use-effective")).toHaveTextContent(
       "You turned memory off. No model is given your notes, and Remember that … keeps nothing. Your notes stay saved here.",
     );
-    // The notes stay, and can still be read.
-    expect(rows()).toHaveLength(1);
     fireEvent.click(use);
     await waitFor(() => expect(use).toBeChecked());
     expect(put).toHaveBeenLastCalledWith("/api/memory/prefs", { enabled: true });
   });
 
   it("keeps the keyboard on the switch while the server answers", async () => {
-    await opened();
+    await openedSettings();
     let finish: (value: unknown) => void = () => undefined;
     vi.mocked(put).mockReturnValue(new Promise((resolve) => (finish = resolve)) as never);
     const use = screen.getByRole("switch", { name: "Use memory" });
@@ -1027,7 +1034,7 @@ describe("the settings", () => {
   });
 
   it("puts the switch back and says why when the server refused", async () => {
-    await opened();
+    await openedSettings();
     vi.mocked(put).mockRejectedValue(new Error("Workbench answered 500."));
     const use = screen.getByRole("switch", { name: "Use memory" });
     fireEvent.click(use);
@@ -1039,7 +1046,7 @@ describe("the settings", () => {
   });
 
   it("shows which of the three choices about outside models is in effect, and whose word it is", async () => {
-    await opened();
+    await openedSettings();
     expect(screen.getByRole("radio", { name: "Ask me in each chat" })).toBeChecked();
     expect(screen.getByRole("radio", { name: "Never send them" })).not.toBeChecked();
     expect(screen.getByRole("radio", { name: "Always send them" })).not.toBeChecked();
@@ -1057,7 +1064,7 @@ describe("the settings", () => {
   });
 
   it("changes the choice, says it is the person's, and offers the default back", async () => {
-    await opened();
+    await openedSettings();
     fireEvent.click(screen.getByRole("radio", { name: "Never send them" }));
     expect(screen.getByRole("radio", { name: "Never send them" })).toBeChecked();
     await waitFor(() =>
@@ -1083,7 +1090,7 @@ describe("the settings", () => {
       external: "always",
       effective: { external: "never", externalSetBy: "owner" },
     });
-    await opened();
+    await openedSettings();
     expect(screen.getByRole("radio", { name: "Never send them" })).toBeChecked();
     for (const radio of screen
       .getAllByRole("radio")
@@ -1100,7 +1107,7 @@ describe("the settings", () => {
 
 describe("how much room notes may take", () => {
   async function room() {
-    await opened();
+    await openedSettings();
     return screen.getByTestId("memory-budget-details");
   }
 

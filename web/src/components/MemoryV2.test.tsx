@@ -1,13 +1,15 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import { ApiError, api, del, patch, post, put } from "../lib/api";
 import { noteDate, usageWords } from "../lib/memory";
 import type { MemoryPage } from "../lib/types";
 import { note, page, prefs, tag } from "../test-memory";
 import { Memory } from "./Memory";
+import { MemorySettings } from "./MemorySettings";
 
 // Connections (MR9b) has its own tests; this page's do not serve it.
 vi.mock("./Connections", () => ({ Connections: () => null }));
+vi.mock("./MemoryModels", () => ({ MemoryModels: () => null }));
 
 vi.mock("../lib/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/api")>()),
@@ -43,6 +45,11 @@ beforeEach(() => {
 async function opened() {
   render(<Memory chats={[]} chatsLoaded onOpenChat={vi.fn()} onClose={vi.fn()} />);
   await waitFor(() => expect(screen.queryByText("Loading your notes…")).toBeNull());
+}
+
+async function openedSettings() {
+  render(<MemorySettings onOpenMemory={vi.fn()} />);
+  await waitFor(() => expect(screen.queryByText("Loading your memory settings…")).toBeNull());
 }
 
 const add = () => screen.getByRole("form", { name: "Add a note" });
@@ -533,10 +540,11 @@ describe("the notes the page does not list", () => {
     expect(screen.queryByTestId("memory-search-results")).toBeNull();
   });
 
-  it("is not offered when every note is listed", async () => {
+  it("is offered with only a few notes, and says nothing of notes not shown when every note is", async () => {
     shown.sections.otherTotal = 1;
     await opened();
-    expect(screen.queryByTestId("memory-search")).toBeNull();
+    expect(screen.getByTestId("memory-search")).toBeInTheDocument();
+    expect(screen.queryByTestId("memory-showing")).toBeNull();
   });
 
   it("says why a search failed", async () => {
@@ -555,9 +563,9 @@ describe("the notes the page does not list", () => {
   });
 });
 
-describe("the two budgets and the search switch", () => {
+describe("the two budgets and the search switch, on the Settings page", () => {
   async function room() {
-    await opened();
+    await openedSettings();
     return screen.getByTestId("memory-budget-details");
   }
 
@@ -620,7 +628,7 @@ describe("the two budgets and the search switch", () => {
   });
 
   it("has a switch for letting models search the notes, which shows what is in effect", async () => {
-    await opened();
+    await openedSettings();
     const search = screen.getByRole("switch", { name: "Let models search my notes" });
     expect(search).toBeChecked();
     fireEvent.click(search);
@@ -631,7 +639,7 @@ describe("the two budgets and the search switch", () => {
 
   it("shows the switch off when it is off", async () => {
     shown = page([note()], { prefs: prefs({ searchTool: false }) });
-    await opened();
+    await openedSettings();
     expect(screen.getByRole("switch", { name: "Let models search my notes" })).not.toBeChecked();
     expect(screen.getByTestId("memory-search-effective")).toHaveTextContent(
       "Models are only given the notes Workbench chooses for them.",
@@ -671,5 +679,93 @@ describe("the usage line", () => {
     expect(screen.getByTestId("memory-usage-tokens")).toHaveTextContent(
       "Pinned: 412 of 2,000 tokens, in every chat. Relevant: up to 6,000 tokens a turn, chosen from 9 notes by meaning and words.",
     );
+  });
+});
+
+describe("the Memory page, with its settings gone (MV4)", () => {
+  const suggested = {
+    ...note({ id: "s1", text: "Works as a nurse.", source: "suggested", sourceChatId: "c1" }),
+    quote: "I'm a nurse working nights",
+    replaces: null,
+    proposedTags: [],
+  };
+
+  function draw(props: { onOpenSettings?: () => void; onSearchChats?: (q: string) => void } = {}) {
+    render(<Memory chats={[]} chatsLoaded onOpenChat={vi.fn()} onClose={vi.fn()} {...props} />);
+    return waitFor(() => expect(screen.queryByText("Loading your notes…")).toBeNull());
+  }
+
+  it("lists its sections in order: Suggested notes, Your notes, Past chats, Tags", async () => {
+    shown = page([note({ id: "n1" })], {
+      suggestions: [suggested],
+      tags: [tag({ tag: "work" })],
+    });
+    await draw({ onSearchChats: vi.fn() });
+    const names = screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent);
+    const at = (name: string) => names.findIndex((n) => n?.includes(name));
+    expect(at("Suggested notes")).toBeGreaterThanOrEqual(0);
+    expect(at("Suggested notes")).toBeLessThan(at("Your notes"));
+    expect(at("Your notes")).toBeLessThan(at("Past chats"));
+    expect(at("Past chats")).toBeLessThan(at("Tags"));
+    expect(at("Tags")).toBeLessThan(at("Export or delete"));
+  });
+
+  it("holds no settings: no Use memory switch, no budget, no models that learn, no connections", async () => {
+    await draw({ onOpenSettings: vi.fn() });
+    expect(screen.queryByTestId("memory-use-switch")).toBeNull();
+    expect(screen.queryByRole("switch", { name: "Use memory" })).toBeNull();
+    expect(screen.queryByTestId("memory-budget-details")).toBeNull();
+    expect(screen.queryByTestId("memory-relevant-budget-input")).toBeNull();
+    expect(screen.queryByTestId("memory-models")).toBeNull();
+    expect(screen.queryByText("Models that learn")).toBeNull();
+    expect(screen.queryByTestId("memory-connections")).toBeNull();
+    expect(screen.queryByText("Connections to other apps")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Settings" })).toBeNull();
+  });
+
+  it("opens the settings from its head", async () => {
+    const onOpenSettings = vi.fn();
+    await draw({ onOpenSettings });
+    expect(screen.getByTestId("memory-open-settings")).toHaveTextContent("Memory settings");
+    fireEvent.click(screen.getByTestId("memory-open-settings"));
+    expect(onOpenSettings).toHaveBeenCalledOnce();
+  });
+
+  it("says Memory is off for the person, only while the person's own Use memory is off", async () => {
+    await draw({ onOpenSettings: vi.fn() });
+    expect(screen.queryByTestId("memory-person-off")).toBeNull();
+    cleanup();
+    shown = page([note({ id: "n1" })], {
+      prefs: prefs({ enabled: false, effective: { enabled: false, disabledBy: "you" } }),
+    });
+    await draw({ onOpenSettings: vi.fn() });
+    expect(screen.getByTestId("memory-person-off")).toHaveTextContent(
+      "Memory is off: no model is given your notes. Turn it on in Memory settings.",
+    );
+    // The notes stay, and can still be read.
+    expect(screen.getAllByTestId("memory-note")).toHaveLength(1);
+  });
+
+  it("searches the person's past chats: the trimmed words go to onSearchChats, and an empty box cannot", async () => {
+    const onSearchChats = vi.fn();
+    await draw({ onSearchChats });
+    const go = screen.getByTestId("memory-past-chats-go");
+    const box = screen.getByTestId("memory-past-chats-input");
+    expect(go).toBeDisabled();
+    fireEvent.change(box, { target: { value: "   " } });
+    expect(go).toBeDisabled();
+    fireEvent.change(box, { target: { value: "  birdhouse cedar  " } });
+    expect(go).toBeEnabled();
+    fireEvent.click(go);
+    expect(onSearchChats).toHaveBeenCalledExactlyOnceWith("birdhouse cedar");
+  });
+
+  it("has the note search at the top of Your notes with only a few notes", async () => {
+    shown = page([note({ id: "n1" }), note({ id: "n2", text: "Likes tea" })]);
+    await draw();
+    const search = screen.getByTestId("memory-search");
+    const notes = screen.getByRole("heading", { level: 2, name: "Your notes" });
+    expect(notes.compareDocumentPosition(search) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByTestId("memory-showing")).toBeNull();
   });
 });

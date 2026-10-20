@@ -4,36 +4,38 @@
  * "Remember that ..." in a chat, or from a message's Remember this), shown
  * with where each came from, and always deletable: a note is gone for real.
  *
- * Every setting shows the value in effect and whose word it is (the person's,
- * the owner's, or nobody's yet), never a stand-in that looks chosen. Where the
- * owner of this Workbench has turned Memory off, the page says so and offers
- * nothing that would keep a note; what a person already has stays theirs to
- * read, export and delete.
+ * The page is the app, and its settings are on the Settings page (MV4: app before
+ * config). What waits for the person comes first (Still true?, Suggested notes,
+ * Recently learned), then the notes with their search and tag filter, then a way
+ * into past chats, the tags, and the person's own copy. A setting that changes what
+ * the page means (Use memory off) is said here and changed there. Where the owner of
+ * this Workbench has turned Memory off, the page says so and offers nothing that
+ * would keep a note; what a person already has stays theirs to read, export and
+ * delete.
  */
 
 import {
   ArrowLeft,
   Brain,
-  ChevronRight,
   CircleAlert,
   CircleCheck,
   Eye,
   FileJson,
   FileText,
   Info,
+  MessagesSquare,
   Pin,
   PinOff,
+  Search,
+  Settings as SettingsIcon,
   TriangleAlert,
 } from "lucide-react";
 import { type FormEvent, type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
 
-import { api, del, fileOf, patch, post, put } from "../lib/api";
+import { api, del, fileOf, patch, post } from "../lib/api";
 import {
-  BUDGET_MAX,
   characters,
-  EXTERNAL_CHOICES,
   excerpt,
-  externalLabel,
   failureWords,
   KINDS,
   kindLabel,
@@ -43,27 +45,16 @@ import {
   plural,
   refusalOf,
   saveFile,
-  setByWords,
+  showingWords,
   tagsFrom,
   UNDO_MS,
   usageWords,
 } from "../lib/memory";
-import type {
-  Chat,
-  ExternalChoice,
-  MemoryNote,
-  MemoryPage,
-  MemoryTag,
-  NoteKind,
-  NoteWhole,
-  WritePolicyName,
-} from "../lib/types";
+import type { Chat, MemoryNote, MemoryPage, MemoryTag, NoteKind, NoteWhole } from "../lib/types";
 import { useKeepFocus } from "../lib/useKeepFocus";
-import { Connections } from "./Connections";
 import { Details, NoteSearch, readWhole } from "./MemoryDetails";
-import { MemoryModels } from "./MemoryModels";
-import { RecentlyLearned, WritePolicy } from "./MemoryLearned";
-import { LearnSettings, StillTrue, Suggestions } from "./MemorySuggestions";
+import { RecentlyLearned } from "./MemoryLearned";
+import { StillTrue, Suggestions } from "./MemorySuggestions";
 import { TagChips, Tags, TagsField } from "./MemoryTags";
 
 /** The lines of a box, one note each: trimmed, with the empty ones left out. */
@@ -83,12 +74,18 @@ export function Memory({
   chats,
   chatsLoaded,
   onOpenChat,
+  onOpenSettings,
+  onSearchChats,
   onClose,
 }: {
   /** The person's chats, to name where a note came from. */
   chats: Chat[];
   chatsLoaded: boolean;
   onOpenChat: (id: string) => void;
+  /** Opens the Settings page at Memory's section. */
+  onOpenSettings?: () => void;
+  /** Opens Search chats with these words searched. */
+  onSearchChats?: (query: string) => void;
   onClose: () => void;
 }) {
   const uid = useId();
@@ -173,6 +170,17 @@ export function Memory({
         <Brain size={20} aria-hidden />
         Memory
       </h1>
+      {onOpenSettings && (
+        <button
+          type="button"
+          data-testid="memory-open-settings"
+          className="btn btn-quiet"
+          onClick={onOpenSettings}
+        >
+          <SettingsIcon size={14} aria-hidden />
+          Memory settings
+        </button>
+      )}
       <button type="button" data-testid="memory-back" className="btn" onClick={onClose}>
         <ArrowLeft size={14} aria-hidden />
         Back to chat
@@ -311,6 +319,26 @@ export function Memory({
                 at once.
               </p>
             </div>
+            {!data.prefs.effective.enabled && (
+              <p data-testid="memory-person-off" className="notice notice--warn">
+                <Info size={16} aria-hidden />
+                <span>
+                  Memory is off: no model is given your notes.{" "}
+                  {onOpenSettings ? (
+                    <button
+                      type="button"
+                      data-testid="memory-person-off-settings"
+                      className="link"
+                      onClick={onOpenSettings}
+                    >
+                      Turn it on in Memory settings.
+                    </button>
+                  ) : (
+                    "Turn it on in Memory settings."
+                  )}
+                </span>
+              </p>
+            )}
             {data.ownerReadsChats && (
               <p data-testid="memory-owner-reads" className="notice notice--warn">
                 <Eye size={16} aria-hidden />
@@ -345,13 +373,6 @@ export function Memory({
             {problem}
           </p>
         )}
-        {!off && (
-          <Settings
-            data={data}
-            busy={busy}
-            onPrefs={(body) => void act(() => put("/api/memory/prefs", body).then(() => undefined))}
-          />
-        )}
         {!off &&
           (data.revisit ?? []).map((note) => (
             <StillTrue
@@ -370,11 +391,15 @@ export function Memory({
           working={working}
           onProblem={setProblem}
         />
+        {!off && (data.learned?.length ?? 0) > 0 && (
+          <RecentlyLearned notes={data.learned ?? []} onChanged={() => void load()} />
+        )}
         {!bare && (
           <section aria-labelledby={`${uid}-notes`} className="section">
             <h2 id={`${uid}-notes`} tabIndex={-1} className="title-section">
               Your notes
             </h2>
+            {notes.length > 0 && <NoteSearch data={data} list={list} />}
             {!off && <Usage data={data} />}
             {said && (
               <p role="status" data-testid="memory-said" className="notice notice--ok">
@@ -463,7 +488,10 @@ export function Memory({
                     list(data.sections.other)
                   )}
                   {data.sections.otherTotal > data.sections.other.length && (
-                    <NoteSearch data={data} list={list} />
+                    <p data-testid="memory-showing" className="help">
+                      {showingWords(data.sections.other.length, data.sections.otherTotal)}. Search
+                      to find the rest.
+                    </p>
                   )}
                 </section>
                 {past.length > 0 && (
@@ -488,12 +516,8 @@ export function Memory({
             )}
           </section>
         )}
+        {onSearchChats && <PastChatsDoor onSearch={onSearchChats} />}
         {!off && !bare && <Tags data={data} busy={busy} act={(work) => act(work)} />}
-        {!off && (data.learned?.length ?? 0) > 0 && (
-          <RecentlyLearned notes={data.learned ?? []} onChanged={() => void load()} />
-        )}
-        {!off && <MemoryModels />}
-        <Connections />
         {!bare && (
           <YourData
             count={notes.length}
@@ -513,289 +537,56 @@ export function Memory({
   );
 }
 
-// --- settings ---
+// --- past chats ---
 
-function Settings({
-  data,
-  busy,
-  onPrefs,
-}: {
-  data: MemoryPage;
-  busy: boolean;
-  onPrefs: (body: {
-    enabled?: boolean;
-    external?: ExternalChoice | null;
-    budgetTokens?: number | null;
-    relevantBudgetTokens?: number | null;
-    searchTool?: boolean;
-    chatsTool?: boolean;
-    learn?: "off" | "suggest" | null;
-    useMode?: "relevant" | "all";
-    writePolicy?: WritePolicyName | null;
-  }) => void;
-}) {
+/** Past chats on the Memory page (MV4): one box, whose words open Search chats searched. */
+function PastChatsDoor({ onSearch }: { onSearch: (query: string) => void }) {
   const uid = useId();
-  const { prefs, limits } = data;
-  const { effective } = prefs;
-  const ownerSet = effective.externalSetBy === "owner";
-  // What was just chosen shows while the server catches up, and a refusal puts
-  // the old value back: these are only read while the page is busy.
-  const [wanted, setWanted] = useState<{ enabled?: boolean; external?: ExternalChoice }>({});
-  const [wantedSearch, setWantedSearch] = useState<boolean | null>(null);
-  const [wantedChats, setWantedChats] = useState<boolean | null>(null);
-  const enabled = busy && wanted.enabled !== undefined ? wanted.enabled : effective.enabled;
-  const external = busy && wanted.external !== undefined ? wanted.external : effective.external;
-  return (
-    <section aria-labelledby={`${uid}-settings`} className="section">
-      <h2 id={`${uid}-settings`} className="title-section">
-        Settings
-      </h2>
-      <div className="field">
-        <label className="check items-center" htmlFor={`${uid}-use`}>
-          <input
-            id={`${uid}-use`}
-            type="checkbox"
-            role="switch"
-            data-testid="memory-use-switch"
-            aria-describedby={`${uid}-use-help`}
-            checked={enabled}
-            disabled={busy}
-            onChange={(event) => {
-              setWanted({ enabled: event.target.checked });
-              onPrefs({ enabled: event.target.checked });
-            }}
-          />
-          Use memory
-        </label>
-        <p id={`${uid}-use-help`} data-testid="memory-use-effective" className="help">
-          {effective.enabled
-            ? "Memory is on: models in your chats are given your notes. Turn it off for one chat from its Memory button."
-            : "You turned memory off. No model is given your notes, and Remember that … keeps nothing. Your notes stay saved here."}
-        </p>
-      </div>
-      <fieldset className="flex min-w-0 flex-col gap-2" aria-describedby={`${uid}-outside-help`}>
-        <legend className="field-label mb-1">Models that run outside your machines</legend>
-        <p id={`${uid}-outside-help`} className="help">
-          Some models run on another company&apos;s computers. Your notes would leave your machines
-          to reach them.
-        </p>
-        {EXTERNAL_CHOICES.map((choice) => (
-          <div key={choice.value}>
-            <label className="check">
-              <input
-                type="radio"
-                name={`${uid}-external`}
-                value={choice.value}
-                data-testid={`memory-external-${choice.value}`}
-                aria-describedby={`${uid}-external-${choice.value}`}
-                checked={external === choice.value}
-                disabled={busy || ownerSet}
-                onChange={() => {
-                  setWanted({ external: choice.value });
-                  onPrefs({ external: choice.value });
-                }}
-              />
-              <span>{choice.label}</span>
-            </label>
-            <p id={`${uid}-external-${choice.value}`} className="help ps-[1.625rem]">
-              {choice.help}
-            </p>
-          </div>
-        ))}
-        <p data-testid="memory-external-effective" className="help">
-          In effect: <strong>{externalLabel(effective.external)}</strong>.{" "}
-          {setByWords(effective.externalSetBy)}
-        </p>
-        {prefs.external !== null && !ownerSet && (
-          <button
-            type="button"
-            data-testid="memory-external-default"
-            disabled={busy}
-            onClick={() => onPrefs({ external: null })}
-            className="btn btn-quiet -ms-2 self-start"
-          >
-            Use the default
-          </button>
-        )}
-      </fieldset>
-      <LearnSettings data={data} busy={busy} onPrefs={onPrefs} />
-      <WritePolicy
-        prefs={data.prefs}
-        busy={busy}
-        onChoose={(writePolicy) => onPrefs({ writePolicy })}
-      />
-      <div className="field">
-        <label className="check items-center" htmlFor={`${uid}-search`}>
-          <input
-            id={`${uid}-search`}
-            type="checkbox"
-            role="switch"
-            data-testid="memory-search-switch"
-            aria-describedby={`${uid}-search-help`}
-            checked={busy && wantedSearch !== null ? wantedSearch : prefs.searchTool}
-            disabled={busy}
-            onChange={(event) => {
-              setWantedSearch(event.target.checked);
-              onPrefs({ searchTool: event.target.checked });
-            }}
-          />
-          Let models search my notes
-        </label>
-        <p id={`${uid}-search-help`} data-testid="memory-search-effective" className="help">
-          {prefs.searchTool
-            ? "A model that can use tools may look up notes it was not given. It only reads your notes and can change nothing."
-            : "Models are only given the notes Workbench chooses for them."}
-        </p>
-      </div>
-      <div className="field">
-        <label className="check items-center" htmlFor={`${uid}-chats`}>
-          <input
-            id={`${uid}-chats`}
-            type="checkbox"
-            role="switch"
-            data-testid="memory-chats-switch"
-            aria-describedby={`${uid}-chats-help`}
-            checked={busy && wantedChats !== null ? wantedChats : prefs.chatsTool !== false}
-            disabled={busy}
-            onChange={(event) => {
-              setWantedChats(event.target.checked);
-              onPrefs({ chatsTool: event.target.checked });
-            }}
-          />
-          Let models search my past chats
-        </label>
-        <p id={`${uid}-chats-help`} data-testid="memory-chats-effective" className="help">
-          {prefs.chatsTool !== false
-            ? "A model that can use tools may look up what your other chats said. It only reads them and can change nothing."
-            : "Models are not given your other chats, unless you turn on Use past chats in a chat."}
-        </p>
-      </div>
-      <details className="group/b text-sm" data-testid="memory-budget-details">
-        <summary
-          data-testid="memory-budget-summary"
-          className="disclosure flex w-fit list-none items-center gap-1.5 rounded-plexus pl-1 pr-2 text-muted hover:bg-hover hover:text-fg [&::-webkit-details-marker]:hidden"
-        >
-          <ChevronRight
-            size={14}
-            aria-hidden
-            className="transition-transform group-open/b:rotate-90"
-          />
-          How much room notes may take
-        </summary>
-        <BudgetField
-          key={`pinned-${String(prefs.budgetTokens)}`}
-          kind="pinned"
-          label="Pinned notes: most tokens in every chat"
-          help={`A chat's pinned notes and instructions take at most this many tokens, and never more than ${limits.budgetSharePercent}% of its model's window.`}
-          value={prefs.budgetTokens}
-          effective={prefs.effective.budgetTokens}
-          ceiling={limits.budgetCeiling}
-          busy={busy}
-          floor={limits.budgetFloor}
-          onSave={(budgetTokens) => onPrefs({ budgetTokens })}
-        />
-        <BudgetField
-          key={`relevant-${String(prefs.relevantBudgetTokens)}`}
-          kind="relevant"
-          label="Relevant notes: most tokens a turn"
-          help={`The notes chosen for each message take at most this many tokens, and never more than ${limits.relevantSharePercent}% of its model's window.`}
-          value={prefs.relevantBudgetTokens}
-          effective={prefs.effective.relevantBudgetTokens}
-          ceiling={limits.relevantCeiling}
-          busy={busy}
-          floor={limits.budgetFloor}
-          onSave={(relevantBudgetTokens) => onPrefs({ relevantBudgetTokens })}
-        />
-      </details>
-    </section>
-  );
-}
-
-function BudgetField({
-  kind,
-  label,
-  help,
-  value,
-  effective,
-  ceiling,
-  busy,
-  floor,
-  onSave,
-}: {
-  /** `pinned` keeps the ids the page has always had; `relevant` is the second field. */
-  kind: "pinned" | "relevant";
-  label: string;
-  help: string;
-  value: number | null;
-  effective: number;
-  ceiling: number;
-  busy: boolean;
-  floor: number;
-  onSave: (tokens: number | null) => void;
-}) {
-  const uid = useId();
-  const [text, setText] = useState(value === null ? "" : String(value));
-  const [problem, setProblem] = useState<string | null>(null);
-  const id = kind === "pinned" ? "budget" : "relevant-budget";
+  const [query, setQuery] = useState("");
   function submit(event: FormEvent) {
     event.preventDefault();
-    const tokens = Number(text.trim());
-    if (!Number.isInteger(tokens) || tokens < floor || tokens > BUDGET_MAX) {
-      setProblem(
-        `Enter a whole number from ${floor.toLocaleString()} to ${BUDGET_MAX.toLocaleString()}, or use the default.`,
-      );
-      return;
-    }
-    setProblem(null);
-    onSave(tokens);
+    if (query.trim()) onSearch(query.trim());
   }
   return (
-    <div className="mt-2 flex flex-col gap-3">
-      <p className="help">{help}</p>
-      <p data-testid={`memory-${id}-effective`} className="help">
-        In effect: <strong>{effective.toLocaleString()} tokens</strong>.{" "}
-        {value === null ? setByWords("default") : setByWords("you")}
+    <section aria-labelledby={`${uid}-chats`} data-testid="memory-past-chats" className="section">
+      <h2 id={`${uid}-chats`} className="title-section">
+        <MessagesSquare size={18} aria-hidden />
+        Past chats
+      </h2>
+      <p className="help">
+        Find what you asked and what the answers said, in all your chats. Only you can search them.
       </p>
-      <form className="flex flex-wrap items-end gap-2" onSubmit={submit}>
+      <form
+        role="search"
+        aria-label="Search your past chats"
+        className="flex flex-wrap items-end gap-2"
+        onSubmit={submit}
+      >
         <div className="field">
-          <label htmlFor={`${uid}-${id}`} className="field-label">
-            {label}
+          <label htmlFor={`${uid}-query`} className="field-label">
+            Search your chats
           </label>
           <input
-            id={`${uid}-${id}`}
-            data-testid={`memory-${id}-input`}
-            inputMode="numeric"
-            value={text}
-            disabled={busy}
-            placeholder={`${ceiling.toLocaleString()} (the default)`}
-            aria-invalid={problem ? true : undefined}
-            aria-describedby={problem ? `${uid}-${id}-problem` : undefined}
-            onChange={(event) => setText(event.target.value)}
-            className="control w-44"
+            id={`${uid}-query`}
+            data-testid="memory-past-chats-input"
+            type="search"
+            value={query}
+            autoComplete="off"
+            onChange={(event) => setQuery(event.target.value)}
+            className="control w-64 max-w-full"
           />
         </div>
-        <button type="submit" data-testid={`memory-${id}-save`} disabled={busy} className="btn">
-          Save
+        <button
+          type="submit"
+          data-testid="memory-past-chats-go"
+          disabled={!query.trim()}
+          className="btn"
+        >
+          <Search size={14} aria-hidden />
+          Search chats
         </button>
-        {value !== null && (
-          <button
-            type="button"
-            data-testid={`memory-${id}-default`}
-            disabled={busy}
-            onClick={() => onSave(null)}
-            className="btn btn-quiet"
-          >
-            Use the default
-          </button>
-        )}
       </form>
-      {problem && (
-        <p id={`${uid}-${id}-problem`} role="alert" className="notice notice--error">
-          <CircleAlert size={16} aria-hidden />
-          {problem}
-        </p>
-      )}
-    </div>
+    </section>
   );
 }
 

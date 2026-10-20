@@ -29,10 +29,11 @@ import {
   Files,
   Info,
   MessageSquarePlus,
+  Settings as SettingsIcon,
 } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 
-import { del, fileOf, post, put } from "../lib/api";
+import { del, fileOf, post } from "../lib/api";
 import {
   emptyWords,
   introWords,
@@ -42,16 +43,12 @@ import {
 import { failureWords, saveFile } from "../lib/memory";
 import {
   capsWords,
-  EXTERNAL_CHOICES,
-  externalLabel,
-  newChatsWords,
   OWNER_OFF,
   OWNER_OFF_EFFECT,
   rebuiltWords,
-  setByWords,
   totalsWords,
 } from "../lib/savedDocuments";
-import type { DocumentsPage, ExternalChoice, Me, MeaningRebuilt, Rebuilt } from "../lib/types";
+import type { DocumentsPage, Me, MeaningRebuilt, Rebuilt } from "../lib/types";
 import { anySearchable } from "../lib/documentFolders";
 import { useDocumentFolders } from "../lib/useDocumentFolders";
 import { useKeepFocus } from "../lib/useKeepFocus";
@@ -69,10 +66,13 @@ export function Documents({
   onClose,
   onAsk,
   onTools,
+  onOpenSettings,
   me,
 }: {
   onClose: () => void;
   onAsk: () => void;
+  /** Opens the Settings page at Documents' section (MV4). */
+  onOpenSettings?: () => void;
   /** Opens Toolbox · Tools, where the owner gives folders to people (the Folders section says so). */
   onTools?: () => void;
   /** Who is reading, and where Eugene's console is: a search model is the owner's to get. */
@@ -121,16 +121,6 @@ export function Documents({
     }
   };
 
-  async function act(work: () => Promise<void>, focus?: string) {
-    setProblem(null);
-    try {
-      await working(work);
-      if (focus) setFocusId(focus);
-    } catch (failure) {
-      setProblem(failureWords(failure));
-    }
-  }
-
   /** Work on one document: a refusal is said on its own row. */
   async function actOn(id: string, work: () => Promise<void>, focus?: string) {
     setProblem(null);
@@ -153,6 +143,17 @@ export function Documents({
         <Files size={20} aria-hidden />
         Documents
       </h1>
+      {onOpenSettings && (
+        <button
+          type="button"
+          data-testid="documents-open-settings"
+          className="btn btn-quiet"
+          onClick={onOpenSettings}
+        >
+          <SettingsIcon size={14} aria-hidden />
+          Documents settings
+        </button>
+      )}
       <button type="button" data-testid="documents-back" className="btn" onClick={onClose}>
         <ArrowLeft size={14} aria-hidden />
         Back to chat
@@ -383,15 +384,6 @@ export function Documents({
             })}
           </p>
         )}
-        {!off && (
-          <Settings
-            data={data}
-            busy={busy}
-            onPrefs={(body) =>
-              void act(() => put("/api/documents/prefs", body).then(() => undefined))
-            }
-          />
-        )}
         {!bare && (
           <section aria-labelledby={`${uid}-list`} className="section">
             <h2 id={`${uid}-list`} tabIndex={-1} className="title-section">
@@ -462,101 +454,5 @@ function Foot({ data }: { data: DocumentsPage }) {
         ))}
       </ul>
     </div>
-  );
-}
-
-// --- settings ---
-
-function Settings({
-  data,
-  busy,
-  onPrefs,
-}: {
-  data: DocumentsPage;
-  busy: boolean;
-  onPrefs: (body: { newChats?: boolean; external?: ExternalChoice | null }) => void;
-}) {
-  const uid = useId();
-  const { prefs } = data;
-  const { effective } = prefs;
-  const ownerSet = effective.externalSetBy === "owner";
-  // What was just chosen shows while the server catches up, and a refusal puts the old
-  // value back: these are only read while the page is busy.
-  const [wanted, setWanted] = useState<{ newChats?: boolean; external?: ExternalChoice }>({});
-  const newChats = busy && wanted.newChats !== undefined ? wanted.newChats : effective.newChats;
-  const external = busy && wanted.external !== undefined ? wanted.external : effective.external;
-  return (
-    <section aria-labelledby={`${uid}-settings`} className="section">
-      <h2 id={`${uid}-settings`} className="title-section">
-        Settings
-      </h2>
-      <div className="field">
-        <label className="check items-center" htmlFor={`${uid}-new`}>
-          <input
-            id={`${uid}-new`}
-            type="checkbox"
-            role="switch"
-            data-testid="documents-new-chats-switch"
-            aria-describedby={`${uid}-new-help`}
-            checked={newChats}
-            disabled={busy}
-            onChange={(event) => {
-              setWanted({ newChats: event.target.checked });
-              onPrefs({ newChats: event.target.checked });
-            }}
-          />
-          Documents in new chats
-        </label>
-        <p id={`${uid}-new-help`} data-testid="documents-new-chats-effective" className="help">
-          {newChatsWords(prefs)}
-        </p>
-      </div>
-      <fieldset className="flex min-w-0 flex-col gap-2" aria-describedby={`${uid}-outside-help`}>
-        <legend className="field-label mb-1">Models that run outside your machines</legend>
-        <p id={`${uid}-outside-help`} className="help">
-          Some models run on another company&apos;s computers. Matching passages of your documents
-          would leave your machines to reach them. This does not hold back files you attach to a
-          chat.
-        </p>
-        {EXTERNAL_CHOICES.map((choice) => (
-          <div key={choice.value}>
-            <label className="check">
-              <input
-                type="radio"
-                name={`${uid}-external`}
-                value={choice.value}
-                data-testid={`documents-external-${choice.value}`}
-                aria-describedby={`${uid}-external-${choice.value}`}
-                checked={external === choice.value}
-                disabled={busy || ownerSet}
-                onChange={() => {
-                  setWanted({ external: choice.value });
-                  onPrefs({ external: choice.value });
-                }}
-              />
-              <span>{choice.label}</span>
-            </label>
-            <p id={`${uid}-external-${choice.value}`} className="help ps-[1.625rem]">
-              {choice.help}
-            </p>
-          </div>
-        ))}
-        <p data-testid="documents-external-effective" className="help">
-          In effect: <strong>{externalLabel(effective.external)}</strong>.{" "}
-          {setByWords(effective.externalSetBy)}
-        </p>
-        {prefs.external !== null && !ownerSet && (
-          <button
-            type="button"
-            data-testid="documents-external-default"
-            disabled={busy}
-            onClick={() => onPrefs({ external: null })}
-            className="btn btn-quiet -ms-2 self-start"
-          >
-            Use the default
-          </button>
-        )}
-      </fieldset>
-    </section>
   );
 }
