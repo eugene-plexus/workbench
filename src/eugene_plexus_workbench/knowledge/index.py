@@ -69,6 +69,9 @@ TRASH = "trash"
 #: `chat:<id>` for one searched only in the chat it was attached to.
 LIBRARY = "library"
 CHAT = "chat:"
+#: A project's documents (MV7b): `project:<id>`, searched by its chats, and kept like My
+#: documents (a file of the same name replaces one already there).
+PROJECT = "project:"
 #: A person's notes (MV1, `workbench-memory-v2.md`): one document a note, by the note's id,
 #: written by `Index.put_note` from the main store and never read from a file. Not a document
 #: the person keeps: the Documents screen, its counts and its cap leave this scope out.
@@ -188,6 +191,15 @@ def valid_id(value: str) -> bool:
 
 def chat_scope(chat_id: str) -> str:
     return f"{CHAT}{chat_id}"
+
+
+def project_scope(project_id: str) -> str:
+    return f"{PROJECT}{project_id}"
+
+
+def named_scope(scope: str) -> bool:
+    """A scope whose files are told apart by their names (My documents, a project's)."""
+    return scope == LIBRARY or scope.startswith(PROJECT)
 
 
 # --------------------------------------------------------------------------- #
@@ -819,11 +831,11 @@ class Index:
                     "SELECT * FROM documents WHERE source = ? ORDER BY added_at DESC, rowid DESC",
                     (source,),
                 ).fetchone()
-            elif scope == LIBRARY:
+            elif named_scope(scope):
                 row = db.execute(
                     "SELECT * FROM documents WHERE scope = ? AND name = ? COLLATE NOCASE "
                     "AND source NOT LIKE 'folder:%' ORDER BY added_at DESC, rowid DESC",
-                    (LIBRARY, name),
+                    (scope, name),
                 ).fetchone()
             else:
                 row = db.execute(
@@ -947,13 +959,13 @@ class Index:
                             (new.source,),
                         )
                     ]
-                elif new.scope == LIBRARY:
+                elif named_scope(new.scope):
                     twins = [
                         _document(r)
                         for r in db.execute(
                             "SELECT * FROM documents WHERE scope = ? AND name = ? COLLATE NOCASE "
                             "AND source NOT LIKE 'folder:%' ORDER BY added_at DESC, rowid DESC",
-                            (LIBRARY, new.name),
+                            (new.scope, new.name),
                         )
                     ]
                 else:
@@ -969,7 +981,7 @@ class Index:
                         t
                         for t in twins
                         if t.status not in (SKIPPED, FAILED)
-                        and (new.scope != LIBRARY or t.sha256 == new.sha256)
+                        and (not named_scope(new.scope) or t.sha256 == new.sha256)
                     ),
                     None,
                 )
@@ -1062,7 +1074,8 @@ class Index:
             def body() -> Document | None:
                 row = db.execute(
                     "SELECT * FROM documents WHERE status = 'queued' "
-                    "ORDER BY (scope = 'library'), added_at, rowid LIMIT 1"
+                    "ORDER BY (scope = 'library' OR scope LIKE 'project:%'), added_at, rowid "
+                    "LIMIT 1"
                 ).fetchone()
                 if row is None:
                     return None
@@ -1650,6 +1663,66 @@ class Index:
             if gone is not None:
                 self._scrub(db)
             return gone
+
+        return await self._run(go)
+
+    async def rescope(self, old: str, new: str) -> tuple[list[Document], list[Document]]:
+        """Move every document of scope `old` to `new` (MV7b: a deleted project's documents to
+        My documents), its sidecar too, so a Rebuild makes it again where it is now. Where `new`
+        names its files, one of the same name there is replaced, as an upload of that name would
+        replace it. All or nothing, files included (`delete_many`'s staging). `(moved,
+        replaced)`, as they were."""
+
+        def go(db: sqlite3.Connection) -> tuple[list[Document], list[Document]]:
+            staged: list[tuple[Path, Path]] = []
+            rewritten: list[tuple[Path, str]] = []
+
+            def body() -> tuple[list[Document], list[Document]]:
+                moving = [
+                    _document(r)
+                    for r in db.execute("SELECT * FROM documents WHERE scope = ?", (old,))
+                ]
+                replaced: list[Document] = []
+                for doc in moving:
+                    if named_scope(new) and not doc.source.startswith(FOLDER):
+                        twins = [
+                            _document(r)
+                            for r in db.execute(
+                                "SELECT * FROM documents WHERE scope = ? AND name = ? "
+                                "COLLATE NOCASE AND source NOT LIKE 'folder:%' AND id != ?",
+                                (new, doc.name, doc.id),
+                            ).fetchall()
+                        ]
+                        staged.extend(self._stage_files([t.id for t in twins]))
+                        for twin in twins:
+                            db.execute("DELETE FROM documents WHERE id = ?", (twin.id,))
+                            replaced.append(twin)
+                    db.execute("UPDATE documents SET scope = ? WHERE id = ?", (new, doc.id))
+                    path = self.meta_path(doc.id)
+                    if path.is_file():
+                        before = path.read_text(encoding="utf-8")
+                        said = json.loads(before)
+                        said["scope"] = new
+                        part = path.with_name(path.name + ".part")
+                        part.write_text(
+                            json.dumps(said, ensure_ascii=False), encoding="utf-8", newline="\n"
+                        )
+                        part.replace(path)
+                        rewritten.append((path, before))
+                return moving, replaced
+
+            try:
+                moved = self._transaction(db, body)
+            except BaseException:
+                self._unstage(staged)
+                for path, before in reversed(rewritten):
+                    with contextlib.suppress(OSError):
+                        path.write_text(before, encoding="utf-8", newline="\n")
+                raise
+            self._discard(staged)
+            if moved[1]:
+                self._scrub(db)
+            return moved
 
         return await self._run(go)
 

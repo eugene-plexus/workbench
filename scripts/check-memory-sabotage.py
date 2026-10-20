@@ -56,6 +56,9 @@ MV6 = "tests/test_memory_mv6.py"
 PROJECTS = SRC + "projects.py"
 PROJECTS_API = SRC + "projects_api.py"
 MV7 = "tests/test_memory_mv7.py"
+MV7B = "tests/test_memory_mv7b.py"
+SAVED_API = SRC + "saved_api.py"
+INGEST = SRC + "knowledge/ingest.py"
 
 # (label, file, before, after, check)
 CASES: list[tuple[str, str, str, str, str]] = [
@@ -1074,6 +1077,77 @@ CASES: list[tuple[str, str, str, str, str]] = [
         "                )\n"
         "                done = db.execute(",
         f"{MV7}::test_nothing_is_left_under_a_deleted_projects_id",
+    ),
+    # --- MV7b: a project's documents ---------------------------------------------------
+    (
+        "MV7b: My documents reach a project with its switch off",
+        SAVED_API,
+        "    return [project_scope(project.id), *([LIBRARY] if project.general_documents else [])]",
+        "    return [project_scope(project.id), LIBRARY]",
+        f"{MV7B}::test_my_documents_reach_a_project_only_while_it_says",
+    ),
+    (
+        "MV7b: a project's chat does not search its documents",
+        SAVED_API,
+        "    return [project_scope(project.id), *([LIBRARY] if project.general_documents else [])]",
+        "    return [*([LIBRARY] if project.general_documents else [])]",
+        f"{MV7B}::test_a_projects_documents_are_kept_to_it_and_searched_by_its_chats",
+    ),
+    (
+        "MV7b: a file of the same name replaces one in another place",
+        INDEX,
+        "                            (new.scope, new.name),",
+        "                            (LIBRARY, new.name),",
+        f"{MV7B}::test_the_same_name_replaces_a_file_within_its_own_place_only",
+    ),
+    (
+        "MV7b: a project deleted with everything keeps its documents",
+        PROJECTS_API,
+        "    gone_documents = await saved.drop_project(person.sub, project.id) if saved is not None else 0",
+        "    gone_documents = 0",
+        f"{MV7B}::test_deleting_a_project_moves_its_documents_or_takes_them",
+    ),
+    (
+        "MV7b: a project gone at boot keeps its documents",
+        INGEST,
+        "        if scopes and project_owners is not None:",
+        "        if False:",
+        f"{MV7B}::test_a_project_gone_at_boot_takes_its_documents_unless_every_project_is",
+    ),
+    (
+        "MV7b: another person's project takes an upload",
+        SAVED_API,
+        "    if await store.project(owner, project_id) is None:",
+        "    if False:",
+        f"{MV7B}::test_another_persons_project_takes_no_upload",
+    ),
+    (
+        "MV7b: a moved document does not replace one of its name",
+        INDEX,
+        "                    if named_scope(new) and not doc.source.startswith(FOLDER):",
+        "                    if False:",
+        f"{MV7B}::test_deleting_a_project_moves_its_documents_or_takes_them",
+    ),
+    (
+        "MV7b: a project's document cannot be removed or read again",
+        SAVED_API,
+        "    if doc is None or (library and not named_scope(doc.scope)):",
+        "    if doc is None or (library and doc.scope != LIBRARY):",
+        f"{MV7B}::test_a_projects_document_is_opened_read_again_and_removed",
+    ),
+    (
+        "MV7b: a moved document's own files still name its project",
+        INDEX,
+        '                        said["scope"] = new',
+        '                        said["scope"] = said["scope"]',
+        f"{MV7B}::test_a_kept_projects_documents_are_rebuilt_in_my_documents",
+    ),
+    (
+        "MV7b: every project gone at boot deletes their documents",
+        INGEST,
+        "            if not any(owner == sub for owner in owners.values()):",
+        "            if False:",
+        f"{MV7B}::test_a_project_gone_at_boot_takes_its_documents_unless_every_project_is",
     ),
 ]
 

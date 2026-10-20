@@ -64,7 +64,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
@@ -86,6 +86,8 @@ from .knowledge.index import (
     Index,
     IndexUnavailable,
     chat_scope,
+    named_scope,
+    project_scope,
     valid_id,
 )
 from .knowledge.meaning import Queue, Status
@@ -273,7 +275,8 @@ async def _own_document(
     if index is None:
         raise missing
     doc = await index.document(doc_id)
-    if doc is None or (library and doc.scope != LIBRARY):
+    # My documents' and a project's (MV7b) are the person's to open, read again and remove.
+    if doc is None or (library and not named_scope(doc.scope)):
         raise missing
     return index, doc
 
@@ -283,8 +286,29 @@ async def _own_document(
 # --------------------------------------------------------------------------- #
 
 
+async def own_scopes(store: Store, owner: str, chat: Chat | None) -> list[str]:
+    """What "your documents" means for a chat (MV7b): My documents for a chat in no project;
+    for one in a project, the project's documents, and My documents too while the project's
+    Also search My documents is on."""
+    if chat is None or chat.project_id is None:
+        return [LIBRARY]
+    project = await store.project(owner, chat.project_id)
+    if project is None:
+        return [LIBRARY]
+    return [project_scope(project.id), *([LIBRARY] if project.general_documents else [])]
+
+
+async def _scope_for(store: Store, owner: str, project_id: str | None) -> str:
+    """Where an upload goes: My documents, or a project of the person's (404 otherwise)."""
+    if project_id is None:
+        return LIBRARY
+    if await store.project(owner, project_id) is None:
+        raise _problem(status.HTTP_404_NOT_FOUND, "There is no such project.")
+    return project_scope(project_id)
+
+
 @router.get("/api/documents")
-async def list_documents(request: Request) -> dict[str, Any]:
+async def list_documents(request: Request, projectId: str | None = None) -> dict[str, Any]:
     """The asker's documents (newest first), each with its state and counts; the totals,
     the limits, how documents are searched, and the asker's own settings. 503 with the
     words and `canRebuild` when the index cannot be used."""
@@ -293,6 +317,8 @@ async def list_documents(request: Request) -> dict[str, Any]:
     install = await config.document_settings(store)
     prefs = await store.documents_prefs(person.sub)
     index = saved.index(person.sub, create=False)
+    # MV7b: a project's documents, when its page asks (404 for a project not theirs).
+    where = await _scope_for(store, person.sub, projectId)
     documents: list[Document] = []
     totals = None
     kept = 0
@@ -300,8 +326,8 @@ async def list_documents(request: Request) -> dict[str, Any]:
         # The files the person added themselves: a folder's files are listed under the folder
         # (`GET /api/documents/folders/{id}/files`), so that a folder of ten thousand files is
         # not part of every poll.
-        documents = await index.documents(LIBRARY, only="upload")
-        totals = await index.totals(LIBRARY, only="upload")
+        documents = await index.documents(where, only="upload")
+        totals = await index.totals(where, only="upload")
         kept = await index.passages_total()
     status = await meaning_status(request, person)
     return {
@@ -358,7 +384,9 @@ def _clean_name(raw: str | None) -> str:
 
 @router.post("/api/documents", status_code=status.HTTP_201_CREATED)
 async def add_documents(
-    request: Request, uploads: list[UploadFile] = File(..., alias="files")
+    request: Request,
+    uploads: list[UploadFile] = File(..., alias="files"),
+    project_id: str | None = Form(default=None, alias="projectId"),
 ) -> dict[str, Any]:
     """Keep these files in My documents (many at once: a multipart field `files`, once
     for each). Each is judged by its bytes (`files.detect`), and a file Workbench does
@@ -373,6 +401,8 @@ async def add_documents(
     install = await config.document_settings(store)
     if not install.enabled:
         raise _problem(status.HTTP_403_FORBIDDEN, _OWNER_OFF)
+    # MV7b: kept to a project when its page adds them.
+    where = await _scope_for(store, person.sub, project_id)
     if len(uploads) > MAX_FILES:
         raise _problem(
             status.HTTP_413_CONTENT_TOO_LARGE,
@@ -448,7 +478,7 @@ async def add_documents(
         added = await saved.add(
             person.sub,
             doc_id=doc_id,
-            scope=LIBRARY,
+            scope=where,
             name=name,
             detected=found,
             size=size,
@@ -459,6 +489,11 @@ async def add_documents(
         view["unchanged"] = added.unchanged
         view["replaced"] = [d.id for d in added.replaced]
         kept.append(view)
+    if project_id is not None and kept and await store.project(person.sub, project_id) is None:
+        # The project was deleted while its files were added (MV7b): they go too, rather than
+        # wait unsearched under an id that no longer exists.
+        await saved.remove_documents(person.sub, [v["id"] for v in kept])
+        raise _problem(status.HTTP_404_NOT_FOUND, "There is no such project.")
     if not kept and refused:
         raise HTTPException(
             status_code=refused[0]["status"],
@@ -478,7 +513,7 @@ async def rebuild_documents(request: Request) -> dict[str, Any]:
     store = _store(request)
     if not (await config.document_settings(store)).enabled:
         raise _problem(status.HTTP_403_FORBIDDEN, _OWNER_OFF)
-    made = await _saved(request).rebuild(person.sub, store.chat_owners)
+    made = await _saved(request).rebuild(person.sub, store.chat_owners, store.project_owners)
     # The index held the person's notes and past chats too (MV1, MV2): they are put back
     # from the store, in the background.
     state = _state(request)
@@ -704,7 +739,7 @@ async def test_question(request: Request, body: QuestionToTry) -> dict[str, Any]
     model_id = body.model
     if body.chatId is not None:
         chat = await _own_chat(request, person, body.chatId)
-        scopes.append(chat_scope(chat.id))
+        scopes = [*await own_scopes(store, person.sub, chat), chat_scope(chat.id)]
         model_id = model_id or chat.model
     window = None
     if model_id:
@@ -1038,7 +1073,7 @@ async def chat_documents_view(
     mine = (0, 0, 0)
     chat_docs: list[Document] = []
     if index is not None:
-        library = await index.count_found([LIBRARY])
+        library = await index.count_found(await own_scopes(_store(request), person.sub, chat))
         mine = await index.count_found([chat_scope(chat.id)])
         chat_docs = await index.documents(chat_scope(chat.id))
     access = await decide_access(request, person, chat, model or chat.model)
@@ -1284,7 +1319,10 @@ async def retrieve(
             if access.hint:
                 notes[-1]["hint"] = access.hint
         flags.update(library=library_ok, chat=has_chat_docs)
-        scopes = [s for s, wanted in ((LIBRARY, library_ok), (here, has_chat_docs)) if wanted]
+        scopes = [
+            *(await own_scopes(_store(request), person.sub, chat) if library_ok else []),
+            *([here] if has_chat_docs else []),
+        ]
         if not scopes:
             return done("skipped", code=access.code or "unavailable", message=access.reason)
         documents, passages_n, waiting = await index.count_found(scopes)

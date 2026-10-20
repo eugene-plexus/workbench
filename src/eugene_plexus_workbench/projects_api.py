@@ -119,8 +119,17 @@ async def get_project(request: Request, project_id: str) -> dict[str, Any]:
     mine = [c for c in await store.chats(person.sub) if c.project_id == project.id]
     notes = [n for n in await store.memory_notes(person.sub) if n.project_id == project.id]
     answers = _answers(request)
+    saved = getattr(_state(request), "saved", None)
+    index = saved.index(person.sub, create=False) if saved is not None else None
+    documents = (
+        len(await index.documents(f"project:{project.id}", only="upload"))
+        if index is not None
+        else 0
+    )
     return {
         **project_view(project, len(mine), len(notes)),
+        # MV7b: how many documents are kept to it (what Delete project names).
+        "documents": documents,
         "chatList": [chat_view(c, running=answers.running(c.id) is not None) for c in mine],
     }
 
@@ -162,9 +171,29 @@ async def delete_project(request: Request, project_id: str, keep: bool = False) 
     person = await _person(request)
     project = await _own(request, person.sub, project_id)
     store = _store(request)
+    saved = getattr(_state(request), "saved", None)
     if keep:
+        # Its documents move to My documents first, as uploads of their names would (MV7b):
+        # all or nothing, so a move that fails leaves the project whole to try again.
+        moved = replaced = 0
+        if saved is not None:
+            try:
+                moved, replaced = await saved.release_project(person.sub, project.id)
+            except Exception as exc:
+                log.warning("a project's documents were not moved: %s: %s", type(exc).__name__, exc)
+                raise _problem(
+                    status.HTTP_503_SERVICE_UNAVAILABLE,
+                    "Workbench could not move this project's documents to My documents, so "
+                    f"nothing was deleted ({type(exc).__name__}). Try again in a moment.",
+                ) from None
         chats, notes = await store.release_project(person.sub, project.id)
-        return {"kept": True, "chats": chats, "notes": notes}
+        return {
+            "kept": True,
+            "chats": chats,
+            "notes": notes,
+            "documents": moved,
+            "replaced": replaced,
+        }
     gone_chats = gone_notes = 0
     for chat in [c for c in await store.chats(person.sub) if c.project_id == project.id]:
         await remove_chat(request, person, chat)
@@ -180,9 +209,15 @@ async def delete_project(request: Request, project_id: str, keep: bool = False) 
                 "but could not remove a note's words from your search index, so the project "
                 f"and its other notes were kept ({type(exc).__name__}). Try again in a moment.",
             ) from None
+    gone_documents = await saved.drop_project(person.sub, project.id) if saved is not None else 0
     # Suggestions still waiting from its chats went with them (`delete_chat`).
     await store.drop_project_row(person.sub, project.id)
-    return {"kept": False, "chats": gone_chats, "notes": gone_notes}
+    return {
+        "kept": False,
+        "chats": gone_chats,
+        "notes": gone_notes,
+        "documents": gone_documents,
+    }
 
 
 class NoteMove(BaseModel):

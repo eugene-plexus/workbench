@@ -335,12 +335,14 @@ export interface Project {
   name: string;
   /** Also use my general memory: its chats are given general notes too. */
   generalMemory: boolean;
-  /** Also search My documents (MV7b): kept, not shown yet. */
+  /** Also search My documents (MV7b): its chats search the person's documents too. */
   generalDocuments: boolean;
   createdAt: number;
   updatedAt: number;
   chats: number;
   notes: number;
+  /** The documents kept to the project. */
+  documents: number;
 }
 
 /** One project with its chats, newest first (`GET /api/projects/{id}`). */

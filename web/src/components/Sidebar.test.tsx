@@ -276,6 +276,7 @@ describe("projects (MV7)", () => {
     name,
     generalMemory: true,
     generalDocuments: true,
+    documents: 0,
     createdAt: 1,
     updatedAt: 1,
     chats: 0,

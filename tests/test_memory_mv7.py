@@ -235,7 +235,7 @@ def test_deleting_a_project_keeps_or_takes_what_was_in_it(world: World) -> None:
         keep(ada, f"A note of {where}.", projectId=where)
     released = ada.delete(f"/api/projects/{kept}", params={"keep": "true"})
     assert released.status_code == 200 and released.json() == {
-        "kept": True, "chats": 1, "notes": 2,
+        "kept": True, "chats": 1, "notes": 2, "documents": 0, "replaced": 0,
     }  # fmt: skip
     taken = ada.delete(f"/api/projects/{gone}")
     assert taken.status_code == 200 and taken.json()["chats"] == 1 and taken.json()["notes"] == 2

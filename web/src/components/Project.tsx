@@ -1,7 +1,7 @@
 /**
- * A project's page (MV7): its name, its chats, the notes kept to it, the one switch that says
- * whether its chats are also given the person's general notes, and the one question that
- * deletes it. A change that fails says why, in the server's words, and the page shows what the
+ * A project's page (MV7): its name, its chats, the notes and documents kept to it, the two
+ * switches that say whether its chats are also given the person's general notes and also search
+ * My documents, and the one question that deletes it. A change that fails says why, in the server's words, and the page shows what the
  * server holds, never what was asked for.
  */
 
@@ -16,10 +16,14 @@ import {
 } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useId, useRef, useState } from "react";
 
-import { api, del, patch, post } from "../lib/api";
-import { characters, failureWords, kindLabel, NOTE_LIMIT, plural } from "../lib/memory";
+import { api, del, fileOf, patch, post } from "../lib/api";
+import { characters, failureWords, kindLabel, NOTE_LIMIT, plural, saveFile } from "../lib/memory";
 import { problemWords } from "../lib/projects";
+import { OWNER_OFF, OWNER_OFF_EFFECT } from "../lib/savedDocuments";
 import type { MemoryNote, NotesFound, ProjectDetail } from "../lib/types";
+import { useSavedDocuments } from "../lib/useSavedDocuments";
+import { AddDocuments } from "./AddDocuments";
+import { DocumentRow } from "./DocumentRow";
 
 export function ProjectPage({
   projectId,
@@ -54,6 +58,11 @@ export function ProjectPage({
   const [deleting, setDeleting] = useState(false);
   const [switchProblem, setSwitchProblem] = useState<string | null>(null);
   const [switching, setSwitching] = useState(false);
+  const [docsSwitchProblem, setDocsSwitchProblem] = useState<string | null>(null);
+  const [docsSwitching, setDocsSwitching] = useState(false);
+  const [docBusy, setDocBusy] = useState(false);
+  const [rowProblems, setRowProblems] = useState<Record<string, string>>({});
+  const saved = useSavedDocuments(projectId);
   const latest = useRef(0);
   // The name box is filled from the first answer, then by what is typed and by a rename.
   const named = useRef(false);
@@ -176,6 +185,43 @@ export function ProjectPage({
     }
   }
 
+  async function setGeneralDocuments(on: boolean) {
+    if (!project) return;
+    setDocsSwitching(true);
+    setDocsSwitchProblem(null);
+    try {
+      const kept = await patch<ProjectDetail>(`/api/projects/${encodeURIComponent(project.id)}`, {
+        generalDocuments: on,
+      });
+      setProject({ ...project, ...kept, chatList: project.chatList });
+      onChanged();
+    } catch (failure) {
+      setDocsSwitchProblem(`Not changed: ${problemWords(failure)}`);
+    } finally {
+      setDocsSwitching(false);
+    }
+  }
+
+  /** Work on one document: a refusal is said on its row, then the list and the count are read again. */
+  async function actOn(id: string, work: () => Promise<unknown>) {
+    setRowProblems((now) => {
+      const rest = { ...now };
+      delete rest[id];
+      return rest;
+    });
+    setDocBusy(true);
+    try {
+      await work();
+    } catch (failure) {
+      setRowProblems((now) => ({ ...now, [id]: failureWords(failure) }));
+    } finally {
+      await saved.reload();
+      setDocBusy(false);
+      void load();
+      onChanged();
+    }
+  }
+
   async function remove(keep: boolean) {
     if (!project || deleting) return;
     setDeleting(true);
@@ -193,7 +239,9 @@ export function ProjectPage({
   }
 
   const same = name.trim() === project.name;
-  const counts = `${plural(project.chats, "chat")} and ${plural(project.notes, "note")}`;
+  const counts = `${plural(project.chats, "chat")}, ${plural(project.notes, "note")} and ${plural(project.documents, "document")}`;
+  const docs = saved.data;
+  const docsOff = docs ? !docs.installEnabled : false;
 
   return (
     <section aria-label="Project" className="page" data-testid="project-page">
@@ -337,6 +385,108 @@ export function ProjectPage({
           />
         </section>
 
+        <section
+          aria-labelledby={`${uid}-documents`}
+          className="section"
+          data-testid="project-documents"
+        >
+          <h2 id={`${uid}-documents`} className="title-section">
+            Documents
+          </h2>
+          <p className="help">
+            Chats in this project search these documents when Documents is on in the chat.
+          </p>
+          {(saved.blocked || saved.problem) && (
+            <p
+              role="alert"
+              data-testid="project-documents-problem"
+              className="notice notice--error"
+            >
+              <CircleAlert size={16} aria-hidden />
+              {saved.blocked?.message ?? saved.problem}{" "}
+              <button
+                type="button"
+                className="btn btn-quiet -my-1 ml-auto"
+                onClick={() => void saved.reload()}
+              >
+                Try again
+              </button>
+            </p>
+          )}
+          {docsOff && (
+            <p data-testid="project-documents-off" className="notice">
+              <span>
+                <span className="notice-title">{OWNER_OFF}</span>
+                {OWNER_OFF_EFFECT}
+              </span>
+            </p>
+          )}
+          {docs &&
+            (docs.documents.length === 0 ? (
+              <p className="empty">No documents in this project yet.</p>
+            ) : (
+              <ul
+                data-testid="project-documents-list"
+                className="divide-y divide-line rounded-plexus border border-line bg-panel"
+              >
+                {docs.documents.map((doc) => (
+                  <DocumentRow
+                    key={doc.id}
+                    doc={doc}
+                    locked={docsOff}
+                    busy={docBusy}
+                    problem={rowProblems[doc.id] ?? null}
+                    onOpen={() =>
+                      void actOn(doc.id, async () => {
+                        const file = await fileOf(
+                          `/api/documents/${encodeURIComponent(doc.id)}/original`,
+                        );
+                        saveFile(file.blob, file.name ?? doc.name);
+                      })
+                    }
+                    onReread={() =>
+                      void actOn(doc.id, () =>
+                        post(`/api/documents/${encodeURIComponent(doc.id)}/reread`),
+                      )
+                    }
+                    onRemove={() =>
+                      void actOn(doc.id, () => del(`/api/documents/${encodeURIComponent(doc.id)}`))
+                    }
+                  />
+                ))}
+              </ul>
+            ))}
+          {docs && !docsOff && (
+            <AddDocuments
+              projectId={project.id}
+              onChanged={() => {
+                void saved.reload();
+                void load();
+                onChanged();
+              }}
+            />
+          )}
+          <label className="flex min-h-7 items-center gap-2">
+            <input
+              type="checkbox"
+              data-testid="project-general-documents"
+              checked={project.generalDocuments}
+              disabled={docsSwitching}
+              aria-describedby={`${uid}-documents-help`}
+              onChange={(event) => void setGeneralDocuments(event.target.checked)}
+            />
+            Also search My documents
+          </label>
+          <p id={`${uid}-documents-help`} className="help">
+            Chats in this project also search My documents.
+          </p>
+          {docsSwitchProblem && (
+            <p role="alert" data-testid="project-documents-switch-problem" className="text-error">
+              {docsSwitchProblem}
+            </p>
+          )}
+        </section>
+
         <section aria-labelledby={`${uid}-memory`} className="section">
           <h2 id={`${uid}-memory`} className="title-section">
             Memory
@@ -401,7 +551,7 @@ export function ProjectPage({
                     onClick={() => void remove(false)}
                     className="btn btn-danger"
                   >
-                    Delete the project and its chats and notes
+                    Delete the project and its chats, notes and documents
                   </button>
                   <p className="help">{`Deletes ${counts} for good.`}</p>
                 </div>
@@ -413,9 +563,11 @@ export function ProjectPage({
                     onClick={() => void remove(true)}
                     className="btn"
                   >
-                    Delete the project, keep its chats and notes
+                    Delete the project, keep its chats, notes and documents
                   </button>
-                  <p className="help">{`${counts} stay and become general.`}</p>
+                  <p className="help">
+                    {`${plural(project.chats, "chat")} and ${plural(project.notes, "note")} stay and become general. ${plural(project.documents, "document")} ${project.documents === 1 ? "moves" : "move"} to My documents; a file of the same name there is replaced.`}
+                  </p>
                 </div>
                 <button
                   type="button"

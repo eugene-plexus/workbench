@@ -13,6 +13,8 @@
  * server says the documents cannot be used (a damaged search): then nothing that
  * might be out of date is shown, and the server's words and what can be done come
  * instead.
+ *
+ * With a project id it reads that project's documents (MV7b), and nothing else changes.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -29,7 +31,7 @@ import {
 } from "./savedDocuments";
 import type { DocumentsBlocked, DocumentsPage } from "./types";
 
-export function useSavedDocuments() {
+export function useSavedDocuments(projectId?: string) {
   const [data, setData] = useState<DocumentsPage | null>(null);
   const [blocked, setBlocked] = useState<DocumentsBlocked | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
@@ -45,7 +47,9 @@ export function useSavedDocuments() {
   const reload = useCallback(async () => {
     const mine = ++latest.current;
     try {
-      const next = await api<DocumentsPage>("/api/documents");
+      const next = await api<DocumentsPage>(
+        projectId ? `/api/documents?projectId=${encodeURIComponent(projectId)}` : "/api/documents",
+      );
       if (mine !== latest.current) return;
       const now = watching(next) === "busy";
       first.current = now && !busy.current;
@@ -67,7 +71,7 @@ export function useSavedDocuments() {
       }
     }
     setReads((n) => n + 1);
-  }, []);
+  }, [projectId]);
 
   useEffect(() => {
     void reload();

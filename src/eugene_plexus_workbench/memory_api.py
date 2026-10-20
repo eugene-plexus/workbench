@@ -477,7 +477,10 @@ async def link_document(request: Request, note_id: str, body: NoteDocument) -> d
     saved = getattr(_state(request), "saved", None)
     index = saved.index(person.sub, create=False) if saved is not None else None
     doc = await index.document(body.docId) if index is not None else None
-    if doc is None or doc.scope != "library":
+    note = await store.memory_note(person.sub, note_id, with_body=False)
+    # My documents for any note; a project's documents only for a note kept to it (MV7b).
+    allowed = {"library"} | ({f"project:{note.project_id}"} if note and note.project_id else set())
+    if doc is None or doc.scope not in allowed:
         raise _problem(status.HTTP_404_NOT_FOUND, "There is no such document in your documents.")
     held = (await store.note_documents(person.sub, [note_id])).get(note_id, [])
     if len(held) >= memory_provenance.MAX_LINKS and all(h["doc_id"] != doc.id for h in held):

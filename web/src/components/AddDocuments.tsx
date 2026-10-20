@@ -56,7 +56,14 @@ function foldersIn(items: DataTransferItemList | undefined): Set<string> {
   return names;
 }
 
-export function AddDocuments({ onChanged }: { onChanged: () => void }) {
+export function AddDocuments({
+  onChanged,
+  projectId,
+}: {
+  onChanged: () => void;
+  /** Keeps the files to this project (MV7b) instead of My documents. */
+  projectId?: string;
+}) {
   const uid = useId();
   const input = useRef<HTMLInputElement>(null);
   const [uploads, setUploads] = useState<Upload[]>([]);
@@ -91,6 +98,7 @@ export function AddDocuments({ onChanged }: { onChanged: () => void }) {
         try {
           const form = new FormData();
           form.append("files", file, file.name);
+          if (projectId) form.append("projectId", projectId);
           const made = await upload<AddedFiles>("/api/documents", form, {
             signal: stop.current?.signal,
             onProgress: (progress) => show(key, { progress }),
@@ -103,7 +111,7 @@ export function AddDocuments({ onChanged }: { onChanged: () => void }) {
               state: "added",
               progress: 1,
               message: kept?.unchanged
-                ? `${file.name} is already in your documents, exactly as it is.`
+                ? `${file.name} is already in ${projectId ? "this project" : "your documents"}, exactly as it is.`
                 : kept && kept.replaced.length > 0
                   ? "Added. It takes the place of the older file with the same name."
                   : null,
@@ -208,7 +216,7 @@ export function AddDocuments({ onChanged }: { onChanged: () => void }) {
           multiple
           accept={DOCUMENT_ACCEPT}
           className="hidden"
-          aria-label="Choose files to add to your documents"
+          aria-label={`Choose files to add to ${projectId ? "this project" : "your documents"}`}
           data-testid="documents-input"
           onChange={(event) => {
             add(Array.from(event.target.files ?? []));

@@ -1,8 +1,9 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
-import { ApiError, api, del, patch, post } from "../lib/api";
-import type { Chat, MemoryNote, ProjectDetail } from "../lib/types";
+import { ApiError, api, del, patch, post, upload } from "../lib/api";
+import type { Chat, DocumentsPage, MemoryNote, ProjectDetail, SavedDocument } from "../lib/types";
 import { note } from "../test-memory";
+import { saved, wordsOnly } from "../test-saved";
 import { ProjectPage } from "./Project";
 
 vi.mock("../lib/api", async (importOriginal) => ({
@@ -11,6 +12,7 @@ vi.mock("../lib/api", async (importOriginal) => ({
   del: vi.fn(),
   patch: vi.fn(),
   post: vi.fn(),
+  upload: vi.fn(),
 }));
 
 const chat = (id: string, title: string): Chat => ({
@@ -28,6 +30,23 @@ const chat = (id: string, title: string): Chat => ({
 
 let held: ProjectDetail;
 let notes: MemoryNote[];
+let docs: SavedDocument[];
+
+const page = (): DocumentsPage =>
+  ({
+    documents: docs,
+    totals: {
+      documents: docs.length,
+      passages: 0,
+      bytes: 0,
+      byState: {},
+      passagesKept: 0,
+      embedded: 0,
+      owed: 0,
+    },
+    search: wordsOnly(),
+    installEnabled: true,
+  }) as unknown as DocumentsPage;
 
 beforeEach(() => {
   held = {
@@ -39,15 +58,18 @@ beforeEach(() => {
     updatedAt: 1,
     chats: 2,
     notes: 1,
+    documents: 1,
     chatList: [chat("c2", "Beds for tomatoes"), chat("c1", "Compost")],
   };
   notes = [note({ id: "n1", text: "The beds face south", projectId: "p1" })];
-  for (const mocked of [api, del, patch, post]) vi.mocked(mocked).mockReset();
+  docs = [saved({ id: "d1", name: "Soil.pdf" })];
+  for (const mocked of [api, del, patch, post, upload]) vi.mocked(mocked).mockReset();
   vi.mocked(api).mockImplementation((async (path: string) => {
     if (path === "/api/projects/p1") return held;
     if (path.startsWith("/api/memory/notes?where=p1")) {
       return { notes, total: notes.length, offset: 0, search: null };
     }
+    if (path === "/api/documents?projectId=p1") return page();
     throw new Error(`not served: ${path}`);
   }) as never);
 });
@@ -158,12 +180,6 @@ describe("Also use my general memory", () => {
     );
     expect(box).toBeChecked();
   });
-
-  it("does not show the documents switch yet", async () => {
-    open();
-    await loaded();
-    expect(screen.queryByText(/My documents/)).toBeNull();
-  });
 });
 
 describe("Add a note", () => {
@@ -209,29 +225,33 @@ describe("Delete project", () => {
   it("asks one question with the counts, and the safe answer is focused", async () => {
     await asked();
     const group = screen.getByRole("group", { name: "Delete this project?" });
-    expect(group).toHaveTextContent("This project has 2 chats and 1 note.");
-    expect(group).toHaveTextContent("Deletes 2 chats and 1 note for good.");
-    expect(group).toHaveTextContent("2 chats and 1 note stay and become general.");
+    expect(group).toHaveTextContent("This project has 2 chats, 1 note and 1 document.");
+    expect(group).toHaveTextContent("Deletes 2 chats, 1 note and 1 document for good.");
+    expect(group).toHaveTextContent(
+      "2 chats and 1 note stay and become general. 1 document moves to My documents; a file of the same name there is replaced.",
+    );
     expect(screen.getByTestId("project-delete-cancel")).toHaveFocus();
     expect(del).not.toHaveBeenCalled();
   });
 
-  it("deletes the project and its chats and notes, then goes back to the chats", async () => {
+  it("deletes the project and its chats, notes and documents, then goes back to the chats", async () => {
     const { onClose, onChanged } = await asked();
     vi.mocked(del).mockResolvedValue(undefined as never);
     fireEvent.click(
-      screen.getByRole("button", { name: "Delete the project and its chats and notes" }),
+      screen.getByRole("button", { name: "Delete the project and its chats, notes and documents" }),
     );
     await waitFor(() => expect(del).toHaveBeenCalledWith("/api/projects/p1?keep=false"));
     await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
     expect(onChanged).toHaveBeenCalled();
   });
 
-  it("deletes the project and keeps its chats and notes, which become general", async () => {
+  it("deletes the project and keeps its chats and notes, and moves its documents, which become general", async () => {
     const { onClose } = await asked();
     vi.mocked(del).mockResolvedValue(undefined as never);
     fireEvent.click(
-      screen.getByRole("button", { name: "Delete the project, keep its chats and notes" }),
+      screen.getByRole("button", {
+        name: "Delete the project, keep its chats, notes and documents",
+      }),
     );
     await waitFor(() => expect(del).toHaveBeenCalledWith("/api/projects/p1?keep=true"));
     await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
@@ -243,7 +263,7 @@ describe("Delete project", () => {
       new ApiError("Workbench deleted 1 chats of this project.", 503),
     );
     fireEvent.click(
-      screen.getByRole("button", { name: "Delete the project and its chats and notes" }),
+      screen.getByRole("button", { name: "Delete the project and its chats, notes and documents" }),
     );
     expect(await screen.findByTestId("project-problem")).toHaveTextContent(
       "Workbench deleted 1 chats of this project.",
@@ -256,5 +276,75 @@ describe("Delete project", () => {
     fireEvent.click(screen.getByTestId("project-delete-cancel"));
     expect(screen.queryByRole("group", { name: "Delete this project?" })).toBeNull();
     expect(del).not.toHaveBeenCalled();
+  });
+});
+
+describe("Documents", () => {
+  it("lists the project's documents and says chats search them", async () => {
+    open();
+    await loaded();
+    const section = await screen.findByTestId("project-documents");
+    expect(await within(section).findByText("Soil.pdf")).toBeVisible();
+    expect(api).toHaveBeenCalledWith("/api/documents?projectId=p1");
+    expect(section).toHaveTextContent("search these documents when Documents is on in the chat");
+  });
+
+  it("says when the project has none", async () => {
+    docs = [];
+    open();
+    expect(await screen.findByText("No documents in this project yet.")).toBeVisible();
+  });
+
+  it("uploads with the project's id and reads the list again", async () => {
+    vi.mocked(upload).mockResolvedValue({
+      documents: [{ ...saved({ id: "d2", name: "Beds.txt" }), unchanged: false, replaced: [] }],
+      refused: [],
+    } as never);
+    open();
+    await loaded();
+    const input = await screen.findByTestId("documents-input");
+    fireEvent.change(input, { target: { files: [new File(["x"], "Beds.txt")] } });
+    await waitFor(() => expect(upload).toHaveBeenCalledOnce());
+    const [path, form] = vi.mocked(upload).mock.calls[0]! as unknown as [string, FormData];
+    expect(path).toBe("/api/documents");
+    expect(form.get("projectId")).toBe("p1");
+    expect((form.get("files") as File).name).toBe("Beds.txt");
+  });
+
+  it("removes one and reads the list again", async () => {
+    vi.mocked(del).mockImplementation((async () => {
+      docs = [];
+    }) as never);
+    open();
+    await screen.findByText("Soil.pdf");
+    fireEvent.click(screen.getByRole("button", { name: /^Remove/ }));
+    fireEvent.click(await screen.findByTestId("saved-document-remove-go"));
+    await waitFor(() => expect(del).toHaveBeenCalledWith("/api/documents/d1"));
+    expect(await screen.findByText("No documents in this project yet.")).toBeVisible();
+  });
+
+  it("saves Also search My documents and shows the server's value", async () => {
+    vi.mocked(patch).mockResolvedValue({ ...held, generalDocuments: true } as never);
+    held.generalDocuments = false;
+    open();
+    await loaded();
+    const box = screen.getByTestId("project-general-documents");
+    expect(box).not.toBeChecked();
+    fireEvent.click(box);
+    await waitFor(() =>
+      expect(patch).toHaveBeenCalledWith("/api/projects/p1", { generalDocuments: true }),
+    );
+    await waitFor(() => expect(box).toBeChecked());
+  });
+
+  it("says why the switch did not change", async () => {
+    vi.mocked(patch).mockRejectedValue(new ApiError("Workbench could not save it.", 503));
+    open();
+    await loaded();
+    fireEvent.click(screen.getByTestId("project-general-documents"));
+    expect(await screen.findByTestId("project-documents-switch-problem")).toHaveTextContent(
+      "Not changed: Workbench could not save it.",
+    );
+    expect(screen.getByTestId("project-general-documents")).toBeChecked();
   });
 });
