@@ -4,6 +4,7 @@ import { useState } from "react";
 import { post } from "../lib/api";
 import { CopyButton } from "./CopyButton";
 import { ToolContent } from "./ToolContent";
+import { RememberReceipt } from "./MemoryLearned";
 import {
   passkeyProblem,
   passkeysHere,
@@ -240,6 +241,9 @@ export function ToolCalls({
               />
               {`${said}${until}`}
             </p>
+            {call.serverId === "memory-write" && (
+              <RememberReceipt call={call} readOnly={readOnly} />
+            )}
             {call.contentVersion === 1 && call.content && <ToolContent blocks={call.content} />}
             <details open={call.status === "pending" && call.ask !== false}>
               <summary className="disclosure cursor-pointer text-muted hover:text-fg">

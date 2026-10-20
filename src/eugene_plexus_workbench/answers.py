@@ -79,8 +79,48 @@ class Preparation:
     memory_tool: bool = False
     #: Whether the model is offered `search_chats` (MV2), likewise.
     chats_tool: bool = False
+    #: Whether the model is offered `remember` (MV3b): set to Keep automatically, under a
+    #: write policy that allows it.
+    remember_tool: bool = False
     #: How a `reply` ends, as a message's `finish` says it.
     finish: str = "documents_only"
+
+
+def turn_context(message: Message, interactions: bool = False) -> Any:
+    """What an answer has read so far this turn, for `remember`'s write policy (MV3b);
+    `interactions`: an app's surface put text in the chat's context."""
+    from .memory_write import TurnContext
+
+    used = message.memory_used or {}
+    return TurnContext(
+        web=bool(message.searches) or any(s.get("kind") == "web" for s in message.sources),
+        documents=bool(message.retrieval)
+        or any(s.get("kind") == "document" for s in message.sources),
+        tools=any(
+            call.get("serverId") not in ("memory", "memory-write")
+            for turn in message.tool_rounds
+            for call in turn.get("calls") or []
+        ),
+        past_chats=bool((used.get("pastChats") or {}).get("exchanges")),
+        interactions=interactions,
+    )
+
+
+def with_remember_hint(body: dict[str, Any]) -> None:
+    """Say in the system message that `remember` is there (MV3b): measured, models seldom call
+    a memory tool nothing mentions. Guidance, not a rule: the rules are code."""
+    from .memory_suggest import REMEMBER_HINT
+
+    messages = body.get("messages") or []
+    if (
+        messages
+        and messages[0].get("role") == "system"
+        and isinstance(messages[0].get("content"), str)
+    ):
+        messages[0] = {**messages[0], "content": f"{messages[0]['content']}\n\n{REMEMBER_HINT}"}
+    else:
+        messages.insert(0, {"role": "system", "content": REMEMBER_HINT})
+        body["messages"] = messages
 
 
 #: A step run before the request is built: it may wait (for a file to be read, a
@@ -439,12 +479,13 @@ class Answers:
             if value is not None:
                 self.publish(chat_id, {"type": "progress", "id": m.id, "progress": value})
 
-        memory_tool = chats_tool = False
+        memory_tool = chats_tool = remember_tool = False
         try:
             if prepare is not None:
                 prepared = await prepare(progress)
                 memory_tool = prepared.memory_tool
                 chats_tool = prepared.chats_tool
+                remember_tool = prepared.remember_tool
                 running.progress = None
                 told: dict[str, Any] = {}
                 if prepared.sources:
@@ -473,7 +514,7 @@ class Answers:
             if context:
                 # Ordinary user context, before the current explicit request.
                 body["messages"][-1:-1] = context
-            if tool_servers or folder_grants or memory_tool or chats_tool:
+            if tool_servers or folder_grants or memory_tool or chats_tool or remember_tool:
                 await self._with_tools(
                     running,
                     body,
@@ -481,6 +522,8 @@ class Answers:
                     folder_grants,
                     memory_tool=memory_tool,
                     chats_tool=chats_tool,
+                    remember_tool=remember_tool,
+                    interactions=bool(context),
                 )
             else:
                 await self._stream(running, body)
@@ -593,6 +636,8 @@ class Answers:
         *,
         memory_tool: bool = False,
         chats_tool: bool = False,
+        remember_tool: bool = False,
+        interactions: bool = False,
     ) -> None:
         if self._tools is None:
             raise ToolError("Tools are unavailable. Restart Workbench and try again.")
@@ -604,6 +649,13 @@ class Answers:
                 session.add_memory_search(running.chat_id, body.get("model"))
             if chats_tool and person is not None:
                 session.add_chats_search(running.chat_id, body.get("model"))
+            if remember_tool and person is not None:
+                session.add_remember(
+                    running.chat_id,
+                    body.get("model"),
+                    lambda: turn_context(running.message, interactions),
+                )
+                with_remember_hint(body)
             if not session.definitions:
                 raise ToolError("The selected servers offer no tools. Check them in Tools.")
             body["tools"] = session.definitions

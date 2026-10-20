@@ -25,7 +25,7 @@ from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFil
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field, StrictBool
 
-from . import artifacts, config, files
+from . import artifacts, config, files, memory_write
 from .answers import Answers, Preparation, Progress, message_view
 from .context import reading_view
 from .conversation import SAMPLING, request_for
@@ -52,7 +52,14 @@ from .store import (
     path,
     versions,
 )
-from .tools import CHATS_SERVER, CHATS_TOOL_NAME, MEMORY_SERVER, MEMORY_TOOL_NAME
+from .tools import (
+    CHATS_SERVER,
+    CHATS_TOOL_NAME,
+    MEMORY_SERVER,
+    MEMORY_TOOL_NAME,
+    REMEMBER_TOOL_NAME,
+    WRITE_SERVER,
+)
 
 log = logging.getLogger(__name__)
 
@@ -578,7 +585,7 @@ def hidden_from_owner(tree: list[Message], mode: str) -> dict[str, str]:
 
 
 #: The tools Workbench runs over a person's own memory (MV1, MV2): never the owner's to read.
-_PRIVATE_SERVERS = (MEMORY_SERVER, CHATS_SERVER)
+_PRIVATE_SERVERS = (MEMORY_SERVER, CHATS_SERVER, WRITE_SERVER)
 
 
 def _touch_exchanges(request: Request, owner: str, chat_id: str) -> None:
@@ -625,11 +632,13 @@ def hide_notes(view: dict[str, Any]) -> dict[str, Any]:
                     {
                         **call,
                         "arguments": {},
-                        "result": "Hidden: the person's notes."
-                        if call.get("serverId") == MEMORY_SERVER
-                        else "Hidden: the person's past chats.",
+                        "result": "Hidden: the person's past chats."
+                        if call.get("serverId") == CHATS_SERVER
+                        else "Hidden: the person's notes.",
                         "content": [],
                         "chats": [],
+                        "note": None,
+                        "noteText": None,
                         "redacted": True,
                     }
                     if call.get("serverId") in _PRIVATE_SERVERS
@@ -650,7 +659,8 @@ def _hide_memory_calls(assistant: dict[str, Any]) -> dict[str, Any]:
         **assistant,
         "tool_calls": [
             {**c, "function": {**(c.get("function") or {}), "arguments": "{}"}}
-            if (c.get("function") or {}).get("name") in (MEMORY_TOOL_NAME, CHATS_TOOL_NAME)
+            if (c.get("function") or {}).get("name")
+            in (MEMORY_TOOL_NAME, CHATS_TOOL_NAME, REMEMBER_TOOL_NAME)
             else c
             for c in calls
         ],
@@ -990,7 +1000,13 @@ async def _ask(
             spent=past.tokens,
         )
         decided["memory_turn"] = turn.block
-        decided["memory_allowed"] = turn.allowed
+        # Call 12 (review, MV3b): a kept `search_memory` result may name a note a model kept
+        # that the person has not seen; while one exists, none is replayed to an outside model.
+        decided["memory_allowed"] = turn.allowed and not (
+            turn.facts is not None
+            and turn.facts.locality != "local"
+            and await memory_api.unseen_withheld(_state(request).store, person.sub)
+        )
         decided["past_turn"] = past.block
         decided["chats_allowed"] = past.allowed
         record = turn.record
@@ -1015,6 +1031,11 @@ async def _ask(
             memory_used=record,
             memory_tool=turn.tool,
             chats_tool=past.tool,
+            # MV3b: tools are assumed unless the gateway says the model refuses them.
+            remember_tool=(turn.facts is None or turn.facts.tools)
+            and await memory_write.remember_allowed(
+                _state(request).store, person.sub, fresh.settings, model
+            ),
         )
 
     def build() -> dict[str, Any]:

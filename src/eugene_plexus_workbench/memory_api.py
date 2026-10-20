@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -55,7 +56,7 @@ from fastapi import APIRouter, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
-from . import config, memory, memory_learn, memory_relevance
+from . import config, memory, memory_learn, memory_policy, memory_relevance, memory_write
 from .api import _new_id, _own_chat, _person, _problem, _readable_chat, _state
 from .hub import Hub, HubError
 from .media_api import _common as served
@@ -130,6 +131,29 @@ def resolve_external(install: str, chosen: str | None) -> tuple[str, str]:
 # --------------------------------------------------------------------------- #
 
 
+async def leaving(store: Store, owner: str, notes: list[MemoryNote]) -> list[MemoryNote]:
+    """The notes that may go to a model outside the machines or a connection (call 12, MV3b):
+    under the person's write policy's `unseenLocal`, none a model kept that they have not
+    seen yet."""
+    install = await config.memory_settings(store)
+    policy, _ = memory_write.policy_for(install, await store.memory_prefs(owner))
+    return memory.shareable(notes) if policy.get("unseenLocal") == "yes" else notes
+
+
+async def unseen_withheld(store: Store, owner: str) -> bool:
+    """Whether the person has a note a model kept that they have not seen, under a policy that
+    keeps such notes on the machines (call 12)."""
+    held = await store.memory_notes(owner)
+    return len(await leaving(store, owner, held)) != len(held)
+
+
+def _policy_name(policy: str | None) -> str | None:
+    try:
+        return str(json.loads(policy)["name"]) if policy else None
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
 def note_view(note: MemoryNote) -> dict[str, Any]:
     out = {
         "id": note.id,
@@ -157,6 +181,12 @@ def note_view(note: MemoryNote) -> dict[str, Any]:
         "validFrom": note.valid_from,
         "supersededAt": note.superseded_at,
         "supersededBy": note.superseded_by,
+        # MV3b: the model that wrote it, the write policy then, whether it was kept with
+        # nobody approving it, and whether its person has seen it since.
+        "model": note.model,
+        "policy": _policy_name(note.policy),
+        "auto": note.auto,
+        "seen": note.seen_at is not None,
     }
     if note.body is not None:
         out["body"] = note.body
@@ -177,6 +207,18 @@ def suggestion_view(
     }
 
 
+def policy_choices(install: config.MemorySettings) -> list[str]:
+    """The presets a person may choose: any, if the owner allows; else those at least as strict
+    as the owner's, row by row."""
+    if install.policy_people == memory_policy.ANY:
+        return list(memory_policy.PRESETS_NAMES)
+    return [
+        name
+        for name in memory_policy.PRESETS_NAMES
+        if memory_policy.is_stricter_or_equal(memory_policy.preset(name), install.policy)
+    ]
+
+
 def prefs_view(prefs: dict[str, Any], install: config.MemorySettings) -> dict[str, Any]:
     """What a person has set, what is in effect now, and whose word it is.
 
@@ -185,6 +227,7 @@ def prefs_view(prefs: dict[str, Any], install: config.MemorySettings) -> dict[st
     a choice (settings never lie)."""
     external, set_by = resolve_external(install.external, prefs["external"])
     learn, learn_by = memory_learn.effective(install, prefs, None)
+    policy, policy_by = memory_write.policy_for(install, prefs)
     return {
         "enabled": prefs["enabled"],
         "external": prefs["external"],
@@ -198,6 +241,11 @@ def prefs_view(prefs: dict[str, Any], install: config.MemorySettings) -> dict[st
         if prefs.get("learn_set")
         else None,
         "useMode": prefs.get("use_mode") or "relevant",
+        # MV3b: what the person chose (null: the owner's), what is in effect and whose word it
+        # is, and what they may choose.
+        "writePolicy": prefs.get("write_policy"),
+        "policyChoices": policy_choices(install),
+        "policyPeople": install.policy_people,
         "effective": {
             "enabled": install.enabled and prefs["enabled"],
             "disabledBy": ("owner" if not install.enabled else None if prefs["enabled"] else "you"),
@@ -210,6 +258,7 @@ def prefs_view(prefs: dict[str, Any], install: config.MemorySettings) -> dict[st
             "learnSetBy": learn_by,
             "learnByModel": install.suggestions == "measured" and not prefs.get("learn_set"),
             "suggestionsAllowed": install.enabled and install.suggestions != "off",
+            "policy": {**policy.view(), "setBy": policy_by, "owners": install.policy.name},
         },
     }
 
@@ -298,6 +347,11 @@ async def get_memory(request: Request) -> dict[str, Any]:
             for n in pending
         ],
         "revisit": [note_view(n) for n in _due_revisits(notes, prefs, today)],
+        # MV3b: what models kept by themselves lately, each with its model and an Undo.
+        "learned": [
+            note_view(n)
+            for n in await store.learned_notes(person.sub, time.time() - LEARNED_DAYS * 86_400.0)
+        ],
         "tags": tags,
         # Whether choosing by meaning can be done now (settings never lie).
         "relevance": relevance,
@@ -427,6 +481,8 @@ class PrefsUpdate(BaseModel):
     learn: Literal["off", "suggest"] | None = None
     useMode: Literal["relevant", "all"] | None = None
     offerDismissed: StrictBool | None = None
+    #: MV3b: the person's own write policy; `null` returns to the owner's.
+    writePolicy: Literal["strict", "standard", "open"] | None = None
 
 
 def _vetted(text: str) -> str:
@@ -665,6 +721,7 @@ async def put_prefs(request: Request, body: PrefsUpdate) -> dict[str, Any]:
         "learn": "off",
         "useMode": "relevant",
         "offerDismissed": False,
+        "writePolicy": None,
     }
     columns = {
         "enabled": "enabled",
@@ -676,7 +733,15 @@ async def put_prefs(request: Request, body: PrefsUpdate) -> dict[str, Any]:
         "learn": "learn",
         "useMode": "use_mode",
         "offerDismissed": "offer_dismissed",
+        "writePolicy": "write_policy",
     }
+    install = await config.memory_settings(store)
+    if body.writePolicy is not None and body.writePolicy not in policy_choices(install):
+        raise _problem(
+            422,
+            "The owner of this Workbench lets people choose only a policy stricter than "
+            f"theirs ({install.policy.name.title()}).",
+        )
     for key in body.model_fields_set:
         given = getattr(body, key)
         values[columns[key]] = defaults[key] if given is None else given
@@ -933,6 +998,8 @@ REVISIT_EVERY_SECONDS = 7 * 86_400.0
 OFFER_AFTER_CHATS = 5
 #: A suggestion waits this many days for the person, then goes.
 SUGGESTION_DAYS = 30
+#: MV3b: Recently learned lists what models kept in this many days.
+LEARNED_DAYS = 30
 
 
 def _due_revisits(notes: list[MemoryNote], prefs: dict[str, Any], today: str) -> list[MemoryNote]:
@@ -1000,6 +1067,78 @@ async def dismiss_suggestion(request: Request, note_id: str) -> Response:
     ):
         raise _problem(status.HTTP_404_NOT_FOUND, "There is no such suggestion.")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+class Seen(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ids: list[str] = Field(max_length=500)
+
+
+@router.post("/api/memory/learned/seen")
+async def learned_seen(request: Request, body: Seen) -> dict[str, Any]:
+    """The person saw these notes a model kept, in Recently learned (call 12): from now on
+    they go where their notes go."""
+    person = await _person(request)
+    return {"seen": await _store(request).mark_learned_seen(person.sub, body.ids)}
+
+
+async def _undo(request: Request, owner: str, ids: list[str]) -> dict[str, Any]:
+    """Undo notes a model kept: out of the index first (as a delete), then the store, and the
+    notes they replaced back in."""
+    state = _state(request)
+    store = _store(request)
+    mine = {n.id for n in await store.memory_notes(owner) if n.auto}
+    wanted = [i for i in ids if i in mine]
+    if not wanted:
+        return {"removed": [], "restored": []}
+    try:
+        await _unindex(state, owner, wanted)
+    except Exception as exc:  # as a delete: nothing goes while the index cannot follow
+        raise _problem(503, f"Workbench could not take the notes out of search ({exc}).") from exc
+    gone, back = await store.undo_learned(owner, wanted)
+    await _reindex(state, owner, back)
+    return {"removed": gone, "restored": back}
+
+
+@router.post("/api/memory/learned/{note_id}/undo")
+async def undo_learned(request: Request, note_id: str) -> dict[str, Any]:
+    """Undo one note a model kept: it goes, and the note it replaced is current again."""
+    person = await _person(request)
+    done = await _undo(request, person.sub, [note_id])
+    if not done["removed"]:
+        raise _problem(404, "There is no such note a model kept.")
+    return done
+
+
+def _since(day: str) -> float:
+    try:
+        return datetime.fromisoformat(day).replace(tzinfo=UTC).timestamp()
+    except ValueError as exc:
+        raise _problem(422, "`since` is a date, YYYY-MM-DD.") from exc
+
+
+@router.get("/api/memory/learned/removal")
+async def removal_preview(request: Request, since: str, model: str | None = None) -> dict[str, Any]:
+    """How many notes `model` (any model when not given) kept since `since`: what Remove would
+    take, named before it does."""
+    person = await _person(request)
+    ids = await _store(request).learned_since(person.sub, model, _since(since))
+    return {"count": len(ids), "model": model, "since": since}
+
+
+class Removal(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    since: str = Field(min_length=10, max_length=10)
+    model: str | None = Field(default=None, max_length=256)
+
+
+@router.post("/api/memory/learned/removal")
+async def remove_learned(request: Request, body: Removal) -> dict[str, Any]:
+    """Remove everything a model kept since a date, each undone as Undo does, in one step."""
+    person = await _person(request)
+    ids = await _store(request).learned_since(person.sub, body.model, _since(body.since))
+    done = await _undo(request, person.sub, ids)
+    return {**done, "count": len(done["removed"])}
 
 
 class Revisit(BaseModel):
@@ -1279,6 +1418,8 @@ async def _pinned(
 ) -> memory.Snapshot:
     """The pinned block for this person and model, as it would be taken now."""
     held = notes if notes is not None else await store.memory_notes(person.sub)
+    if facts.locality != "local":
+        held = await leaving(store, person.sub, held)
     always = [n for n in held if memory.is_always(n)]
     return memory.build_snapshot(
         always,
@@ -1413,6 +1554,8 @@ async def _turn_for(
         return TurnMemory()
     prefs = await store.memory_prefs(person.sub)
     notes = await store.memory_notes(person.sub)
+    if decision.facts.locality != "local":
+        notes = await leaving(store, person.sub, notes)
     others = [n for n in notes if not memory.is_always(n)]
     deferred = snapshot.deferred if snapshot is not None else []
     facts = decision.facts
@@ -1491,9 +1634,12 @@ async def run_search_tool(
         chat = await state.store.chat(chat_id)
         if chat is None or chat.owner != owner:
             return "This chat is gone."
-        if not (await decide(state, person, chat, model_id)).send:
+        decision = await decide(state, person, chat, model_id)
+        if not decision.send:
             return memory.WITHHELD
         notes = await state.store.memory_notes(owner)
+        if decision.facts is None or decision.facts.locality != "local":
+            notes = await leaving(state.store, owner, notes)
         chosen = await _finder(state).search(owner, query, notes, today=_today())
         turn = memory.pack_relevant(chosen.candidates[:limit], memory.SEARCH_TOOL_TOKENS)
     except Exception as exc:

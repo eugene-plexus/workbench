@@ -48,7 +48,16 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import Receive, Scope, Send
 
-from . import config, memory, memory_relevance, memory_suggest, person_context
+from . import (
+    config,
+    memory,
+    memory_api,
+    memory_policy,
+    memory_relevance,
+    memory_suggest,
+    memory_write,
+    person_context,
+)
 from ._build import commit
 from .knowledge.index import FOUND, LIBRARY, PENDING, IndexUnavailable, valid_id
 from .knowledge.search import plan_query
@@ -413,6 +422,8 @@ class Tools:
             raise ToolRefused("This person has turned their Workbench memory off.")
         today = datetime.now().date().isoformat()
         notes = [n for n in await self.store.memory_notes(sub) if not memory.is_past(n, today)]
+        # Call 12 (MV3b): a connection is outside the machines.
+        notes = await memory_api.leaving(self.store, sub, notes)
         _, tags = memory_relevance.split_tags(query)
         wanted = {tag_key(t) for t in tags}
         always = [
@@ -511,6 +522,8 @@ class Tools:
         note = await self.store.memory_note(sub, note_id)
         if note is None or note.status != "active":
             raise ToolRefused("There is no such note.")
+        if not await memory_api.leaving(self.store, sub, [note]):
+            raise ToolRefused("There is no such note.")  # kept by a model, not seen yet
         body = (note.body or "")[offset:]
         cut = _cut(body, READ_TOKENS)
         return {
@@ -633,8 +646,18 @@ class Tools:
             raise ToolRefused("Notes are turned off on this Workbench.")
         if install.suggestions == "off":
             raise ToolRefused("The owner of this Workbench has turned suggested notes off.")
-        if not (await self.store.memory_prefs(sub))["enabled"]:
+        prefs = await self.store.memory_prefs(sub)
+        if not prefs["enabled"]:
             raise ToolRefused("This person has turned their Workbench memory off.")
+        # The write policy's `connections` row (MV3b), in code.
+        policy, _ = memory_write.policy_for(install, prefs)
+        if (
+            memory_policy.route(
+                policy, kind=kind, sensitive=None, untrusted=True, auto=False, via="connection"
+            )[0]
+            == memory_policy.DROP
+        ):
+            raise ToolRefused("This person's memory write policy does not take notes from apps.")
         try:
             text = memory.validate_note(unicodedata.normalize("NFKC", raw))
         except memory.NoteRefused as exc:

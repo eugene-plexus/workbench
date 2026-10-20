@@ -171,6 +171,12 @@ export interface ToolCall {
   held?: HeldCall;
   /** When your open window on that site ended, as of this call. */
   windowUntil?: string;
+  /** MV3b, `remember`: the note it wrote, its words, whether it was kept (else offered),
+   * and whether you removed it since. */
+  note?: string;
+  noteText?: string;
+  kept?: boolean;
+  removed?: boolean;
   /** What the call returned, in order (rich content RC3); `result` is the
    * same as the words the model is sent. Absent from a call made before. */
   content?: ContentBlock[];
@@ -614,7 +620,15 @@ export type ChatEvent =
   | { type: "reload" }
   /** Another version is shown: Try again, an edit, or a choice. */
   | { type: "path" }
+  /** MV3b: notes this chat's model kept by itself after it went quiet. */
+  | { type: "memory"; learned: LearnedNote[] }
   | { type: "signed-out"; reason: string; message: string };
+
+export interface LearnedNote {
+  id: string;
+  text: string;
+  model: string | null;
+}
 
 export interface Person {
   sub: string;
@@ -662,6 +676,12 @@ export interface MemoryNote {
   supersededBy: string | null;
   /** Markdown; only on a note read whole. */
   body?: string;
+  /** MV3b: the model that wrote it and the write policy then (null for your own), whether
+   * it was kept with nobody approving it, and whether you have seen it since. */
+  model?: string | null;
+  policy?: string | null;
+  auto?: boolean;
+  seen?: boolean;
 }
 
 /** One tag on the person's list. */
@@ -720,7 +740,27 @@ export interface MemoryPrefs {
     /** Until the person chooses, a chat on a model that passed the measurement suggests. */
     learnByModel: boolean;
     suggestionsAllowed: boolean;
+    /** MV3b: the write policy in effect, whose word it is, and what it allows beyond
+     * Standard or holds back. */
+    policy?: WritePolicyView;
   };
+  /** MV3b: the person's own write policy; null is the owner's. */
+  writePolicy?: WritePolicyName | null;
+  /** The presets they may choose. */
+  policyChoices?: WritePolicyName[];
+  policyPeople?: "stricter" | "any";
+}
+
+export type WritePolicyName = "strict" | "standard" | "open";
+
+export interface WritePolicyView {
+  name: WritePolicyName | "custom";
+  rows: Record<string, string>;
+  allows: string[];
+  holdsBack: string[];
+  setBy: "owner" | "you";
+  /** The owner's policy, by name. */
+  owners: WritePolicyName | "custom";
 }
 
 /** `GET /api/memory`: the Memory page. */
@@ -739,6 +779,8 @@ export interface MemoryPage {
   suggestions?: MemorySuggestion[];
   /** The project to ask "Still true?" about now (at most one, at most weekly). */
   revisit?: MemoryNote[];
+  /** MV3b: notes models kept by themselves in the last 30 days, newest first. */
+  learned?: MemoryNote[];
   /** Whether only relevant notes can be chosen now (a search model runs), and why not. */
   relevance?: { available: boolean; why: string | null };
   usage: {

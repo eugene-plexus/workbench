@@ -373,6 +373,10 @@ def test_a_persons_own_memory_settings_and_what_is_in_effect(world: World) -> No
         "chatsTool": True,
         "learn": None,  # MR8: not chosen
         "useMode": "relevant",
+        # MV3b: the owner's write policy, and the stricter presets the person may choose.
+        "writePolicy": None,
+        "policyChoices": ["strict", "standard"],
+        "policyPeople": "stricter",
         "effective": {
             "enabled": True,
             "disabledBy": None,
@@ -384,6 +388,23 @@ def test_a_persons_own_memory_settings_and_what_is_in_effect(world: World) -> No
             "learnSetBy": "default",
             "learnByModel": True,
             "suggestionsAllowed": True,
+            "policy": {
+                "name": "standard",
+                "rows": {
+                    "source": "own",
+                    "secrets": "refuse",
+                    "sensitive": "refuse",
+                    "untrusted": "inbox",
+                    "instructions": "inbox",
+                    "keepAuto": "on",
+                    "connections": "inbox",
+                    "unseenLocal": "yes",
+                },
+                "allows": [],
+                "holdsBack": [],
+                "setBy": "owner",
+                "owners": "standard",
+            },
         },
     }
     changed = ada.put("/api/memory/prefs", json={"external": "never"}).json()

@@ -37,15 +37,17 @@ from __future__ import annotations
 
 import hmac
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
+from . import memory_policy
 from ._generated.models import (
     ConfigDocument,
     ConfigField,
     ConfigFieldError,
+    ConfigFieldShowWhen,
     ConfigFieldStatus,
     ConfigFieldStatusLevel,
     ConfigSchema,
@@ -64,6 +66,19 @@ MEMORY_MAX_BODY_CHARS = "memoryMaxBodyChars"
 MEMORY_EXTERNAL_MODELS = "memoryExternalModels"
 MEMORY_SUGGESTIONS = "memorySuggestions"
 SUGGESTION_CHOICES = ("off", "choose", "measured")
+#: MV3b: the memory write policy, whether people may loosen it, and Custom's rows.
+MEMORY_WRITE_POLICY = "memoryWritePolicy"
+MEMORY_POLICY_PEOPLE = "memoryPolicyPeople"
+POLICY_ROW_KEYS = {
+    "source": "memoryPolicySource",
+    "secrets": "memoryPolicySecrets",
+    "sensitive": "memoryPolicySensitive",
+    "untrusted": "memoryPolicyUntrusted",
+    "instructions": "memoryPolicyInstructions",
+    "keepAuto": "memoryPolicyKeepAuto",
+    "connections": "memoryPolicyConnections",
+    "unseenLocal": "memoryPolicyUnseenLocal",
+}
 CONNECTIONS = "connections"
 DOCUMENTS_ENABLED = "documentsEnabled"
 DOCUMENTS_MAX_FILE_MB = "documentsMaxFileMB"
@@ -474,6 +489,104 @@ FIELDS = [
     ),
 ]
 
+_ROW_LABELS: dict[str, tuple[str, str, list[str]]] = {
+    "source": (
+        "Custom policy: what a note may be drawn from",
+        "**Own words**: the person's own words, pasted material left out. **Anything**: any "
+        "text in the chat, answers and tool results included.",
+        ["Own words", "Anything in the chat"],
+    ),
+    "secrets": (
+        "Custom policy: text shaped like a secret",
+        "Whether a model's note that looks like a password, key, card or account number is "
+        "refused. The check catches the shape of a secret, not its meaning.",
+        ["Refused", "Allowed"],
+    ),
+    "sensitive": (
+        "Custom policy: notes about sensitive subjects",
+        "Health, religion, politics, sexuality, money and contact details.",
+        ["Refused", "To Suggested notes", "Kept"],
+    ),
+    "untrusted": (
+        "Custom policy: web pages, tool results, documents or pasted text in the chat",
+        "What happens to a note a model writes while such text is in the turns it read.",
+        ["Dropped", "To Suggested notes", "Kept like any other"],
+    ),
+    "instructions": (
+        "Custom policy: instructions and procedures from a model",
+        "Instructions and procedures shape every later answer.",
+        ["Never", "To Suggested notes", "May be kept automatically"],
+    ),
+    "keepAuto": (
+        "Custom policy: Keep automatically",
+        "Whether people may let a model keep notes without asking.",
+        ["Not available", "Available"],
+    ),
+    "connections": (
+        "Custom policy: suggestions from connected apps",
+        "Whether apps connected to a person's notes may suggest notes.",
+        ["Off", "To Suggested notes"],
+    ),
+    "unseenLocal": (
+        "Custom policy: notes a model kept, before the person has seen them",
+        "**Stay on the machines**: not sent to outside models or connected apps until seen.",
+        ["Stay on the machines", "Go where notes go"],
+    ),
+}
+
+POLICY_FIELDS = [
+    ConfigField(
+        key=MEMORY_WRITE_POLICY,
+        label="What models may write to people's memory",
+        description=(
+            "What models may write to people's memory, checked by Workbench before a note is "
+            "stored.\n\n"
+            "- **Strict**: no model keeps notes by itself, and a note drawn beside web pages, "
+            "tool results, documents or pasted text is dropped.\n"
+            "- **Standard**: people may let a model keep notes; with such text in the chat a "
+            "note waits in Suggested notes, and a kept note stays on your machines until its "
+            "person has seen it.\n"
+            "- **Open**: models may keep notes drawn from anything in a chat; for testing.\n"
+            "- **Custom**: set each rule.\n\n"
+            "Notes shaped like a secret are refused under every preset."
+        ),
+        category="memory",
+        valueType=ConfigValueType.enum,
+        enumValues=list(memory_policy.NAMES),
+        enumLabels=["Strict", "Standard", "Open", "Custom"],
+        default=memory_policy.STANDARD,
+    ),
+    ConfigField(
+        key=MEMORY_POLICY_PEOPLE,
+        label="People may choose a looser write policy",
+        description=(
+            "A person may always choose a stricter policy for their own memory.\n\n"
+            "- **Stricter only**: never looser than this install's.\n"
+            "- **Any**: any preset, looser too."
+        ),
+        category="memory",
+        valueType=ConfigValueType.enum,
+        enumValues=[memory_policy.STRICTER_ONLY, memory_policy.ANY],
+        enumLabels=["Stricter only", "Any"],
+        default=memory_policy.STRICTER_ONLY,
+    ),
+    *[
+        ConfigField(
+            key=POLICY_ROW_KEYS[row],
+            label=label,
+            description=description,
+            category="memory",
+            valueType=ConfigValueType.enum,
+            enumValues=list(memory_policy.ROWS[row]),
+            enumLabels=labels,
+            default=memory_policy.PRESETS[memory_policy.STANDARD][row],
+            showWhen=ConfigFieldShowWhen(key=MEMORY_WRITE_POLICY, equals=memory_policy.CUSTOM),
+        )
+        for row, (label, description, labels) in _ROW_LABELS.items()
+    ],
+]
+FIELDS += POLICY_FIELDS
+
 DEFAULTS: dict[str, Any] = {
     OWNER_READS_CHATS: False,
     MEMORY_ENABLED: True,
@@ -481,6 +594,12 @@ DEFAULTS: dict[str, Any] = {
     MEMORY_MAX_BODY_CHARS: MAX_BODY_CHARS_LIMIT,
     MEMORY_EXTERNAL_MODELS: "ask",
     MEMORY_SUGGESTIONS: "measured",
+    MEMORY_WRITE_POLICY: memory_policy.STANDARD,
+    MEMORY_POLICY_PEOPLE: memory_policy.STRICTER_ONLY,
+    **{
+        key: memory_policy.PRESETS[memory_policy.STANDARD][row]
+        for row, key in POLICY_ROW_KEYS.items()
+    },
     CONNECTIONS: True,
     DOCUMENTS_ENABLED: True,
     DOCUMENTS_MAX_FILE_MB: 50,
@@ -521,6 +640,20 @@ class MemorySettings:
     suggestions: str = "measured"
     #: MV1: the most characters a new or edited note's body may hold.
     max_body_chars: int = MAX_BODY_CHARS_LIMIT
+    #: MV3b: the write policy's name, Custom's rows as set (Standard's where unset), and
+    #: whether people may loosen it.
+    policy_name: str = memory_policy.STANDARD
+    policy_rows: dict[str, str] = field(
+        default_factory=lambda: dict(memory_policy.PRESETS[memory_policy.STANDARD])
+    )
+    policy_people: str = memory_policy.STRICTER_ONLY
+
+    @property
+    def policy(self) -> memory_policy.Policy:
+        """The install's write policy in effect: a preset, or Custom's rows."""
+        if self.policy_name in memory_policy.PRESETS:
+            return memory_policy.preset(self.policy_name)
+        return memory_policy.custom(self.policy_rows)
 
 
 async def memory_settings(store: Store) -> MemorySettings:
@@ -529,7 +662,17 @@ async def memory_settings(store: Store) -> MemorySettings:
     body = await store.setting(MEMORY_MAX_BODY_CHARS)
     external = await store.setting(MEMORY_EXTERNAL_MODELS)
     suggestions = await store.setting(MEMORY_SUGGESTIONS)
+    name = await store.setting(MEMORY_WRITE_POLICY)
+    people = await store.setting(MEMORY_POLICY_PEOPLE)
+    rows = {row: await store.setting(key) for row, key in POLICY_ROW_KEYS.items()}
     return MemorySettings(
+        policy_name=str(name) if name in memory_policy.NAMES else memory_policy.STANDARD,
+        policy_rows=memory_policy.custom(rows).rows,
+        policy_people=(
+            str(people)
+            if people in (memory_policy.STRICTER_ONLY, memory_policy.ANY)
+            else memory_policy.STRICTER_ONLY
+        ),
         suggestions=(
             str(suggestions)
             if suggestions in SUGGESTION_CHOICES
@@ -681,10 +824,12 @@ async def get_schema(request: Request) -> ConfigSchema:
 
 
 def _suggestions_status() -> ConfigFieldStatus:
-    """What "On for measured models" comes to now: which models passed, or that none has."""
-    from .memory_learn import PASSED
+    """What "On for measured models" comes to now: which models Eugene's measurement recommends
+    for Suggest (an install's own measurements add to these on the Memory screen)."""
+    from .memory_models import measurement_for, recommended_for_suggest, shipped_names
 
-    if not PASSED:
+    passed = [n for n in shipped_names() if recommended_for_suggest(measurement_for(n))]
+    if not passed:
         return ConfigFieldStatus(
             level=ConfigFieldStatusLevel.info,
             text=(
@@ -692,11 +837,9 @@ def _suggestions_status() -> ConfigFieldStatus:
                 "people who turn them on."
             ),
         )
-    from .memory_learn import PASSED_NAMES
-
     return ConfigFieldStatus(
         level=ConfigFieldStatusLevel.info,
-        text=f"Models that passed the measurement: {', '.join(PASSED_NAMES)}.",
+        text=f"Models that passed the measurement: {', '.join(passed)}.",
     )
 
 
@@ -762,6 +905,9 @@ async def get_config(request: Request) -> ConfigDocument:
             MEMORY_MAX_BODY_CHARS: memory.max_body_chars,
             MEMORY_EXTERNAL_MODELS: memory.external,
             MEMORY_SUGGESTIONS: memory.suggestions,
+            MEMORY_WRITE_POLICY: memory.policy_name,
+            MEMORY_POLICY_PEOPLE: memory.policy_people,
+            **{key: memory.policy_rows[row] for row, key in POLICY_ROW_KEYS.items()},
             CONNECTIONS: await connections_enabled(store),
             DOCUMENTS_ENABLED: documents.enabled,
             DOCUMENTS_MAX_FILE_MB: documents.max_file_mb,
@@ -870,6 +1016,18 @@ def _problem_with(key: str, value: Any) -> str | None:
         return None if value in EXTERNAL_CHOICES else "Must be never, ask or always."
     if key == MEMORY_SUGGESTIONS:
         return None if value in SUGGESTION_CHOICES else "Must be off, choose or measured."
+    if key == MEMORY_WRITE_POLICY:
+        return None if value in memory_policy.NAMES else "Must be strict, standard, open or custom."
+    if key == MEMORY_POLICY_PEOPLE:
+        return (
+            None
+            if value in (memory_policy.STRICTER_ONLY, memory_policy.ANY)
+            else ("Must be stricter or any.")
+        )
+    for row, row_key in POLICY_ROW_KEYS.items():
+        if key == row_key:
+            values = memory_policy.ROWS[row]
+            return None if value in values else f"Must be {', '.join(values)}."
     return "Workbench has no such setting."
 
 

@@ -13,7 +13,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { api } from "./api";
 import { watch } from "./events";
-import type { ChatDetail, ChatEvent, Message, Progress } from "./types";
+import type { ChatDetail, ChatEvent, LearnedNote, Message, Progress } from "./types";
 
 type Outcome = { detail: ChatDetail; gap: boolean };
 
@@ -118,6 +118,8 @@ export function useChat(chatId: string | null) {
   const [detail, setDetailState] = useState<ChatDetail | null>(null);
   const [progress, setProgress] = useState<Progress | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // MV3b: notes the chat's model kept by itself after it went quiet, for their receipts.
+  const [learned, setLearned] = useState<LearnedNote[]>([]);
   // The chat as last shown, kept beside the state so an event can be
   // placed against it at once, rather than inside a React updater.
   const current = useRef<ChatDetail | null>(null);
@@ -167,6 +169,7 @@ export function useChat(chatId: string | null) {
     setDetail(null);
     setProgress(null);
     setError(null);
+    setLearned([]);
     held.current = [];
     via.current = null;
     if (!chatId) return;
@@ -176,6 +179,10 @@ export function useChat(chatId: string | null) {
         // Another version is shown in some tab: every tab follows.
         if (event.type === "reload" || event.type === "path") {
           void reload();
+          return;
+        }
+        if (event.type === "memory") {
+          setLearned((old) => [...old, ...event.learned]);
           return;
         }
         setProgress((previous) => {
@@ -197,5 +204,5 @@ export function useChat(chatId: string | null) {
     return () => watching.close();
   }, [chatId, reload, setDetail]);
 
-  return { detail, update, progress, error, reload, look };
+  return { detail, update, progress, error, reload, look, learned };
 }

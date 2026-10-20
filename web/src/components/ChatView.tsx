@@ -10,6 +10,7 @@ import {
   TriangleAlert,
   X,
 } from "lucide-react";
+import { LearnedReceipts } from "./MemoryLearned";
 import { useEffect, useRef, useState } from "react";
 import { Fragment } from "react";
 
@@ -64,7 +65,7 @@ export function ChatView({
   /** Open the Documents screen (from the drawer, and from an answer's search that went wrong). */
   onOpenDocuments: () => void;
 }) {
-  const { detail, update, progress, error, reload, look } = useChat(chatId);
+  const { detail, update, progress, error, reload, look, learned } = useChat(chatId);
   const interactive = useInteractions(
     chatId,
     detail?.chat.readOnly ? detail.messages.at(-1)?.id : undefined,
@@ -609,6 +610,7 @@ export function ChatView({
           }}
         />
       )}
+      {!chat.readOnly && <LearnedReceipts notes={learned} />}
       {!chat.readOnly && !agentMode && (
         <div className="contents" inert={!agui.loaded}>
           <Composer

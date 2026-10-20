@@ -58,6 +58,9 @@ CHATS_SERVER = CHATS_SERVER_ID
 CHATS_TOOL_NAME = "search_chats"
 #: What a kept `search_chats` result is in a request that may not carry past chats.
 CHATS_WITHHELD = "Past-chat results are not sent to this model."
+#: MV3b: `remember`, the tool a model set to Keep automatically may call.
+WRITE_SERVER = "memory-write"
+REMEMBER_TOOL_NAME = "remember"
 
 
 class ToolError(Exception):
@@ -249,6 +252,13 @@ class Tools:
         #: it quoted.
         self.chats_search: (
             Callable[[Person, str, str | None, dict[str, Any]], Awaitable[tuple[str, list[str]]]]
+            | None
+        ) = None
+        #: Runs one `remember` call (MV3b, `memory_write.run_remember`): what the model is
+        #: told, and the note written (kept or offered), if any. The last argument is what the
+        #: answer read so far this turn.
+        self.remember: (
+            Callable[[Person, str, str | None, dict[str, Any], Any], Awaitable[tuple[str, Any]]]
             | None
         ) = None
 
@@ -540,6 +550,11 @@ class ToolSession:
         self.memory_calls = 0
         self.chats_search = tools.chats_search
         self.chats_calls = 0
+        self.remember = tools.remember
+        self.remember_calls = 0
+        #: What the answer has read so far this turn (`memory_write.TurnContext`), for
+        #: `remember`'s write policy.
+        self.turn_context: Callable[[], Any] = lambda: None
         #: The chat and model an answer's own tools run for (`add_memory_search`).
         self.chat_id: str | None = None
         self.model: str | None = None
@@ -622,6 +637,25 @@ class ToolSession:
                 },
             }
         )
+
+    def add_remember(self, chat_id: str, model: str | None, context: Callable[[], Any]) -> None:
+        """Offer `remember` (MV3b): Workbench runs it, without asking the person first, and
+        decides in code, under their write policy, whether the note is kept, offered to them
+        or dropped. The answer shows a receipt with Undo."""
+        self.chat_id, self.model = chat_id, model or self.model
+        self.turn_context = context
+        if self.remember is None or REMEMBER_TOOL_NAME in self.tools:
+            return
+        from .memory_suggest import remember_tool
+
+        definition = remember_tool()
+        schema = definition["function"]["parameters"]
+        server = {"id": WRITE_SERVER, "name": "Memory", "transport": "memory-write"}
+        self.tools[REMEMBER_TOOL_NAME] = (server, None, REMEMBER_TOOL_NAME, schema)
+        self.asks[REMEMBER_TOOL_NAME] = False
+        self.metadata[REMEMBER_TOOL_NAME] = {}
+        self.model_names.add(REMEMBER_TOOL_NAME)
+        self.definitions.append(definition)
 
     def add_chats_search(self, chat_id: str, model: str | None) -> None:
         """Offer `search_chats` (MV2): Workbench runs it over the asking person's own past
@@ -729,6 +763,27 @@ class ToolSession:
                     self.person, self.chat_id or "", self.model, call["arguments"]
                 )
                 call.update(status="done", result=text)
+            return
+        if server["transport"] == "memory-write":
+            from .memory_write import REMEMBER_CALLS
+
+            self.remember_calls += 1
+            if self.remember is None or self.person is None or self.chat_id is None:
+                call.update(status="failed", result="Keeping notes is unavailable.")
+            elif self.remember_calls > REMEMBER_CALLS:
+                call.update(
+                    status="failed",
+                    result=f"This answer has called remember {REMEMBER_CALLS} times, the most "
+                    "it may.",
+                )
+            else:
+                text, note = await self.remember(
+                    self.person, self.chat_id, self.model, call["arguments"], self.turn_context()
+                )
+                call.update(status="done", result=text)
+                if note is not None:
+                    # The receipt: the note, and whether it was kept or offered (MV3b).
+                    call.update(note=note.id, noteText=note.text, kept=bool(note.auto))
             return
         if server["transport"] == "past-chats":
             from .past_chats import TOOL_CALLS

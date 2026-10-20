@@ -90,7 +90,7 @@ from .agui_store import AGUIStore, allow_chat_write
 from .interaction_store import SCHEMA as INTERACTION_SCHEMA
 from .interaction_store import InteractionStore
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 
 #: The oldest schema this migrates from: what Workbench v0.1.0 wrote. Schema 1 predates
 #: it, and nobody holds one.
@@ -522,6 +522,46 @@ def _past_chats(db: sqlite3.Connection) -> None:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
 
+#: Schema 24's columns (MV3, learning and the write policy): on a note, the model that wrote
+#: it and the policy it was written under (null for the person's own), whether it was kept
+#: with nobody approving it, and when the person first saw it (call 12); a person's own write
+#: policy (null: the owner's).
+_LEARNING_COLUMNS: list[tuple[str, str, str]] = [
+    ("memory_notes", "model", "TEXT"),
+    ("memory_notes", "policy", "TEXT"),
+    ("memory_notes", "auto", "INTEGER NOT NULL DEFAULT 0 CHECK (auto IN (0, 1))"),
+    ("memory_notes", "seen_at", "REAL"),
+    (
+        "memory_prefs",
+        "write_policy",
+        "TEXT CHECK (write_policy IS NULL OR write_policy IN ('strict','standard','open'))",
+    ),
+]
+
+
+def _learning(db: sqlite3.Connection) -> None:
+    """Schema 24 (MV3): the columns above, a person's choice per model (Off, Suggest, Keep
+    automatically), and the install's own measurements, one per model id (the newest)."""
+    for table, column, declaration in _LEARNING_COLUMNS:
+        present = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+        if column not in present:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS memory_model_choices ("
+        "owner TEXT NOT NULL, model TEXT NOT NULL CHECK (length(model) BETWEEN 1 AND 256), "
+        "mode TEXT NOT NULL CHECK (mode IN ('off','suggest','auto')), set_at REAL NOT NULL, "
+        "PRIMARY KEY (owner, model))"
+    )
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS memory_measurements ("
+        "model TEXT PRIMARY KEY CHECK (length(model) BETWEEN 1 AND 256), "
+        "measured_at REAL NOT NULL, owner TEXT, result TEXT NOT NULL)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS memory_notes_learned ON memory_notes (owner, auto, created_at)"
+    )
+
+
 #: What brings a store written at version N-1 to N, for N above `OLDEST_SCHEMA`.
 #: `_SCHEMA` already holds the result, for a store made new. A step is a statement,
 #: or a function of the connection for what SQL alone cannot say.
@@ -662,6 +702,8 @@ _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
     ],
     # Past chats (MV2, 2026-10-19): two new columns only.
     23: [_past_chats],
+    # Learning and the write policy (MV3, 2026-10-19): new columns and two new tables.
+    24: [_learning],
 }
 
 
@@ -793,6 +835,7 @@ def _initialize_schema(
         _connections(db)
         _memory_v2(db)
         _past_chats(db)
+        _learning(db)
         db.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?)",
             (str(SCHEMA_VERSION),),
@@ -888,6 +931,13 @@ class MemoryNote:
     tags: list[str] = field(default_factory=list)
     #: For a suggestion: the tags it came with, some perhaps not on the list.
     proposed_tags: list[str] = field(default_factory=list)
+    #: MV3. The model that wrote it and the write policy in effect then (`memory_policy`'s
+    #: JSON), both None for the person's own; whether it was kept with nobody approving it;
+    #: when the person first saw it (call 12: an unseen kept note stays on the machines).
+    model: str | None = None
+    policy: str | None = None
+    auto: bool = False
+    seen_at: float | None = None
 
 
 @dataclass
@@ -933,6 +983,8 @@ class TagListFull(Exception):
 MAX_TAGS = 1000
 #: What a kept `search_memory` result becomes when a note it named is deleted (MV1).
 FORGOTTEN_RESULT = "A note this search found was deleted since, so its result is not kept."
+#: MV3b: what a kept `remember` call says once the person removed the note it kept.
+REMOVED_RESULT = "The person removed this note."
 #: What a kept `search_chats` result becomes when a chat it quoted is deleted (MV2).
 FORGOTTEN_CHAT = "A chat this search found was deleted since, so its result is not kept."
 #: The server id a kept `search_chats` call is known by (`tools.CHATS_SERVER`).
@@ -949,7 +1001,7 @@ _NOTE_LIST = (
     "id, owner, text, kind, status, pinned, source, source_chat_id, source_message_id, quote, "
     "expires_at, revisit_at, created_at, updated_at, last_used_at, use_count, replaces, "
     "source_connection_id, source_connection, length(body) AS body_chars, valid_from, "
-    "superseded_at, superseded_by, proposed_tags"
+    "superseded_at, superseded_by, proposed_tags, model, policy, auto, seen_at"
 )
 
 
@@ -1164,6 +1216,10 @@ def _note(row: sqlite3.Row) -> MemoryNote:
         superseded_at=row["superseded_at"],
         superseded_by=row["superseded_by"],
         proposed_tags=_tag_list(row["proposed_tags"]),
+        model=row["model"] if "model" in keys else None,
+        policy=row["policy"] if "policy" in keys else None,
+        auto=bool(row["auto"]) if "auto" in keys else False,
+        seen_at=row["seen_at"] if "seen_at" in keys else None,
     )
 
 
@@ -1232,6 +1288,9 @@ MEMORY_PREFS_DEFAULT: dict[str, Any] = {
     "search_tool": True,
     # MV2: whether models may search the person's past chats (`search_chats`).
     "chats_tool": True,
+    # MV3: the person's write policy, stricter than the owner's or (if the owner lets them)
+    # any; None is the owner's.
+    "write_policy": None,
 }
 
 
@@ -2829,7 +2888,7 @@ class Store:
         rows = db.execute(
             "SELECT m.id, m.memory_used, m.tool_rounds FROM messages AS m "
             "JOIN chats AS c ON c.id = m.chat_id WHERE c.owner = ? AND m.role = 'assistant' "
-            "AND (m.memory_used IS NOT NULL OR m.tool_rounds LIKE '%\"memory\"%')",
+            "AND (m.memory_used IS NOT NULL OR m.tool_rounds LIKE '%\"memory%')",
             (owner,),
         ).fetchall()
         for row in rows:
@@ -2849,6 +2908,18 @@ class Store:
             touched = False
             for turn in rounds if isinstance(rounds, list) else []:
                 for call in turn.get("calls") or [] if isinstance(turn, dict) else []:
+                    if (
+                        isinstance(call, dict)
+                        and call.get("serverId") == "memory-write"
+                        and (titles is None or call.get("note") in titles)
+                        and call.get("note")
+                    ):
+                        # MV3b: a note `remember` kept and the person removed since.
+                        call["result"] = REMOVED_RESULT
+                        call["removed"] = True
+                        call.pop("noteText", None)
+                        touched = True
+                        continue
                     if not isinstance(call, dict) or call.get("serverId") != "memory":
                         continue
                     result = str(call.get("result") or "")
@@ -2962,8 +3033,9 @@ class Store:
             "INSERT INTO memory_notes (id, owner, text, kind, status, pinned, source, "
             "source_chat_id, source_message_id, quote, expires_at, revisit_at, "
             "created_at, updated_at, last_used_at, use_count, replaces, body, valid_from, "
-            "source_connection_id, source_connection, proposed_tags) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "source_connection_id, source_connection, proposed_tags, model, policy, auto, "
+            "seen_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 note.id,
                 note.owner,
@@ -2987,6 +3059,10 @@ class Store:
                 note.source_connection_id,
                 note.source_connection,
                 json.dumps(note.proposed_tags) if note.proposed_tags else None,
+                note.model,
+                note.policy,
+                int(note.auto),
+                note.seen_at,
             ),
         )
 
@@ -3094,7 +3170,10 @@ class Store:
                 if changes or retagged:
                     columns = ", ".join(f"{k} = ?" for k in changes)
                     db.execute(
-                        f"UPDATE memory_notes SET {columns}{', ' if columns else ''}updated_at = ? "
+                        f"UPDATE memory_notes SET {columns}{', ' if columns else ''}"
+                        # Editing or pinning a note a model kept makes it the person's: no
+                        # longer the model's to undo or remove, and seen (call 12).
+                        "updated_at = ?, auto = 0 "
                         "WHERE id = ? AND owner = ?",
                         (*changes.values(), now, note_id, owner),
                     )
@@ -3537,6 +3616,7 @@ class Store:
                 "relevant_budget_tokens": row["relevant_budget_tokens"],
                 "search_tool": bool(row["search_tool"]),
                 "chats_tool": bool(row["chats_tool"]),
+                "write_policy": row["write_policy"],
             }
 
         return await self._run(go)
@@ -3565,6 +3645,77 @@ class Store:
 
         await self._run(go)
         return await self.memory_prefs(owner)
+
+    # --- MV3: which models learn, and the install's measurements ----------
+
+    async def memory_model_choices(self, owner: str) -> dict[str, str]:
+        """The person's choice per model id: `off`, `suggest` or `auto`."""
+
+        def go() -> dict[str, str]:
+            rows = (
+                self._conn()
+                .execute("SELECT model, mode FROM memory_model_choices WHERE owner = ?", (owner,))
+                .fetchall()
+            )
+            return {r["model"]: r["mode"] for r in rows}
+
+        return await self._run(go)
+
+    async def put_memory_model_choice(self, owner: str, model: str, mode: str | None) -> None:
+        """Set the person's choice for one model; None forgets it."""
+
+        def go() -> None:
+            db = self._conn()
+            if mode is None:
+                db.execute(
+                    "DELETE FROM memory_model_choices WHERE owner = ? AND model = ?",
+                    (owner, model),
+                )
+            else:
+                db.execute(
+                    "INSERT INTO memory_model_choices (owner, model, mode, set_at) "
+                    "VALUES (?, ?, ?, ?) ON CONFLICT (owner, model) "
+                    "DO UPDATE SET mode = excluded.mode, set_at = excluded.set_at",
+                    (owner, model, mode, time.time()),
+                )
+
+        await self._run(go)
+
+    async def memory_measurements(self) -> dict[str, dict[str, Any]]:
+        """The install's own measurements, by model id: when, by whom, and the result."""
+
+        def go() -> dict[str, dict[str, Any]]:
+            rows = self._conn().execute("SELECT * FROM memory_measurements").fetchall()
+            out: dict[str, dict[str, Any]] = {}
+            for r in rows:
+                try:
+                    result = json.loads(r["result"])
+                except ValueError:
+                    continue
+                out[r["model"]] = {
+                    "measuredAt": r["measured_at"],
+                    "owner": r["owner"],
+                    "result": result,
+                }
+            return out
+
+        return await self._run(go)
+
+    async def put_memory_measurement(
+        self, model: str, owner: str | None, result: dict[str, Any]
+    ) -> None:
+        """Keep a measurement of a model, in place of any earlier one of the same id."""
+
+        def go() -> None:
+            self._conn().execute(
+                "INSERT INTO memory_measurements (model, measured_at, owner, result) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT (model) DO UPDATE SET "
+                "measured_at = excluded.measured_at, owner = excluded.owner, "
+                "result = excluded.result",
+                (model, time.time(), owner, json.dumps(result)),
+            )
+
+        await self._run(go)
 
     async def set_memory_snapshot(
         self, chat_id: str, owner: str, snapshot: dict[str, Any] | None
@@ -3613,7 +3764,7 @@ class Store:
                 self._conn()
                 .execute(
                     "SELECT COUNT(*) AS n FROM memory_events "
-                    "WHERE owner = ? AND event = 'suggest' AND ts >= ?",
+                    "WHERE owner = ? AND event IN ('suggest', 'learn') AND ts >= ?",
                     (owner, since),
                 )
                 .fetchone()
@@ -3634,7 +3785,11 @@ class Store:
         per_day: int | None = None,
         since: float = 0.0,
     ) -> list[MemoryNote]:
-        """Offer these notes to the person, and mark the chat read up to `read_at`.
+        """Offer these notes to the person, and mark the chat read up to `read_at`. A note
+        with `auto` set is kept instead (MV3b: a model the person set to Keep automatically,
+        its policy allowing it): active at once, with its model and policy, the listed tags it
+        came with, and, when it names one, the note it replaces kept as its earlier version.
+        This is the one store method every model's note goes through.
 
         In one step: a note whose words the person already has (kept or offered) is
         not offered twice, no more are offered than `limit` notes in all leaves room
@@ -3677,7 +3832,7 @@ class Store:
                 if per_day is not None:
                     today = db.execute(
                         "SELECT COUNT(*) AS n FROM memory_events "
-                        "WHERE owner = ? AND event = 'suggest' AND ts >= ?",
+                        "WHERE owner = ? AND event IN ('suggest', 'learn') AND ts >= ?",
                         (owner, since),
                     ).fetchone()["n"]
                     room = min(room, per_day - int(today))
@@ -3689,16 +3844,20 @@ class Store:
                     if latest is not None and note.created_at <= latest:
                         note.created_at = note.updated_at = latest + 1e-6
                     latest = note.created_at
+                    auto = bool(note.auto)
                     db.execute(
                         "INSERT INTO memory_notes (id, owner, text, kind, status, pinned, source, "
                         "source_chat_id, source_message_id, quote, expires_at, revisit_at, "
-                        "created_at, updated_at, replaces, proposed_tags) "
-                        "VALUES (?, ?, ?, ?, 'pending', 0, 'suggested', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "created_at, updated_at, replaces, proposed_tags, model, policy, auto, "
+                        "valid_from) "
+                        "VALUES (?, ?, ?, ?, ?, 0, 'suggested', ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                        "?, ?, ?, ?)",
                         (
                             note.id,
                             owner,
                             note.text,
                             note.kind,
+                            "active" if auto else "pending",
                             chat_id,
                             note.source_message_id,
                             note.quote,
@@ -3706,13 +3865,24 @@ class Store:
                             note.revisit_at,
                             note.created_at,
                             note.updated_at,
-                            note.replaces,
-                            json.dumps(note.proposed_tags) if note.proposed_tags else None,
+                            None if auto else note.replaces,
+                            None
+                            if auto or not note.proposed_tags
+                            else json.dumps(note.proposed_tags),
+                            note.model,
+                            note.policy,
+                            int(auto),
+                            note.created_at if auto else None,
                         ),
                     )
-                    # The words are in the note; the log says only that it was offered.
-                    self._event(db, owner, note.id, "suggest", "model", None, None)
-                    note.status, note.source, note.source_chat_id = "pending", "suggested", chat_id
+                    # The words are in the note; the log says only that it was offered or kept.
+                    self._event(
+                        db, owner, note.id, "learn" if auto else "suggest", "model", None, None
+                    )
+                    if auto:
+                        self._keep_learned(db, owner, note)
+                    note.status = "active" if auto else "pending"
+                    note.source, note.source_chat_id = "suggested", chat_id
                     held.add(key)
                     total += 1
                     offered.append(note)
@@ -3726,6 +3896,134 @@ class Store:
                 db.execute("ROLLBACK")
                 raise
             return offered
+
+        return await self._run(go)
+
+    def _keep_learned(self, db: sqlite3.Connection, owner: str, note: MemoryNote) -> None:
+        """What keeping a model's note adds beside its row: the tags it came with that are on
+        the person's list, and the note it replaces kept as its earlier version (with its pin,
+        body and tags, as a person's Keep new does)."""
+        now = note.created_at
+        listed = {
+            r["key"] for r in db.execute("SELECT key FROM memory_tags WHERE owner = ?", (owner,))
+        }
+        self._link_tags(
+            db, owner, note.id, [t for t in note.proposed_tags if tag_key(t) in listed], now
+        )
+        if not note.replaces:
+            return
+        old = db.execute(
+            "SELECT pinned, body FROM memory_notes "
+            "WHERE id = ? AND owner = ? AND status = 'active'",
+            (note.replaces, owner),
+        ).fetchone()
+        if old is None or not self._supersede(db, owner, note.replaces, note.id, now, "model"):
+            return
+        db.execute(
+            "UPDATE memory_notes SET pinned = ?, body = ? WHERE id = ?",
+            (old["pinned"], old["body"], note.id),
+        )
+        carried = self._tags_of(db, owner, [note.replaces]).get(note.replaces, [])
+        self._link_tags(db, owner, note.id, carried, now)
+
+    async def learned_notes(self, owner: str, since: float) -> list[MemoryNote]:
+        """Notes a model kept automatically since `since`, current ones, newest first."""
+
+        def go() -> list[MemoryNote]:
+            return self._notes(
+                self._conn(),
+                owner,
+                " AND auto = 1 AND status = 'active' AND created_at >= ?",
+                [since],
+                with_body=False,
+            )
+
+        return await self._run(go)
+
+    async def mark_learned_seen(self, owner: str, note_ids: Sequence[str]) -> int:
+        """The person has seen these notes a model kept (call 12): from now on they go where
+        the person's notes go."""
+
+        def go() -> int:
+            db = self._conn()
+            now = time.time()
+            return sum(
+                db.execute(
+                    "UPDATE memory_notes SET seen_at = ? "
+                    "WHERE id = ? AND owner = ? AND auto = 1 AND seen_at IS NULL",
+                    (now, one, owner),
+                ).rowcount
+                for one in note_ids
+            )
+
+        return await self._run(go)
+
+    async def learned_since(self, owner: str, model: str | None, since: float) -> list[str]:
+        """The ids of current notes `model` (any model when None) kept since `since`."""
+
+        def go() -> list[str]:
+            rows = (
+                self._conn()
+                .execute(
+                    "SELECT id FROM memory_notes WHERE owner = ? AND auto = 1 "
+                    "AND status = 'active' AND created_at >= ? AND (? IS NULL OR model = ?) "
+                    "ORDER BY created_at DESC",
+                    (owner, since, model, model),
+                )
+                .fetchall()
+            )
+            return [r["id"] for r in rows]
+
+        return await self._run(go)
+
+    async def undo_learned(
+        self, owner: str, note_ids: Sequence[str]
+    ) -> tuple[list[str], list[str]]:
+        """Undo notes a model kept automatically: each goes, for real (as a delete), and the
+        note it replaced is current again. Returns `(the ids that went, the ids made current
+        again)`. A note no model kept, or not the person's, is left alone."""
+
+        def go() -> tuple[list[str], list[str]]:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                gone: list[str] = []
+                back: list[str] = []
+                titles: dict[str, str] = {}
+                for one in note_ids:
+                    row = db.execute(
+                        "SELECT id, text FROM memory_notes "
+                        "WHERE id = ? AND owner = ? AND auto = 1 AND status = 'active'",
+                        (one, owner),
+                    ).fetchone()
+                    if row is None:
+                        continue
+                    for earlier in db.execute(
+                        "SELECT id FROM memory_notes WHERE owner = ? AND superseded_by = ? "
+                        "AND status = 'superseded'",
+                        (owner, one),
+                    ).fetchall():
+                        db.execute(
+                            "UPDATE memory_notes SET status = 'active', superseded_at = NULL, "
+                            "superseded_by = NULL, updated_at = ? WHERE id = ?",
+                            (time.time(), earlier["id"]),
+                        )
+                        self._event(db, owner, earlier["id"], "restore", "person", None, None)
+                        back.append(earlier["id"])
+                    titles[one] = row["text"]
+                    db.execute("DELETE FROM memory_notes WHERE owner = ? AND id = ?", (owner, one))
+                    self._event(db, owner, one, "undo", "person", None, None)
+                    gone.append(one)
+                if gone:
+                    self._drop_from_chats(db, owner, set(gone) | set(back))
+                    self._drop_from_answers(db, owner, titles=titles)
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            if gone:
+                self._scrub_notes(db)
+            return gone, back
 
         return await self._run(go)
 
