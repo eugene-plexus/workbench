@@ -55,6 +55,7 @@ from .media import MediaJobs
 from .memory_servers import router as memory_servers_router
 from .node_folders import NodeFolders
 from .past_chats import router as past_chats_router
+from .projects_api import router as projects_router
 from .sessions import Sessions
 from .settings import Settings
 from .signin import Provider
@@ -373,6 +374,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(memory_api.router)
     app.include_router(memory_models_api.router)
     app.include_router(past_chats_router)
+    app.include_router(projects_router)
     app.include_router(memory_servers_router)
     app.include_router(documents_api.router)
     # Before `saved_api`: `/api/documents/folders` is not a document's id.

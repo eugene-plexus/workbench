@@ -325,6 +325,27 @@ export interface Chat {
   updatedAt: number;
   running: boolean;
   readOnly: boolean;
+  /** MV7: the project this chat is in, or null (or absent) for none. */
+  projectId?: string | null;
+}
+
+/** A named group of chats and notes (MV7). */
+export interface Project {
+  id: string;
+  name: string;
+  /** Also use my general memory: its chats are given general notes too. */
+  generalMemory: boolean;
+  /** Also search My documents (MV7b): kept, not shown yet. */
+  generalDocuments: boolean;
+  createdAt: number;
+  updatedAt: number;
+  chats: number;
+  notes: number;
+}
+
+/** One project with its chats, newest first (`GET /api/projects/{id}`). */
+export interface ProjectDetail extends Project {
+  chatList: Chat[];
 }
 
 export interface ChatDetail {
@@ -668,6 +689,8 @@ export interface MemoryNote {
   revisitAt?: string | null;
   /** MV1: `active`, or `superseded` for an earlier version. */
   status: "active" | "superseded" | "pending";
+  /** MV7: the project it is kept to; null or absent is general. */
+  projectId?: string | null;
   tags: string[];
   /** How long its details (body) are; 0 for none. The details come with `GET /api/memory/notes/{id}`. */
   bodyChars: number;

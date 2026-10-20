@@ -53,9 +53,10 @@ from . import (
     memory_policy,
     memory_suggest,
     memory_write,
+    projects,
 )
 from .hub import Hub, HubError
-from .store import MemoryNote, Person, Store
+from .store import Chat, MemoryNote, Person, Store, tag_key
 
 log = logging.getLogger(__name__)
 
@@ -109,6 +110,15 @@ class Outcome:
     offered: list[MemoryNote] = field(default_factory=list)
     rejected: dict[str, int] = field(default_factory=dict)
     skipped: str | None = None
+
+
+async def _tags_elsewhere(store: Store, owner: str, chat: Chat) -> set[str]:
+    """The keys of tags carried only by notes a chat may not be given (MV7)."""
+    every = await store.memory_notes(owner)
+    here = {n.id for n in projects.in_place(every, await projects.place_of(store, chat))}
+    used_here = {tag_key(t) for n in every if n.id in here for t in n.tags}
+    used_there = {tag_key(t) for n in every if n.id not in here for t in n.tags}
+    return used_there - used_here
 
 
 class Learner:
@@ -285,11 +295,16 @@ class Learner:
             if memory_api._placement(facts, install, prefs, chat).send:
                 # Call 12: a note a model kept and the person has not seen stays local.
                 local_only = facts.locality != "local" and policy.get("unseenLocal") == "yes"
-                known = await self._known(owner, " ".join(sources), local_only=local_only)
+                known = await self._known(
+                    owner, " ".join(sources), local_only=local_only, chat=chat
+                )
                 # Their tag list is their words too: it goes only where their notes may.
+                # MV7: and a tag used only by another place's notes is that place's.
+                elsewhere = await _tags_elsewhere(store, owner, chat)
                 tags = [
                     memory_suggest.TagChoice(t["tag"], t["description"])
                     for t in await store.memory_tags(owner)
+                    if t["key"] not in elsewhere
                 ]
         except HubError as exc:
             log.warning("memory suggestions could not ask about the chat's model: %s", exc.message)
@@ -317,7 +332,7 @@ class Learner:
         held = [
             n.text
             for status in ("active", "pending")
-            for n in await store.memory_notes(owner, status=status)
+            for n in await projects.chat_notes(store, owner, chat, status=status)
             if n.id not in shown
         ]
         outcome = memory_suggest.read_answer(
@@ -361,6 +376,7 @@ class Learner:
                     policy,
                     w.proposal.tags or memory_suggest.tags_for(w.proposal.text, tags),
                     now,
+                    chat.project_id,
                 )
             )
         offered = await store.add_suggestions(
@@ -379,16 +395,28 @@ class Learner:
         return Outcome(asked=True, offered=offered, rejected=rejected)
 
     async def _known(
-        self, owner: str, words: str, *, local_only: bool = False
+        self, owner: str, words: str, *, local_only: bool = False, chat: Chat | None = None
     ) -> list[memory_suggest.Known]:
         """The notes most likely to be repeated or replaced: those sharing words with the
         messages, then the newest, up to what the model is shown. With `local_only`, none a
-        model kept that the person has not seen (call 12)."""
+        model kept that the person has not seen (call 12). Only notes the chat may be given
+        (MV7): a suggestion never repeats or replaces a note of another place."""
         cap = memory_suggest.MAX_KNOWN_SHOWN
+        place = await projects.place_of(self._store, chat)
         expression = memory.match_expression(memory.search_words(words))
-        found = await self._store.search_memory(owner, expression, limit=cap) if expression else []
+        found = (
+            projects.in_place(
+                await self._store.search_memory(owner, expression, limit=cap * 4), place
+            )[:cap]
+            if expression
+            else []
+        )
         seen = {n.id for n in found}
-        rest = [n for n in await self._store.memory_notes(owner) if n.id not in seen]
+        rest = [
+            n
+            for n in projects.in_place(await self._store.memory_notes(owner), place)
+            if n.id not in seen
+        ]
         both = [*found, *rest]
         if local_only:
             both = memory.shareable(both)

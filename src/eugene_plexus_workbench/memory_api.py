@@ -65,6 +65,7 @@ from . import (
     memory_relevance,
     memory_tidy,
     memory_write,
+    projects,
 )
 from .api import _new_id, _own_chat, _person, _problem, _readable_chat, _state
 from .hub import Hub, HubError
@@ -196,6 +197,8 @@ def note_view(note: MemoryNote) -> dict[str, Any]:
         "policy": _policy_name(note.policy),
         "auto": note.auto,
         "seen": note.seen_at is not None,
+        # MV7: the project it is kept to, or null for a general note.
+        "projectId": note.project_id,
     }
     if note.body is not None:
         out["body"] = note.body
@@ -297,7 +300,7 @@ def _limits(install: config.MemorySettings) -> dict[str, Any]:
 
 
 @router.get("/api/memory")
-async def get_memory(request: Request) -> dict[str, Any]:
+async def get_memory(request: Request, where: str = "all") -> dict[str, Any]:
     """The asker's notes by section, their tags, their settings, and what the notes cost.
 
     `usage.pinned` is what the pinned block would take of its budget in a chat whose model
@@ -312,7 +315,8 @@ async def get_memory(request: Request) -> dict[str, Any]:
     notes = await store.memory_notes(person.sub)
     today = _today()
     budget = memory.budget_for(None, prefs["budget_tokens"])
-    always = [n for n in notes if memory.is_always(n)]
+    # What a chat in no project is given (MV7): the figures are a general chat's.
+    always = [n for n in projects.in_place(notes, projects.GENERAL) if memory.is_always(n)]
     shown = memory.build_snapshot(
         always,
         budget=budget,
@@ -323,7 +327,9 @@ async def get_memory(request: Request) -> dict[str, Any]:
         bodies=await _bodies(store, person.sub, always),
         nonce="00000000",
     )
-    current = [n for n in notes if not memory.is_past(n, today)]
+    # MV7: the notes of one place when `where` says so (`all`, `general`, a project's id).
+    placed = _where(notes, where)
+    current = [n for n in placed if not memory.is_past(n, today)]
     others = [n for n in current if not memory.is_always(n)]
     by_id = {n.id: n for n in notes}
     # A suggestion left waiting a month is not one they want: it goes, quote and all.
@@ -349,7 +355,7 @@ async def get_memory(request: Request) -> dict[str, Any]:
             "other": [note_view(n) for n in others[:PAGE_NOTES]],
             "otherTotal": len(others),
             # MR8: events whose day has gone, kept until the person deletes them.
-            "past": [note_view(n) for n in notes if memory.is_past(n, today)],
+            "past": [note_view(n) for n in placed if memory.is_past(n, today)],
         },
         "suggestions": [
             suggestion_view(n, by_id.get(n.replaces) if n.replaces else None, listed)
@@ -410,14 +416,16 @@ async def list_notes(
     tag: str | None = None,
     offset: int = 0,
     limit: int = PAGE_NOTES,
+    where: str = "all",
 ) -> dict[str, Any]:
     """The asker's current notes: newest first, or the ones that match `query` (by words
-    and meaning; `#tag` filters), and only those with `tag` when it is given."""
+    and meaning; `#tag` filters), and only those with `tag` when it is given. `where` (MV7):
+    `all`, `general`, or a project's id."""
     person = await _person(request)
     store = _store(request)
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
-    notes = await store.memory_notes(person.sub)
+    notes = _where(await store.memory_notes(person.sub), where)
     if tag:
         key = tag_key(tag)
         notes = [n for n in notes if key in {tag_key(t) for t in n.tags}]
@@ -521,6 +529,8 @@ class NoteCreate(BaseModel):
     source: Literal["typed", "button"] = "typed"
     chatId: str | None = Field(default=None, max_length=200)
     messageId: str | None = Field(default=None, max_length=200)
+    #: MV7: typed on a project's page, the project; from a chat, its chat's project instead.
+    projectId: str | None = Field(default=None, max_length=200)
 
 
 class NoteUpdate(BaseModel):
@@ -609,9 +619,12 @@ async def add_note(request: Request, body: NoteCreate) -> JSONResponse:
     tags = _vetted_tags(body.tags)
     chat_id = message_id = None
     answer: Message | None = None
+    project_id = None
     if body.chatId is not None:
         chat = await _own_chat(request, person, body.chatId)
         chat_id = chat.id
+        # A note belongs where it was said (MV7-C2): in the chat's project.
+        project_id = chat.project_id
         if body.messageId is not None:
             message = await store.message(body.messageId)
             if message is None or message.chat_id != chat.id:
@@ -620,6 +633,10 @@ async def add_note(request: Request, body: NoteCreate) -> JSONResponse:
             answer = message if message.role == "assistant" else None
     elif body.messageId is not None:
         raise _problem(status.HTTP_400_BAD_REQUEST, "A message needs the chat it is in.")
+    elif body.projectId is not None:
+        if await store.project(person.sub, body.projectId) is None:
+            raise _problem(status.HTTP_404_NOT_FOUND, "There is no such project.")
+        project_id = body.projectId
     now = time.time()
     note = MemoryNote(
         id=_new_id(),
@@ -634,6 +651,7 @@ async def add_note(request: Request, body: NoteCreate) -> JSONResponse:
         source_message_id=message_id,
         body=note_body,
         tags=tags,
+        project_id=project_id,
     )
     try:
         kept, created = await store.add_memory_note(note, limit=install.max_notes)
@@ -685,6 +703,7 @@ async def edit_note(request: Request, note_id: str, body: NoteUpdate) -> dict[st
                 tags=tags if tags is not None else list(old.tags),
                 expires_at=old.expires_at,
                 revisit_at=old.revisit_at,
+                project_id=old.project_id,
             )
             kept = await store.supersede_memory_note(
                 person.sub, note_id, new, limit=install.max_notes
@@ -1128,6 +1147,15 @@ async def _tidy(request: Request, owner: str, today: str) -> list[dict[str, Any]
         return []
 
 
+def _where(notes: list[MemoryNote], where: str) -> list[MemoryNote]:
+    """Notes of one place (MV7): `all`, `general`, or a project's id."""
+    if where == "all":
+        return notes
+    if where == "general":
+        return [n for n in notes if n.project_id is None]
+    return [n for n in notes if n.project_id == where]
+
+
 def _due_revisits(notes: list[MemoryNote], prefs: dict[str, Any], today: str) -> list[MemoryNote]:
     """The project to ask "Still true?" about now: the one longest due, unless the person
     was asked within the week."""
@@ -1400,6 +1428,7 @@ async def export(request: Request, format: Literal["md", "json"] = "md") -> Resp
     tags = await store.memory_tags(person.sub)
     # MV6: the documents each note rests on.
     links = await store.note_documents(person.sub)
+    names = {p.id: p.name for p in await store.projects(person.sub)}
     # MV5: what the person's own memory server lists, or why it is not here.
     from . import memory_servers
 
@@ -1422,6 +1451,8 @@ async def export(request: Request, format: Literal["md", "json"] = "md") -> Resp
                 "validFrom": _stamp(n.valid_from),
                 "supersededAt": _stamp(n.superseded_at),
                 "supersededBy": n.superseded_by,
+                # MV7: where it is kept, by the project's name then; null for General.
+                "project": names.get(n.project_id) if n.project_id else None,
                 "documents": [
                     {
                         "name": link["name"],
@@ -1631,9 +1662,12 @@ async def _pinned(
     facts: ModelFacts,
     prefs: dict[str, Any],
     notes: list[MemoryNote] | None = None,
+    *,
+    chat: Chat | None = None,
 ) -> memory.Snapshot:
-    """The pinned block for this person and model, as it would be taken now."""
-    held = notes if notes is not None else await store.memory_notes(person.sub)
+    """The pinned block for this person and model, as it would be taken now: of the notes
+    `chat` may be given (MV7: its project's, and general ones as its project says)."""
+    held = notes if notes is not None else await projects.chat_notes(store, person.sub, chat)
     if facts.locality != "local":
         held = await leaving(store, person.sub, held)
     always = [n for n in held if memory.is_always(n)]
@@ -1653,7 +1687,7 @@ async def _freeze(
 ) -> memory.Snapshot:
     """Choose the pinned block for this chat and model, and keep it with the chat. Nothing
     is kept when there is nothing to send."""
-    snapshot = await _pinned(store, person, facts, prefs)
+    snapshot = await _pinned(store, person, facts, prefs, chat=chat)
     if snapshot.text:
         await store.set_memory_snapshot(chat.id, person.sub, snapshot.to_json())
         await store.mark_memory_used(person.sub, snapshot.ids, snapshot.frozen_at)
@@ -1689,7 +1723,7 @@ async def _current_pinned(
         snapshot = (
             await _freeze(store, person, chat, facts, prefs)
             if freeze
-            else await _pinned(store, person, facts, prefs)
+            else await _pinned(store, person, facts, prefs, chat=chat)
         )
     return snapshot, decision
 
@@ -1769,7 +1803,7 @@ async def _turn_for(
     if decision is None or decision.facts is None:
         return TurnMemory()
     prefs = await store.memory_prefs(person.sub)
-    notes = await store.memory_notes(person.sub)
+    notes = await projects.chat_notes(store, person.sub, fresh)
     if decision.facts.locality != "local":
         notes = await leaving(store, person.sub, notes)
     others = [n for n in notes if not memory.is_always(n)]
@@ -1853,7 +1887,7 @@ async def run_search_tool(
         decision = await decide(state, person, chat, model_id)
         if not decision.send:
             return memory.WITHHELD
-        notes = await state.store.memory_notes(owner)
+        notes = await projects.chat_notes(state.store, owner, chat)
         if decision.facts is None or decision.facts.locality != "local":
             notes = await leaving(state.store, owner, notes)
         chosen = await _finder(state).search(owner, query, notes, today=_today())
@@ -1937,7 +1971,7 @@ async def chat_memory(
         await store.set_memory_snapshot(chat.id, person.sub, None)
         saved = None
     prefs = await store.memory_prefs(person.sub)
-    notes = await store.memory_notes(person.sub)
+    notes = await projects.chat_notes(store, person.sub, chat)
     decision = await _decide(request, person, chat, chat.model)
     sending = decision.send and bool(notes)
     out: dict[str, Any] = {
@@ -2128,7 +2162,11 @@ async def handle_command(
             expression = memory.match_expression(words)
             if expression is None:
                 return None
-            found = await store.search_memory(person.sub, expression, limit=5)
+            # MV7: only notes this chat may be given; another place's are not offered.
+            place = await projects.place_of(store, chat)
+            found = projects.in_place(
+                await store.search_memory(person.sub, expression, limit=50), place
+            )[:5]
             return {
                 "command": "forget",
                 "words": " ".join(words),
@@ -2163,6 +2201,7 @@ async def handle_command(
                     source="said",
                     source_chat_id=chat.id,
                     source_message_id=message.id,
+                    project_id=chat.project_id,
                 ),
                 limit=install.max_notes,
             )

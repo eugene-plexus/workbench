@@ -537,6 +537,7 @@ def test_export_is_a_plain_file_of_the_askers_notes_only(world: World) -> None:
         "supersededAt",
         "supersededBy",
         "documents",
+        "project",
     } == set(body["notes"][0])
     assert {"earlierVersions", "tags"} <= set(body)
     assert body["notes"][0]["createdAt"].endswith("Z") and body["exportedAt"].endswith("Z")

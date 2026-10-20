@@ -17,6 +17,7 @@ import { JobSites } from "./components/JobSites";
 import { Mascot } from "./components/Mascot";
 import { Memory } from "./components/Memory";
 import { PastChats } from "./components/PastChats";
+import { ProjectPage } from "./components/Project";
 import { SettingsPage } from "./components/SettingsPage";
 import { type Handoff, Media } from "./components/Media";
 import { Sidebar } from "./components/Sidebar";
@@ -31,7 +32,8 @@ import { forgetFormulas } from "./lib/mathClient";
 import { type Door, mediaFromPath, mediaPath } from "./lib/media";
 import { saveDraft } from "./lib/conveniences";
 import { forget, takeFragment } from "./lib/session";
-import type { Chat, Me, Models } from "./lib/types";
+import { fetchProjects, problemWords, projectPath } from "./lib/projects";
+import type { Chat, Me, Models, Project } from "./lib/types";
 import { modeChanged } from "./lib/words";
 import { atFromSearch, openChatAt } from "./lib/pastChats";
 import { requestedModel, clearRequestedModel } from "./lib/modelHandoff";
@@ -39,6 +41,12 @@ import { requestedModel, clearRequestedModel } from "./lib/modelHandoff";
 /** The chat an address names: `/chats/<id>`, or none. */
 export function chatFromPath(path: string): string | null {
   const match = /^\/chats\/([A-Za-z0-9_-]+)\/?$/.exec(path);
+  return match ? match[1]! : null;
+}
+
+/** The project an address names: `/projects/<id>` (MV7), or none. */
+export function projectFromPath(path: string): string | null {
+  const match = /^\/projects\/([A-Za-z0-9_-]+)\/?$/.exec(path);
   return match ? match[1]! : null;
 }
 
@@ -80,7 +88,16 @@ function onMac(): boolean {
 
 /** The page a person is on, for the top bar, the tab's title and where focus goes. */
 type View =
-  "chat" | "home" | "tools" | "media" | "documents" | "memory" | "sites" | "search" | "settings";
+  | "chat"
+  | "home"
+  | "tools"
+  | "media"
+  | "documents"
+  | "memory"
+  | "sites"
+  | "search"
+  | "settings"
+  | "project";
 
 const PAGE_TITLES = {
   tools: "Toolbox · Tools",
@@ -90,6 +107,7 @@ const PAGE_TITLES = {
   sites: "Job sites",
   search: "Search chats",
   settings: "Settings",
+  project: "Project",
 } as const;
 
 /** Move focus to a heading (or any element), making it a target if it is not. */
@@ -108,6 +126,9 @@ export default function App() {
   const [preferredModel, setPreferredModel] = useState(requestedModel);
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   const [chatId, setChatId] = useState<string | null>(() => chatFromPath(window.location.pathname));
+  const [projectId, setProjectId] = useState<string | null>(() =>
+    projectFromPath(window.location.pathname),
+  );
   const [media, setMedia] = useState(() => mediaFromPath(window.location.pathname));
   const [memoryOpen, setMemoryOpen] = useState(() => memoryFromPath(window.location.pathname));
   const [documentsOpen, setDocumentsOpen] = useState(() =>
@@ -126,6 +147,8 @@ export default function App() {
   const [handoff, setHandoff] = useState<{ chatId: string; attachments: Handoff[] } | null>(null);
   const [chats, setChats] = useState<Chat[]>([]);
   const [chatsLoaded, setChatsLoaded] = useState(false);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [projectsError, setProjectsError] = useState<string | null>(null);
   const [models, setModels] = useState<Models | null>(null);
   const [modelsError, setModelsError] = useState<string | null>(null);
   const [showTools, setShowTools] = useState(false);
@@ -152,9 +175,11 @@ export default function App() {
               ? "settings"
               : searchOpen
                 ? "search"
-                : chatId
-                  ? "chat"
-                  : "home";
+                : projectId
+                  ? "project"
+                  : chatId
+                    ? "chat"
+                    : "home";
   const lastView = useRef(view);
 
   useEffect(() => {
@@ -197,6 +222,7 @@ export default function App() {
     const path = id ? `/chats/${id}` : "/";
     if (window.location.pathname !== path) window.history.pushState(null, "", path);
     setChatId(id);
+    setProjectId(null);
     setChatAtId(null);
     setSearchOpen(false);
     setMedia(null);
@@ -214,6 +240,7 @@ export default function App() {
       const path = mediaPath(door);
       if (window.location.pathname !== path) window.history.pushState(null, "", path);
       setMedia({ door, id: null });
+      setProjectId(null);
       setSearchOpen(false);
       setMemoryOpen(false);
       setSettingsOpen(false);
@@ -229,6 +256,7 @@ export default function App() {
   const openMemory = useCallback(() => {
     if (window.location.pathname !== "/memory") window.history.pushState(null, "", "/memory");
     setMemoryOpen(true);
+    setProjectId(null);
     setSettingsOpen(false);
     setSearchOpen(false);
     setDocumentsOpen(false);
@@ -244,6 +272,7 @@ export default function App() {
       window.history.pushState(null, "", "/documents");
     }
     setDocumentsOpen(true);
+    setProjectId(null);
     setSearchOpen(false);
     setMemoryOpen(false);
     setSettingsOpen(false);
@@ -262,6 +291,7 @@ export default function App() {
     }
     setSearchQuery(query);
     setSearchOpen(true);
+    setProjectId(null);
     setDocumentsOpen(false);
     setMemoryOpen(false);
     setSettingsOpen(false);
@@ -279,6 +309,7 @@ export default function App() {
       window.history.pushState(null, "", path);
     }
     setSettingsOpen(true);
+    setProjectId(null);
     setSearchOpen(false);
     setDocumentsOpen(false);
     setMemoryOpen(false);
@@ -289,8 +320,27 @@ export default function App() {
     setShowChats(false);
   }, []);
 
+  /** A project's page (MV7). */
+  const openProject = useCallback((id: string) => {
+    const path = projectPath(id);
+    if (window.location.pathname !== path) window.history.pushState(null, "", path);
+    setProjectId(id);
+    setChatId(null);
+    setChatAtId(null);
+    setSearchOpen(false);
+    setMemoryOpen(false);
+    setSettingsOpen(false);
+    setDocumentsOpen(false);
+    setMedia(null);
+    setMediaPerson(null);
+    setShowTools(false);
+    setShowSites(false);
+    setShowChats(false);
+  }, []);
+
   useEffect(() => {
     const back = () => {
+      setProjectId(projectFromPath(window.location.pathname));
       setChatId(chatFromPath(window.location.pathname));
       setChatAtId(atFromSearch(window.location.search));
       setSearchOpen(searchFromPath(window.location.pathname));
@@ -369,6 +419,15 @@ export default function App() {
     }
   }, []);
 
+  const refreshProjects = useCallback(async () => {
+    try {
+      setProjects(await fetchProjects());
+      setProjectsError(null);
+    } catch (error) {
+      if (!(error instanceof SignedOut)) setProjectsError(problemWords(error));
+    }
+  }, []);
+
   const refreshModels = useCallback(async () => {
     try {
       setModels(await api<Models>("/api/models"));
@@ -383,38 +442,47 @@ export default function App() {
   useEffect(() => {
     if (phase.kind !== "ready") return;
     void refreshChats();
+    void refreshProjects();
     void refreshModels();
     const every = window.setInterval(() => {
       void refreshChats();
+      void refreshProjects();
       void refreshModels();
     }, 20000);
     return () => window.clearInterval(every);
-  }, [phase.kind, refreshChats, refreshModels]);
+  }, [phase.kind, refreshChats, refreshProjects, refreshModels]);
 
-  const newChat = useCallback(async () => {
-    if (newPending.current) return;
-    newPending.current = true;
-    setCreating(true);
-    setActionError(null);
-    try {
-      const available = preferredModel ? await api<Models>("/api/models") : null;
-      if (preferredModel && !available?.models.some((model) => model.id === preferredModel)) {
-        throw new Error(
-          `The requested model ${preferredModel} is not available to your account. Choose another model or wait for it to become available.`,
-        );
+  const newChat = useCallback(
+    async (inProject?: string) => {
+      if (newPending.current) return;
+      newPending.current = true;
+      setCreating(true);
+      setActionError(null);
+      try {
+        const available = preferredModel ? await api<Models>("/api/models") : null;
+        if (preferredModel && !available?.models.some((model) => model.id === preferredModel)) {
+          throw new Error(
+            `The requested model ${preferredModel} is not available to your account. Choose another model or wait for it to become available.`,
+          );
+        }
+        const chat = await post<Chat>("/api/chats", {
+          ...(preferredModel ? { model: preferredModel } : {}),
+          ...(inProject ? { projectId: inProject } : {}),
+        });
+        clearRequestedModel();
+        setPreferredModel(null);
+        setChats((current) => [chat, ...current]);
+        open(chat.id);
+        if (inProject) void refreshProjects();
+      } catch (error) {
+        setActionError(error instanceof Error ? error.message : String(error));
+      } finally {
+        newPending.current = false;
+        setCreating(false);
       }
-      const chat = await post<Chat>("/api/chats", preferredModel ? { model: preferredModel } : {});
-      clearRequestedModel();
-      setPreferredModel(null);
-      setChats((current) => [chat, ...current]);
-      open(chat.id);
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : String(error));
-    } finally {
-      newPending.current = false;
-      setCreating(false);
-    }
-  }, [open, preferredModel]);
+    },
+    [open, preferredModel, refreshProjects],
+  );
 
   /** A new chat with Documents on, for asking about the person's own documents. */
   const askAboutDocuments = useCallback(async () => {
@@ -515,6 +583,16 @@ export default function App() {
             onOpenMedia={(person) => openMedia("images", person)}
             onClose={() => setShowChats(false)}
             onNew={() => void newChat()}
+            projects={projects}
+            projectsError={projectsError}
+            currentProject={projectId}
+            onOpenProject={openProject}
+            onNewChatIn={(id) => void newChat(id)}
+            onNewProject={async (name) => {
+              const made = await post<Project>("/api/projects", { name });
+              await refreshProjects();
+              openProject(made.id);
+            }}
             onSearchChats={() => openSearch()}
             creating={creating}
             error={chatsError}
@@ -523,6 +601,7 @@ export default function App() {
               await post("/api/signout").catch(() => undefined);
               forget();
               setChats([]);
+              setProjects([]);
               setChatsLoaded(false);
               setPhase({ kind: "signed-out", message: "You signed out.", unavailable: null });
             }}
@@ -749,6 +828,19 @@ export default function App() {
               onSearchChats={(query) => openSearch(query)}
               onClose={() => open(chatId)}
             />
+          ) : projectId ? (
+            <ProjectPage
+              key={projectId}
+              projectId={projectId}
+              onOpenChat={open}
+              onNewChat={() => void newChat(projectId)}
+              creating={creating}
+              onChanged={() => {
+                void refreshChats();
+                void refreshProjects();
+              }}
+              onClose={() => open(null)}
+            />
           ) : chatId ? (
             <ChatView
               key={`${chatId}:${chatAtId ?? ""}`}
@@ -758,10 +850,15 @@ export default function App() {
               me={phase.me}
               models={models}
               modelsError={modelsError}
-              onChanged={refreshChats}
+              onChanged={() => {
+                void refreshChats();
+                void refreshProjects();
+              }}
+              onOpenProject={openProject}
               onDeleted={() => {
                 open(null);
                 void refreshChats();
+                void refreshProjects();
               }}
               onOpenMemory={openMemory}
               onOpenDocuments={openDocuments}

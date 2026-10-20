@@ -50,7 +50,16 @@ import {
   UNDO_MS,
   usageWords,
 } from "../lib/memory";
-import type { Chat, MemoryNote, MemoryPage, MemoryTag, NoteKind, NoteWhole } from "../lib/types";
+import { placeName, useProjects } from "../lib/projects";
+import type {
+  Chat,
+  MemoryNote,
+  MemoryPage,
+  MemoryTag,
+  NoteKind,
+  NoteWhole,
+  Project,
+} from "../lib/types";
 import { useKeepFocus } from "../lib/useKeepFocus";
 import { Details, NoteSearch, readWhole } from "./MemoryDetails";
 import { RecentlyLearned } from "./MemoryLearned";
@@ -106,11 +115,17 @@ export function Memory({
   // have not been kept, though other lines were: the ones left are theirs to fix.
   const [starting, setStarting] = useState(false);
   const latest = useRef(0);
+  // MV7: where the notes shown are kept: all, general, or one project's id.
+  const [where, setWhere] = useState("all");
+  const whereNow = useRef("all");
 
   async function load() {
     const mine = ++latest.current;
     try {
-      const next = await api<MemoryPage>("/api/memory");
+      const at = whereNow.current;
+      const next = await api<MemoryPage>(
+        at === "all" ? "/api/memory" : `/api/memory?where=${encodeURIComponent(at)}`,
+      );
       if (mine !== latest.current) return;
       setData(next);
       setLoadProblem(null);
@@ -121,8 +136,10 @@ export function Memory({
   }
 
   useEffect(() => {
+    whereNow.current = where;
     void load();
-  }, []);
+    // Read again when the person chooses another place.
+  }, [where]);
 
   // After a change the thing a person was on may have moved (a pinned note goes
   // to the other list): focus follows it, by id, once the page has redrawn.
@@ -164,6 +181,10 @@ export function Memory({
       setProblem(failureWords(failure));
     }
   }
+
+  // After the notes are asked for, so a failure of theirs is the first thing said.
+  const projectList = useProjects();
+  const projects = useMemo(() => projectList.projects ?? [], [projectList.projects]);
 
   const titles = useMemo(() => new Map(chats.map((chat) => [chat.id, chat.title])), [chats]);
 
@@ -270,6 +291,8 @@ export function Memory({
           locked={off}
           busy={busy}
           from={whereFrom(note)}
+          place={note.projectId ? (placeName(projects, note.projectId) ?? "a project") : null}
+          projects={projects}
           working={working}
           limits={data.limits}
           tags={data.tags}
@@ -413,7 +436,15 @@ export function Memory({
             <h2 id={`${uid}-notes`} tabIndex={-1} className="title-section">
               Your notes
             </h2>
-            {notes.length > 0 && <NoteSearch data={data} list={list} />}
+            {(notes.length > 0 || where !== "all") && (
+              <NoteSearch
+                data={data}
+                list={list}
+                where={where}
+                onWhere={setWhere}
+                projects={projects}
+              />
+            )}
             {!off && <Usage data={data} />}
             {said && (
               <p role="status" data-testid="memory-said" className="notice notice--ok">
@@ -454,7 +485,14 @@ export function Memory({
                 </button>
               </p>
             )}
-            {!off && (notes.length === 0 || starting) && (
+            {notes.length === 0 && where !== "all" && (
+              <p data-testid="memory-where-empty" className="empty">
+                {where === "general"
+                  ? "No general notes."
+                  : `No notes in ${placeName(projects, where) ?? "this project"}.`}
+              </p>
+            )}
+            {!off && ((notes.length === 0 && where === "all") || starting) && (
               <Starter busy={busy} working={working} onLeft={(left) => setStarting(left > 0)} />
             )}
             {notes.length > 0 && (
@@ -656,6 +694,8 @@ function NoteItem({
   locked,
   busy,
   from,
+  place,
+  projects,
   working,
   limits,
   tags,
@@ -673,6 +713,9 @@ function NoteItem({
   locked: boolean;
   busy: boolean;
   from: ReactNode;
+  /** MV7: the project the note is kept to, by name, or null for a general note. */
+  place: string | null;
+  projects: Project[];
   working: Working;
   limits: Limits;
   tags: MemoryTag[];
@@ -688,6 +731,8 @@ function NoteItem({
   // While the note is read whole (to edit it, or before it is deleted).
   const [reading, setReading] = useState(false);
   const [asking, setAsking] = useState<NoteWhole | null>(null);
+  // Moving the note to a project, or back to general: the place chosen, once the list is open.
+  const [moveTo, setMoveTo] = useState<string | null>(null);
   const original = useRef<{ body: string; tags: string[] }>({ body: "", tags: [] });
   const back = useRef(false);
   const name = excerpt(note);
@@ -923,6 +968,11 @@ function NoteItem({
             Pinned
           </span>
         )}
+        {place && (
+          <span data-testid="memory-note-project" className="badge">
+            In {place}
+          </span>
+        )}
         <TagChips tags={note.tags} />
         {note.bodyChars > 0 && (
           <span data-testid="memory-note-body-size" className="badge">
@@ -976,6 +1026,61 @@ function NoteItem({
           {problem}
         </p>
       )}
+      {moveTo !== null && (
+        <form
+          aria-label={`Move note to a project: ${name}`}
+          data-testid="memory-note-move-form"
+          className="flex flex-wrap items-end gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (busy) return;
+            setProblem(null);
+            working(() =>
+              post(`/api/memory/notes/${encodeURIComponent(note.id)}/move`, {
+                projectId: moveTo || null,
+              }),
+            ).then(
+              () => setMoveTo(null),
+              (failure: unknown) => setProblem(failureWords(failure)),
+            );
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") setMoveTo(null);
+          }}
+        >
+          <div className="field">
+            <label htmlFor={`${uid}-move`} className="field-label">
+              Move to project
+            </label>
+            <select
+              id={`${uid}-move`}
+              data-testid="memory-note-move-select"
+              autoFocus
+              value={moveTo}
+              onChange={(event) => setMoveTo(event.target.value)}
+              className="control"
+            >
+              <option value="">General</option>
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <button
+            type="submit"
+            data-testid="memory-note-move-go"
+            disabled={busy || moveTo === (note.projectId ?? "")}
+            className="btn"
+          >
+            Move
+          </button>
+          <button type="button" onClick={() => setMoveTo(null)} className="btn btn-quiet">
+            Cancel
+          </button>
+        </form>
+      )}
       <div className="-ms-2 flex flex-wrap items-center gap-1">
         <button
           type="button"
@@ -1012,6 +1117,19 @@ function NoteItem({
           >
             {note.pinned ? <PinOff size={14} aria-hidden /> : <Pin size={14} aria-hidden />}
             {note.pinned ? "Unpin" : "Pin"}
+          </button>
+        )}
+        {!locked && (projects.length > 0 || note.projectId) && (
+          <button
+            type="button"
+            id={`move-${note.id}`}
+            data-testid="memory-note-move"
+            aria-label={`Move note to a project: ${name}`}
+            disabled={busy}
+            onClick={() => setMoveTo(note.projectId ?? "")}
+            className="btn btn-quiet"
+          >
+            Move to project
           </button>
         )}
         <button

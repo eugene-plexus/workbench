@@ -57,6 +57,7 @@ from . import (
     memory_suggest,
     memory_write,
     person_context,
+    projects,
 )
 from ._build import commit
 from .knowledge.index import FOUND, LIBRARY, PENDING, IndexUnavailable, valid_id
@@ -421,7 +422,12 @@ class Tools:
         if not (await self.store.memory_prefs(sub))["enabled"]:
             raise ToolRefused("This person has turned their Workbench memory off.")
         today = datetime.now().date().isoformat()
-        notes = [n for n in await self.store.memory_notes(sub) if not memory.is_past(n, today)]
+        # MV7-C4: a connection is another app, in no project: general notes only.
+        notes = [
+            n
+            for n in await self.store.memory_notes(sub)
+            if n.project_id is None and not memory.is_past(n, today)
+        ]
         # Call 12 (MV3b): a connection is outside the machines.
         notes = await memory_api.leaving(self.store, sub, notes)
         _, tags = memory_relevance.split_tags(query)
@@ -485,7 +491,10 @@ class Tools:
         if not (await self.store.memory_prefs(sub))["enabled"]:
             raise ToolRefused("This person has turned their Workbench memory off.")
         try:
-            found = await past_chats.find(self.state, sub, query, after=after, before=before)
+            # MV7-C4: a connection is in no project: chats in no project only.
+            found = await past_chats.find(
+                self.state, sub, query, after=after, before=before, place=projects.GENERAL
+            )
         except IndexUnavailable as exc:
             raise ToolRefused(exc.message) from None
         out: list[dict[str, Any]] = []
@@ -520,7 +529,8 @@ class Tools:
         if not (await self.store.memory_prefs(sub))["enabled"]:
             raise ToolRefused("This person has turned their Workbench memory off.")
         note = await self.store.memory_note(sub, note_id)
-        if note is None or note.status != "active":
+        # MV7-C4: a project's notes are not a connection's to read, whatever it guesses.
+        if note is None or note.status != "active" or note.project_id is not None:
             raise ToolRefused("There is no such note.")
         if not await memory_api.leaving(self.store, sub, [note]):
             raise ToolRefused("There is no such note.")  # kept by a model, not seen yet

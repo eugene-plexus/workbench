@@ -348,6 +348,8 @@ async def models(request: Request) -> dict[str, Any]:
 
 class ChatCreate(BaseModel):
     model: str | None = Field(default=None, max_length=256)
+    #: MV7: made in a project.
+    projectId: str | None = Field(default=None, max_length=200)
 
 
 class ChatSettings(BaseModel):
@@ -384,6 +386,8 @@ class ChatUpdate(BaseModel):
     model: str | None = Field(default=None, max_length=256)
     search: bool | None = None
     settings: ChatSettings | None = None
+    #: MV7: move the chat to a project, or to none with null.
+    projectId: str | None = Field(default=None, max_length=200)
 
 
 class Send(BaseModel):
@@ -423,6 +427,8 @@ def chat_view(chat: Chat, *, running: bool, read_only: bool = False) -> dict[str
         "updatedAt": chat.updated_at,
         "running": running,
         "readOnly": read_only,
+        # MV7: the project the chat is in, or null.
+        "projectId": chat.project_id,
     }
 
 
@@ -473,6 +479,8 @@ async def create_chat(request: Request, body: ChatCreate) -> dict[str, Any]:
     store: Store = _state(request).store
     # Documents are off in a new chat unless the person has said otherwise for new chats.
     prefs = await store.documents_prefs(person.sub)
+    if body.projectId is not None and await store.project(person.sub, body.projectId) is None:
+        raise _problem(status.HTTP_404_NOT_FOUND, "There is no such project.")
     chat = Chat(
         id=_new_id(),
         owner=person.sub,
@@ -481,6 +489,7 @@ async def create_chat(request: Request, body: ChatCreate) -> dict[str, Any]:
         created_at=now,
         updated_at=now,
         settings={"documents": "on"} if prefs["new_chats"] else {},
+        project_id=body.projectId,
     )
     await store.create_chat(chat)
     return chat_view(chat, running=False)
@@ -809,6 +818,13 @@ async def update_chat(request: Request, chat_id: str, body: ChatUpdate) -> dict[
         merged = dict(chat.settings)
         merged.update(body.settings.model_dump(exclude_unset=True))
         values["settings"] = {k: v for k, v in merged.items() if v is not None}
+    if "projectId" in body.model_fields_set and body.projectId != chat.project_id:
+        store_: Store = _state(request).store
+        if body.projectId is not None and await store_.project(person.sub, body.projectId) is None:
+            raise _problem(status.HTTP_404_NOT_FOUND, "There is no such project.")
+        # Its frozen pinned block goes with the move: the next turn is given the notes of
+        # where the chat is now (MV7).
+        await store_.move_chat(person.sub, chat.id, body.projectId)
     values["updated_at"] = time.time()
     await _state(request).store.update_chat(chat.id, **values)
     if "title" in values:
@@ -825,6 +841,14 @@ async def update_chat(request: Request, chat_id: str, body: ChatUpdate) -> dict[
 async def delete_chat(request: Request, chat_id: str) -> Response:
     person = await _person(request)
     chat = await _own_chat(request, person, chat_id)
+    await remove_chat(request, person, chat)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+async def remove_chat(request: Request, person: Person, chat: Chat) -> None:
+    """Delete a chat of the person's, and everything of it: what the delete route does, and
+    what deleting a project with its chats does for each (MV7). Raises the 503 the route
+    answers when the chat's words could not be taken out of the person's index."""
     store: Store = _state(request).store
     await _state(request).agui.stop(chat.id)
     await _answers(request).stop(chat.id)
@@ -882,7 +906,6 @@ async def delete_chat(request: Request, chat_id: str) -> Response:
             files.remove_stored(root, record.owner, record.id)
 
     await asyncio.to_thread(unlink)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/api/people")
