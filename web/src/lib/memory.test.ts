@@ -20,6 +20,7 @@ import {
   tokenWords,
 } from "./memory";
 import { ApiError } from "./api";
+import type { ChatMemory } from "./types";
 
 describe("a note is one line of at most 240 characters", () => {
   it("counts characters as the server does, so an emoji is one", () => {
@@ -196,6 +197,32 @@ describe("the chip", () => {
       label: "Memory: no notes fit",
       short: "",
       tone: "warn",
+    });
+  });
+
+  it("counts the notes a turn was sent as relevant memory, not only the pinned ones", () => {
+    const turn = {
+      messageId: "a1",
+      tokens: 12,
+      budget: 300,
+      didNotFit: 0,
+      notes: [{ id: "n1", text: "Code word", kind: "fact", tags: [], passages: [], via: "words" }],
+      how: "words_and_meaning",
+      why: null,
+      from: 1,
+      window: 8192,
+      room: 300,
+    } as unknown as NonNullable<ChatMemory["turn"]>;
+    expect(chipWords(sending({ counts: { notes: 1, sent: 0, notSent: 0 }, turn }))).toEqual({
+      label: "Memory: 1 note sent",
+      short: "1",
+      tone: "on",
+    });
+    // Before any answer, nothing pinned: notes are chosen when a message is sent.
+    expect(chipWords(sending({ counts: { notes: 1, sent: 0, notSent: 0 }, turn: null }))).toEqual({
+      label: "Memory: notes are chosen each turn",
+      short: "",
+      tone: "on",
     });
   });
 
