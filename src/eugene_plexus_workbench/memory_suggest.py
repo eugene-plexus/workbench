@@ -86,11 +86,10 @@ MAX_KNOWN_SHOWN = 20
 #: "Add to my tags".
 MAX_TAGS_PER_PROPOSAL = 3
 TAG_ENUM_MAX = 50
-#: Whether the person's tags go in the request at all. Measured 2026-10-19 on Gemma 4 E4B
-#: (`docs/acceptance/m-memory-data/tags`): any list, 12 to 200 tags, raised false memories
-#: from 0% to 5-17% and let an injection through at 12-50, so Workbench tags a proposal in
-#: code instead (`tags_for`). Troy's call MV1-C1 decides whether this stays off.
-TAGS_IN_REQUEST = False
+#: Whether the person's tags go in a model's request is that model's measurement's to say
+#: (MV1-C1, `memory_models.tags_in_request`): measured 2026-10-19 on Gemma 4 E4B
+#: (`docs/acceptance/m-memory-data/tags`), any list, 12 to 200 tags, raised false memories
+#: from 0% to 5-17%, so for a model not measured with one Workbench tags in code (`tags_for`).
 
 #: The request's own settings: steady, short, no tools, no thinking.
 TEMPERATURE = 0.2
@@ -243,8 +242,17 @@ QUOTED_WORDS = 6
 
 def _drop_quoted_spans(text: str) -> str:
     for left, right in _QUOTE_MARKS:
+        # A single mark is an apostrophe inside a word ("I'm", "What's"): it quotes only where
+        # it opens and closes at a word's edge (MV3's live run found "I'm ... What's" dropped).
+        single = left in ("'", chr(0x2018))
         pattern = re.compile(
-            re.escape(left) + r"([^" + re.escape(left + right) + r"\n]*)" + re.escape(right)
+            (r"(?<!\w)" if single else "")
+            + re.escape(left)
+            + r"([^"
+            + re.escape(left + right)
+            + r"\n]*)"
+            + re.escape(right)
+            + (r"(?!\w)" if single else "")
         )
         text = pattern.sub(
             lambda m: " " if len(m.group(1).split()) >= QUOTED_WORDS else m.group(0), text
@@ -345,6 +353,69 @@ def request_body(
         "temperature": TEMPERATURE,
         "max_tokens": MAX_TOKENS,
         "stream": False,
+    }
+
+
+#: MV3: the in-turn tool a model set to Keep automatically may call. Its arguments are a
+#: proposal's fields, judged by `read_answer` as the pass's are; `replaces` is the title of the
+#: note it updates. What it says of when to keep a note is guidance; the rules are code.
+REMEMBER_TOOL = "remember"
+REMEMBER_DESCRIPTION = (
+    "Keep a lasting note about the person you are talking to, for future, unrelated "
+    "conversations: their work, skills, the tools, devices and software they use, the "
+    "languages they speak, their household, how they want answers written, projects they "
+    "work on over weeks or months, and dated plans in their own life. Only what they said "
+    "about themselves in their own words, quoted exactly. Never what they asked about this "
+    "once, other people, text they pasted or quoted, opinions, or passwords, keys, contact "
+    "details, health, religion, politics, sexuality or money. Most turns need no note."
+)
+
+#: What a chat's system message says when `remember` is offered: models seldom call a memory
+#: tool that nothing mentions (measured, MV3). Guidance only; the rules are code.
+REMEMBER_HINT = (
+    "You can keep notes about the person with the remember tool. When they tell you something "
+    "lasting about themselves that would help in future conversations, call it once, then "
+    "answer as usual."
+)
+
+
+def remember_tool() -> dict[str, Any]:
+    """The `remember` tool as a chat request offers it (OpenAI's function shape)."""
+    return {
+        "type": "function",
+        "function": {
+            "name": REMEMBER_TOOL,
+            "description": REMEMBER_DESCRIPTION,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "maxLength": MAX_TEXT_CHARS,
+                        "description": "One short sentence about them, without their name.",
+                    },
+                    "kind": {"type": "string", "enum": list(memory.SUGGESTED_KINDS)},
+                    "quote": {
+                        "type": "string",
+                        "maxLength": MAX_QUOTE_CHARS,
+                        "description": "Their exact words that say this.",
+                    },
+                    "date": {
+                        "type": "string",
+                        "maxLength": 10,
+                        "description": "For an event, its date as YYYY-MM-DD; otherwise empty.",
+                    },
+                    "replaces": {
+                        "type": "string",
+                        "maxLength": memory.MAX_NOTE_CHARS,
+                        "description": "The exact title of a note they keep that this "
+                        "updates, if they said it changed; otherwise empty.",
+                    },
+                },
+                "required": ["text", "kind", "quote"],
+                "additionalProperties": False,
+            },
+        },
     }
 
 
@@ -647,6 +718,9 @@ class Proposal:
     #: The tags it came with (MV1): from the person's list, or, past the enum's cut-off,
     #: words that may not be on it.
     tags: tuple[str, ...] = ()
+    #: MV3b: the sensitive category it touches, when the write policy let it through to be
+    #: routed (`memory_policy.route`); None when it touches none.
+    sensitive: str | None = None
 
 
 @dataclass(frozen=True)
@@ -698,13 +772,17 @@ def read_answer(
     dismissed: Sequence[str] = (),
     today: dt.date,
     room: int = MAX_PER_CALL,
+    secrets_ok: bool = False,
+    sensitive_ok: bool = False,
 ) -> Outcome:
     """What of a model's answer may reach the inbox, and why the rest may not.
 
     `sources` are exactly the texts the model was sent (`sources_of`),
     `known` the person's notes as shown to it (numbered from 1), `dismissed`
     the words of proposals they turned down (never proposed again), and
-    `room` how many more this chat and day may take."""
+    `room` how many more this chat and day may take. The write policy (MV3b) may let a
+    note shaped like a secret through (`secrets_ok`, Custom only) and a sensitive one through
+    to be routed (`sensitive_ok`, carried in `Proposal.sensitive`)."""
     out = Outcome()
     items = parse_notes(content)
     if items is None:
@@ -714,7 +792,7 @@ def read_answer(
     taken = {note_key(k.text) for k in known} | {note_key(d) for d in dismissed}
     others = [k.text for k in known] + list(dismissed)
     for item in items[:MAX_PER_CALL]:
-        verdict = _judge(item, sources, shown, taken, others, today)
+        verdict = _judge(item, sources, shown, taken, others, today, secrets_ok, sensitive_ok)
         if isinstance(verdict, Rejected):
             out.rejected.append(verdict)
             continue
@@ -734,6 +812,8 @@ def _judge(
     taken: set[str],
     others: Sequence[str],
     today: dt.date,
+    secrets_ok: bool = False,
+    sensitive_ok: bool = False,
 ) -> Proposal | Rejected:
     if not isinstance(item, dict):
         return Rejected(NOT_A_NOTE)
@@ -756,9 +836,13 @@ def _judge(
     try:
         text = memory.validate_note(text)
     except memory.NoteRefused as refused:
-        reason = {"secret": SECRET, "too_long": TOO_LONG}.get(refused.reason, NOT_A_NOTE)
-        return Rejected(reason, "" if reason == SECRET else text, refused.looks_like)
-    shape = memory.looks_like_secret(quote)
+        if not (secrets_ok and refused.reason == "secret"):
+            reason = {"secret": SECRET, "too_long": TOO_LONG}.get(refused.reason, NOT_A_NOTE)
+            return Rejected(reason, "" if reason == SECRET else text, refused.looks_like)
+        text = text.strip()
+        if len(text) > memory.MAX_NOTE_CHARS:
+            return Rejected(TOO_LONG, text)
+    shape = None if secrets_ok else memory.looks_like_secret(quote)
     if shape is not None:
         return Rejected(SECRET, "", shape)
     if len(text) > MAX_TEXT_CHARS:
@@ -772,7 +856,7 @@ def _judge(
     if not supported(text, quote, date):
         return Rejected(UNSUPPORTED, text)
     category = sensitive(text) or sensitive(quote)
-    if category is not None:
+    if category is not None and not sensitive_ok:
         return Rejected(SENSITIVE, "", category)
     replaced = shown[replaces - 1].id if 0 < replaces <= len(shown) else None
     if note_key(text) in taken:
@@ -798,6 +882,7 @@ def _judge(
         revisit_at=revisit,
         replaces=replaced,
         tags=_tags_of(item.get("tags")),
+        sensitive=category,
     )
 
 

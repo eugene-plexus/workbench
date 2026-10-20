@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -29,6 +30,7 @@ from . import (
     job_sites_api,
     media_api,
     memory_api,
+    memory_models_api,
     saved_api,
     tools_api,
     web,
@@ -251,12 +253,47 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return await past_chats.run_tool(app.state, person, chat_id, model, arguments)
 
         tools.chats_search = search_chats
+        # Keep automatically (MV3b): `remember`, judged and routed under the write policy.
+        from . import memory_write
+
+        async def remember(
+            person: Any, chat_id: str, model: str | None, arguments: dict[str, Any], turn: Any
+        ) -> tuple[str, Any]:
+            text, note = await memory_write.run_remember(
+                store, person, chat_id, model, arguments, turn or memory_write.TurnContext()
+            )
+            if note is not None:
+                await memory_api._reindex(app.state, person.sub, [note.id])
+            return text, note
+
+        tools.remember = remember
         answers.on_finished = lambda chat_id: exchanges.touch(None, chat_id)
         # Learn from my chats (MR8): one timer per chat that has gone quiet.
         from .memory_learn import Learner
 
         learner = Learner(store, hub, busy=lambda chat_id: answers.running(chat_id) is not None)
         app.state.learner = learner
+
+        def learned(chat_id: str, notes: list[Any]) -> None:
+            """Notes the pass kept automatically: into the index, and a receipt for an open
+            chat (MV3b)."""
+            if notes:
+                owner = notes[0].owner
+                task = asyncio.create_task(
+                    memory_api._reindex(app.state, owner, [n.id for n in notes])
+                )
+                background.add(task)
+                task.add_done_callback(background.discard)
+            answers.publish(
+                chat_id,
+                {
+                    "type": "memory",
+                    "learned": [{"id": n.id, "text": n.text, "model": n.model} for n in notes],
+                },
+            )
+
+        background: set[asyncio.Task[None]] = set()
+        learner.on_learned = learned
         app.state.sessions = sessions
         app.state.agui = AGUI(store, app.state.sessions, answers)
         await store.agui.recover()
@@ -285,6 +322,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await app.state.agui.aclose()
             await app.state.interactions.aclose()
             await learner.aclose()
+            measurer = getattr(app.state, "measurer", None)
+            if measurer is not None:
+                await measurer.aclose()
             await notes_index.aclose()
             await exchanges.aclose()
             await answers.aclose()
@@ -317,6 +357,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(agui_api.router)
     app.include_router(media_api.router)
     app.include_router(memory_api.router)
+    app.include_router(memory_models_api.router)
     app.include_router(past_chats_router)
     app.include_router(documents_api.router)
     # Before `saved_api`: `/api/documents/folders` is not a document's id.

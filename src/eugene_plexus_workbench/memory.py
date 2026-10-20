@@ -441,6 +441,12 @@ def validate_description(text: str) -> str:
     return cleaned
 
 
+def shareable(notes: list[Any]) -> list[Any]:
+    """The notes that may leave the machines under call 12 (MV3b): every note but one a model
+    kept automatically that its person has not seen yet."""
+    return [n for n in notes if not (getattr(n, "auto", False) and n.seen_at is None)]
+
+
 def validate_note(text: str) -> str:
     """The words to keep, or `NoteRefused` saying why not.
 

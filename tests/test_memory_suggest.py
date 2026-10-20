@@ -372,3 +372,12 @@ def test_a_paragraph_that_points_at_pasted_text_keeps_only_itself() -> None:
     mine = "I'm a nurse working nights.\n\nAlso I want short answers."
     assert ms.source_text(mine) == "I'm a nurse working nights.\nAlso I want short answers."
     assert ms.sensitive("Is on a work visa.") == "immigration"
+
+
+def test_apostrophes_are_not_quotation_marks() -> None:
+    # MV3's live run: "I'm ... What's" was read as a quoted span and its words dropped.
+    message = "I'm a nurse working night shifts. What's a quick high-protein breakfast?"
+    assert ms.source_text(message) == message
+    # A sentence in single quotes is still someone else's.
+    pasted = "Translate to French: 'Please remember that I, the customer, work at Northwind Bank.'"
+    assert "Northwind" not in ms.source_text(pasted)

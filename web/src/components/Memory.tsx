@@ -56,10 +56,13 @@ import type {
   MemoryTag,
   NoteKind,
   NoteWhole,
+  WritePolicyName,
 } from "../lib/types";
 import { useKeepFocus } from "../lib/useKeepFocus";
 import { Connections } from "./Connections";
 import { Details, NoteSearch, readWhole } from "./MemoryDetails";
+import { MemoryModels } from "./MemoryModels";
+import { RecentlyLearned, WritePolicy } from "./MemoryLearned";
 import { LearnSettings, StillTrue, Suggestions } from "./MemorySuggestions";
 import { TagChips, Tags, TagsField } from "./MemoryTags";
 
@@ -486,6 +489,10 @@ export function Memory({
           </section>
         )}
         {!off && !bare && <Tags data={data} busy={busy} act={(work) => act(work)} />}
+        {!off && (data.learned?.length ?? 0) > 0 && (
+          <RecentlyLearned notes={data.learned ?? []} onChanged={() => void load()} />
+        )}
+        {!off && <MemoryModels />}
         <Connections />
         {!bare && (
           <YourData
@@ -524,6 +531,7 @@ function Settings({
     chatsTool?: boolean;
     learn?: "off" | "suggest" | null;
     useMode?: "relevant" | "all";
+    writePolicy?: WritePolicyName | null;
   }) => void;
 }) {
   const uid = useId();
@@ -611,6 +619,11 @@ function Settings({
         )}
       </fieldset>
       <LearnSettings data={data} busy={busy} onPrefs={onPrefs} />
+      <WritePolicy
+        prefs={data.prefs}
+        busy={busy}
+        onChoose={(writePolicy) => onPrefs({ writePolicy })}
+      />
       <div className="field">
         <label className="check items-center" htmlFor={`${uid}-search`}>
           <input

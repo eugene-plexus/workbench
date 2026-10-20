@@ -14,16 +14,20 @@ else: the next message reads what was left.
 
 **Whose, and how much.** Only the chat's own person's messages, only with the chat's own model
 (so their words go nowhere they have not gone), only while memory is on for them, for this
-chat and for the install, and only while `learn` is `suggest` for them (`effective`). At most
+chat and for the install, and only while the chat's model learns for them (`effective`). At most
 `MAX_PER_CHAT` suggestions a chat ever makes, `MAX_PER_DAY` a person gets in a day, and none at
 the notes limit. The notes they already keep are shown to the model, so it can skip or replace
 them, only where their notes may go (a model on their machines, or one they let notes go to in
 this chat).
 
-**On by default only for models that passed.** A person who has not chosen gets the install's
-`memorySuggestions`: `measured` turns it on for a model in `PASSED`, the models that met the
-harness's bar. `PASSED` is empty until that bar is decided, so until then it is off for
-everyone who has not turned it on.
+**Which models, and how** (MV3, `memory_models`): the person's choice for the chat's model
+(Off, Suggest, Keep automatically), else their choice for models they have not set, else, under
+the install's `memorySuggestions: measured`, Suggest for a model whose measurement met the
+bar, Eugene's shipped one (`memory_measured.json`: today Gemma 4 E4B and 12B,
+Qwen3.6-35B-A3B and Qwen3.8-27B) or the install's own (Measure this model). Keep automatically
+is only ever the person's own choice, and arrives with the write policy (MV3b); until then it
+suggests. The person's tag list goes in the request only for a model whose measurement with a
+list met the same bar (MV1-C1).
 
 Logs carry counts, reasons and causes; never what anybody wrote.
 """
@@ -34,16 +38,22 @@ import asyncio
 import contextlib
 import datetime as dt
 import logging
-import re
 import secrets
 import time
-import uuid
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import config, memory, memory_suggest
+from . import (
+    config,
+    memory,
+    memory_measure,
+    memory_models,
+    memory_policy,
+    memory_suggest,
+    memory_write,
+)
 from .hub import Hub, HubError
 from .store import MemoryNote, Person, Store
 
@@ -55,43 +65,40 @@ HOUR_SECONDS = 3_600.0
 #: Suggestion calls a person's chats may make in an hour, whatever they come to.
 CALLS_PER_HOUR = 20
 
-#: Model ids (patterns, matched anywhere, case ignored) that passed the harness's bar and so
-#: suggest by default for a person who has not chosen. The bar (Troy, 2026-10-18): no secret,
-#: injection or sensitive note kept; false memories at most 5% of kept, recall at least 60%,
-#: unreadable answers and noise sets at most 5% each, on the path Workbench sends
-#: (`specs/docs/acceptance/m-memory-measurement.md`). Measured at Q4_K_M; a fine-tune that
-#: removes refusals ("abliterated") is a different model and is not covered.
-PASSED_NAMES = ("Gemma 4 E4B", "Gemma 4 12B", "Qwen3.6-35B-A3B", "Qwen3.8-27B")
-_SEP = r"[-_ .]?"
-PASSED: tuple[re.Pattern[str], ...] = tuple(
-    re.compile(r"^(?!.*abliterat)" + pattern, re.IGNORECASE)
-    for pattern in (
-        rf".*gemma{_SEP}4{_SEP}e4b",
-        rf".*gemma{_SEP}4{_SEP}12b",
-        rf".*qwen3\.6{_SEP}35b{_SEP}a3b",
-        rf".*qwen3\.8{_SEP}27b",
-    )
+#: Whose word `learn` is (`memory_models`'s words, kept here for the callers that read them).
+YOU, OWNER, MEASURED, DEFAULT = (
+    memory_models.YOU,
+    memory_models.OWNER,
+    memory_models.MEASURED,
+    memory_models.DEFAULT,
 )
 
-#: Whose word `learn` is: the person's own, the owner's, the model's measurement, or nobody's.
-YOU, OWNER, MEASURED, DEFAULT = "you", "owner", "measured", "default"
 
-
-def passed(model: str | None) -> bool:
-    return bool(model) and any(p.search(model or "") for p in PASSED)
+def passed(model: str | None, local: dict[str, dict[str, Any]] | None = None) -> bool:
+    """Whether `model`'s measurement recommends Suggest."""
+    return memory_models.recommended_for_suggest(
+        memory_models.measurement_for(model, local, for_default=True)
+    )
 
 
 def effective(
-    install: config.MemorySettings, prefs: dict[str, Any], model: str | None
+    install: config.MemorySettings,
+    prefs: dict[str, Any],
+    model: str | None,
+    *,
+    choice: str | None = None,
+    local: dict[str, dict[str, Any]] | None = None,
+    keep_allowed: bool = False,
 ) -> tuple[str, str]:
-    """Whether a chat on `model` learns for this person: `(off | suggest, whose word)`."""
-    if not install.enabled or install.suggestions == "off" or not prefs["enabled"]:
-        return "off", OWNER if not install.enabled or install.suggestions == "off" else YOU
-    if prefs.get("learn_set"):
-        return ("off" if prefs["learn"] == "off" else "suggest"), YOU
-    if install.suggestions == "measured" and passed(model):
-        return "suggest", MEASURED
-    return "off", DEFAULT
+    """What a chat on `model` does for this person: `(off | suggest | auto, whose word)`."""
+    return memory_models.effective(
+        install,
+        prefs,
+        model,
+        choice=choice,
+        measured=memory_models.measurement_for(model, local, for_default=True),
+        keep_allowed=keep_allowed,
+    )
 
 
 @dataclass
@@ -130,6 +137,8 @@ class Learner:
         self._again: dict[str, Person] = {}
         #: One call at a time for a person, and at most `CALLS_PER_HOUR` an hour.
         self._locks: dict[str, asyncio.Lock] = {}
+        #: Told of the notes a model kept automatically in a chat, for its receipt (MV3b).
+        self.on_learned: Callable[[str, list[MemoryNote]], None] = lambda chat_id, notes: None
         self._calls: dict[str, deque[float]] = {}
 
     def poke(self, person: Person, chat_id: str) -> None:
@@ -218,7 +227,19 @@ class Learner:
         if not unread:
             return Outcome(skipped="nothing_new")
         newest = max(m.created_at for _, m in unread)
-        mode, _ = effective(install, prefs, chat.model)
+        local = await store.memory_measurements()
+        # What the install does: Eugene's measurement, or the owner's own run (section 30).
+        measured = memory_models.measurement_for(chat.model, local, for_default=True)
+        choices = await store.memory_model_choices(owner)
+        policy, _ = memory_write.policy_for(install, prefs)
+        mode, _ = memory_models.effective(
+            install,
+            prefs,
+            chat.model,
+            choice=choices.get(chat.model or ""),
+            measured=measured,
+            keep_allowed=policy.get("keepAuto") == "on",
+        )
 
         async def done(reason: str) -> Outcome:
             # What was not read while learning was off, or for another model, is never read
@@ -247,16 +268,24 @@ class Learner:
         )
         if room <= 0:
             return await done("no_room")
-        sources = memory_suggest.sources_of([m.content for m in theirs])
+        # What a note may be drawn from is the write policy's `source` row (MV3b): the
+        # person's own words (MR8), or under Open their whole messages and the answers too.
+        sources, read = memory_write.sources_for(path, theirs, policy)
         if not theirs or not memory_suggest.worth_asking(sources):
             return await done("nothing_to_read")
+        untrusted = memory_write.untrusted_in(
+            read if policy.get("source") == "any" else theirs,
+            answers_too=policy.get("source") == "any",
+        )
         # The notes they keep go to the model only where their notes may go.
         known: list[memory_suggest.Known] = []
         tags: list[memory_suggest.TagChoice] = []
         try:
             facts = await memory_api.model_facts(self._hub, chat.model)
             if memory_api._placement(facts, install, prefs, chat).send:
-                known = await self._known(owner, " ".join(sources))
+                # Call 12: a note a model kept and the person has not seen stays local.
+                local_only = facts.locality != "local" and policy.get("unseenLocal") == "yes"
+                known = await self._known(owner, " ".join(sources), local_only=local_only)
                 # Their tag list is their words too: it goes only where their notes may.
                 tags = [
                     memory_suggest.TagChoice(t["tag"], t["description"])
@@ -272,7 +301,7 @@ class Learner:
             known,
             today,
             secrets.token_hex(4),
-            tags if memory_suggest.TAGS_IN_REQUEST else (),
+            tags[: memory_measure.TAGS_MEASURED] if memory_models.tags_in_request(measured) else (),
         )
         self._calls.setdefault(owner, deque()).append(now)
         try:
@@ -298,32 +327,42 @@ class Learner:
             dismissed=[*await store.dismissed_words(owner), *held],
             today=today,
             room=room,
+            secrets_ok=policy.get("secrets") == "allow",
+            sensitive_ok=policy.get("sensitive") != "refuse",
         )
         rejected: dict[str, int] = {}
         for r in outcome.rejected:
             rejected[r.reason] = rejected.get(r.reason, 0) + 1
         if outcome.error is not None:
             rejected[outcome.error] = rejected.get(outcome.error, 0) + 1
-        notes = [
-            MemoryNote(
-                id=uuid.uuid4().hex,
-                owner=owner,
-                text=p.text,
-                kind=p.kind,
-                created_at=now,
-                updated_at=now,
-                status="pending",
-                source="suggested",
-                source_chat_id=chat_id,
-                source_message_id=theirs[p.message].id,
-                quote=p.quote,
-                expires_at=p.expires_at,
-                revisit_at=p.revisit_at,
-                replaces=p.replaces,
-                proposed_tags=list(p.tags or memory_suggest.tags_for(p.text, tags)),
+        # The write policy decides where each goes, in code (MV3b): kept, offered or dropped.
+        named = [p.replaces for p in outcome.proposals if p.replaces]
+        routed = memory_write.route(
+            outcome.proposals,
+            policy,
+            auto=mode == memory_models.AUTO,
+            untrusted=untrusted,
+            replaced={n.id: n for n in await store.memory_notes_by_ids(owner, named)}
+            if named
+            else None,
+        )
+        notes = []
+        for w in routed:
+            if w.action == memory_policy.DROP:
+                rejected[f"policy_{w.why}"] = rejected.get(f"policy_{w.why}", 0) + 1
+                continue
+            notes.append(
+                memory_write.note_of(
+                    owner,
+                    chat_id,
+                    read[w.proposal.message].id,
+                    w,
+                    chat.model,
+                    policy,
+                    w.proposal.tags or memory_suggest.tags_for(w.proposal.text, tags),
+                    now,
+                )
             )
-            for p in outcome.proposals
-        ]
         offered = await store.add_suggestions(
             owner,
             chat_id,
@@ -334,17 +373,26 @@ class Learner:
             per_day=memory_suggest.MAX_PER_DAY,
             since=now - DAY_SECONDS,
         )
+        kept = [n for n in offered if n.auto]
+        if kept:
+            self.on_learned(chat_id, kept)
         return Outcome(asked=True, offered=offered, rejected=rejected)
 
-    async def _known(self, owner: str, words: str) -> list[memory_suggest.Known]:
+    async def _known(
+        self, owner: str, words: str, *, local_only: bool = False
+    ) -> list[memory_suggest.Known]:
         """The notes most likely to be repeated or replaced: those sharing words with the
-        messages, then the newest, up to what the model is shown."""
+        messages, then the newest, up to what the model is shown. With `local_only`, none a
+        model kept that the person has not seen (call 12)."""
         cap = memory_suggest.MAX_KNOWN_SHOWN
         expression = memory.match_expression(memory.search_words(words))
         found = await self._store.search_memory(owner, expression, limit=cap) if expression else []
         seen = {n.id for n in found}
         rest = [n for n in await self._store.memory_notes(owner) if n.id not in seen]
-        return [memory_suggest.Known(n.id, n.text) for n in [*found, *rest][:cap]]
+        both = [*found, *rest]
+        if local_only:
+            both = memory.shareable(both)
+        return [memory_suggest.Known(n.id, n.text) for n in both[:cap]]
 
 
 def dismissed_words(text: str) -> str:

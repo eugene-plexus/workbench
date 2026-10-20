@@ -40,6 +40,14 @@ EXCHANGES_INDEX = SRC + "exchanges_index.py"
 INDEX = SRC + "knowledge/index.py"
 CONNECTIONS = SRC + "connections.py"
 MV2 = "tests/test_past_chats.py"
+MV3 = "tests/test_memory_mv3.py"
+MODELS = SRC + "memory_models.py"
+MEASURE = SRC + "memory_measure.py"
+MODELS_API = SRC + "memory_models_api.py"
+LEARN = SRC + "memory_learn.py"
+MV3B = "tests/test_memory_mv3b.py"
+POLICY = SRC + "memory_policy.py"
+WRITE = SRC + "memory_write.py"
 
 # (label, file, before, after, check)
 CASES: list[tuple[str, str, str, str, str]] = [
@@ -599,11 +607,202 @@ CASES: list[tuple[str, str, str, str, str]] = [
         '    "search_chats": "read_notes",\n}',
         f"{MV2}::test_a_connection_searches_past_chats_only_with_the_right",
     ),
+    # --- MV3a: which models learn, and the measurement ---------------------
+    (
+        "MV3: the owner's learning off yields to a person's choice",
+        MODELS,
+        '    if not install.enabled or install.suggestions == "off":\n        return OFF, OWNER\n',
+        "    if False:\n        return OFF, OWNER\n",
+        f"{MV3}::test_what_a_model_does_for_a_person",
+    ),
+    (
+        "MV3: Keep automatically without the write policy allowing it",
+        MODELS,
+        "        return (SUGGEST if choice == AUTO and not keep_allowed else choice), YOU\n",
+        "        return choice, YOU\n",
+        f"{MV3}::test_what_a_model_does_for_a_person",
+    ),
+    (
+        "MV3: an abliterated fine-tune matches a measurement",
+        MODELS,
+        'r"^(?!.*(?:abliterat|uncensor)).*" + entry["pattern"], re.IGNORECASE',
+        'r"^.*" + entry["pattern"], re.IGNORECASE',
+        f"{MV3}::test_shipped_measurements_match_the_starter_models_and_never_an_abliterated_one",
+    ),
+    (
+        "MV3: a wrong supersession is not counted",
+        MEASURE,
+        '        if item.get("replaces") and item.get("replaces") != s["replaces"]:\n',
+        "        if False:\n",
+        f"{MV3}::test_a_note_naming_a_note_it_does_not_replace_is_a_wrong_supersession",
+    ),
+    (
+        "MV3: Keep automatically's bar is Suggest's",
+        MEASURE,
+        '    "false": 0.02,\n',
+        '    "false": 0.05,\n',
+        f"{MV3}::test_the_bars",
+    ),
+    (
+        "MV3: the tool path is not judged",
+        MEASURE,
+        "    if keep_miss is None and tools:\n",
+        "    if False:\n",
+        f"{MV3}::test_the_bars",
+    ),
+    (
+        "MV3: an outside model is measured without asking",
+        MODELS_API,
+        "    if outside and not body.confirmOutside:\n",
+        "    if False:\n",
+        f"{MV3}::test_an_outside_model_needs_confirming_and_three_a_day",
+    ),
+    (
+        "MV3: one person's model choices reach another",
+        STORE,
+        '.execute("SELECT model, mode FROM memory_model_choices WHERE owner = ?", (owner,))',
+        '.execute("SELECT model, mode FROM memory_model_choices WHERE ? IS NOT NULL", (owner,))',
+        f"{MV3}::test_the_models_list_and_a_choice_per_model",
+    ),
+    (
+        "MV3: another person's measurement sets the install's default",
+        MODELS,
+        '        and (not for_default or own["result"].get("startedByOwner") is True)\n',
+        "        and True\n",
+        f"{MV3}::test_only_the_owners_own_run_sets_the_installs_default",
+    ),
+    (
+        "MV3: a gateway that does not answer is kept as a measurement",
+        MEASURE,
+        "            if failures > max(3, FAILED_SHARE * total):\n",
+        "            if False:\n",
+        f"{MV3}::test_a_gateway_that_does_not_answer_is_not_a_measurement",
+    ),
+    (
+        "MV3: Keep is recommended with its tool path unmeasured",
+        MEASURE,
+        '            keep_miss = "the remember tool was not measured"\n',
+        "            keep_miss = None\n",
+        f"{MV3}::test_the_bars",
+    ),
+    # --- MV3b: the write policy, Keep automatically, Undo, call 12 -------------
+    (
+        "MV3b: untrusted text in the turns read is not routed",
+        POLICY,
+        "    if untrusted:\n",
+        "    if False:\n",
+        f"{MV3B}::test_the_presets_route_as_the_design_table_says",
+    ),
+    (
+        "MV3b: a model keeps without Keep automatically allowed",
+        POLICY,
+        '    if action == KEEP and not (auto and policy.get("keepAuto") == "on"):\n',
+        "    if action == KEEP and not auto:\n",
+        f"{MV3B}::test_the_presets_route_as_the_design_table_says",
+    ),
+    (
+        "MV3b: a person's looser policy counts under stricter only",
+        POLICY,
+        "    combined = stricter(mine, install)\n",
+        "    combined = mine\n",
+        f"{MV3B}::test_a_person_may_tighten_never_loosen_unless_the_owner_lets_them",
+    ),
+    (
+        "MV3b: a person saves a policy the owner does not allow",
+        ROUTES,
+        "    if body.writePolicy is not None and body.writePolicy not in policy_choices(install):\n",
+        "    if False:\n",
+        f"{MV3B}::test_the_owners_strict_policy_turns_keep_into_suggest_and_says_so",
+    ),
+    (
+        "MV3b: a paste in the person's message is not untrusted",
+        WRITE,
+        '        if m.role == "user" and (m.attachments or _stripped(m.content) or _long(m.content)):\n',
+        "        if False:\n",
+        f"{MV3B}::test_a_paste_in_the_chat_sends_a_keep_to_suggested_notes",
+    ),
+    (
+        "MV3b: remember ignores what the turn read",
+        WRITE,
+        "    untrusted = context.untrusted or untrusted_in(path, answers_too=True)\n",
+        "    untrusted = False\n",
+        f"{MV3B}::test_remember_offers_instead_while_untrusted_text_is_in_the_turn",
+    ),
+    (
+        "MV3b: remember draws from pasted text under Standard",
+        WRITE,
+        '    if policy.get("source") == "own":\n',
+        "    if False:\n",
+        f"{MV3B}::test_an_injected_paste_cannot_make_remember_keep_anything",
+    ),
+    (
+        "MV3b: remember is not asked again as it runs",
+        WRITE,
+        "    if not await remember_allowed(store, owner, chat.settings, model):\n",
+        "    if False:\n",
+        f"{MV3B}::test_remember_is_not_kept_off_the_persons_words_or_without_keep_automatically",
+    ),
+    (
+        "MV3b: an unseen model-kept note leaves the machines",
+        MEMORY,
+        '    return [n for n in notes if not (getattr(n, "auto", False) and n.seen_at is None)]\n',
+        "    return list(notes)\n",
+        f"{MV3B}::test_unseen_model_kept_notes_stay_local_until_seen",
+    ),
+    (
+        "MV3b: Undo leaves the replaced note superseded",
+        STORE,
+        "                            \"UPDATE memory_notes SET status = 'active', superseded_at = NULL, \"\n",
+        "                            \"UPDATE memory_notes SET status = 'superseded', superseded_at = NULL, \"\n",
+        f"{MV3B}::test_undo_brings_back_the_note_a_model_replaced",
+    ),
+    (
+        "MV3b: a removed note's remember result is replayed",
+        STORE,
+        '                        call["result"] = REMOVED_RESULT\n',
+        "                        pass\n",
+        f"{MV3B}::test_a_removed_notes_remember_result_is_not_replayed",
+    ),
+    (
+        "MV3b: a model replaces the person's own pinned note by itself",
+        WRITE,
+        '        and note.source == "suggested"\n',
+        "        and True\n",
+        f"{MV3B}::test_a_model_never_replaces_the_persons_own_note_by_itself",
+    ),
+    (
+        "MV3b: a model replaces a pinned note by itself",
+        WRITE,
+        "        and not note.pinned\n",
+        "        and True\n",
+        f"{MV3B}::test_a_model_never_replaces_a_pinned_note_by_itself",
+    ),
+    (
+        "MV3b: a note worded as an instruction is routed as its kind says",
+        WRITE,
+        '        kind = "instruction" if _IMPERATIVE.search(p.text) else p.kind\n',
+        "        kind = p.kind\n",
+        f"{MV3B}::test_a_note_worded_as_an_instruction_is_routed_as_one",
+    ),
+    (
+        "MV3b: the owner's view shows what remember kept",
+        API,
+        '                        "noteText": None,\n',
+        "",
+        f"{MV3B}::test_the_owners_view_hides_what_remember_kept",
+    ),
+    (
+        "MV3: the tag list goes to a model not measured with one",
+        LEARN,
+        "tags[: memory_measure.TAGS_MEASURED] if memory_models.tags_in_request(measured) else (),",
+        "tags,",
+        f"{MV3}::test_a_choice_for_one_model_makes_its_chats_suggest",
+    ),
     (
         "MV2: the owner's view keeps a past-chats search",
         API,
-        "_PRIVATE_SERVERS = (MEMORY_SERVER, CHATS_SERVER)",
-        "_PRIVATE_SERVERS = (MEMORY_SERVER,)",
+        "_PRIVATE_SERVERS = (MEMORY_SERVER, CHATS_SERVER, WRITE_SERVER)",
+        "_PRIVATE_SERVERS = (MEMORY_SERVER, WRITE_SERVER)",
         f"{MV2}::test_a_kept_search_chats_call_is_withheld_where_past_chats_may_not_go_and_hidden_from_owner",
     ),
 ]

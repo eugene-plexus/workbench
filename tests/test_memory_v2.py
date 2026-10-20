@@ -333,7 +333,7 @@ def test_a_schema_21_store_keeps_every_note_and_takes_the_v2_shape(tmp_path: Pat
         assert db.execute("SELECT value FROM meta WHERE key='schema'").fetchone() == (
             str(SCHEMA_VERSION),
         )
-    assert SCHEMA_VERSION == 23
+    assert SCHEMA_VERSION == 24
     assert list(tmp_path.glob("w.sqlite3.schema-21*.bak")), "backed up first"
 
 
@@ -663,7 +663,10 @@ def test_a_suggestion_is_tagged_by_code_from_the_words_it_says_and_no_model_sees
         "martial-arts",
     )
     assert memory_suggest.tags_for("Likes tea", listed) == ()
-    assert memory_suggest.TAGS_IN_REQUEST is False  # measured: the list made suggestions worse
+    # MV1-C1, settled per model (MV3): only a model measured with a list gets it.
+    from eugene_plexus_workbench import memory_models
+
+    assert not memory_models.tags_in_request(memory_models.measurement_for("never-measured"))
 
 
 def test_a_new_version_at_the_cap_is_refused_and_keeps_the_note_as_it_was(world: World) -> None:
