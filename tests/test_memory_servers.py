@@ -206,6 +206,17 @@ def test_verbs_are_found_by_name_and_need_their_argument() -> None:
         [tool("recall", "query"), tool("retain", "content"), tool("forget", "document_id")]
     )
     assert set(keeps_no_id) == {"recall", "retain"}
+    # Hindsight lists both: its `retain` only queues, so a forget could find nothing yet.
+    hindsight = ms.verbs_of(
+        [
+            tool("recall", "query"),
+            tool("retain", "content", "document_id"),
+            tool("sync_retain", "content", "document_id"),
+            tool("delete_document", "document_id"),
+        ]
+    )
+    assert hindsight["retain"]["tool"] == "sync_retain"
+    assert "forget" in hindsight
     assert ms.verbs_of([tool("recall", "query", "x" * 50)])["recall"]["arguments"] == ["query"]
     assert ms._arguments(found["recall"], {"query": "q", "max_tokens": 9}) == {"query": "q"}
     assert Tool  # the SDK's type is what a server lists
