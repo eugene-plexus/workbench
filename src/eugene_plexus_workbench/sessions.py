@@ -86,7 +86,9 @@ class Sessions:
         self._provider = provider
         #: Every issuer this Workbench signs in through (LT2-C5): a refresh or
         #: a revocation goes to the one that issued the token.
-        self._providers = {p.issuer: p for p in (provider, *others) if p.issuer}
+        self._providers = {
+            issuer: p for p in (provider, *others) if (issuer := getattr(p, "issuer", None))
+        }
         self._locks: dict[str, asyncio.Lock] = {}
 
     async def create(
