@@ -1,7 +1,8 @@
 /* global process, console, document, getComputedStyle, window, URL */
-// Memory in Chrome (MR1): the whole of it, as a person meets it, against the
+// Memory in Chrome (MR1, walked again for MV1-MV4): the whole of it, as a person meets it, against the
 // real app and its fake Eugene and gateway. Says "Remember that ...", sees the
-// toast, reads the note on the Memory page with its source, starts a new chat
+// toast, sees the unpinned note chosen as relevant memory for that turn, reads the
+// note on the Memory page with its source, pins it, starts a new chat
 // and sees the chip say a note was sent, reads the exact text in the drawer,
 // turns memory off for the chat, keeps and takes back a note from a message,
 // meets an outside model, deletes the note; then takes pictures of the page and
@@ -72,6 +73,18 @@ async function say(page, words) {
 const chip = (page) => page.getByTestId("memory-chip");
 const chipSays = (page, words) => chip(page).filter({ hasText: words }).waitFor({ timeout: 10000 });
 
+/** What the drawer says the latest answer was sent: the page is read again first, since the
+ * chip is read when a message is sent and not again when its answer ends. Closes the drawer. */
+async function turnSays(page, words) {
+  await page.reload();
+  await chip(page).waitFor();
+  await chip(page).click();
+  const turn = page.getByTestId("memory-drawer").getByTestId("memory-this-turn");
+  await turn.getByTestId("memory-turn-summary").filter({ hasText: "1 note chosen" }).waitFor();
+  assert.match(await turn.getByTestId("memory-turn-notes").textContent(), new RegExp(words));
+  await page.getByTestId("memory-close").click();
+}
+
 // Every scroller to its top, and the window made tall enough for the whole page.
 async function tall(page) {
   const more = await page.evaluate(() => {
@@ -119,8 +132,8 @@ try {
   await page.screenshot(shot("memory-toast-dark-desk"));
   log("PASS  a message that begins 'Remember that' keeps the note, and the toast says so");
   const first = page.url();
-  await chipSays(page, "1 note sent");
-  log("PASS  the chip says the note went with the message");
+  await turnSays(page, WORD);
+  log("PASS  the drawer says the unpinned note was chosen for the message, as relevant memory");
 
   // --- words that are not kept, and a note forgotten on purpose --------------------
   await say(page, SAID.card);
@@ -185,10 +198,10 @@ try {
   const from = note.getByTestId("memory-note-from");
   assert.match(await from.textContent(), /From /);
   assert.match(await from.getByRole("link").textContent(), /Remember that my code word/);
-  assert.match(await page.getByTestId("memory-usage-notes").textContent(), /1 of 300 notes/);
+  assert.match(await page.getByTestId("memory-usage-notes").textContent(), /1 of 20,000 notes/);
   assert.match(
     await page.getByTestId("memory-usage-tokens").textContent(),
-    /Using \d+ of 1,000 tokens/,
+    /Pinned: \d+ of [\d,]+ tokens, in every chat\. Relevant: up to [\d,]+ tokens a turn/,
   );
   // The settings are not on this page (MV4): a button goes to them, on the Settings page.
   assert.equal(await page.getByTestId("memory-use-switch").count(), 0);
@@ -217,6 +230,12 @@ try {
     "PASS  Settings holds Memory's, Documents' and Connections' settings; the Memory page holds none",
   );
   log("PASS  the Memory page lists the note with its kind, date and the chat it came from");
+  // Pinned, the note is in the chat's own copy from the start, in every chat (the unpinned
+  // way, chosen again for each message, was the first chat's).
+  await note.getByTestId("memory-note-pin").click();
+  await page.getByTestId("memory-section-always").getByTestId("memory-note").waitFor();
+  assert.equal((await ask(context, "/api/memory")).sections.always.length, 1);
+  log("PASS  Pin makes it a note that is always used");
   await from.getByRole("link").click();
   await page.waitForURL(first);
   log("PASS  the 'from' link goes back to the chat");
@@ -294,7 +313,7 @@ try {
   await chipSays(page, "Memory not sent: outside model");
   await chip(page).click();
   const outside = page.getByTestId("memory-drawer");
-  await outside.getByText("Your notes were not sent").waitFor();
+  await outside.getByTestId("memory-status").getByText("Your notes were not sent").waitFor();
   await page.screenshot(shot("memory-outside-dark-desk"));
   await outside.getByTestId("memory-send-here").click();
   await outside.getByTestId("memory-stop-sending").waitFor();

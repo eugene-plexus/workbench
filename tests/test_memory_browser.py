@@ -56,12 +56,27 @@ def system_of(body: dict[str, Any]) -> str:
     return str(first["content"]) if first["role"] == "system" else ""
 
 
+def said_in(body: dict[str, Any]) -> str:
+    """The text of a request's newest message: relevant memory (MV1) comes first in it,
+    then the person's words."""
+    content = body["messages"][-1]["content"]
+    return content if isinstance(content, str) else json.dumps(content)
+
+
+def relevant_of(body: dict[str, Any]) -> str:
+    """The relevant-memory block the newest message carries (`<memory-XXXXXXXX>...`), or ""."""
+    text = said_in(body)
+    start = text.find("<memory-")
+    end = text.find("</memory-")
+    return text[start : text.index(">", end) + 1] if start >= 0 and end > start else ""
+
+
 def asked(requests: list[dict[str, Any]], words: str) -> dict[str, Any]:
-    """The one request whose newest message is these words."""
+    """The one request whose newest message ends in these words."""
     found = [
         body
         for body in requests
-        if body["messages"][-1]["role"] == "user" and body["messages"][-1]["content"] == words
+        if body["messages"][-1]["role"] == "user" and said_in(body).endswith(words)
     ]
     assert len(found) == 1, (words, len(found))
     return found[0]
@@ -127,33 +142,45 @@ def test_memory_in_chrome(world: World, tmp_path: Path) -> None:
         if line.startswith("DRAWER_TEXT:")
     )
     sent = world.gateway.requests
-    first = system_of(asked(sent, SAID["remember"]))
-    # 1. "Remember that ..." kept the note before the request was built.
-    assert WORD in first
-    # 2. A chat keeps the notes it started with, the same bytes every turn: a note
-    # kept after that (the cat) is not in it, and forgetting it changes nothing.
+    first = asked(sent, SAID["remember"])
+    # 1. "Remember that ..." kept the note before the request was built: the note was not
+    # pinned, so it went as relevant memory in that turn's own message (MV1), not in the
+    # system message (design section 6).
+    assert system_of(first) == ""
+    assert WORD in relevant_of(first)
+    # 2. The chat began with no pinned notes, so every turn of it has the same (empty) system
+    # message; a note kept later reaches a turn only as relevant memory, in that turn.
     for later in ("card", "cat", "cat2", "forget", "forget2"):
-        assert system_of(asked(sent, SAID[later])) == first, later
-    assert "Biscuit" not in first
-    assert "Marmalade" not in first
-    # 3. Words that were refused (a card number) are in no system message at all.
+        assert system_of(asked(sent, SAID[later])) == "", later
+    assert all("Biscuit" not in system_of(body) for body in sent)
+    assert all("Marmalade" not in system_of(body) for body in sent)
+    # 3. Words that were refused (a card number) are in no system message and no memory block.
     assert all("4242" not in system_of(body) for body in sent)
-    # 4. The new chat sent the note once, and the drawer showed those very words.
+    assert all("4242" not in relevant_of(body) for body in sent)
+    # 4. The new chat, after the note was pinned, sent it once in the system message, and the
+    # drawer showed those very words; a pinned note is not also sent as relevant memory.
     chat2 = asked(sent, SAID["ask"])
     assert shown in system_of(chat2)
     assert chat2["model"] == MODEL
     assert "Biscuit" not in system_of(chat2)
-    # 5. Memory off for the chat: no notes, and no system message at all.
+    assert WORD not in relevant_of(chat2)
+    # 5. Memory off for the chat: no notes, no system message, and no memory block at all.
     for off in ("french", "long"):
         body = asked(sent, SAID[off])
         assert system_of(body) == "", off
+        assert relevant_of(body) == "", off
         assert WORD not in json.dumps(body), off
     # 6. The outside model was sent the note once, after "Send for this chat".
     outside = [body for body in sent if body["model"] == OUTSIDE]
     assert len(outside) == 1
     assert outside[0] is asked(sent, SAID["outside"])
     assert WORD in system_of(outside[0])
-    # 7. Every note the pictures show went to the chat they were made in.
-    pictured = system_of(asked(sent, SAID["pictures"]))
+    # 7. Every note the pictures show went to the chat they were made in: the pinned ones and the
+    # instruction in its system message, the others as relevant memory in the turn.
+    body = asked(sent, SAID["pictures"])
+    pictured = system_of(body) + relevant_of(body)
     for note in NOTES:
         assert note["text"] in pictured, note["text"]
+        # An instruction is always used, as a pinned note is.
+        always = bool(note.get("pinned")) or note["kind"] == "instruction"
+        assert (note["text"] in system_of(body)) == always, note["text"]

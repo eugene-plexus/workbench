@@ -66,13 +66,13 @@ export function Attachments({
   const request = documents ? requestWords(facts?.request ?? null) : null;
   return (
     // The files and what is said under them take what the window has left after
-    // the header, a line of the conversation and the rest of the composer (32 rem,
-    // measured on a phone with two files in it), and scroll past it: many files
+    // the header, a line of the conversation and the rest of the composer (35 rem, measured on a phone
+    // with four files, one too long, and its choices), and scroll past it: many files
     // must not push the message box and Send off the screen. Its buttons are what a
     // keyboard stops on. The padding is room for a focus ring the scroller would cut.
     <div
       data-testid="attachments"
-      className="-m-1 max-h-[max(8rem,calc(100dvh-32rem))] overflow-y-auto overscroll-contain p-1"
+      className="-m-1 max-h-[max(8rem,calc(100dvh-35rem))] overflow-y-auto overscroll-contain p-1"
     >
       <div className="flex flex-col gap-3">
         <ul aria-label="Attached" data-testid="attached" className="flex flex-wrap gap-2">

@@ -468,8 +468,8 @@ describe("many files", () => {
     show([file(), choose(), scan(), tooLong()]);
     const box = screen.getByTestId("attachments");
     expect(box).toHaveClass("overflow-y-auto", "overscroll-contain");
-    // What the window has left after 32 rem, and at least 8 rem of files to look at.
-    expect(box.className).toContain("max-h-[max(8rem,calc(100dvh-32rem))]");
+    // What the window has left after 35 rem, and at least 8 rem of files to look at.
+    expect(box.className).toContain("max-h-[max(8rem,calc(100dvh-35rem))]");
     expect(box).toContainElement(screen.getByLabelText("Attached"));
     expect(box).toContainElement(screen.getByTestId("files-request"));
     expect(screen.getAllByTestId("document-chip")).toHaveLength(4);
