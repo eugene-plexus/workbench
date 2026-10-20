@@ -9,6 +9,7 @@ log ingress under the app's key name (C1).
 from __future__ import annotations
 
 import logging
+import socket
 import sys
 
 import uvicorn
@@ -27,7 +28,7 @@ def main() -> None:
     # One line per request to the gateway is noise on the Logs page, and
     # every tab polls the model list.
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    uvicorn.run(
+    config = uvicorn.Config(
         create_app(settings),
         host=settings.bind_host,
         port=settings.bind_port,
@@ -35,6 +36,21 @@ def main() -> None:
         access_log=False,
         forwarded_allow_ips=[],
     )
+    if not settings.tls_port:
+        uvicorn.Server(config).run()
+        return
+    # LT2: behind the agent's door, a second loopback port takes the TLS
+    # connections, decrypted (`public_origin.SchemeByPort`).
+    sockets = [_bound(settings.bind_host, port) for port in (settings.bind_port, settings.tls_port)]
+    uvicorn.Server(config).run(sockets=sockets)
+
+
+def _bound(host: str, port: int) -> socket.socket:
+    sock = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((host, port))
+    sock.set_inheritable(True)
+    return sock
 
 
 if __name__ == "__main__":
