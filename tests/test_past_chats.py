@@ -241,14 +241,21 @@ def _index(world: World, sub: str) -> dict[str, str]:
     path = world.data / "knowledge" / files.person_key(sub) / "index.sqlite3"
     if not path.is_file():
         return {}
-    with sqlite3.connect(path) as db:
-        found: dict[str, str] = {}
-        for doc_id, text in db.execute(
+    found: dict[str, str] = {}
+    db = sqlite3.connect(path)
+    try:
+        rows = db.execute(
             "SELECT d.id, c.text FROM documents d JOIN chunks c ON c.doc_id = d.id "
             "WHERE d.scope = 'exchanges' ORDER BY d.id, c.ord"
-        ):
-            found[doc_id] = found.get(doc_id, "") + " " + text
-        return found
+        ).fetchall()
+    except sqlite3.OperationalError:
+        # The file exists a moment before its tables do (seen on Windows CI).
+        return {}
+    finally:
+        db.close()
+    for doc_id, text in rows:
+        found[doc_id] = found.get(doc_id, "") + " " + text
+    return found
 
 
 def settle(world: World, sub: str, check: Callable[[dict[str, str]], bool]) -> dict[str, str]:
