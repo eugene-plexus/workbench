@@ -6,9 +6,9 @@ read, run, edited and kept in revisions.
 the word `artifact` (```` ```html artifact title="Pricing table" ````) is shown
 as an artifact's card; any other closed fence of these languages can be opened
 as one by the person (web/src/components/Artifact.tsx). Its language names its
-kind: Markdown, SVG, HTML or a React component. **Nothing runs because it
-exists**: a page or a component runs only when the person presses Run, in a
-frame of its own (web.py `PREVIEW_CSP`).
+kind: Markdown, SVG, HTML or a React component. Pages and components run when
+shown unless the person or chat turns that off, in a frame of their own
+(web.py `PREVIEW_CSP`). Tool results use the same frame.
 
 **An artifact is kept when it is first changed.** Until then it is the answer's
 own block, revision 1, and nothing is written. Saving an edit keeps the block
@@ -27,7 +27,7 @@ from __future__ import annotations
 import struct
 from typing import Any
 
-from .store import ArtifactRecord
+from .store import ArtifactRecord, Message
 
 #: An artifact's kinds, by the fence languages that name them.
 KINDS = {
@@ -70,8 +70,8 @@ def digest(source: str) -> str:
     return f"{len(units)}-{(2097151 & h2) * 4294967296 + h1:x}"
 
 
-def from_answer(original: str, content: str) -> bool:
-    """Whether the answer holds `original`: as written, or as a run of its lines
+def _holds(original: str, content: str) -> bool:
+    """Whether text holds `original`: as written, or as a run of its lines
     in their order once each line's indent is set aside (a fence inside a list
     is indented). Lines found apart, or in another order, are not the answer's."""
     if not original.strip():
@@ -83,6 +83,32 @@ def from_answer(original: str, content: str) -> bool:
     want = [line.strip() for line in original.split("\n")]
     held = [line.strip() for line in content.split("\n")]
     return any(held[at : at + len(want)] == want for at in range(len(held) - len(want) + 1))
+
+
+def found_in(original: str, message: Message) -> dict[str, str] | None:
+    """Find a block in the answer first, then its tools' results, with its origin.
+
+    Only result text counts: never a call's arguments, resource addresses or
+    arbitrary structured data. Text resources may be stored as text blocks.
+    """
+    if _holds(original, message.content):
+        return {"origin": "answer"}
+    for round_ in message.tool_rounds:
+        for call in round_.get("calls") or []:
+            texts = [call.get("result")]
+            for block in call.get("content") or []:
+                if block.get("type") == "text":
+                    texts.append(block.get("text"))
+                elif block.get("type") == "resource":
+                    resource = block.get("resource")
+                    if isinstance(resource, dict):
+                        texts.append(resource.get("text"))
+            if any(isinstance(text, str) and _holds(original, text) for text in texts):
+                return {
+                    "origin": "tool",
+                    "tool": f"{call.get('serverId', '')}/{call.get('tool', '')}",
+                }
+    return None
 
 
 def summary(record: ArtifactRecord) -> dict[str, Any]:

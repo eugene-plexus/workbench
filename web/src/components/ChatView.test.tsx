@@ -62,6 +62,38 @@ function view() {
   return render(element());
 }
 
+it("run_artifacts_off_shows_run_without_starting_the_artifact", async () => {
+  detail = {
+    chat: { ...chat, settings: { runArtifacts: false } },
+    messages: [message({ content: '```html artifact title="Page"\n<h1>Page</h1>\n```' })],
+    ownerName: null,
+  };
+  view();
+  const run = await screen.findByRole("button", { name: "Run" });
+  await new Promise((done) => setTimeout(done, 50));
+  expect(screen.queryByTestId("artifact-frame")).toBeNull();
+  fireEvent.click(run);
+  expect(await screen.findByTestId("artifact-frame")).toHaveAttribute(
+    "sandbox",
+    "allow-scripts allow-forms",
+  );
+});
+
+it("turning_run_artifacts_off_stops_an_automatic_preview_and_keeps_manual_run", async () => {
+  detail = {
+    chat,
+    messages: [message({ content: '```html artifact title="Page"\n<h1>Page</h1>\n```' })],
+    ownerName: null,
+  };
+  const shown = view();
+  await screen.findByTestId("artifact-frame");
+  detail = { ...detail, chat: { ...chat, settings: { runArtifacts: false } } };
+  shown.rerender(element());
+  await waitFor(() => expect(screen.queryByTestId("artifact-frame")).toBeNull());
+  fireEvent.click(screen.getByRole("button", { name: "Run" }));
+  expect(await screen.findByTestId("artifact-frame")).toBeInTheDocument();
+});
+
 const message = (over: Partial<Message>): Message => ({
   id: "m",
   seq: 1,

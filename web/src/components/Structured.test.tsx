@@ -58,12 +58,12 @@ afterEach(() => vi.restoreAllMocks());
 
 it("draws a bar for each point, named for a screen reader, in the series' colours", () => {
   const { container } = render(<Structured spec={BAR} />);
-  const chart = screen.getByRole("img", { name: summary(BAR) });
+  const chart = screen.getByRole("group", { name: summary(BAR) });
   expect(summary(BAR)).toBe(
     "Bar chart: Tokens a second. 2 series, 4 points. Its numbers are under Data.",
   );
-  expect(chart.querySelectorAll("rect")).toHaveLength(4);
-  expect(container.querySelectorAll(".chart-s0 rect, .chart-s1 rect")).toHaveLength(4);
+  expect(chart.querySelectorAll(".chart-bar")).toHaveLength(4);
+  expect(container.querySelectorAll(".chart-s0 .chart-bar, .chart-s1 .chart-bar")).toHaveLength(4);
   expect(screen.getByText("Before").closest("li")).toHaveClass("chart-s0");
   // No style attribute anywhere: the page's policy refuses them.
   expect(container.querySelector("[style]")).toBeNull();
@@ -122,7 +122,7 @@ it("draws a ```chart block, and keeps one it cannot draw as its source, saying w
   fireEvent.click(screen.getByRole("button", { name: "Source" }));
   expect(screen.getByLabelText("The chart's source")).toHaveTextContent('"type":"line"');
   unmount();
-  render(<Markdown text={'```chart\n{"type": "pie", "series": []}\n```'} />);
+  render(<Markdown text={'```chart\n{"type": "area", "series": []}\n```'} />);
   expect(screen.getByText(/^Chart not shown: "type" must be/)).toBeInTheDocument();
 });
 

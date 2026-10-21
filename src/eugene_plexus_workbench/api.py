@@ -369,6 +369,8 @@ class ChatSettings(BaseModel):
     topP: float | None = Field(default=None, gt=0, le=1)
     maxTokens: int | None = Field(default=None, ge=1, le=1_000_000)
     repetitionMode: Literal["off", "observe", "stop"] | None = None
+    #: Pages and components run by themselves unless this chat turns them off.
+    runArtifacts: bool | None = None
     #: Memory in this chat: `off` sends no notes to its model; unset follows the
     #: person's own setting.
     memory: Literal["on", "off"] | None = None
@@ -423,6 +425,7 @@ def chat_view(chat: Chat, *, running: bool, read_only: bool = False) -> dict[str
                 "toolServers",
                 "folderGrants",
                 "repetitionMode",
+                "runArtifacts",
                 "memory",
                 "memoryExternal",
                 "documents",

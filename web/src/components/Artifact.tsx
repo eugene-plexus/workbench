@@ -21,6 +21,7 @@ import {
   blockText,
   KIND_NAMES,
   keptFor,
+  revisionOrigin,
 } from "../lib/artifacts";
 
 /** What a block needs to know to be an artifact: whose message it is in, and what is kept. */
@@ -32,6 +33,10 @@ export type Scope = {
   readOnly: boolean;
   /** The answer is still being written: nothing is kept until it ends. */
   writing: boolean;
+  /** The chat lets pages and components run by themselves; unset is on. */
+  runArtifacts?: boolean;
+  /** A tool result's server/tool identity, when this scope is a tool's. */
+  tool?: string;
   /** Something was kept: the chat is read again, for the cards' counts. */
   onKept: () => void;
 };
@@ -67,8 +72,10 @@ function Dialog({ scope, opened, onClose }: { scope: Scope; opened: Opened; onCl
 
 const ICONS = { markdown: FileText, svg: ImageIcon, html: AppWindow, react: FileCode } as const;
 
-function revisionWords(kept: ArtifactSummary | null): string {
-  if (!kept || kept.revisions <= 1) return "From the answer";
+function revisionWords(kept: ArtifactSummary | null, tool?: string): string {
+  if (!kept || kept.revisions <= 1) {
+    return tool ? `Revision 1, ${revisionOrigin(tool)}` : "From the answer";
+  }
   return `${kept.revisions} revisions`;
 }
 
@@ -79,11 +86,14 @@ export function ArtifactCard({
   language,
   title,
   source,
+  openAs = false,
 }: {
   kind: ArtifactKind;
   language: string | null;
   title: string;
   source: string;
+  /** A tool's text block also offers Open as artifact. */
+  openAs?: boolean;
 }) {
   const scope = useContext(ArtifactScope);
   const runPreviews = useContext(RunPreviews);
@@ -102,30 +112,33 @@ export function ArtifactCard({
         <span className="artifact-card-words">
           <span className="artifact-card-title">{shownTitle}</span>
           <span className="text-sm text-muted">
-            {KIND_NAMES[kind]} · {revisionWords(kept)}
+            {KIND_NAMES[kind]} · {revisionWords(kept, kept?.tool ?? scope?.tool)}
           </span>
         </span>
         <button
           type="button"
           className="act"
           aria-haspopup="dialog"
-          aria-label={`Open ${shownTitle}`}
+          aria-label={
+            openAs ? `Open this ${KIND_NAMES[kind]} as an artifact` : `Open ${shownTitle}`
+          }
           disabled={!scope}
           onClick={() => setOpened({ kind, language, title: shownTitle, original })}
         >
           <PanelRightOpen size={14} aria-hidden="true" />
-          Open
+          {openAs ? "Open as artifact" : "Open"}
         </button>
       </div>
       {scope && (
         <Suspense fallback={null}>
           <ArtifactBody
+            key={scope.runArtifacts === false ? "manual" : "automatic"}
             scope={scope}
             kind={kind}
             title={shownTitle}
             original={original}
             kept={kept}
-            auto={runPreviews && !scope.readOnly && !scope.writing}
+            auto={runPreviews && scope.runArtifacts !== false && !scope.readOnly && !scope.writing}
           />
         </Suspense>
       )}

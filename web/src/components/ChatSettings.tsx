@@ -102,6 +102,7 @@ export function ChatSettings({
   const [saved, setSaved] = useState(false);
   const [toolServers, setToolServers] = useState(settings.toolServers ?? []);
   const [folderGrants, setFolderGrants] = useState(settings.folderGrants ?? []);
+  const [runArtifacts, setRunArtifacts] = useState(settings.runArtifacts !== false);
   const [repetitionMode, setRepetitionMode] = useState<
     NonNullable<Settings["repetitionMode"]> | ""
   >(settings.repetitionMode ?? "");
@@ -169,6 +170,7 @@ export function ChatSettings({
       toolServers,
       folderGrants,
       repetitionMode: repetitionMode || null,
+      runArtifacts,
     };
     for (const field of FIELDS) {
       const raw = values[field.key]?.trim() ?? "";
@@ -286,6 +288,18 @@ export function ChatSettings({
                 tool arguments are never stopped. Time and length limits still apply.
               </p>
             </div>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={runArtifacts}
+                onChange={(e) => {
+                  setRunArtifacts(e.target.checked);
+                  setSaved(false);
+                }}
+                className="accent-accent"
+              />
+              Run pages and components by themselves: {runArtifacts ? "On" : "Off"}
+            </label>
           </fieldset>
           {onMove && (
             <fieldset className="flex min-w-0 flex-col gap-2" data-testid="chat-project-field">

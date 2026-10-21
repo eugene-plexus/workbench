@@ -319,7 +319,15 @@ async def test_cancelling_a_documents_key_ends_its_real_reader_and_the_next_is_r
         python: str, source: Path, output: Path, kind: str, language: str | None
     ) -> list[str]:
         if source.name == "doc00001":
-            hang = "import os, sys, time\nopen(sys.argv[2] + '.pid', 'w').write(str(os.getpid()))\ntime.sleep(600)\n"
+            # Written whole, then named: a test that sees the file reads the number (the
+            # two-step write left test_reader reading it empty on Windows CI).
+            hang = """
+                import os, sys, time
+                with open(sys.argv[2] + ".pid.part", "w") as f:
+                    f.write(str(os.getpid()))
+                os.replace(sys.argv[2] + ".pid.part", sys.argv[2] + ".pid")
+                time.sleep(600)
+            """
             return [python, "-c", textwrap.dedent(hang), str(source), str(output)]
         return real(python, source, output, kind, language)
 

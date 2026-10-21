@@ -33,7 +33,8 @@ export type Point = { x: number | string; y: number };
 export type Series = { name: string; points: Point[] };
 export type ChartSpec = {
   kind: "chart";
-  type: "bar" | "line" | "scatter";
+  type: "bar" | "line" | "scatter" | "pie";
+  stacked?: boolean;
   title: string;
   xLabel: string;
   yLabel: string;
@@ -65,9 +66,9 @@ export function asksToBeDrawn(data: unknown): boolean {
 
 function chart(data: Record<string, unknown>): ChartSpec {
   const type = data.type;
-  if (type !== "bar" && type !== "line" && type !== "scatter") {
+  if (type !== "bar" && type !== "line" && type !== "scatter" && type !== "pie") {
     throw new NotDrawn(
-      `"type" must be "bar", "line" or "scatter", not ${JSON.stringify(type)?.slice(0, 40)}`,
+      `"type" must be "bar", "line", "scatter" or "pie", not ${JSON.stringify(type)?.slice(0, 40)}`,
     );
   }
   if (!Array.isArray(data.series) || data.series.length === 0) {
@@ -76,6 +77,11 @@ function chart(data: Record<string, unknown>): ChartSpec {
   if (data.series.length > MAX_SERIES) {
     throw new NotDrawn(`it has ${data.series.length} series; at most ${MAX_SERIES} are drawn`);
   }
+  if (type === "pie" && data.series.length !== 1) throw new NotDrawn("A pie needs one series.");
+  if (data.stacked !== undefined && typeof data.stacked !== "boolean")
+    throw new NotDrawn('"stacked" must be true or false.');
+  if (data.stacked === true && type !== "bar")
+    throw new NotDrawn("Only a bar chart can be stacked.");
   const x = isRecord(data.x) ? data.x : {};
   const y = isRecord(data.y) ? data.y : {};
   let total = 0;
@@ -95,6 +101,7 @@ function chart(data: Record<string, unknown>): ChartSpec {
       if (typeof py !== "number" || !Number.isFinite(py)) {
         throw new NotDrawn(`${where} has a y that is not a number`);
       }
+      if (type === "pie" && py < 0) throw new NotDrawn("A pie cannot show negative values.");
       if (
         Math.abs(py) > MAX_MAGNITUDE ||
         (typeof px === "number" && Math.abs(px) > MAX_MAGNITUDE)
@@ -120,11 +127,21 @@ function chart(data: Record<string, unknown>): ChartSpec {
     const seen = new Set<string>();
     for (const s of series) for (const p of s.points) seen.add(String(p.x));
     categories = [...seen];
-  } else if (type === "bar") {
+  } else if (type === "bar" || type === "pie") {
     // A bar stands on a category: numbers (years, say) are categories, in order.
     const seen = new Set<number>();
     for (const s of series) for (const p of s.points) seen.add(Number(p.x));
     categories = [...seen].sort((a, b) => a - b).map(String);
+  }
+  if (
+    data.stacked === true &&
+    series.some(
+      (s) =>
+        s.points.length !== categories?.length ||
+        new Set(s.points.map((p) => String(p.x))).size !== categories.length,
+    )
+  ) {
+    throw new NotDrawn("A stacked chart needs one value per category in each series.");
   }
   return {
     kind: "chart",
@@ -134,6 +151,7 @@ function chart(data: Record<string, unknown>): ChartSpec {
     yLabel: label(y.label, "y label"),
     series,
     categories,
+    ...(data.stacked === true ? { stacked: true } : {}),
   };
 }
 

@@ -7,6 +7,32 @@ import { ChatSettings, SHEET_OVERLAY_QUERY } from "./ChatSettings";
 vi.mock("./Tools", () => ({ ToolSelection: () => null }));
 vi.mock("./Folders", () => ({ FolderSelection: () => null }));
 
+it("run_artifacts_defaults_on_and_keeps_an_off_choice", async () => {
+  const save = vi.fn().mockResolvedValue(undefined);
+  const shown = render(<ChatSettings settings={{}} onSave={save} onClose={vi.fn()} />);
+  const switch_ = screen.getByRole("checkbox", {
+    name: "Run pages and components by themselves: On",
+  });
+  expect(switch_).toBeChecked();
+  fireEvent.click(switch_);
+  expect(
+    screen.getByRole("checkbox", {
+      name: "Run pages and components by themselves: Off",
+    }),
+  ).not.toBeChecked();
+  fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+  await waitFor(() =>
+    expect(save).toHaveBeenCalledWith(expect.objectContaining({ runArtifacts: false })),
+  );
+  shown.unmount();
+  render(<ChatSettings settings={{ runArtifacts: false }} onSave={save} onClose={vi.fn()} />);
+  expect(
+    screen.getByRole("checkbox", {
+      name: "Run pages and components by themselves: Off",
+    }),
+  ).not.toBeChecked();
+});
+
 it("inherits protection by default and saves an explicit off override", async () => {
   const save = vi.fn().mockResolvedValue(undefined);
   render(<ChatSettings settings={{}} onSave={save} onClose={() => undefined} />);

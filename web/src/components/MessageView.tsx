@@ -20,6 +20,7 @@ import {
   useState,
 } from "react";
 
+import { useDisplay } from "../lib/display";
 import { fileUrl, post } from "../lib/api";
 import { stableCitations } from "../lib/citations";
 import {
@@ -62,6 +63,7 @@ export function MessageView({
   progress,
   busy,
   readOnly,
+  runArtifacts = true,
   onChanged,
   onLook,
   memory,
@@ -72,6 +74,7 @@ export function MessageView({
   progress: Progress | null;
   busy: boolean;
   readOnly: boolean;
+  runArtifacts?: boolean;
   onChanged: () => void;
   /** The owner's read-only view: show another version without choosing it. */
   onLook?: (id: string) => void;
@@ -82,6 +85,7 @@ export function MessageView({
    * person cannot (the owner's read-only view). */
   documents?: { onManage: () => void };
 }) {
+  const { speakers } = useDisplay();
   const [editing, setEditing] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [acting, setActing] = useState(false);
@@ -114,9 +118,10 @@ export function MessageView({
       artifacts: artifacts ?? [],
       readOnly,
       writing,
+      runArtifacts,
       onKept: () => changed.current(),
     }),
-    [chatId, message.id, artifacts, readOnly, writing],
+    [chatId, message.id, artifacts, readOnly, writing, runArtifacts],
   );
   const arrows = (
     <VersionArrows
@@ -140,6 +145,9 @@ export function MessageView({
   if (message.redacted) {
     return (
       <div className="flex flex-col gap-1">
+        <h2 className="sr-only">
+          {message.role === "user" ? "You" : `Answer from ${message.model || "Assistant"}`}
+        </h2>
         <p
           data-testid="redacted-message"
           className="max-w-measure rounded-plexus border border-line px-3 py-2 text-sm text-muted wrap-anywhere"
@@ -158,6 +166,12 @@ export function MessageView({
         className="msg flex flex-col items-end gap-1 [&:not(:first-child)]:mt-4"
         data-testid="user-message"
       >
+        <h2 className="sr-only">You</h2>
+        {speakers && (
+          <p className="speaker-label text-accent" aria-hidden="true">
+            You
+          </p>
+        )}
         {message.files && message.files.length > 0 && (
           // A document says how it was read, and lets the person see the text;
           // an image or a sound is its name (or itself).
@@ -311,6 +325,12 @@ export function MessageView({
   const working = waiting ? splitWorking(workingWords(progress, message, now)) : null;
   return (
     <article className="msg flex flex-col gap-3" data-testid="answer" data-status={message.status}>
+      <h2 className="sr-only">Answer from {message.model || "Assistant"}</h2>
+      {speakers && (
+        <p className="speaker-label text-heading" aria-hidden="true">
+          {message.model || "Assistant"}
+        </p>
+      )}
       {(message.reasoning || (message.reasoningTokens ?? 0) > 0) && (
         <Fold
           label="Reasoning"
@@ -348,8 +368,8 @@ export function MessageView({
                   {hasTools ? "Used tools" : SEARCHED_MARK}
                 </p>
               )}
-              <div dir="auto" className="whitespace-pre-wrap py-1 wrap-anywhere">
-                {thought}
+              <div dir="auto" className="py-1 wrap-anywhere">
+                <Markdown text={thought} />
               </div>
             </div>
           ))}
@@ -361,7 +381,9 @@ export function MessageView({
           <Markdown text={draft} quiet />
         </Fold>
       )}
-      <ToolCalls chatId={chatId} message={message} readOnly={readOnly} onChanged={onChanged} />
+      <ArtifactScope.Provider value={artifactScope}>
+        <ToolCalls chatId={chatId} message={message} readOnly={readOnly} onChanged={onChanged} />
+      </ArtifactScope.Provider>
       {working && (
         // Eugene works while the model does; waiting on the person's
         // approval is not work, so he steps away then.
@@ -593,8 +615,7 @@ function statusLook(message: Message): { className: string; glyph: ReactNode } {
   return { className: "text-sm text-muted", glyph: null };
 }
 
-/** Text the model wrote that is not the answer, folded: a quiet row that opens
- * to the console's dashed box. It is plain text in a box that scrolls. */
+/** Reasoning or a draft, folded: a quiet row that opens to a scrolling box. */
 function Fold({
   label,
   metrics,

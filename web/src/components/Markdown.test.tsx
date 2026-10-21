@@ -6,6 +6,48 @@ import { HIGHLIGHT_MAX_CHARS, HIGHLIGHT_MAX_LINES } from "../lib/highlight";
 import { fenceIsOpen } from "../lib/markdownPlugins";
 import { Markdown, safeHref } from "./Markdown";
 
+it("answer_headings_nest_under_the_message", () => {
+  render(
+    <Markdown
+      text={"# First\n\n## Second\n\n### Third\n\n#### Fourth\n\n##### Fifth\n\n###### Sixth"}
+    />,
+  );
+  const headings = screen.getAllByRole("heading");
+  expect(headings.map((heading) => heading.tagName)).toEqual(["H3", "H4", "H5", "H6", "H6", "H6"]);
+  expect(headings.map((heading) => heading.getAttribute("data-md"))).toEqual([
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+  ]);
+});
+
+it("kana block gets lang ja", () => {
+  const { container } = render(
+    <Markdown
+      text={
+        "# 日本の見出し\n\n**かな**と漢字\n\n- カナ\n\n> 日本語です\n\n| 名前 |\n| --- |\n| ひらがな |"
+      }
+    />,
+  );
+  for (const selector of ["h3", "p", "li", "ul", "blockquote", "table", "td"]) {
+    expect(container.querySelector(selector), selector).toHaveAttribute("lang", "ja");
+  }
+});
+
+it("chooses Korean and the viewer's Han font, leaving Latin text alone", () => {
+  vi.spyOn(navigator, "languages", "get").mockReturnValue(["en-US", "ja-JP", "zh-TW"]);
+  const { container } = render(<Markdown text={"한국어\n\n漢字\n\nEnglish"} />);
+  expect(Array.from(container.querySelectorAll("p")).map((p) => p.lang)).toEqual([
+    "ko",
+    "ja-JP",
+    "",
+  ]);
+  vi.restoreAllMocks();
+});
+
 describe("an answer is untrusted (W5)", () => {
   it("shows an image an answer names as a link, never fetching it", () => {
     const { container } = render(

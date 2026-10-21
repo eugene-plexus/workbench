@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useTheme, type Theme } from "../lib/display";
 import { post } from "../lib/api";
 import {
   object,
@@ -37,9 +38,9 @@ export function offlineDocument(resource: ObjectValue): string {
     );
   throw new Error("The app did not return an HTML document.");
 }
-function context(): ObjectValue {
+function context(theme: Theme): ObjectValue {
   return {
-    theme: matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark",
+    theme,
     locale: navigator.language,
     displayMode: "inline",
     availableDisplayModes: ["inline"],
@@ -63,6 +64,13 @@ function AppFrame({
   attempt: number;
   onRetry: () => void;
 }) {
+  const theme = useTheme();
+  const themeRef = useRef(theme);
+  const themeChanged = useRef<() => void>(() => {});
+  useEffect(() => {
+    themeRef.current = theme;
+    themeChanged.current();
+  }, [theme]);
   const [channel] = useState(() => crypto.randomUUID());
   const frame = useRef<HTMLIFrameElement>(null);
   const [status, setStatus] = useState("Opening isolated app…");
@@ -240,7 +248,7 @@ function AppFrame({
               serverResources: {},
               sandbox: { csp: {}, permissions: {} },
             },
-            hostContext: context(),
+            hostContext: context(themeRef.current),
           });
         } else if (!ready) finish(id, undefined, "Initialize the app first.");
         else if (["ping", "tools/list", "resources/read"].includes(msg.method))
@@ -266,18 +274,9 @@ function AppFrame({
       } else send({ jsonrpc: "2.0", id: heartbeatId, method: "ping", params: {} });
     }, 2000);
     window.addEventListener("message", handler);
-    const theme = new MutationObserver(() => {
-      if (ready) notify("ui/notifications/host-context-changed", context());
-    });
-    theme.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ["data-theme", "class"],
-    });
-    const scheme = matchMedia("(prefers-color-scheme: light)");
-    const changed = () => {
-      if (ready) notify("ui/notifications/host-context-changed", context());
+    themeChanged.current = () => {
+      if (ready) notify("ui/notifications/host-context-changed", context(themeRef.current));
     };
-    scheme.addEventListener("change", changed);
     return () => {
       live = false;
       clearTimeout(timer);
@@ -285,8 +284,7 @@ function AppFrame({
       clearInterval(heartbeat);
       pending.clear();
       window.removeEventListener("message", handler);
-      theme.disconnect();
-      scheme.removeEventListener("change", changed);
+      themeChanged.current = () => {};
       completions.current = () => {};
     };
   }, [channel, path, revision, viewJson, attempt, onRetry]);

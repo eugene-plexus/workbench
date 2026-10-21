@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { setDisplay } from "./display";
 import { post } from "./api";
 import { resolve, type Action, type ObjectValue, type Surface } from "./interactions";
 import { runInput, type Run } from "./agui";
@@ -160,6 +161,7 @@ it("requires frame, opaque origin, channel and completed handshake; duplicates c
     actions: [] as Action[],
     onAction,
   };
+  setDisplay({ theme: "light" });
   const shown = render(<MCPApp {...props} />);
   fireEvent.click(screen.getByRole("button", { name: "Open app" }));
   const frame = screen.getByTitle("Isolated MCP app") as HTMLIFrameElement;
@@ -181,7 +183,31 @@ it("requires frame, opaque origin, channel and completed handshake; duplicates c
   await emit("tools/call", 10);
   expect(onAction).not.toHaveBeenCalled();
   await emit("ui/initialize", 1);
+  expect(output).toHaveBeenCalledWith(
+    {
+      channel,
+      message: expect.objectContaining({
+        id: 1,
+        result: expect.objectContaining({
+          hostContext: expect.objectContaining({ theme: "light" }),
+        }),
+      }),
+    },
+    "*",
+  );
   await emit("ui/notifications/initialized");
+  act(() => setDisplay({ theme: "dark" }));
+  expect(output).toHaveBeenCalledWith(
+    {
+      channel,
+      message: expect.objectContaining({
+        method: "ui/notifications/host-context-changed",
+        params: expect.objectContaining({ theme: "dark" }),
+      }),
+    },
+    "*",
+  );
+  expect(screen.getByTitle("Isolated MCP app")).toBe(frame);
   await emit("tools/call", 11, { source: window });
   await emit("tools/call", 12, { origin: "https://wrong.test" });
   await emit("tools/call", 13, {
@@ -208,5 +234,6 @@ it("requires frame, opaque origin, channel and completed handshake; duplicates c
   fireEvent.click(screen.getByRole("button", { name: "Stop app" }));
   await emit("tools/call", 14);
   expect(onAction).toHaveBeenCalledOnce();
+  setDisplay({ theme: "system" });
   vi.unstubAllGlobals();
 });

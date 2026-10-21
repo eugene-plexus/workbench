@@ -12,10 +12,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import json
 import secrets
 import socket
+import sqlite3
+import struct
 import sys
 import threading
 import time
@@ -39,6 +42,89 @@ from eugene_plexus_workbench.knowledge import sorting
 from eugene_plexus_workbench.settings import Settings
 
 from . import fake_embedding, fake_rerank
+
+
+def _one_tls_context_for_every_test_client() -> None:
+    """Each httpx client a test makes (every `httpx.get`, every `Browser`) would load certifi's
+    CA bundle into an SSL context of its own: about 100 ms a client on Windows. Made once, the
+    suite on four workers went from 356 s to 247 s there. The tests speak plain HTTP to loopback
+    and an SSL context is safe to share. Workbench's own clients already share theirs
+    (`_http.ssl_context`); this changes only clients made with httpx's default, in the tests."""
+    from httpx._transports import default as transports
+
+    made = getattr(transports, "create_ssl_context", None)
+    if made is None:  # httpx moved it: the suite is slower on Windows, nothing else
+        return
+    shared: dict[bool, Any] = {}
+
+    def create_ssl_context(verify: Any = True, cert: Any = None, trust_env: bool = True) -> Any:
+        if verify is not True or cert is not None:
+            return made(verify=verify, cert=cert, trust_env=trust_env)
+        if trust_env not in shared:
+            shared[trust_env] = made(verify=True, cert=None, trust_env=trust_env)
+        return shared[trust_env]
+
+    transports.create_ssl_context = create_ssl_context
+
+
+_one_tls_context_for_every_test_client()
+
+
+def _test_sockets_leave_no_time_wait() -> None:
+    """On Windows a connection closed the ordinary way keeps its port for two minutes
+    (TIME_WAIT), out of 16,384 for the whole machine. A full run on 32 workers left about 9,000
+    behind in under a minute, so a second run straight after it, or two at once, ran out, and the
+    tests' event loops hung making their self-pipe (`socket.socketpair` waits on an `accept` that
+    never comes). Each event loop's self-pipe and each of the tests' own HTTP connections is
+    closed with a reset instead, which leaves no TIME_WAIT: about 2,500 a run remain, from
+    Workbench's own connections, which are not changed."""
+    if sys.platform != "win32":
+        return
+    linger = struct.pack("hh", 1, 0)
+    pair = socket.socketpair
+
+    def socketpair(*args: Any, **kwargs: Any) -> tuple[socket.socket, socket.socket]:
+        left, right = pair(*args, **kwargs)
+        for end in (left, right):
+            end.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
+        return left, right
+
+    socket.socketpair = socketpair  # type: ignore[assignment]
+    init = httpx.HTTPTransport.__init__
+
+    def transport(self: httpx.HTTPTransport, *args: Any, **kwargs: Any) -> None:
+        if kwargs.get("socket_options") is None:
+            kwargs["socket_options"] = [(socket.SOL_SOCKET, socket.SO_LINGER, linger)]
+        init(self, *args, **kwargs)
+
+    httpx.HTTPTransport.__init__ = transport  # type: ignore[method-assign]
+
+
+_test_sockets_leave_no_time_wait()
+
+
+def _sqlite_without_flushes_on_windows() -> None:
+    """Workbench's stores are SQLite in WAL with the default `synchronous=FULL`: every commit
+    waits for the disk to flush, and on a Windows CI runner that was the largest part of what
+    was left of its suite's extra time (the Pytest step took 531 to 631 s with flushes and 357 s
+    without; Linux took 281 s either way). No test can tell a flushed commit from one in the
+    OS's cache (a process the tests kill leaves the cache behind), so in the tests, on Windows,
+    each connection skips the flush. What Workbench does in use is not changed."""
+    if sys.platform != "win32":
+        return
+    connect = sqlite3.connect
+
+    def unflushed(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        db = connect(*args, **kwargs)
+        # A file that is not a store fails where it would have, at Workbench's own first read.
+        with contextlib.suppress(sqlite3.Error):
+            db.execute("PRAGMA synchronous=OFF")
+        return db
+
+    sqlite3.connect = unflushed  # type: ignore[assignment]
+
+
+_sqlite_without_flushes_on_windows()
 
 CLIENT_ID = "wb-client"
 CLIENT_SECRET = "wb-client-secret"
@@ -669,6 +755,9 @@ class FakeGateway:
     #: A batch of passages is held until this is set (a thread's event: the test and the
     #: server are not one loop). Requests of one text are not held.
     embed_gate: threading.Event | None = None
+    #: How many batches a closed gate still lets through, one each, before it holds the rest:
+    #: a test that needs some passages given meaning and the others not, whatever the timing.
+    embed_gate_lets: int = 0
     embed_delay: float = 0.0
     #: What an answer calls the model that was asked for, and how long its vectors are.
     embed_names: dict[str, str] = field(default_factory=dict)
@@ -1007,6 +1096,9 @@ class FakeGateway:
                 while (
                     self.embed_gate is not None and len(given) > 1 and not self.embed_gate.is_set()
                 ):
+                    if self.embed_gate_lets > 0:
+                        self.embed_gate_lets -= 1
+                        break
                     if await request.is_disconnected():
                         self.embed_disconnects += 1
                         return Response(status_code=499)

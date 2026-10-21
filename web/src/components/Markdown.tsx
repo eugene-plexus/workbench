@@ -41,6 +41,7 @@ import {
   type ReactNode,
 } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
+import type { Element, Root } from "hast";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { remarkMath } from "../lib/markdownMath";
@@ -140,6 +141,65 @@ function textOf(node: ReactNode): string {
   return "";
 }
 
+const BLOCKS = new Set([
+  "p",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "blockquote",
+  "ul",
+  "ol",
+  "li",
+  "pre",
+  "table",
+  "thead",
+  "tbody",
+  "tr",
+  "th",
+  "td",
+  "section",
+  "div",
+  "hr",
+]);
+
+/** The browser chooses the CJK glyph family from the language of each block. */
+function blockLanguage(text: string): string | undefined {
+  if (/[\p{Script=Hiragana}\p{Script=Katakana}]/u.test(text)) return "ja";
+  if (/\p{Script=Hangul}/u.test(text)) return "ko";
+  if (/\p{Script=Han}/u.test(text)) {
+    return (
+      (typeof navigator === "undefined" ? [] : navigator.languages).find((lang) =>
+        /^(zh|ja)(-|$)/i.test(lang),
+      ) ?? "zh"
+    );
+  }
+}
+
+function rehypeReading() {
+  return (tree: Root) => {
+    function visit(node: Root | Element | Root["children"][number]): string {
+      if (node.type === "text") return node.value;
+      if (!("children" in node)) return "";
+      const text = node.children.map(visit).join("");
+      if (node.type === "element") {
+        if (BLOCKS.has(node.tagName)) {
+          const lang = blockLanguage(text);
+          if (lang) node.properties.lang = lang;
+        }
+        if (/^h[1-6]$/.test(node.tagName)) {
+          node.properties.dataMd = node.tagName;
+          node.tagName = `h${Math.min(6, Number(node.tagName[1]) + 2)}`;
+        }
+      }
+      return text;
+    }
+    visit(tree);
+  };
+}
+
 /**
  * A footnote's reference or its way back: focus moves to its partner, found
  * by id inside the same answer and nowhere else, and the address is left
@@ -228,8 +288,9 @@ const components: Components = {
       </a>
     );
   },
-  pre({ children }) {
-    return <CodeBlock>{children}</CodeBlock>;
+  pre({ children, lang }) {
+    const block = <CodeBlock>{children}</CodeBlock>;
+    return lang ? <div lang={lang}>{block}</div> : block;
   },
   code({ className, children }) {
     const kind = /\bmath-(inline|display)\b/.exec(className ?? "")?.[1];
@@ -237,19 +298,19 @@ const components: Components = {
     return <code className={className}>{children}</code>;
   },
   // A footnote is where its reference sends focus.
-  li({ id, className, children }) {
+  li({ id, className, children, lang }) {
     return (
-      <li id={id} className={className} tabIndex={id ? -1 : undefined}>
+      <li id={id} className={className} lang={lang} tabIndex={id ? -1 : undefined}>
         {children}
       </li>
     );
   },
   // A wide table scrolls inside its own box, not the answer; the wrapper (and
   // not `display: block` on the table) keeps it a table to a screen reader.
-  table({ children }) {
+  table({ children, lang }) {
     return (
       <div className="table-wrap">
-        <table>{children}</table>
+        <table lang={lang}>{children}</table>
       </div>
     );
   },
@@ -303,7 +364,7 @@ export const Markdown = memo(function Markdown({
   const scope = `md${useId().replace(/[^\w-]/g, "")}-`;
   const { rehypePlugins, remarkRehypeOptions } = useMemo(
     () => ({
-      rehypePlugins: [rehypeOpenFences, rehypeFootnoteScope(scope)],
+      rehypePlugins: [rehypeOpenFences, rehypeFootnoteScope(scope), rehypeReading],
       remarkRehypeOptions: { clobberPrefix: scope },
     }),
     [scope],
