@@ -246,6 +246,58 @@ def test_purge_reaches_every_copy_and_keeps_them_for_everyone_else(tmp_path: Pat
             assert db.execute("SELECT COUNT(*) FROM chats").fetchone()[0] == 1
 
 
+class _Server:
+    """A person's memory server that fails each forget `fails` times before it answers."""
+
+    def __init__(self, fails: int) -> None:
+        self.fails = fails
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call(self, server: Any, mode: str, verb: str, wanted: dict[str, Any]) -> list[Any]:
+        from eugene_plexus_workbench.memory_servers import ServerProblem
+
+        self.calls.append((verb, wanted))
+        if self.fails:
+            self.fails -= 1
+            raise ServerProblem("The memory server did not answer in time.")
+        return []
+
+
+@pytest.mark.parametrize(("fails", "outcome"), [(2, "done"), (3, "did not answer in time")])
+def test_the_memory_server_forgets_what_workbench_sent_and_is_never_purged(
+    tmp_path: Path, fails: int, outcome: str
+) -> None:
+    from eugene_plexus_workbench import config
+    from eugene_plexus_workbench.removal import Removal
+
+    async def go() -> tuple[str, list[tuple[str, dict[str, Any]]], list[dict[str, Any]]]:
+        store = Store(tmp_path / "workbench.sqlite3")
+        await store.open()
+        try:
+            await store.put_setting(config.MEMORY_SERVERS, "any")
+            await store.put_memory_server(
+                "p-ann", "http://example.org/mcp", "", "Hers", {"forget": {"tool": "x"}}
+            )
+            with _open(tmp_path / "workbench.sqlite3") as db:
+                db.execute(
+                    "INSERT INTO memory_server_sent (document_id, owner, chat_id, message_id, "
+                    "state, next_at, created_at) VALUES ('c1:m1', 'p-ann', 'c1', 'm1', 'sent', 0, 0)"
+                )
+            server = _Server(fails)
+            removal = Removal(store, None, tmp_path, servers=server)  # type: ignore[arg-type]
+            done = await removal._step_memory("p-ann")
+            return done, server.calls, await store.forgets_owed("p-ann")
+        finally:
+            await store.close()
+
+    done, calls, owed = asyncio.run(go())
+    assert outcome in done
+    assert {verb for verb, _ in calls} == {"forget"}  # never purge: the server is theirs
+    assert all(wanted == {"document_id": "c1:m1"} for _, wanted in calls)
+    assert len(calls) == min(fails + 1, 3)
+    assert (owed == []) == (done == "done")
+
+
 # --------------------------------------------------------------------------- #
 # a real Workbench and the fake Eugene
 # --------------------------------------------------------------------------- #

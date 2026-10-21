@@ -461,17 +461,19 @@ class Removal:
             return why_not or "this install does not allow memory servers"
         if "forget" not in (server.get("verbs") or {}) or self.servers is None:
             return "it has no forget tool"
-        misses, last = 0, ""
         for row in owed:
-            try:
-                await self.servers.call(server, mode, "forget", {"document_id": row["document_id"]})
-            except ServerProblem as exc:
-                misses, last = misses + 1, exc.message
-                if misses >= FORGET_TRIES:
-                    return last.rstrip(".")
-                continue
-            misses = 0
-            await self.store.memory_server_drop(row["document_id"])
+            for attempt in range(FORGET_TRIES):
+                try:
+                    await self.servers.call(
+                        server, mode, "forget", {"document_id": row["document_id"]}
+                    )
+                except ServerProblem as exc:
+                    if attempt == FORGET_TRIES - 1:
+                        return exc.message.rstrip(".")
+                    continue
+                # Forgotten: a restart does not ask again.
+                await self.store.memory_server_drop(row["document_id"])
+                break
         return "done"
 
     async def _step_knowledge(self, sub: str) -> str:
