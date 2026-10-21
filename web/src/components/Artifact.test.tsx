@@ -345,7 +345,7 @@ describe("its revisions", () => {
       source: "<h1>Mine</h1>",
       base: 1,
     });
-    expect(within(dialog).getByRole("combobox")).toHaveDisplayValue(/^Revision 2 of 2, edited/);
+    expect(within(dialog).getByRole("combobox", { name: "Revision" })).toHaveDisplayValue(/^Revision 2 of 2, edited/);
     expect(editor).toHaveValue("<h1>Mine</h1>");
   });
 
@@ -389,7 +389,7 @@ describe("its revisions", () => {
     await waitFor(() => expect(editor).toHaveValue("<p>two</p>"));
     fireEvent.change(editor, { target: { value: "<p>three</p>" } });
     // Another revision waits for this one to be saved or discarded.
-    expect(within(dialog).getByRole("combobox")).toBeDisabled();
+    expect(within(dialog).getByRole("combobox", { name: "Revision" })).toBeDisabled();
     fireEvent.click(within(dialog).getByRole("button", { name: "Save as revision 3" }));
     await waitFor(() =>
       expect(post).toHaveBeenCalledWith("/api/chats/c1/artifacts/a1/revisions", {
