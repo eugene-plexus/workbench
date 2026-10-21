@@ -740,7 +740,12 @@ class Courier:
                         "memory servers: one %s failed: %s", row["state"], type(exc).__name__
                     )
                 delay = RETRY_SECONDS[min(row["attempts"], len(RETRY_SECONDS) - 1)]
-                await self.store.memory_server_retry(row["document_id"], now + delay)
+                kept = await self.store.memory_server_retry(row["document_id"], now + delay)
+                if not kept and row["state"] == "send":
+                    # A send that failed may still have been kept there (a timeout after the
+                    # write), and its row went meanwhile: forget it there, as a send that
+                    # succeeded after its row went is (`_one`).
+                    await self.store.memory_server_forget_later(row)
             finally:
                 async with self._calm:
                     self._busy[owner] -= 1

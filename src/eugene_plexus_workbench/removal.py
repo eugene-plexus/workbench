@@ -94,6 +94,11 @@ BRAKE_KEY = "removedPeopleBrake"
 ISSUER_KEY = "removedPeopleIssuer"
 CHECKED_KEY = "removedPeopleCheckedAt"
 PROBLEM_KEY = "removedPeopleProblem"
+#: What a person signing in is told while their data is being deleted.
+PURGING_NOW = (
+    "Your data in this Workbench is being deleted, because Eugene had removed you. "
+    "Sign in again in a few minutes."
+)
 
 
 def _cause(exc: BaseException) -> str:
@@ -352,14 +357,16 @@ class Removal:
         row = await self.store.removed_person(sub)
         if row is None:
             return None
-        if row["state"] == "purging":
-            return (
-                "Your data in this Workbench is being deleted, because Eugene had removed you. "
-                "Sign in again in a few minutes."
-            )
         if row["state"] in ("held", "hidden", "kept"):
-            await self.store.back_from_removed([sub])
-            log.info("%s signed in again: their data is theirs again", row["name"])
+            if await self.store.back_from_removed([sub]):
+                log.info("%s signed in again: their data is theirs again", row["name"])
+            else:
+                # Something changed it meanwhile: the purge may have begun. Read it again.
+                row = await self.store.removed_person(sub)
+                if row is None:
+                    return None
+        if row["state"] == "purging":
+            return PURGING_NOW
         self._allow(sub)
         return None
 

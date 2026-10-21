@@ -5704,14 +5704,17 @@ class Store:
             )
         )
 
-    async def memory_server_retry(self, document_id: str, next_at: float) -> None:
-        await self._run(
+    async def memory_server_retry(self, document_id: str, next_at: float) -> bool:
+        """Try this exchange again at `next_at`. False when its row had gone meanwhile (its
+        chat was deleted, or its person removed, while it was being sent)."""
+        cursor = await self._run(
             lambda: self._conn().execute(
                 "UPDATE memory_server_sent SET attempts = attempts + 1, next_at = ? "
                 "WHERE document_id = ?",
                 (next_at, document_id),
             )
         )
+        return bool(cursor.rowcount > 0)
 
     async def memory_server_drop(self, document_id: str) -> None:
         await self._run(
@@ -6123,11 +6126,17 @@ class Store:
 
     # --- the export log (row 7) -----------------------------------------
 
-    async def add_export(self, row: dict[str, Any]) -> None:
-        def go() -> None:
-            self._conn().execute(
+    async def add_export(self, row: dict[str, Any]) -> bool:
+        """Record a download being made, in the same statement that checks its subject's data
+        is not being deleted (row 7): False, and nothing recorded, once their purge has begun,
+        so none begins after the purge deleted their downloads."""
+
+        def go() -> bool:
+            cursor = self._conn().execute(
                 "INSERT INTO exports (id, asker, asker_name, subject, subject_name, scope, state, "
-                "created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, 'making', ?, ?)",
+                "created_at, expires_at) SELECT ?, ?, ?, ?, ?, ?, 'making', ?, ? "
+                "WHERE NOT EXISTS (SELECT 1 FROM removed_people WHERE sub = ? "
+                "AND state IN ('purging', 'purged'))",
                 (
                     row["id"],
                     row["asker"],
@@ -6137,10 +6146,12 @@ class Store:
                     row["scope"],
                     row["created_at"],
                     row["expires_at"],
+                    row["subject"],
                 ),
             )
+            return bool(cursor.rowcount > 0)
 
-        await self._run(go)
+        return await self._run(go)
 
     @staticmethod
     def _export(row: sqlite3.Row) -> dict[str, Any]:

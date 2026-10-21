@@ -162,8 +162,9 @@ class Exports:
 
     async def request(
         self, asker: Person, subject: str, subject_name: str, scope: str, *, full: bool
-    ) -> dict[str, Any]:
-        """Start making a download, log it, and say where it stands."""
+    ) -> dict[str, Any] | None:
+        """Start making a download, log it, and say where it stands. None, and nothing begun,
+        when the subject's data is being deleted (checked where the download is recorded)."""
         now = time.time()
         row: dict[str, Any] = {
             "id": secrets.token_urlsafe(18),
@@ -175,7 +176,8 @@ class Exports:
             "created_at": now,
             "expires_at": now + EXPORT_SECONDS,
         }
-        await self.store.add_export(row)
+        if not await self.store.add_export(row):
+            return None
         log.info(
             "%s asked for a download of %s data (%s)",
             asker.name,
@@ -468,6 +470,8 @@ async def export_mine(request: Request) -> dict[str, Any]:
     person = await _person(request)
     exports: Exports = request.app.state.exports
     row = await exports.request(person, person.sub, person.name, SELF, full=True)
+    if row is None:
+        raise _problem(status.HTTP_410_GONE, "Your data in this Workbench is being deleted.")
     return {"export": view(row)}
 
 
@@ -498,6 +502,8 @@ async def export_person(request: Request, sub: str) -> dict[str, Any]:
         name, full = found.name, False
     exports: Exports = request.app.state.exports
     row = await exports.request(person, sub, name, OWNER, full=full)
+    if row is None:
+        raise _problem(status.HTTP_410_GONE, f"{name}'s data is being deleted.")
     return {"export": view(row)}
 
 

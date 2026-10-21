@@ -507,6 +507,136 @@ def test_an_exchange_being_sent_when_its_person_is_removed_is_forgotten(tmp_path
     assert ("forget", {"document_id": "c1:a1"}) in calls, calls
 
 
+def test_a_sign_in_racing_the_purge_is_refused_and_keeps_the_courier_stopped(
+    tmp_path: Path,
+) -> None:
+    """A sign-in reads the person as hidden; before it brings them back, the purge begins. The
+    sign-in must then be refused, and nothing may be sent to their server again."""
+    from eugene_plexus_workbench.memory_servers import Courier
+    from eugene_plexus_workbench.removal import Removal
+    from eugene_plexus_workbench.store import Person
+
+    async def go() -> tuple[str | None, bool, str]:
+        store = Store(tmp_path / "workbench.sqlite3")
+        await store.open()
+        try:
+            await store.upsert_person(Person(sub="p-ann", name="Ann", role="member"))
+            courier = Courier(store, _SlowServer())  # type: ignore[arg-type]
+            removal = Removal(store, None, tmp_path)  # type: ignore[arg-type]
+            removal.courier = courier
+            await removal.hide([{"sub": "p-ann", "name": "Ann", "known_at": time.time()}])
+            back = store.back_from_removed
+
+            async def raced(subs: Any) -> list[str]:
+                # The purge commits `purging` between the read and the bringing back.
+                await store.put_removed("p-ann", state="purging")
+                return await back(subs)
+
+            store.back_from_removed = raced  # type: ignore[method-assign]
+            said = await removal.signed_in("p-ann")
+            row = await store.removed_person("p-ann")
+            assert row is not None
+            return said, "p-ann" in courier._stopped, row["state"]
+        finally:
+            await store.close()
+
+    said, stopped, state = asyncio.run(go())
+    assert said is not None and "being deleted" in said
+    assert stopped and state == "purging"
+
+
+class _FailingServer(_SlowServer):
+    """A server that keeps a sent exchange, then fails to say so (a timeout after the write)."""
+
+    async def call(
+        self, server: Any, mode: str, verb: str, wanted: dict[str, Any], seconds: float = 20.0
+    ) -> list[Any]:
+        await super().call(server, mode, verb, wanted, seconds)
+        if verb == "retain":
+            from eugene_plexus_workbench.memory_servers import ServerProblem
+
+            raise ServerProblem("The memory server did not answer in time.")
+        return []
+
+
+def test_a_send_that_fails_after_reaching_the_server_is_forgotten(tmp_path: Path) -> None:
+    """A `retain` that times out may have been kept. If its row went meanwhile (the person was
+    hidden), it is to be forgotten there, not retried on a row that no longer exists."""
+    from eugene_plexus_workbench import config
+    from eugene_plexus_workbench.memory_servers import Courier
+    from eugene_plexus_workbench.removal import Removal
+    from eugene_plexus_workbench.store import Chat, Message, Person
+
+    async def go() -> list[tuple[str, dict[str, Any]]]:
+        store = Store(tmp_path / "workbench.sqlite3")
+        await store.open()
+        server = _FailingServer()
+        try:
+            await store.put_setting(config.MEMORY_SERVERS, "any")
+            await store.upsert_person(Person(sub="p-ann", name="Ann", role="member"))
+            await store.put_memory_server(
+                "p-ann",
+                "http://example.org/mcp",
+                "",
+                "Hers",
+                {"retain": {"tool": "retain"}, "forget": {"tool": "forget"}},
+            )
+            now = time.time()
+            await store.create_chat(
+                Chat(id="c1", owner="p-ann", title="t", model="m", created_at=now, updated_at=now)
+            )
+            for message, parent in (
+                (Message(id="u1", chat_id="c1", seq=0, role="user", status="done",
+                         created_at=now, content="My favourite colour is green."), None),
+                (Message(id="a1", chat_id="c1", seq=0, role="assistant", status="done",
+                         created_at=now, content="Noted."), "u1"),
+            ):  # fmt: skip
+                await store.add_message(message, parent_id=parent)
+            assert await store.queue_memory_server_send("p-ann", "c1", "a1")
+            courier = Courier(store, server)  # type: ignore[arg-type]
+            sending = asyncio.create_task(courier.once())
+            await asyncio.wait_for(server.inside.wait(), 10)
+            removal = Removal(store, None, tmp_path, servers=server)  # type: ignore[arg-type]
+            removal.courier = courier
+            await removal.hide([{"sub": "p-ann", "name": "Ann", "known_at": now}])
+            purging = asyncio.create_task(removal.purge("p-ann"))
+            await asyncio.sleep(0.3)
+            server.release.set()
+            await sending
+            await purging
+            return server.calls
+        finally:
+            server.release.set()
+            await store.close()
+
+    calls = asyncio.run(go())
+    assert ("forget", {"document_id": "c1:a1"}) in calls, calls
+
+
+def test_no_download_is_begun_once_the_purge_has(tmp_path: Path) -> None:
+    """The owner's download of a removed person is refused once their purge has begun, checked
+    where the download is recorded, so none begins after the purge deleted the downloads."""
+    from eugene_plexus_workbench.exports import OWNER, Exports
+    from eugene_plexus_workbench.store import Person
+
+    async def go() -> tuple[Any, list[dict[str, Any]]]:
+        store = Store(tmp_path / "workbench.sqlite3")
+        await store.open()
+        try:
+            await store.hide_people([("p-ann", "Ann", "hidden", 0.0, DAY)])
+            await store.put_removed("p-ann", state="purging")
+            made = Exports(store, tmp_path, SimpleNamespace(store=store))
+            owner = Person(sub="operator", name="Owner", role="operator")
+            got = await made.request(owner, "p-ann", "Ann", OWNER, full=True)
+            await made.aclose()
+            return got, await store.exports_by("operator")
+        finally:
+            await store.close()
+
+    got, logged = asyncio.run(go())
+    assert got is None and logged == []
+
+
 def test_a_download_cut_off_by_a_restart_says_so_and_can_be_made_again(
     world: World, ann: Browser
 ) -> None:
