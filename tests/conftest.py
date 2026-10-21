@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import json
 import secrets
 import socket
+import sqlite3
 import struct
 import sys
 import threading
@@ -99,6 +101,30 @@ def _test_sockets_leave_no_time_wait() -> None:
 
 
 _test_sockets_leave_no_time_wait()
+
+
+def _sqlite_without_flushes_on_windows() -> None:
+    """Workbench's stores are SQLite in WAL with the default `synchronous=FULL`: every commit
+    waits for the disk to flush, and on a Windows CI runner that was the largest part of what
+    was left of its suite's extra time (the Pytest step took 531 to 631 s with flushes and 357 s
+    without; Linux took 281 s either way). No test can tell a flushed commit from one in the
+    OS's cache (a process the tests kill leaves the cache behind), so in the tests, on Windows,
+    each connection skips the flush. What Workbench does in use is not changed."""
+    if sys.platform != "win32":
+        return
+    connect = sqlite3.connect
+
+    def unflushed(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        db = connect(*args, **kwargs)
+        # A file that is not a store fails where it would have, at Workbench's own first read.
+        with contextlib.suppress(sqlite3.Error):
+            db.execute("PRAGMA synchronous=OFF")
+        return db
+
+    sqlite3.connect = unflushed  # type: ignore[assignment]
+
+
+_sqlite_without_flushes_on_windows()
 
 CLIENT_ID = "wb-client"
 CLIENT_SECRET = "wb-client-secret"
