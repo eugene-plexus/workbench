@@ -16,6 +16,7 @@ import hashlib
 import json
 import secrets
 import socket
+import struct
 import sys
 import threading
 import time
@@ -65,6 +66,39 @@ def _one_tls_context_for_every_test_client() -> None:
 
 
 _one_tls_context_for_every_test_client()
+
+
+def _test_sockets_leave_no_time_wait() -> None:
+    """On Windows a connection closed the ordinary way keeps its port for two minutes
+    (TIME_WAIT), out of 16,384 for the whole machine. A full run on 32 workers left about 9,000
+    behind in under a minute, so a second run straight after it, or two at once, ran out, and the
+    tests' event loops hung making their self-pipe (`socket.socketpair` waits on an `accept` that
+    never comes). Each event loop's self-pipe and each of the tests' own HTTP connections is
+    closed with a reset instead, which leaves no TIME_WAIT: about 2,500 a run remain, from
+    Workbench's own connections, which are not changed."""
+    if sys.platform != "win32":
+        return
+    linger = struct.pack("hh", 1, 0)
+    pair = socket.socketpair
+
+    def socketpair(*args: Any, **kwargs: Any) -> tuple[socket.socket, socket.socket]:
+        left, right = pair(*args, **kwargs)
+        for end in (left, right):
+            end.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
+        return left, right
+
+    socket.socketpair = socketpair  # type: ignore[assignment]
+    init = httpx.HTTPTransport.__init__
+
+    def transport(self: httpx.HTTPTransport, *args: Any, **kwargs: Any) -> None:
+        if kwargs.get("socket_options") is None:
+            kwargs["socket_options"] = [(socket.SOL_SOCKET, socket.SO_LINGER, linger)]
+        init(self, *args, **kwargs)
+
+    httpx.HTTPTransport.__init__ = transport  # type: ignore[method-assign]
+
+
+_test_sockets_leave_no_time_wait()
 
 CLIENT_ID = "wb-client"
 CLIENT_SECRET = "wb-client-secret"
