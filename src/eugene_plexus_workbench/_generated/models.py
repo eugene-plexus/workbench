@@ -9,6 +9,31 @@ from typing import Any, Literal
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, RootModel
 
 
+class ModelRole(StrEnum):
+    """
+    An install-wide job assigned to models through the gateway's
+    `modelSlots`. A client requests `role:<ModelRole>` rather than
+    a particular model. The list is closed: a new role is a contract
+    change, and an unknown `role:` name is refused when saved.
+
+    These are routing roles, separate from a conversation's `Role`.
+    Capability checks warn; they never block role assignment.
+
+    """
+
+    chat = 'chat'
+    agentic = 'agentic'
+    vision = 'vision'
+    reads_pages = 'reads-pages'
+    image = 'image'
+    speech_to_text = 'speech-to-text'
+    text_to_speech = 'text-to-speech'
+    music = 'music'
+    embeddings = 'embeddings'
+    rerank = 'rerank'
+    decision = 'decision'
+
+
 class Role(StrEnum):
     """
     The speaker of a single message in a conversation. Matches the
@@ -529,6 +554,16 @@ class ModelRequirementAuthority(StrEnum):
     engine = 'engine'
 
 
+class PreparationVisionMode(StrEnum):
+    """
+    Where to encode images during inference; off prepares text only.
+    """
+
+    off = 'off'
+    cpu = 'cpu'
+    gpu = 'gpu'
+
+
 class Context(RootModel[int]):
     root: int = Field(..., ge=1)
 
@@ -554,6 +589,10 @@ class ModelPreparation(BaseModel):
     contexts: list[Context] | None = Field(
         None,
         description="The context sizes, in tokens, the preparation can be asked for\n(LS5): an engine that fixes the context when it prepares\noffers its own choices, and without one takes its own\nrecommendation for the node. Strata's are its setup's own.\nAbsent: the preparation takes no context.\n",
+    )
+    visionModes: list[PreparationVisionMode] | None = Field(
+        None,
+        description="Image encoder choices supported by this model's preparation. Absent:\nno image preparation is offered. Omitting the choice in a run intent\npreserves text-only preparation. Enabling images downloads an extra\nencoder and uses additional memory while serving.\n",
     )
     minEngineVersion: str | None = Field(
         None,
@@ -1623,39 +1662,20 @@ class PathMapping(BaseModel):
     )
 
 
-class LibraryFolder(BaseModel):
+class LibraryFolderKind(StrEnum):
     """
-    One directory the library catalogues, and where other machines
-    find it (2026-09-14).
-
-    `path` is the directory as the library's own host spells it —
-    what the scanner walks, what a `ModelSummary.path` starts with,
-    the left-hand side of every rule that reaches it. `mounts` is
-    the same directory as **other** machines see it: a POSIX-shaped
-    entry is for Linux and macOS nodes, a Windows-shaped one (drive
-    letter or UNC) for Windows nodes, and a node takes the first
-    entry of its own shape. That is the whole of "how does node X
-    reach folder Y" for every node that mounts the share where the
-    folder says; a node that mounts it elsewhere carries one
-    override in its agent's `pathMappings`, and a node with no
-    mount of its shape opens `path` as written — the identical-mount
-    convention, and every single-host install.
-
-    The rule this replaces was per node per folder, on each node's
-    agent, and grew as nodes × folders with every row typed by hand.
-    This is per folder, stated once. Nothing is copied or cached:
-    the operator mounts the share, this says where.
+    What the library reads in a folder (CX9, 2026-10-20). `folder`:
+    model files, walked as they are. `ollama`: an Ollama model store
+    (the directory holding `blobs/` and `manifests/` or
+    `manifests-v2/`), read through its manifests and **never written
+    to** -- no download, provenance, prepared file or delete lands
+    there. Its models are Ollama's: one that Ollama removes goes
+    `missing`.
 
     """
 
-    path: str = Field(
-        ...,
-        description="Absolute, as the library's host spells it. Immutable in the\nsense that changing it is a different folder: models are\nidentified by their path under it.\n",
-    )
-    mounts: list[str] | None = Field(
-        [],
-        description='Absolute paths, each Windows- or POSIX-shaped; the shape\nsays which nodes it is for. Order matters only among entries\nof one shape, where the first wins. Empty means "reached at\n`path`, or not at all".\n',
-    )
+    folder = 'folder'
+    ollama = 'ollama'
 
 
 class DirectoryEntryKind(StrEnum):
@@ -1963,6 +1983,46 @@ class ConfigFieldStatus(BaseModel):
 
     level: ConfigFieldStatusLevel
     text: str
+
+
+class LibraryFolder(BaseModel):
+    """
+    One directory the library catalogues, and where other machines
+    find it (2026-09-14).
+
+    `path` is the directory as the library's own host spells it —
+    what the scanner walks, what a `ModelSummary.path` starts with,
+    the left-hand side of every rule that reaches it. `mounts` is
+    the same directory as **other** machines see it: a POSIX-shaped
+    entry is for Linux and macOS nodes, a Windows-shaped one (drive
+    letter or UNC) for Windows nodes, and a node takes the first
+    entry of its own shape. That is the whole of "how does node X
+    reach folder Y" for every node that mounts the share where the
+    folder says; a node that mounts it elsewhere carries one
+    override in its agent's `pathMappings`, and a node with no
+    mount of its shape opens `path` as written — the identical-mount
+    convention, and every single-host install.
+
+    The rule this replaces was per node per folder, on each node's
+    agent, and grew as nodes × folders with every row typed by hand.
+    This is per folder, stated once. Nothing is copied or cached:
+    the operator mounts the share, this says where.
+
+    """
+
+    path: str = Field(
+        ...,
+        description="Absolute, as the library's host spells it. Immutable in the\nsense that changing it is a different folder: models are\nidentified by their path under it.\n",
+    )
+    mounts: list[str] | None = Field(
+        [],
+        description='Absolute paths, each Windows- or POSIX-shaped; the shape\nsays which nodes it is for. Order matters only among entries\nof one shape, where the first wins. Empty means "reached at\n`path`, or not at all".\n',
+    )
+    kind: LibraryFolderKind | None = 'folder'
+    found: bool | None = Field(
+        None,
+        description='Not in `modelRoots`: the library found it on its own machine\n(an Ollama store, CX9) and lists it while `findOllama` is on.\nAbsent or false for a folder someone added.\n',
+    )
 
 
 class DirectoryEntry(BaseModel):
