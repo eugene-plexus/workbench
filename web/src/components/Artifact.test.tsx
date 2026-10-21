@@ -345,7 +345,9 @@ describe("its revisions", () => {
       source: "<h1>Mine</h1>",
       base: 1,
     });
-    expect(within(dialog).getByRole("combobox", { name: "Revision" })).toHaveDisplayValue(/^Revision 2 of 2, edited/);
+    expect(within(dialog).getByRole("combobox", { name: "Revision" })).toHaveDisplayValue(
+      /^Revision 2 of 2, edited/,
+    );
     expect(editor).toHaveValue("<h1>Mine</h1>");
   });
 
