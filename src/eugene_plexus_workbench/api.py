@@ -185,8 +185,20 @@ async def sign_in_callback(request: Request) -> Response:
         identity = await provider.finish(pending, code, query.get("iss"))
     except (SignInRefused, SignInUnavailable) as exc:
         return _sign_in_failed(request, str(exc))
+    # Row 7: Eugene has this person now. If they were removed, they are not any more, unless
+    # their data is being deleted this moment.
+    removal = getattr(_state(request), "removal", None)
+    refusal = await removal.signed_in(identity.sub) if removal is not None else None
+    if refusal is not None:
+        return _sign_in_failed(request, refusal)
     await store.upsert_person(
-        Person(sub=identity.sub, name=identity.name, role=identity.role, username=identity.username)
+        Person(
+            sub=identity.sub,
+            name=identity.name,
+            role=identity.role,
+            username=identity.username,
+            email=identity.email,
+        )
     )
     created = await sessions.create(
         identity.sub, identity.refresh_token, identity.expires_in, identity.access_token

@@ -1424,67 +1424,82 @@ async def export(request: Request, format: Literal["md", "json"] = "md") -> Resp
     """The asker's notes as a plain file: Markdown to read, JSON to keep. Both carry each
     note's body and tags, the versions a note replaced, and the tag list (MV1)."""
     person = await _person(request)
-    store = _store(request)
-    every = await store.memory_notes(person.sub, status=None, with_body=True)
-    notes = [n for n in every if n.status == "active"]
-    earlier = [n for n in every if n.status == "superseded"]
-    tags = await store.memory_tags(person.sub)
-    # MV6: the documents each note rests on.
-    links = await store.note_documents(person.sub)
-    names = {p.id: p.name for p in await store.projects(person.sub)}
-    # MV5: what the person's own memory server lists, or why it is not here.
-    from . import memory_servers
-
-    server = await memory_servers.export_items(_state(request), person.sub)
-    now = time.time()
+    document, markdown = await memory_export(_state(request), person.sub, person.name)
     headers = {"Cache-Control": "private, no-store"}
     if format == "json":
-
-        def entry(n: MemoryNote) -> dict[str, Any]:
-            return {
-                "id": n.id,
-                "text": n.text,
-                "body": n.body or "",
-                "kind": n.kind,
-                "pinned": n.pinned,
-                "tags": list(n.tags),
-                "source": n.source,
-                "createdAt": _stamp(n.created_at),
-                "updatedAt": _stamp(n.updated_at),
-                "validFrom": _stamp(n.valid_from),
-                "supersededAt": _stamp(n.superseded_at),
-                "supersededBy": n.superseded_by,
-                # MV7: where it is kept, by the project's name then; null for General.
-                "project": names.get(n.project_id) if n.project_id else None,
-                "documents": [
-                    {
-                        "name": link["name"],
-                        "sha256": link["sha256"],
-                        "how": link["how"],
-                        "place": link["place"],
-                        "linkedAt": _stamp(link["linked_at"]),
-                    }
-                    for link in links.get(n.id, [])
-                ],
-            }
-
         return JSONResponse(
-            {
-                "exportedAt": _stamp(now),
-                "notes": [entry(n) for n in notes],
-                "earlierVersions": [entry(n) for n in earlier],
-                "tags": [{"tag": t["tag"], "description": t["description"]} for t in tags],
-                **({"memoryServer": server} if server is not None else {}),
-            },
+            document,
             headers={
                 **headers,
                 "Content-Disposition": 'attachment; filename="workbench-memory.json"',
             },
         )
+    return Response(
+        markdown,
+        media_type="text/markdown; charset=utf-8",
+        headers={**headers, "Content-Disposition": 'attachment; filename="workbench-memory.md"'},
+    )
+
+
+async def memory_export(
+    state: Any, owner: str, name: str, *, server_too: bool = True
+) -> tuple[dict[str, Any], str]:
+    """A person's notes as the Memory page exports them: the JSON document, and the Markdown.
+    With `server_too`, what their own memory server lists is asked for and added (MV5); a
+    download made of a removed person (row 7) does not ask their server."""
+    store: Store = state.store
+    every = await store.memory_notes(owner, status=None, with_body=True)
+    notes = [n for n in every if n.status == "active"]
+    earlier = [n for n in every if n.status == "superseded"]
+    tags = await store.memory_tags(owner)
+    # MV6: the documents each note rests on.
+    links = await store.note_documents(owner)
+    names = {p.id: p.name for p in await store.projects(owner)}
+    # MV5: what the person's own memory server lists, or why it is not here.
+    from . import memory_servers
+
+    server = await memory_servers.export_items(state, owner) if server_too else None
+    now = time.time()
+
+    def entry(n: MemoryNote) -> dict[str, Any]:
+        return {
+            "id": n.id,
+            "text": n.text,
+            "body": n.body or "",
+            "kind": n.kind,
+            "pinned": n.pinned,
+            "tags": list(n.tags),
+            "source": n.source,
+            "createdAt": _stamp(n.created_at),
+            "updatedAt": _stamp(n.updated_at),
+            "validFrom": _stamp(n.valid_from),
+            "supersededAt": _stamp(n.superseded_at),
+            "supersededBy": n.superseded_by,
+            # MV7: where it is kept, by the project's name then; null for General.
+            "project": names.get(n.project_id) if n.project_id else None,
+            "documents": [
+                {
+                    "name": link["name"],
+                    "sha256": link["sha256"],
+                    "how": link["how"],
+                    "place": link["place"],
+                    "linkedAt": _stamp(link["linked_at"]),
+                }
+                for link in links.get(n.id, [])
+            ],
+        }
+
+    document = {
+        "exportedAt": _stamp(now),
+        "notes": [entry(n) for n in notes],
+        "earlierVersions": [entry(n) for n in earlier],
+        "tags": [{"tag": t["tag"], "description": t["description"]} for t in tags],
+        **({"memoryServer": server} if server is not None else {}),
+    }
     lines = [
         "# Memory",
         "",
-        f"What Workbench remembers for {person.name}. Exported {_day(now)}.",
+        f"What Workbench remembers for {name}. Exported {_day(now)}.",
         "",
     ]
     for title, members in (
@@ -1521,11 +1536,7 @@ async def export(request: Request, format: Literal["md", "json"] = "md") -> Resp
         if server["memories"] == []:
             lines.append("Nothing here.")
         lines.append("")
-    return Response(
-        "\n".join(lines),
-        media_type="text/markdown; charset=utf-8",
-        headers={**headers, "Content-Disposition": 'attachment; filename="workbench-memory.md"'},
-    )
+    return document, "\n".join(lines)
 
 
 # --------------------------------------------------------------------------- #

@@ -264,6 +264,17 @@ class FolderSync:
         if self._task is None:
             self._task = asyncio.create_task(self._loop(), name="folder-sync")
 
+    async def stop_person(self, sub: str) -> None:
+        """The person was removed from Eugene (row 7): nothing of theirs waits, and a check of
+        one of their folders running now ends. Their folders are no longer listed
+        (`Store.folder_records`), so none is checked again."""
+        for key in [k for k in self._wanted if k[0] == sub]:
+            self._wanted.pop(key, None)
+        running = [s.task for k, s in self._states.items() if k[0] == sub and s.task is not None]
+        for task in running:
+            task.cancel()
+        await asyncio.gather(*running, return_exceptions=True)
+
     async def aclose(self) -> None:
         task, self._task = self._task, None
         if task is not None:

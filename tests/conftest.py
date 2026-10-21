@@ -494,6 +494,8 @@ class FakeEugene:
     revoked: list[str] = field(default_factory=list)
     refreshes: int = 0
     token_calls: int = 0
+    #: Row 7: each `/oidc/subjects` call's ids; a person deleted from `people` is `unknown`.
+    subject_calls: list[list[str]] = field(default_factory=list)
 
     @property
     def issuer(self) -> str:
@@ -521,6 +523,8 @@ class FakeEugene:
             "eugene_role": person["role"],
             "auth_time": now,
         }
+        if "email" in person:  # row 7: only when the person has one, as Eugene sends it
+            claims["email"] = person["email"]
         if nonce is not None:
             claims["nonce"] = nonce
         return jwt.encode({"alg": "RS256", "typ": typ, "kid": "k1"}, claims, self.key)
@@ -628,6 +632,19 @@ class FakeEugene:
             self.revoked.append(token)
             self.refresh_tokens.pop(token, None)
             return {}
+
+        @app.post("/oidc/subjects")
+        async def subjects(request: Request) -> Any:
+            if not self.up:
+                return JSONResponse({"error": "temporarily_unavailable"}, status_code=503)
+            if not client_ok(request):
+                return JSONResponse({"error": "invalid_client"}, status_code=401)
+            asked = [str(s) for s in (await request.json())["subjects"]]
+            self.subject_calls.append(asked)
+            return {
+                "known": [s for s in asked if s in self.people],
+                "unknown": [s for s in asked if s not in self.people],
+            }
 
         return app
 

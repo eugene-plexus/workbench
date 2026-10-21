@@ -592,6 +592,8 @@ def test_settings_are_changed_only_with_the_agents_admin_token(world: World) -> 
     schema = httpx.get(f"{world.workbench}/v1/config/schema", headers=good, trust_env=False).json()
     assert [f["key"] for f in schema["fields"]] == [
         "ownerReadsChats",
+        "removedPeopleRetention",
+        "removedPeopleDays",
         "memoryEnabled",
         "memoryMaxNotes",
         "memoryMaxBodyChars",
@@ -627,6 +629,8 @@ def test_settings_are_changed_only_with_the_agents_admin_token(world: World) -> 
     assert schema["fields"][0]["default"] is False
     assert httpx.get(f"{world.workbench}/v1/config", headers=good, trust_env=False).json() == {
         "ownerReadsChats": False,
+        "removedPeopleRetention": "days",
+        "removedPeopleDays": 30,
         "memoryEnabled": True,
         "memoryMaxNotes": 20000,
         "memoryMaxBodyChars": 20000,

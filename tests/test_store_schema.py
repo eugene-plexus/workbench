@@ -107,7 +107,7 @@ def test_a_v0_1_store_keeps_its_messages_and_takes_the_marks(tmp_path: Path) -> 
     assert message.answer_from == 4 and message.reasoning_from == 0
     with sqlite3.connect(path) as db:
         (version,) = db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
-    assert int(version) == SCHEMA_VERSION == 27
+    assert int(version) == SCHEMA_VERSION == 28
 
 
 def test_schema_3_http_connections_survive_local_server_migration(tmp_path: Path) -> None:
@@ -188,7 +188,7 @@ def test_a_schema_6_store_keeps_its_attachments_and_gains_media(tmp_path: Path) 
     assert [(f.id, f.chat_id, f.width) for f in made] == [("f2", None, 512)]
     with sqlite3.connect(path) as db:
         (version,) = db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
-    assert int(version) == SCHEMA_VERSION == 27
+    assert int(version) == SCHEMA_VERSION == 28
 
 
 def test_a_new_store_starts_at_the_current_schema(tmp_path: Path) -> None:
