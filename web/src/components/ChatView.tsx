@@ -582,6 +582,7 @@ export function ChatView({
                     progress={message.status === "running" ? progress : null}
                     busy={running}
                     readOnly={chat.readOnly}
+                    runArtifacts={chat.settings.runArtifacts !== false}
                     onChanged={() => {
                       void reload();
                       onChanged();

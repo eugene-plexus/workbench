@@ -244,7 +244,16 @@ export function ToolCalls({
             {call.serverId === "memory-write" && (
               <RememberReceipt call={call} readOnly={readOnly} />
             )}
-            {call.contentVersion === 1 && call.content && <ToolContent blocks={call.content} />}
+            <ToolContent
+              blocks={
+                call.contentVersion === 1 && call.content
+                  ? call.content
+                  : call.result
+                    ? [{ id: `${call.id}:text`, type: "text", text: call.result }]
+                    : []
+              }
+              tool={`${call.serverId}/${call.tool}`}
+            />
             <details open={call.status === "pending" && call.ask !== false}>
               <summary className="disclosure cursor-pointer text-muted hover:text-fg">
                 Arguments for this call

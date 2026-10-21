@@ -66,6 +66,20 @@ it("compares saved revisions and reads the chosen revision through the existing 
   expect(screen.queryByRole("region", { name: /Changes from/ })).toBeNull();
 });
 
+it("saved_tool_artifact_names_the_result_and_keeps_person_edits_separate", async () => {
+  vi.mocked(api).mockImplementation(async (path) => {
+    if (path.endsWith("/revisions/3")) return { number: 3, source: "same\nnew\nend" };
+    return { ...artifact, origin: "tool", tool: "pages/fetch_page" };
+  });
+  show();
+  await screen.findByText("new", { exact: false });
+  const revisions = screen.getByLabelText("Revision");
+  expect(revisions.querySelector('option[value="1"]')).toHaveTextContent(
+    "from fetch_page's result",
+  );
+  expect(revisions.querySelector('option[value="2"]')).toHaveTextContent("edited");
+});
+
 it("names a failed revision read and offers downloads when a comparison is too long", async () => {
   vi.mocked(api).mockImplementation(async (path) => {
     if (path.endsWith("/revisions/3")) return { number: 3, source: "x\n".repeat(5001) };

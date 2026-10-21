@@ -30,6 +30,7 @@ import {
   keptFor,
   MAX_SOURCE,
   runs,
+  revisionOrigin,
 } from "../lib/artifacts";
 import { ArtifactScope, type Opened, type Scope } from "./Artifact";
 import { SvgPicture } from "./ArtifactBody";
@@ -55,8 +56,8 @@ function when(seconds: number | null): string {
   });
 }
 
-function revisionLabel(revision: RevisionView, count: number): string {
-  const by = revision.author === "answer" ? "from the answer" : "edited";
+function revisionLabel(revision: RevisionView, count: number, tool?: string): string {
+  const by = revision.author === "answer" ? revisionOrigin(revision.tool ?? tool) : "edited";
   const at = when(revision.createdAt);
   return `Revision ${revision.number} of ${count}, ${by}${at ? `, ${at}` : ""}`;
 }
@@ -356,7 +357,7 @@ export default function ArtifactDialog({
           >
             {revisions.map((revision) => (
               <option key={revision.number} value={revision.number}>
-                {revisionLabel(revision, revisions.length)}
+                {revisionLabel(revision, revisions.length, kept?.tool ?? scope.tool)}
               </option>
             ))}
           </select>

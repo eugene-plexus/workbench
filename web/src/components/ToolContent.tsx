@@ -10,13 +10,15 @@
  */
 
 import { Download, FileText, Film, Image as ImageIcon, Link2, Music } from "lucide-react";
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useContext, useEffect, useMemo, useState } from "react";
 
 import { fileUrl, releaseFileUrl } from "../lib/api";
 import { asksToBeDrawn, NotDrawn, readSpec, type Spec } from "../lib/chartSpec";
+import { titleOf, toolKind } from "../lib/artifacts";
 import type { ContentBlock, ToolFile } from "../lib/types";
 import { safeHref } from "./Markdown";
 import { Structured } from "./Structured";
+import { ArtifactCard, ArtifactScope } from "./Artifact";
 
 /** A size as a person reads it. */
 export function sizeWords(size: number): string {
@@ -221,6 +223,18 @@ const DrawnData = memo(function DrawnData({ data }: { data: unknown }) {
 
 function Shown({ block }: { block: ContentBlock }) {
   switch (block.type) {
+    case "text": {
+      const kind = toolKind(block.text, block.mimeType, block.source);
+      return kind ? (
+        <ArtifactCard
+          kind={kind}
+          language={kind}
+          title={titleOf("", kind)}
+          source={block.text}
+          openAs
+        />
+      ) : null;
+    }
     case "image":
       return <Picture file={block} />;
     case "audio":
@@ -269,15 +283,22 @@ function Shown({ block }: { block: ContentBlock }) {
   }
 }
 
-/** A call's blocks other than its words, in the order the tool returned them. */
-export function ToolContent({ blocks }: { blocks: ContentBlock[] }) {
-  const shown = blocks.filter((block) => block.type !== "text");
+/** A call's files, data and artifacts, in the order the tool returned them. */
+export function ToolContent({ blocks, tool }: { blocks: ContentBlock[]; tool?: string }) {
+  const scope = useContext(ArtifactScope);
+  const toolScope = useMemo(() => (scope && tool ? { ...scope, tool } : scope), [scope, tool]);
+  const shown = blocks.filter(
+    (block) =>
+      block.type !== "text" || (scope && toolKind(block.text, block.mimeType, block.source)),
+  );
   if (!shown.length) return null;
   return (
-    <div className="tool-content" data-testid="tool-content">
-      {shown.map((block) => (
-        <Shown key={block.id} block={block} />
-      ))}
-    </div>
+    <ArtifactScope.Provider value={toolScope}>
+      <div className="tool-content" data-testid="tool-content">
+        {shown.map((block) => (
+          <Shown key={block.id} block={block} />
+        ))}
+      </div>
+    </ArtifactScope.Provider>
   );
 }

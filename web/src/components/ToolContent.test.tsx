@@ -9,6 +9,8 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { releaseAllFileUrls } from "../lib/api";
 import { chatMarkdown } from "../lib/conveniences";
 import type { ChatDetail, ContentBlock, ToolCall } from "../lib/types";
+import { runner } from "../lib/previewRunner";
+import { ArtifactScope, type Scope } from "./Artifact";
 import { sizeWords, ToolContent } from "./ToolContent";
 
 const PICTURE: ContentBlock = {
@@ -54,6 +56,7 @@ let made: number;
 let revoked: string[];
 
 beforeEach(() => {
+  runner.reset();
   fetched = [];
   made = 0;
   revoked = [];
@@ -70,6 +73,87 @@ beforeEach(() => {
     revoked.push(url);
   });
 });
+
+const artifactScope: Scope = {
+  chatId: "c",
+  messageId: "m",
+  artifacts: [],
+  readOnly: false,
+  writing: false,
+  onKept() {},
+};
+
+function toolArtifact(block: ContentBlock, over: Partial<Scope> = {}) {
+  return render(
+    <ArtifactScope.Provider value={{ ...artifactScope, ...over }}>
+      <ToolContent blocks={[block]} tool="pages/fetch_page" />
+    </ArtifactScope.Provider>,
+  );
+}
+
+it("tool_html_runs_inline_and_opens_as_an_artifact_with_its_origin", async () => {
+  toolArtifact({
+    id: "html",
+    type: "text",
+    text: '<h1>Page</h1><script>parent.document.title = "escaped"</script>',
+  });
+  const frame = await screen.findByTestId("artifact-frame");
+  expect(frame).toHaveAttribute("sandbox", "allow-scripts allow-forms");
+  expect(frame).toHaveAttribute("src", "/preview/frame");
+  expect(document.title).not.toBe("escaped");
+  expect(screen.getByText(/Revision 1, from fetch_page's result/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Open this HTML as an artifact" }));
+  const dialog = await screen.findByTestId("artifact-dialog");
+  expect(dialog.querySelector("option")).toHaveTextContent("from fetch_page's result");
+});
+
+it("tool_artifact_waits_for_run_when_the_chat_switch_is_off", async () => {
+  toolArtifact(
+    { id: "html", type: "text", text: "<!doctype html><h1>Page</h1>" },
+    { runArtifacts: false },
+  );
+  const run = await screen.findByRole("button", { name: "Run" });
+  await new Promise((done) => setTimeout(done, 50));
+  expect(screen.queryByTestId("artifact-frame")).toBeNull();
+  fireEvent.click(run);
+  expect(await screen.findByTestId("artifact-frame")).toBeInTheDocument();
+});
+
+it.each([
+  { id: "md", type: "text", text: "# Notes\n\n- one", mimeType: "text/markdown" },
+  { id: "resource", type: "text", text: "Plain resource notes.", source: "file:///notes.md" },
+] satisfies ContentBlock[])("tool_markdown_is_shown_as_an_artifact: $id", async (block) => {
+  toolArtifact(block);
+  expect(await screen.findByText(block.id === "md" ? "Notes" : block.text)).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "Open this Markdown as an artifact" }),
+  ).toBeInTheDocument();
+  expect(screen.queryByTestId("artifact-frame")).toBeNull();
+});
+
+it("tool_svg_resource_is_a_picture_and_an_artifact", async () => {
+  toolArtifact({
+    id: "svg",
+    type: "text",
+    text: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><title>Dot</title><circle r="2"/></svg>',
+    source: "file:///dot.svg",
+  });
+  expect(await screen.findByRole("img", { name: "Dot" })).toHaveAttribute(
+    "src",
+    expect.stringMatching(/^data:image\/svg\+xml/),
+  );
+  expect(screen.getByRole("button", { name: "Open this SVG as an artifact" })).toBeInTheDocument();
+});
+
+it.each([{ readOnly: true }, { writing: true }])(
+  "tool_artifact_does_not_start_in_a_restricted_scope: %j",
+  async (over) => {
+    toolArtifact({ id: "html", type: "text", text: "<h1>Page</h1>" }, over);
+    expect(await screen.findByRole("button", { name: "Run" })).toBeInTheDocument();
+    await new Promise((done) => setTimeout(done, 50));
+    expect(screen.queryByTestId("artifact-frame")).toBeNull();
+  },
+);
 
 afterEach(() => {
   vi.unstubAllGlobals();

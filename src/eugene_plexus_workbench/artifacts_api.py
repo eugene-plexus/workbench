@@ -56,7 +56,7 @@ class Revise(BaseModel):
     base: int | None = Field(default=None, ge=1)
 
 
-def revision_view(revision: Revision) -> dict[str, Any]:
+def revision_view(revision: Revision, origin: dict[str, str] | None = None) -> dict[str, Any]:
     view: dict[str, Any] = {
         "number": revision.number,
         "author": revision.author,
@@ -65,14 +65,27 @@ def revision_view(revision: Revision) -> dict[str, Any]:
     }
     if revision.source is not None:
         view["source"] = revision.source
+    if revision.number == 1 and origin:
+        view.update(origin)
     return view
 
 
+async def _origin(store: Store, record: ArtifactRecord) -> dict[str, str]:
+    """Re-find revision one's origin, without a new column or migration."""
+    first = await store.revision(record.id, 1)
+    message = await store.message(record.message_id)
+    if first is None or first.source is None or message is None:
+        return {}
+    return artifacts.found_in(first.source, message) or {}
+
+
 async def _view(store: Store, record: ArtifactRecord) -> dict[str, Any]:
+    origin = await _origin(store, record)
     return {
         **artifacts.summary(record),
+        **origin,
         "messageId": record.message_id,
-        "revisionList": [revision_view(r) for r in await store.revisions(record.id)],
+        "revisionList": [revision_view(r, origin) for r in await store.revisions(record.id)],
     }
 
 
@@ -138,7 +151,11 @@ async def keep_artifact(
     edited_size = _sized(edited, "The edit") if edited is not None else 0
     now = time.time()
     digest = await asyncio.to_thread(artifacts.digest, body.original)
-    author = "answer" if artifacts.from_answer(body.original, message.content) else "person"
+    if artifacts.found_in(body.original, message) is None:
+        raise _problem(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "This block is not in the answer or its tools' results",
+        )
     try:
         record, made = await store.add_artifact(
             ArtifactRecord(
@@ -151,7 +168,7 @@ async def keep_artifact(
                 title=artifacts.title_of(body.title, body.kind),
                 created_at=now,
             ),
-            Revision(number=1, author=author, size=size, created_at=now, source=body.original),
+            Revision(number=1, author="answer", size=size, created_at=now, source=body.original),
             then=(
                 Revision(number=0, author="person", size=edited_size, created_at=now, source=edited)
                 if edited is not None
@@ -186,7 +203,8 @@ async def get_revision(
     revision = await _state(request).store.revision(record.id, number)
     if revision is None:
         raise _problem(status.HTTP_404_NOT_FOUND, "There is no such revision.")
-    return revision_view(revision)
+    origin = await _origin(_state(request).store, record) if number == 1 else None
+    return revision_view(revision, origin)
 
 
 @router.post(

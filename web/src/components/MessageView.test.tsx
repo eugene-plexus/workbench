@@ -68,6 +68,34 @@ it("keeps a repetition-stopped answer and explains the intentional repetition ov
   expect(screen.getByTestId("try-again")).toBeInTheDocument();
 });
 
+it("tool_result_artifact_runs_inline_with_origin_tool", async () => {
+  show(
+    answer({
+      toolRounds: [
+        {
+          calls: [
+            {
+              id: "fetch",
+              serverId: "pages",
+              serverName: "Pages",
+              tool: "fetch_page",
+              arguments: {},
+              status: "done",
+              result: "<h1>Tool page</h1>",
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  expect(await screen.findByTestId("artifact-frame")).toHaveAttribute(
+    "sandbox",
+    "allow-scripts allow-forms",
+  );
+  expect(screen.getByText(/Revision 1, from fetch_page's result/)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Open this HTML as an artifact" })).toBeInTheDocument();
+});
+
 describe("a searched answer (W6)", () => {
   it("lists what it cites as links", () => {
     show(
@@ -423,13 +451,13 @@ describe("an answer's surroundings", () => {
   });
 });
 
-describe("reasoning is plain text in a quiet box that scrolls", () => {
+describe("reasoning is Markdown in a folded box that scrolls", () => {
   const reasoning = "Let me *think* about **this**.";
 
   afterEach(() => vi.restoreAllMocks());
 
-  it("is a folded row with a chevron that opens to a named box of text, asterisks and all", () => {
-    show(answer({ reasoning }));
+  it("reasoning_markdown_renders_and_starts_collapsed", () => {
+    show(answer({ reasoning: `${reasoning}\n\n# Plan\n\n- Check the \`input\`` }));
     const row = screen.getByText("Reasoning");
     expect(row.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
     // 28 px under a mouse and 44 px under a finger (the stylesheet's .disclosure).
@@ -437,9 +465,11 @@ describe("reasoning is plain text in a quiet box that scrolls", () => {
     expect(row.closest("details")).not.toHaveAttribute("open");
     const box = screen.getByRole("group", { name: "Reasoning text" });
     expect(box).toHaveClass("reasoning-body");
-    expect(box).toHaveTextContent(reasoning);
-    // Not Markdown: it is what the model thought, not an answer.
-    expect(box.querySelector("em, strong, p")).toBeNull();
+    expect(box.querySelector(".answer")).not.toHaveClass("answer-quiet");
+    expect(box.querySelector("em")).toHaveTextContent("think");
+    expect(box.querySelector("strong")).toHaveTextContent("this");
+    expect(box.querySelector('h3[data-md="h1"]')).toHaveTextContent("Plan");
+    expect(box.querySelector("li code")).toHaveTextContent("input");
   });
 
   it("keeps to the answer's measure, wraps what has no break in it and reads in its own direction", () => {
@@ -447,8 +477,8 @@ describe("reasoning is plain text in a quiet box that scrolls", () => {
     const details = screen.getByText("Reasoning").closest("details")!;
     expect(details).toHaveClass("max-w-measure", "text-sm");
     const thought = screen.getByText("x".repeat(400));
-    expect(thought).toHaveClass("wrap-anywhere", "whitespace-pre-wrap");
-    expect(thought).toHaveAttribute("dir", "auto");
+    expect(thought.closest("[dir]")).toHaveClass("wrap-anywhere");
+    expect(thought.closest("[dir]")).toHaveAttribute("dir", "auto");
   });
 
   it("is a keyboard stop only while it overflows", () => {
@@ -554,17 +584,18 @@ describe("the working line", () => {
   });
 
   it("moves below the words once they start, with the count and the speed, and is not announced", () => {
-    const { container } = run(
-      answer({ status: "running", content: "Tides are the ocean", reasoning: "Hmm" }),
-      { stage: "generating", generated_tokens: 1234, tokens_per_second: 83.14 },
-    );
+    run(answer({ status: "running", content: "Tides are the ocean", reasoning: "Hmm" }), {
+      stage: "generating",
+      generated_tokens: 1234,
+      tokens_per_second: 83.14,
+    });
     expect(screen.queryByTestId("progress")).toBeNull();
     const writing = screen.getByTestId("writing");
     expect(writing).toHaveTextContent("Writing the answer · 1,234 tokens · 83.1 tok/s");
     expect(writing).not.toHaveAttribute("aria-live");
     expect(writing.querySelector(".working-dots")).toHaveAttribute("aria-hidden", "true");
     // Below the text, not above it.
-    const text = container.querySelector(".answer")!;
+    const text = screen.getByText("Tides are the ocean").closest(".answer")!;
     expect(text.compareDocumentPosition(writing) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(text).toHaveTextContent("Tides are the ocean");
   });

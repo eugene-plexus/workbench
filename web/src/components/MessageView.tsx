@@ -63,6 +63,7 @@ export function MessageView({
   progress,
   busy,
   readOnly,
+  runArtifacts = true,
   onChanged,
   onLook,
   memory,
@@ -73,6 +74,7 @@ export function MessageView({
   progress: Progress | null;
   busy: boolean;
   readOnly: boolean;
+  runArtifacts?: boolean;
   onChanged: () => void;
   /** The owner's read-only view: show another version without choosing it. */
   onLook?: (id: string) => void;
@@ -116,9 +118,10 @@ export function MessageView({
       artifacts: artifacts ?? [],
       readOnly,
       writing,
+      runArtifacts,
       onKept: () => changed.current(),
     }),
-    [chatId, message.id, artifacts, readOnly, writing],
+    [chatId, message.id, artifacts, readOnly, writing, runArtifacts],
   );
   const arrows = (
     <VersionArrows
@@ -365,8 +368,8 @@ export function MessageView({
                   {hasTools ? "Used tools" : SEARCHED_MARK}
                 </p>
               )}
-              <div dir="auto" className="whitespace-pre-wrap py-1 wrap-anywhere">
-                {thought}
+              <div dir="auto" className="py-1 wrap-anywhere">
+                <Markdown text={thought} />
               </div>
             </div>
           ))}
@@ -378,7 +381,9 @@ export function MessageView({
           <Markdown text={draft} quiet />
         </Fold>
       )}
-      <ToolCalls chatId={chatId} message={message} readOnly={readOnly} onChanged={onChanged} />
+      <ArtifactScope.Provider value={artifactScope}>
+        <ToolCalls chatId={chatId} message={message} readOnly={readOnly} onChanged={onChanged} />
+      </ArtifactScope.Provider>
       {working && (
         // Eugene works while the model does; waiting on the person's
         // approval is not work, so he steps away then.
@@ -610,8 +615,7 @@ function statusLook(message: Message): { className: string; glyph: ReactNode } {
   return { className: "text-sm text-muted", glyph: null };
 }
 
-/** Text the model wrote that is not the answer, folded: a quiet row that opens
- * to the console's dashed box. It is plain text in a box that scrolls. */
+/** Reasoning or a draft, folded: a quiet row that opens to a scrolling box. */
 function Fold({
   label,
   metrics,

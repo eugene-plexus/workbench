@@ -199,7 +199,7 @@ export interface ToolFile {
 
 /** One block of a tool's result (rich content RC3). */
 export type ContentBlock =
-  | { id: string; type: "text"; text: string; source?: string }
+  | { id: string; type: "text"; text: string; source?: string; mimeType?: string }
   | ToolFile
   | { id: string; type: "data"; data: unknown }
   | {
@@ -271,6 +271,8 @@ export interface ChatSettings {
   topP?: number | null;
   maxTokens?: number | null;
   repetitionMode?: "off" | "observe" | "stop" | null;
+  /** Pages and components run by themselves unless this chat turns them off. */
+  runArtifacts?: boolean | null;
   /** Memory in this chat: `off` sends no notes to its model; unset follows
    * the person's own setting (MR1). */
   memory?: "on" | "off" | null;

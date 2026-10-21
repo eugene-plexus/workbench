@@ -12,7 +12,7 @@ import pytest
 
 from eugene_plexus_workbench import artifacts
 from eugene_plexus_workbench.app import DATABASE
-from eugene_plexus_workbench.store import Store
+from eugene_plexus_workbench.store import Message, Store
 from eugene_plexus_workbench.web import CSP, PREVIEW_CSP
 
 from .conftest import World
@@ -56,14 +56,25 @@ def test_a_block_s_number_is_the_one_the_page_computes(words: str, number: str) 
 
 
 def test_an_answer_holds_its_block_even_set_in_by_a_list() -> None:
-    assert artifacts.from_answer(PAGE, ANSWER)
-    assert artifacts.from_answer("<svg/>\n<g/>", LISTED)
-    assert not artifacts.from_answer("<svg>made up</svg>", ANSWER)
+    def message(content: str) -> Message:
+        return Message(
+            id="a",
+            chat_id="c",
+            seq=1,
+            role="assistant",
+            status="done",
+            created_at=0,
+            content=content,
+        )
+
+    assert artifacts.found_in(PAGE, message(ANSWER)) == {"origin": "answer"}
+    assert artifacts.found_in("<svg/>\n<g/>", message(LISTED))
+    assert not artifacts.found_in("<svg>made up</svg>", message(ANSWER))
     # Its lines, but apart or in another order, are not the answer's block; nor is nothing.
-    assert not artifacts.from_answer("- one\n<h1>Prices</h1>", ANSWER)
-    assert not artifacts.from_answer("<g/>\n<svg/>", LISTED)
-    assert not artifacts.from_answer("", ANSWER)
-    assert artifacts.from_answer(PAGE.replace("\n", "\r\n"), ANSWER)
+    assert not artifacts.found_in("- one\n<h1>Prices</h1>", message(ANSWER))
+    assert not artifacts.found_in("<g/>\n<svg/>", message(LISTED))
+    assert not artifacts.found_in("", message(ANSWER))
+    assert artifacts.found_in(PAGE.replace("\n", "\r\n"), message(ANSWER))
 
 
 def test_a_block_that_is_not_text_is_refused_and_nothing_is_kept(world: World) -> None:
@@ -141,13 +152,74 @@ def test_keeping_the_same_block_again_adds_to_it_and_nothing_is_written_over(
     assert sources == [PAGE, "A", "B", "C"]
 
 
-def test_a_block_the_answer_does_not_hold_is_kept_as_the_person_s(world: World) -> None:
+def test_a_block_the_answer_does_not_hold_is_refused(world: World) -> None:
     ada = world.browser()
     ada.sign_in("p-ada")
     chat, message = answered(world, ada, ANSWER)
     made = keep(ada, chat, message["id"], original="<p>never written</p>", source="<p>x</p>")
+    assert made.status_code == 422, made.text
+    assert (
+        made.json()["detail"]["message"] == "This block is not in the answer or its tools' results"
+    )
+    assert ada.get(f"/api/chats/{chat}").json()["messages"][-1]["artifacts"] == []
+
+
+@pytest.mark.parametrize("where", ["result", "text", "resource"])
+def test_block_from_tool_result_is_kept_with_origin_tool(world: World, where: str) -> None:
+    ada = world.browser()
+    ada.sign_in("p-ada")
+    chat, message = answered(world, ada, "The tool made a page.")
+    call: dict[str, Any] = {
+        "id": "fetch",
+        "serverId": "pages",
+        "serverName": "Pages",
+        "tool": "fetch_page",
+        "arguments": {"invented": "<p>not a result</p>"},
+        "status": "done",
+        "result": "Page made.",
+    }
+    if where == "result":
+        call["result"] = PAGE
+    elif where == "text":
+        call["content"] = [
+            {"id": "fetch:0", "type": "text", "text": PAGE, "source": "file:///page.html"}
+        ]
+        call["contentVersion"] = 1
+    else:
+        call["content"] = [
+            {"type": "resource", "resource": {"text": PAGE, "mimeType": "text/html"}}
+        ]
+
+    async def returned() -> None:
+        store = Store(world.settings.data_dir / DATABASE)
+        await store.open()
+        try:
+            await store.update_message(message["id"], tool_rounds=[{"calls": [call]}])
+        finally:
+            await store.close()
+
+    asyncio.run(returned())
+    made = keep(ada, chat, message["id"], source=PAGE + "\n<p>Edited</p>")
     assert made.status_code == 201, made.text
-    assert made.json()["revisionList"][0]["author"] == "person"
+    view = made.json()
+    assert (view["origin"], view["tool"]) == ("tool", "pages/fetch_page")
+    assert view["revisionList"][0]["author"] == "answer"
+    path = f"/api/chats/{chat}/artifacts/{view['id']}"
+    reread = ada.get(path).json()
+    assert (reread["origin"], reread["tool"]) == ("tool", "pages/fetch_page")
+    first = ada.get(f"{path}/revisions/1").json()
+    assert first["source"] == PAGE and first["author"] == "answer"
+    assert (first["origin"], first["tool"]) == ("tool", "pages/fetch_page")
+    assert ada.get(f"{path}/revisions/2").json()["author"] == "person"
+    # Arguments are not results, and a block in neither place must be refused.
+    for absent in ("<p>not a result</p>", "<p>in neither place</p>"):
+        refused = keep(ada, chat, message["id"], original=absent)
+        assert refused.status_code == 422, refused.text
+        assert (
+            refused.json()["detail"]["message"]
+            == "This block is not in the answer or its tools' results"
+        )
+    assert len(ada.get(f"/api/chats/{chat}").json()["messages"][-1]["artifacts"]) == 1
 
 
 def test_each_version_of_an_answer_keeps_its_own(world: World) -> None:
@@ -189,7 +261,7 @@ def test_an_answer_being_written_keeps_nothing_yet(world: World) -> None:
 def test_an_artifact_keeps_only_so_much(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
     ada = world.browser()
     ada.sign_in("p-ada")
-    chat, message = answered(world, ada, ANSWER)
+    chat, message = answered(world, ada, ANSWER + "\n<p>another</p>\n<p>third</p>")
     big = ada.post(
         f"/api/chats/{chat}/messages/{message['id']}/artifacts",
         json={"kind": "html", "original": PAGE, "source": "é" * (artifacts.MAX_SOURCE // 2 + 1)},

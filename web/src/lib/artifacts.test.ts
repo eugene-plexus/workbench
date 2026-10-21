@@ -14,11 +14,23 @@ import {
   kindOf,
   runs,
   titleOf,
+  toolKind,
   type ArtifactSummary,
 } from "./artifacts";
 import { readSvg, Refused } from "./svgArtifact";
 
 describe("a block as an artifact", () => {
+  it("tool_artifact_kind_uses_mime_resources_and_sniffing", () => {
+    expect(toolKind("plain words", "text/markdown; charset=utf-8")).toBe("markdown");
+    expect(toolKind("plain words", undefined, "file:///notes.md")).toBe("markdown");
+    expect(toolKind('<svg viewBox="0 0 1 1"/>')).toBe("svg");
+    expect(toolKind("<!doctype html><h1>Page</h1>")).toBe("html");
+    expect(toolKind("<div>Page</div>", "text/plain")).toBe("html");
+    expect(toolKind("# Notes\n\n- one")).toBe("markdown");
+    expect(toolKind("ordinary words")).toBeNull();
+    expect(toolKind("", "text/html")).toBeNull();
+  });
+
   it("is of a kind its language names, and only those", () => {
     expect(["markdown", "md", "svg", "html", "jsx", "tsx", "react", "HTML"].map(kindOf)).toEqual([
       "markdown",

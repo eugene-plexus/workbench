@@ -52,6 +52,36 @@ export function kindOf(language: string | null): ArtifactKind | null {
   return language ? (KINDS.get(language.toLowerCase()) ?? null) : null;
 }
 
+/** A tool's text or embedded text resource, by MIME type or its own words.
+ * Normalised text resources retain their source URI even without a MIME type. */
+export function toolKind(text: string, mimeType?: string, source?: string): ArtifactKind | null {
+  if (!text.trim()) return null;
+  const mime = mimeType?.split(";")[0]?.trim().toLowerCase();
+  if (mime === "image/svg+xml") return "svg";
+  if (mime === "text/html" || mime === "application/xhtml+xml") return "html";
+  if (mime === "text/markdown" || mime === "text/x-markdown") return "markdown";
+  const start = text.trimStart().replace(/^(?:<\?xml[^>]*>\s*|<!--[\s\S]*?-->\s*)+/i, "");
+  if (/^<svg(?:\s|\/?>)/i.test(start)) return "svg";
+  if (
+    /^<(?:!doctype\s+html\b|(?:html|head|body|title|meta|link|style|script|div|span|p|h[1-6]|main|section|article|table|ul|ol|form|button|canvas)\b)/i.test(
+      start,
+    )
+  )
+    return "html";
+  if (/\.(?:md|markdown)(?:[?#]|$)/i.test(source ?? "")) return "markdown";
+  if (
+    /^ {0,3}(?:#{1,6}\s+\S|[-+*]\s+\S|\d+[.)]\s+\S|>\s|`{3}|~{3})/m.test(text) ||
+    /(?:\*\*\S[^\n]*?\*\*|\[[^\]\n]+\]\([^\n)]+\)|\|[^\n]+\|\s*\n\s*\|?\s*:?-{3})/.test(text)
+  )
+    return "markdown";
+  return null;
+}
+
+/** The person sees the tool's name; the full server/tool identity stays in the view. */
+export function revisionOrigin(tool?: string): string {
+  return tool ? `from ${tool.split("/").pop()}'s result` : "from the answer";
+}
+
 /** Whether a kind runs when previewed (a page, a component). */
 export function runs(kind: ArtifactKind): boolean {
   return kind === "html" || kind === "react";
@@ -122,7 +152,9 @@ export function fileName(title: string, kind: ArtifactKind, language: string | n
 }
 
 /** What a message says of an artifact kept for one of its blocks. */
-export type ArtifactSummary = {
+export type ArtifactOrigin = { origin?: "answer" | "tool"; tool?: string };
+
+export type ArtifactSummary = ArtifactOrigin & {
   id: string;
   kind: ArtifactKind;
   title: string;
@@ -132,7 +164,7 @@ export type ArtifactSummary = {
   updatedAt: number;
 };
 
-export type RevisionView = {
+export type RevisionView = ArtifactOrigin & {
   number: number;
   author: "answer" | "person";
   size: number;
