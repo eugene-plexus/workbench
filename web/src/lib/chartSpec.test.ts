@@ -31,6 +31,43 @@ const BAR = {
   ],
 };
 
+it("pie_and_stacked_read", () => {
+  expect(readSpec({ ...BAR, type: "pie", series: [BAR.series[0]] })).toMatchObject({
+    kind: "chart",
+    type: "pie",
+  });
+  expect(readSpec({ ...BAR, stacked: true, series: [BAR.series[0], BAR.series[0]] })).toMatchObject(
+    { type: "bar", stacked: true },
+  );
+});
+
+it("negative_pie_refused_with_reason", () => {
+  expect(() =>
+    readSpec({ ...BAR, type: "pie", series: [{ name: "s", points: [["a", -1]] }] }),
+  ).toThrow("A pie cannot show negative values.");
+});
+
+it("refuses a stack with missing or duplicate categories, and a pie with more than one series", () => {
+  expect(() => readSpec({ ...BAR, stacked: true })).toThrow(
+    "A stacked chart needs one value per category in each series.",
+  );
+  expect(() =>
+    readSpec({
+      ...BAR,
+      stacked: true,
+      series: [
+        {
+          points: [
+            ["a", 1],
+            ["a", 2],
+          ],
+        },
+      ],
+    }),
+  ).toThrow("A stacked chart needs one value per category in each series.");
+  expect(() => readSpec({ ...BAR, type: "pie" })).toThrow("A pie needs one series.");
+});
+
 it("reads a chart, its categories in the order first given", () => {
   const spec = readSpec(BAR);
   expect(spec).toMatchObject({
@@ -78,7 +115,7 @@ it("draws only what says it is a chart or table", () => {
 
 it.each([
   [{ ...BAR, version: 2 }, "it is version 2; this page draws version 1"],
-  [{ ...BAR, type: "pie" }, '"type" must be "bar", "line" or "scatter", not "pie"'],
+  [{ ...BAR, type: "area" }, '"type" must be "bar", "line", "scatter" or "pie", not "area"'],
   [{ ...BAR, series: [] }, 'it has no "series"'],
   [
     { ...BAR, series: [{ name: "s", points: [["a", "b"]] }] },

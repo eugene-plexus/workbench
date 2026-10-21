@@ -38,26 +38,31 @@ const layer = plain.indexOf("@layer components {");
 const layerEnd = layer + braces(plain, plain.indexOf("{", layer)).length + 2;
 const inLayer = (rule: Rule) => rule.at > layer && rule.at < layerEnd;
 
-describe("the measure is a count of characters", () => {
-  it("is in em of the text's own size, so a 14 px box holds as many characters as a 17 px answer", () => {
-    expect(css).toMatch(/--measure:\s*33\.88em;/);
-    // 33.88 em is 36 rem at the 17 px reading size.
-    expect(33.88 * 17).toBeCloseTo(576, 0);
+describe("the viewer's reading width", () => {
+  it("defaults to a comfortable 36 rem", () => {
+    expect(css).toMatch(/--measure:\s*36rem;/);
   });
 
-  it("caps the prose, and each heading at the same width: the measure over its own scale", () => {
+  it("caps prose and relevelled headings at the same reading width", () => {
     expect(
-      declares(".answer > :is(p, ul, ol, blockquote, hr, h4)", "max-width: var(--measure)"),
+      declares(
+        '.answer > :is(p, ul, ol, blockquote, hr, [data-md="h4"])',
+        "max-width: var(--measure)",
+      ),
     ).toBe(true);
     for (const [heading, selector, cap] of [
-      ["h1", ".answer h1", ".answer > h1"],
-      ["h2", ".answer h2", ".answer > h2"],
-      ["h3", ".answer h3", ".answer > h3"],
-      ["h5 and h6", ".answer :is(h5, h6)", ".answer > :is(h5, h6)"],
+      ["h1", '.answer [data-md="h1"]', '.answer > [data-md="h1"]'],
+      ["h2", '.answer [data-md="h2"]', '.answer > [data-md="h2"]'],
+      ["h3", '.answer [data-md="h3"]', '.answer > [data-md="h3"]'],
+      [
+        "h5 and h6",
+        '.answer :is([data-md="h5"], [data-md="h6"])',
+        '.answer > :is([data-md="h5"], [data-md="h6"])',
+      ],
     ] as const) {
       const scale = /font-size:\s*([\d.]+)em/.exec(bodiesOf(selector)[0]?.body ?? "")?.[1];
       expect(scale, heading).toBeDefined();
-      expect(declares(cap, `max-width: calc(var(--measure) / ${scale})`), heading).toBe(true);
+      expect(declares(cap, "max-width: var(--measure)"), heading).toBe(true);
     }
   });
 });
@@ -66,7 +71,7 @@ describe("a quiet draft keeps everything at 13 px or more", () => {
   it.each([
     [".answer.answer-quiet :not(pre) > code", "0.88em"],
     [".answer.answer-quiet table", "0.9em"],
-    [".answer.answer-quiet :is(h5, h6)", "0.8125em"],
+    ['.answer.answer-quiet :is([data-md="h5"], [data-md="h6"])', "0.8125em"],
   ])("%s", (selector, em) => {
     expect(declares(selector, `font-size: max(0.8125rem, ${em})`)).toBe(true);
   });

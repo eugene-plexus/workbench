@@ -160,16 +160,16 @@ try {
     const drawn = page.locator("[data-testid=answer]").last();
     const chart = drawn.getByTestId("structured-chart");
     await chart.waitFor();
-    const bars = await chart.locator("svg.chart rect").count();
+    const bars = await chart.locator("svg.chart .chart-bar").count();
     const fills = await chart
-      .locator("svg.chart rect")
+      .locator("svg.chart .chart-bar")
       .evaluateAll((els) => [...new Set(els.map((el) => getComputedStyle(el).fill))]);
     check(
       `${scheme}: a bar chart draws a bar a point, each series in its own colour`,
       bars === 6 && fills.length === 2,
       `${bars} bars, ${fills.join(" ")}`,
     );
-    const named = await chart.getByRole("img").getAttribute("aria-labelledby");
+    const named = await chart.locator("svg.chart").getAttribute("aria-labelledby");
     check(`${scheme}: the chart is named for a screen reader`, Boolean(named));
     const tick = chart.locator("svg.chart .chart-tick").first();
     const panel = await chart.evaluate((el) => getComputedStyle(el).backgroundColor);

@@ -20,6 +20,7 @@ import {
   useState,
 } from "react";
 
+import { useDisplay } from "../lib/display";
 import { fileUrl, post } from "../lib/api";
 import { stableCitations } from "../lib/citations";
 import {
@@ -82,6 +83,7 @@ export function MessageView({
    * person cannot (the owner's read-only view). */
   documents?: { onManage: () => void };
 }) {
+  const { speakers } = useDisplay();
   const [editing, setEditing] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [acting, setActing] = useState(false);
@@ -140,6 +142,9 @@ export function MessageView({
   if (message.redacted) {
     return (
       <div className="flex flex-col gap-1">
+        <h2 className="sr-only">
+          {message.role === "user" ? "You" : `Answer from ${message.model || "Assistant"}`}
+        </h2>
         <p
           data-testid="redacted-message"
           className="max-w-measure rounded-plexus border border-line px-3 py-2 text-sm text-muted wrap-anywhere"
@@ -158,6 +163,12 @@ export function MessageView({
         className="msg flex flex-col items-end gap-1 [&:not(:first-child)]:mt-4"
         data-testid="user-message"
       >
+        <h2 className="sr-only">You</h2>
+        {speakers && (
+          <p className="speaker-label text-accent" aria-hidden="true">
+            You
+          </p>
+        )}
         {message.files && message.files.length > 0 && (
           // A document says how it was read, and lets the person see the text;
           // an image or a sound is its name (or itself).
@@ -311,6 +322,12 @@ export function MessageView({
   const working = waiting ? splitWorking(workingWords(progress, message, now)) : null;
   return (
     <article className="msg flex flex-col gap-3" data-testid="answer" data-status={message.status}>
+      <h2 className="sr-only">Answer from {message.model || "Assistant"}</h2>
+      {speakers && (
+        <p className="speaker-label text-heading" aria-hidden="true">
+          {message.model || "Assistant"}
+        </p>
+      )}
       {(message.reasoning || (message.reasoningTokens ?? 0) > 0) && (
         <Fold
           label="Reasoning"

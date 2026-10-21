@@ -24,6 +24,7 @@ import {
   PRODUCTION_MODE,
   PRODUCTION_MODE_EXPLAINED,
 } from "../lib/words";
+import { DisplaySettings } from "./DisplaySettings";
 import { Logo } from "./Mascot";
 
 export function Sidebar({
@@ -295,6 +296,7 @@ export function Sidebar({
       {onRunPreviews && (
         <RunPreviewsSwitch on={me.runPreviews !== false} onChange={onRunPreviews} />
       )}
+      <DisplaySettings />
       <div className="flex items-center justify-between gap-2 border-t border-line px-4 py-2 text-sm">
         <span className="truncate" data-testid="me">
           {me.name}

@@ -33,7 +33,7 @@ it("gives each answer its own ids, and every reference a target in its own answe
       expect(region.querySelector(`[id="${target}"]`)).not.toBeNull();
     }
     // The heading that names the notes, and what points at it, are the answer's own.
-    const label = region.querySelector("[data-footnotes] > h2");
+    const label = region.querySelector('[data-footnotes] > h4[data-md="h2"]');
     expect(label?.id).toBe(`${scope}footnote-label`);
     expect(label).toHaveClass("sr-only");
     for (const ref of region.querySelectorAll("[data-footnote-ref]")) {

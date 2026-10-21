@@ -41,6 +41,23 @@ function show(message: Message) {
   );
 }
 
+it("gives each turn a level two heading and optional speaker labels", async () => {
+  const { setDisplay } = await import("../lib/display");
+  const shown = show(answer({ model: "qwen3-8b", content: "# Heading" }));
+  expect(screen.getByRole("heading", { level: 2, name: "Answer from qwen3-8b" })).toHaveClass(
+    "sr-only",
+  );
+  expect(screen.getByRole("heading", { level: 3, name: "Heading" })).toBeInTheDocument();
+  expect(shown.container.querySelector(".speaker-label")).toBeNull();
+  shown.unmount();
+  setDisplay({ speakers: true });
+  const user = show(answer({ role: "user", content: "Hello" }));
+  expect(screen.getByRole("heading", { level: 2, name: "You" })).toHaveClass("sr-only");
+  expect(user.container.querySelector(".speaker-label")).toHaveTextContent("You");
+  user.unmount();
+  setDisplay({ speakers: false });
+});
+
 it("keeps a repetition-stopped answer and explains the intentional repetition override", () => {
   show(
     answer({ content: "The partial answer.", status: "stopped", finish: "repetition_detected" }),
@@ -396,7 +413,7 @@ describe("an answer's surroundings", () => {
 
   it("gives a model name that has no break in it somewhere to wrap", () => {
     show(answer({ model: "unsloth/Qwen3-30B-A3B-GGUF:UD-Q4_K_XL_with_a_very_long_name" }));
-    expect(screen.getByText(/unsloth\/Qwen3/)).toHaveClass("wrap-anywhere");
+    expect(screen.getByText(/unsloth\/Qwen3/, { selector: "span" })).toHaveClass("wrap-anywhere");
   });
 
   it("says its time as 9:05 AM, not 09:05 AM", () => {

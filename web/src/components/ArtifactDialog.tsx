@@ -17,6 +17,7 @@
 import { Download, X } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { api, ApiError, post } from "../lib/api";
+import { lineDiff, type DiffLine } from "../lib/lineDiff";
 import {
   type ArtifactView,
   type RevisionView,
@@ -84,6 +85,8 @@ export default function ArtifactDialog({
   const [loading, setLoading] = useState(summary !== null);
   const [sources, setSources] = useState<Map<number, string>>(() => new Map([[1, original]]));
   const [selected, setSelected] = useState(1);
+  const [compare, setCompare] = useState<number | null>(null);
+  const [compareProblem, setCompareProblem] = useState("");
   const [draft, setDraft] = useState<string | null>(() => draftOf(key)?.text ?? null);
   // The revision the draft began from; unknown once a newer one was found saved.
   const [base, setBase] = useState<number | null>(() => draftOf(key)?.base ?? null);
@@ -151,6 +154,26 @@ export default function ArtifactDialog({
     };
   }, [missing, kept, selected, scope.chatId]);
 
+  const compareMissing = compare !== null && !sources.has(compare);
+  useEffect(() => {
+    if (!compareMissing || compare === null || !kept) return;
+    let gone = false;
+    api<RevisionView>(`/api/chats/${scope.chatId}/artifacts/${kept.id}/revisions/${compare}`).then(
+      (revision) => {
+        if (!gone) setSources((was) => new Map(was).set(compare, revision.source ?? ""));
+      },
+      (error: unknown) => {
+        if (!gone)
+          setCompareProblem(
+            `Revision ${compare} could not be read: ${error instanceof Error ? error.message : String(error)}`,
+          );
+      },
+    );
+    return () => {
+      gone = true;
+    };
+  }, [compareMissing, compare, kept, scope.chatId]);
+
   const revisions: RevisionView[] = kept?.revisionList ?? [
     { number: 1, author: "answer", size: byteSize(original), createdAt: 0 },
   ];
@@ -162,6 +185,7 @@ export default function ArtifactDialog({
 
   const latest = revisions[revisions.length - 1]?.number ?? 1;
   const edit = (text: string) => {
+    setCompare(null);
     const next = text === saved ? null : text;
     const from = next === null ? null : (base ?? selected);
     setDraft(next);
@@ -234,6 +258,7 @@ export default function ArtifactDialog({
     if (!next) return;
     event.preventDefault();
     setTab(next);
+    setCompare(null);
     document.getElementById(`${uid}-${next}-tab`)?.focus();
   };
 
@@ -307,7 +332,10 @@ export default function ArtifactDialog({
               aria-selected={tab === name}
               aria-controls={`${uid}-${name}-panel`}
               tabIndex={tab === name ? 0 : -1}
-              onClick={() => setTab(name)}
+              onClick={() => {
+                setTab(name);
+                setCompare(null);
+              }}
               onKeyDown={onTabKey}
             >
               {name === "preview" ? "Preview" : "Source"}
@@ -319,7 +347,11 @@ export default function ArtifactDialog({
           <select
             value={selected}
             disabled={loading || draft !== null || revisions.length < 2}
-            onChange={(event) => setSelected(Number(event.target.value))}
+            onChange={(event) => {
+              setSelected(Number(event.target.value));
+              setCompare(null);
+              setCompareProblem("");
+            }}
             aria-describedby={draft !== null ? `${uid}-unsaved` : undefined}
           >
             {revisions.map((revision) => (
@@ -329,7 +361,57 @@ export default function ArtifactDialog({
             ))}
           </select>
         </label>
+        {revisions.length > 1 && (
+          <label className="artifact-revision">
+            <span className="sr-only">Compare with revision</span>
+            <select
+              value={compare ?? ""}
+              disabled={loading || missing || draft !== null}
+              onChange={(event) => {
+                setCompare(event.target.value ? Number(event.target.value) : null);
+                setCompareProblem("");
+              }}
+            >
+              <option value="">Compare revisions</option>
+              {revisions
+                .filter((revision) => revision.number !== selected)
+                .map((revision) => (
+                  <option key={revision.number} value={revision.number}>
+                    Compare with revision {revision.number}
+                  </option>
+                ))}
+            </select>
+          </label>
+        )}
       </div>
+      {compare !== null && (
+        <section
+          className="artifact-diff"
+          aria-label={`Changes from revision ${compare} to revision ${selected}`}
+        >
+          {compareProblem ? (
+            <p role="alert" className="notice notice--error">
+              {compareProblem}
+            </p>
+          ) : compareMissing || saved === undefined ? (
+            <p role="status">Reading revision {compare}…</p>
+          ) : (
+            <RevisionDiff
+              before={sources.get(compare)!}
+              after={saved}
+              beforeNumber={compare}
+              afterNumber={selected}
+              onDownload={() => {
+                save(
+                  sources.get(compare)!,
+                  fileName(`${title}-revision-${compare}`, kind, language),
+                );
+                save(saved, fileName(`${title}-revision-${selected}`, kind, language));
+              }}
+            />
+          )}
+        </section>
+      )}
       {draft !== null && (
         <p id={`${uid}-unsaved`} className="artifact-unsaved text-sm">
           {tab === "preview"
@@ -344,7 +426,7 @@ export default function ArtifactDialog({
         role="tabpanel"
         aria-labelledby={`${uid}-preview-tab`}
         className="artifact-dialog-body"
-        hidden={tab !== "preview"}
+        hidden={tab !== "preview" || compare !== null}
       >
         {preview}
       </div>
@@ -353,7 +435,7 @@ export default function ArtifactDialog({
         role="tabpanel"
         aria-labelledby={`${uid}-source-tab`}
         className="artifact-dialog-body"
-        hidden={tab !== "source"}
+        hidden={tab !== "source" || compare !== null}
       >
         {
           <div className="artifact-source">
@@ -400,5 +482,85 @@ export default function ArtifactDialog({
         </p>
       )}
     </dialog>
+  );
+}
+
+function RevisionDiff({
+  before,
+  after,
+  beforeNumber,
+  afterNumber,
+  onDownload,
+}: {
+  before: string;
+  after: string;
+  beforeNumber: number;
+  afterNumber: number;
+  onDownload: () => void;
+}) {
+  const result = useMemo(() => {
+    try {
+      const lines = lineDiff(before, after);
+      const rows: { before?: DiffLine; after?: DiffLine }[] = [];
+      for (let i = 0; i < lines.length;) {
+        const line = lines[i]!;
+        if (line.type === "same") {
+          rows.push({ before: line, after: line });
+          i++;
+          continue;
+        }
+        const removed: DiffLine[] = [],
+          added: DiffLine[] = [];
+        while (i < lines.length && lines[i]!.type !== "same") {
+          const changed = lines[i++]!;
+          (changed.type === "removed" ? removed : added).push(changed);
+        }
+        for (let j = 0; j < Math.max(removed.length, added.length); j++)
+          rows.push({ before: removed[j], after: added[j] });
+      }
+      return { rows, error: "" };
+    } catch (error) {
+      return { rows: [], error: error instanceof Error ? error.message : String(error) };
+    }
+  }, [before, after]);
+  return (
+    <>
+      <div className="flex flex-wrap items-center justify-between gap-2 pb-2 text-sm">
+        <h3>
+          Revision {beforeNumber} → Revision {afterNumber}
+        </h3>
+        <button type="button" className="act" onClick={onDownload}>
+          <Download size={14} aria-hidden="true" /> Download both
+        </button>
+      </div>
+      {result.error ? (
+        <p role="status">{result.error}</p>
+      ) : (
+        <div className="artifact-diff-lines" tabIndex={0} role="region" aria-label="Compared lines">
+          {result.rows.map((row, index) => (
+            <div key={index} className="artifact-diff-line">
+              <span className="diff-before" data-change={row.before?.type ?? "empty"}>
+                {row.before?.type === "removed" ? (
+                  <del>− {row.before.text || " "}</del>
+                ) : row.before?.type === "same" ? (
+                  `  ${row.before.text}`
+                ) : null}
+              </span>
+              <span
+                className="diff-after"
+                data-change={row.after?.type ?? "empty"}
+                aria-hidden={row.after?.type === "same" ? true : undefined}
+              >
+                {row.after?.type === "added" ? (
+                  <ins>+ {row.after.text || " "}</ins>
+                ) : row.after?.type === "same" ? (
+                  `  ${row.after.text}`
+                ) : null}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
   );
 }

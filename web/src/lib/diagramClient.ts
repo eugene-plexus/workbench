@@ -15,6 +15,7 @@
  */
 
 import { useCallback, useSyncExternalStore } from "react";
+import { useTheme } from "./display";
 import type { Picture } from "./diagramMarkup";
 import { workerQueue, type Outcome, type Queue } from "./workerQueue";
 
@@ -160,25 +161,6 @@ function pagePalette(): Palette {
   if (typeof document === "undefined") return {};
   const style = getComputedStyle(document.documentElement);
   return readPalette((name) => style.getPropertyValue(name));
-}
-
-const light =
-  typeof window !== "undefined" && typeof window.matchMedia === "function"
-    ? window.matchMedia("(prefers-color-scheme: light)")
-    : null;
-
-function listenScheme(listener: () => void): () => void {
-  light?.addEventListener("change", listener);
-  return () => light?.removeEventListener("change", listener);
-}
-
-/** The theme the page is in (it follows the system's). */
-export function useScheme(): Scheme {
-  return useSyncExternalStore(
-    listenScheme,
-    () => (light?.matches ? "light" : "dark"),
-    () => "dark",
-  );
 }
 
 // --- what the page shows ----------------------------------------------------------------
@@ -334,7 +316,7 @@ function subscribe(key: string, listener: () => void): () => void {
  * failed. Until `wanted` it is not asked for (one already kept is shown).
  */
 export function useDiagram(source: string, wanted = true): Shown {
-  const scheme = useScheme();
+  const scheme = useTheme();
   const key = keyOf(scheme, source);
   const listen = useCallback(
     (listener: () => void) => (wanted ? subscribe(key, listener) : () => undefined),

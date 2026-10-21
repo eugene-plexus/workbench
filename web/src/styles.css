@@ -149,11 +149,8 @@
   --hl-punct: var(--muted);
 
   --radius: 4px;
-  /* A line is capped by a count of characters (75 on average, 80 at most), and
-     a count is a width in em of the text's own size: 33.88 em is 36 rem at the
-     17 px reading size, and 474 px at 14 px. Measured in Chrome, both hold 74
-     on average and 78 at most; 36 rem at 14 px holds 92. */
-  --measure: 33.88em;
+  /* The viewer can choose 34 rem, 36 rem or the full column. */
+  --measure: 36rem;
   --font-ui: "IBM Plex Sans Variable", "IBM Plex Sans", system-ui, -apple-system, sans-serif;
   --font-code: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
 }
@@ -432,7 +429,7 @@ textarea {
 
 /* Prose keeps to the measure, in em of its own size; code and tables use the
    whole column. */
-.answer > :is(p, ul, ol, blockquote, hr, h4) {
+.answer > :is(p, ul, ol, blockquote, hr, [data-md="h4"]) {
   max-width: var(--measure);
 }
 
@@ -456,38 +453,46 @@ textarea {
 }
 
 /* Headings */
-.answer :is(h1, h2, h3, h4, h5, h6) {
+.answer
+  :is(
+    [data-md="h1"],
+    [data-md="h2"],
+    [data-md="h3"],
+    [data-md="h4"],
+    [data-md="h5"],
+    [data-md="h6"]
+  ) {
   color: var(--foreground-strong);
   font-weight: 600;
   text-wrap: balance;
 }
-.answer :is(h1, h2, h3) {
+.answer :is([data-md="h1"], [data-md="h2"], [data-md="h3"]) {
   color: var(--heading);
 }
-.answer h1 {
+.answer [data-md="h1"] {
   font-size: 1.5em;
   line-height: 1.2;
   letter-spacing: -0.018em;
   margin: 1.6em 0 0.5em;
 }
-.answer h2 {
+.answer [data-md="h2"] {
   font-size: 1.25em;
   line-height: 1.25;
   letter-spacing: -0.012em;
   margin: 1.6em 0 0.45em;
 }
-.answer h3 {
+.answer [data-md="h3"] {
   font-size: 1.1em;
   line-height: 1.3;
   letter-spacing: -0.006em;
   margin: 1.5em 0 0.4em;
 }
-.answer h4 {
+.answer [data-md="h4"] {
   font-size: 1em;
   line-height: 1.4;
   margin: 1.4em 0 0.3em;
 }
-.answer :is(h5, h6) {
+.answer :is([data-md="h5"], [data-md="h6"]) {
   color: var(--muted);
   font-size: 0.8125em;
   line-height: 1.4;
@@ -495,30 +500,29 @@ textarea {
   text-transform: uppercase;
   margin: 1.6em 0 0.35em;
 }
-.answer h6 {
+.answer [data-md="h6"] {
   font-weight: 500;
 }
-/* A heading's em is its own size, so its cap is the measure divided by its
-   scale: the same width as the prose around it. */
-.answer > h1 {
-  max-width: calc(var(--measure) / 1.5);
+/* Headings keep the same reading width as the prose around them. */
+.answer > [data-md="h1"] {
+  max-width: var(--measure);
 }
-.answer > h2 {
-  max-width: calc(var(--measure) / 1.25);
+.answer > [data-md="h2"] {
+  max-width: var(--measure);
 }
-.answer > h3 {
-  max-width: calc(var(--measure) / 1.1);
+.answer > [data-md="h3"] {
+  max-width: var(--measure);
 }
-.answer > :is(h5, h6) {
-  max-width: calc(var(--measure) / 0.8125);
+.answer > :is([data-md="h5"], [data-md="h6"]) {
+  max-width: var(--measure);
 }
 /* The hairline under h1 and h2, and the segment that closes it. */
-.answer :is(h1, h2) {
+.answer :is([data-md="h1"], [data-md="h2"]) {
   position: relative;
   padding-bottom: 0.3em;
   border-bottom: 1px solid var(--rule);
 }
-.answer :is(h1, h2)::after {
+.answer :is([data-md="h1"], [data-md="h2"])::after {
   content: "";
   position: absolute;
   inset-inline-start: 0;
@@ -528,7 +532,16 @@ textarea {
   background: var(--accent-right);
 }
 /* The heading's own bottom margin is the gap; the next block adds none. */
-.answer :is(h1, h2, h3, h4, h5, h6) + * {
+.answer
+  :is(
+    [data-md="h1"],
+    [data-md="h2"],
+    [data-md="h3"],
+    [data-md="h4"],
+    [data-md="h5"],
+    [data-md="h6"]
+  )
+  + * {
   margin-top: 0;
 }
 
@@ -541,7 +554,19 @@ textarea {
   color: var(--heading);
 }
 /* Plex Mono is loaded at 400 only: code inside a bolder run stays at it. */
-.answer :is(strong, b, h1, h2, h3, h4, h5, h6, th) code {
+.answer
+  :is(
+    strong,
+    b,
+    [data-md="h1"],
+    [data-md="h2"],
+    [data-md="h3"],
+    [data-md="h4"],
+    [data-md="h5"],
+    [data-md="h6"],
+    th
+  )
+  code {
   font-weight: 400;
 }
 .answer del {
@@ -761,7 +786,7 @@ textarea {
 .answer.answer-quiet table {
   font-size: max(0.8125rem, 0.9em);
 }
-.answer.answer-quiet :is(h5, h6) {
+.answer.answer-quiet :is([data-md="h5"], [data-md="h6"]) {
   font-size: max(0.8125rem, 0.8125em);
 }
 .answer.answer-quiet > ul > li::marker {
@@ -955,9 +980,43 @@ textarea {
 .chart-s11 {
   --series: var(--border-hover);
 }
-.chart [class^="chart-s"] rect,
-.chart [class^="chart-s"] circle {
+.chart-marker,
+.chart-pattern-base {
   fill: var(--series);
+}
+.chart-pattern-line {
+  stroke: var(--panel);
+  stroke-width: 2;
+}
+.chart-pie-slice {
+  stroke: var(--panel);
+  stroke-width: 1;
+}
+.chart-bar-marker .chart-marker,
+.chart-pie-marker .chart-marker {
+  fill: var(--panel);
+  stroke: var(--foreground-strong);
+  stroke-width: 1;
+}
+.chart [tabindex="0"]:focus-visible {
+  outline: 2px solid var(--foreground-strong);
+  outline-offset: 3px;
+}
+.chart-wrap {
+  position: relative;
+}
+.chart-tooltip {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  max-width: calc(100% - 1rem);
+  padding: 0.375rem 0.5rem;
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--foreground-strong);
+  font-size: 0.8125rem;
+  pointer-events: none;
 }
 .chart .chart-line {
   fill: none;
@@ -978,12 +1037,14 @@ textarea {
   align-items: center;
   gap: 0.375rem;
 }
-.chart-swatch {
-  display: inline-block;
-  width: 0.75rem;
-  height: 0.75rem;
-  border-radius: 2px;
-  background: var(--series);
+.chart-legend-mark {
+  width: 2rem;
+  height: 1rem;
+  overflow: visible;
+}
+.chart-legend-mark line {
+  stroke: var(--series);
+  stroke-width: 2;
 }
 .data-table {
   display: flex;
@@ -1165,7 +1226,7 @@ textarea {
   color: var(--muted);
   font-size: 0.875em;
 }
-.answer [data-footnotes] > h2 {
+.answer [data-footnotes] > [data-md="h2"] {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -2249,6 +2310,50 @@ textarea {
 .artifact-dialog-body[hidden] {
   display: none;
 }
+.artifact-diff {
+  flex: 1;
+  min-height: 8rem;
+  padding: 0.75rem;
+  overflow: auto;
+  border-bottom: 1px solid var(--rule);
+}
+.artifact-diff-lines {
+  font: 0.8125rem/1.6 var(--font-code);
+}
+.artifact-diff-line > span {
+  display: block;
+  min-width: 0;
+  padding-inline: 0.5rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.artifact-diff-line .diff-after[data-change="same"],
+.artifact-diff-line > span[data-change="empty"] {
+  display: none;
+}
+.artifact-diff-line .diff-before[data-change="removed"] {
+  background: var(--status-error-bg);
+  color: var(--status-error-fg);
+}
+.artifact-diff-line .diff-after[data-change="added"] {
+  background: var(--status-ok-bg);
+  color: var(--status-ok-fg);
+}
+.artifact-diff ins {
+  text-decoration: none;
+}
+@media (min-width: 1024px) {
+  .artifact-diff-line {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .artifact-diff .artifact-diff-line > span[data-change] {
+    display: block;
+  }
+  .artifact-diff-line .diff-after {
+    border-inline-start: 1px solid var(--rule);
+  }
+}
 .artifact-picture {
   overflow: auto;
 }
@@ -2339,3 +2444,198 @@ textarea {
   }
 }
 /* ---- end RC5 ---- */
+
+/* The viewer's effective theme, including a system choice. */
+:root[data-theme="dark"] {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  color-scheme: dark;
+
+  /* ground */
+  --background: #141619;
+  --foreground: #e6e8ea;
+  --panel: #1b1e22;
+  --panel-soft: #23272c;
+  --panel-hover: #2b3037;
+
+  /* text, brightest first (foreground is the body) */
+  --foreground-strong: #f4f6f7;
+  /* An answer's own text. The body in dark; in light a notch softer than ink,
+     so bold and headings have somewhere to go. */
+  --foreground-read: var(--foreground);
+  --muted: #b3b9bf;
+  --faint: #959aa0;
+
+  /* the answer's labels and boundaries */
+  --heading: #ebc3a1;
+  --accent-right: #e2a16d;
+  /* Warm text, where a mark's colour is not enough: inline code, on its soft
+     fill, and an alert's label. At least 7:1 on that fill in both schemes. */
+  --accent-right-text: #eeb184;
+
+  /* you, controls, what is current */
+  --accent-left: #70b8e0;
+  --accent-hover: #91cced;
+  --accent-active: #5da3cc;
+  --on-accent-left: #0c1216;
+  --link: #91cced;
+  --link-hover: #acdff8;
+  --tint: #2b353d;
+  --tint-edge: #506473;
+
+  /* edges */
+  --border: #3a4048;
+  --border-hover: #5c646e;
+  --border-control: #737c86;
+  --rule: #3a4048;
+
+  /* status: a glyph, words and a tint, never colour alone */
+  --status-warn-fg: #e8b565;
+  --status-warn-bg: rgb(151 106 37 / 0.18);
+  --status-warn-border: #976a25;
+  --status-error-fg: #eb988e;
+  --status-error-bg: rgb(164 79 67 / 0.2);
+  --status-error-border: #a44f43;
+  --status-ok-fg: #86cda4;
+  --status-ok-bg: rgb(56 134 90 / 0.18);
+  --status-ok-border: #38865a;
+  --status-info-fg: #91cced;
+  --status-info-bg: rgb(112 184 224 / 0.12);
+  --status-info-border: #46758e;
+  --danger-edge: #bd7d72;
+
+  /* what the browser would otherwise decide */
+  --selection: rgb(112 184 224 / 0.34);
+  --scrollbar-thumb: #68717b;
+  --scrollbar-thumb-hover: #8793a0;
+
+  /* code colours come from the tokens above, so light follows */
+  --hl-keyword: var(--link);
+  --hl-string: var(--status-ok-fg);
+  --hl-number: var(--status-warn-fg);
+  --hl-title: var(--heading);
+  --hl-attr: var(--status-error-fg);
+  --hl-comment: var(--faint);
+  --hl-punct: var(--muted);
+
+  --radius: 4px;
+  /* The viewer can choose 34 rem, 36 rem or the full column. */
+  --measure: 36rem;
+  --font-ui: "IBM Plex Sans Variable", "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --font-code: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --background: #fafafb;
+  --foreground: #0d0d10;
+  --panel: #ffffff;
+  --panel-soft: #f3f3f5;
+  --panel-hover: #e7e7eb;
+
+  --foreground-strong: #0d0d10;
+  --foreground-read: #202023;
+  --muted: #5a5a63;
+  --faint: #6b6b73;
+
+  --heading: #8f2f5e;
+  --accent-right: #cf3a85;
+  --accent-right-text: #a10260;
+
+  --accent-left: #2a55e6;
+  --accent-hover: #1f42c4;
+  --accent-active: #1a37a8;
+  --on-accent-left: #ffffff;
+  --link: #2a55e6;
+  --link-hover: #1f42c4;
+  --tint: #e8edfc;
+  --tint-edge: #a7b2dc;
+
+  --border: #e3e3e8;
+  --border-hover: #8a8a93;
+  --border-control: #80808a;
+  --rule: #c4c4cc;
+
+  --status-warn-fg: #7c3f08;
+  --status-warn-bg: rgb(243 194 90 / 0.18);
+  --status-warn-border: #f3c25a;
+  --status-error-fg: #971838;
+  --status-error-bg: rgb(242 154 169 / 0.18);
+  --status-error-border: #f29aa9;
+  --status-ok-fg: #07664d;
+  --status-ok-bg: rgb(122 220 176 / 0.18);
+  --status-ok-border: #7adcb0;
+  --status-info-fg: #1f42c4;
+  --status-info-bg: rgb(42 85 230 / 0.07);
+  --status-info-border: #9aaaf0;
+  --danger-edge: #c24a68;
+
+  --selection: rgb(42 85 230 / 0.22);
+  --scrollbar-thumb: #8a8a93;
+  --scrollbar-thumb-hover: #5a5a63;
+}
+
+:root[data-theme="light"] {
+  -webkit-font-smoothing: auto;
+  -moz-osx-font-smoothing: auto;
+}
+
+@media (prefers-contrast: more) {
+  :root[data-theme="dark"] {
+    --foreground: #ffffff;
+    --foreground-strong: #ffffff;
+    --muted: #d0d4d8;
+    --faint: #c4c9ce;
+    --heading: #f0d5c0;
+    --accent-right: #e0ab82;
+    --accent-right-text: #e7b288;
+    /* The primary button's states keep their direction: lighter when hovered,
+       darker when pressed. */
+    --accent-left: #a9d0e8;
+    --accent-hover: #bcdcf0;
+    --accent-active: #8bb8d4;
+    --link: #b4d6ec;
+    --link-hover: #cfe5f3;
+    --border: #939ba5;
+    --border-hover: #aab2bb;
+    --border-control: #aab2bb;
+    --rule: #939ba5;
+    --status-warn-fg: #ecc08a;
+    --status-error-fg: #f0b4ad;
+    --status-ok-fg: #a9d7b9;
+  }
+}
+@media (prefers-contrast: more) {
+  :root[data-theme="light"] {
+    --foreground: #000000;
+    --foreground-strong: #000000;
+    --foreground-read: #000000;
+    --muted: #44444c;
+    --faint: #4a4a52;
+    --heading: #6f2a4d;
+    --accent-right: #a3326b;
+    /* Text, not a mark: 7:1 on every surface (the mark's colour is 5.9:1 on a
+       soft fill). */
+    --accent-right-text: #842758;
+    /* The primary button's states keep their direction: darker when hovered
+       and again when pressed. */
+    --accent-left: #1a3eb7;
+    --accent-hover: #1638a8;
+    --accent-active: #112d8c;
+    --link: #1a3eb7;
+    --link-hover: #1a3eb7;
+    --status-info-fg: #1b3bbd;
+    --border: #62626c;
+    --border-hover: #4a4a52;
+    --border-control: #4a4a52;
+    --rule: #62626c;
+    --status-warn-fg: #6a3406;
+    --status-error-fg: #7d1230;
+    --status-ok-fg: #05523d;
+  }
+}
+
+.speaker-label {
+  font-family: var(--font-code);
+  font-size: 0.75rem;
+}
