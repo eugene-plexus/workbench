@@ -170,8 +170,8 @@ FIELDS = [
         description=(
             "How long Workbench hides the data of a person removed from Eugene before it "
             "deletes it.\n\n"
-            "Deleting removes every copy Workbench keeps. A change moves every date not yet "
-            "reached."
+            "Deleting removes every copy Workbench keeps. A change applies to people removed "
+            "after it: people already removed keep their dates."
         ),
         category="people",
         valueType=ConfigValueType.integer,

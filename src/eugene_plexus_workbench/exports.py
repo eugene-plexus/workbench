@@ -31,6 +31,7 @@ import os
 import re
 import secrets
 import sqlite3
+import threading
 import time
 import unicodedata
 import zipfile
@@ -53,6 +54,12 @@ router = APIRouter()
 EXPORT_SECONDS = 24 * 3600.0
 #: A person's own download, and the owner's of another person.
 SELF, OWNER = "self", "owner"
+#: What a download a stop cut off says, at the next start.
+INTERRUPTED = "The download was cut off when Workbench stopped. Make it again."
+
+
+class _Dropped(Exception):
+    """A download was deleted while it was being written: nothing of it is kept."""
 
 
 def _stamp(moment: float | None) -> str | None:
@@ -135,6 +142,18 @@ class Exports:
         self.dir = data_dir / "exports"
         self.state = state
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        #: Each download's writer: told to stop, and its thread, which runs on after the task
+        #: that waits for it is cancelled (`drop` and `aclose` wait for it).
+        self._writers: dict[str, tuple[threading.Event, asyncio.Future[Any]]] = {}
+
+    async def resume(self) -> int:
+        """Start: a download a stop cut off fails, saying so, and its half-written file goes, so
+        the person can make it again at once. How many."""
+        cut = await self.store.fail_unfinished_exports(INTERRUPTED)
+        for export_id in cut:
+            with contextlib.suppress(OSError, ValueError):
+                self.path_of(export_id).with_suffix(".part").unlink(missing_ok=True)
+        return len(cut)
 
     def path_of(self, export_id: str) -> Path:
         if not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", export_id):
@@ -195,6 +214,7 @@ class Exports:
 
             memory = await memory_export(self.state, sub, name, server_too=row["scope"] == SELF)
         root, target = self.data_dir, self.path_of(row["id"])
+        abort = threading.Event()
 
         def write() -> tuple[dict[str, int], int]:
             self.dir.mkdir(parents=True, exist_ok=True)
@@ -313,20 +333,35 @@ class Exports:
                         holds["documents"] += 1
                 archive.writestr("README.txt", _readme(row, holds, full))
             size = partial.stat().st_size
+            if abort.is_set():  # deleted while it was written: nothing of it is kept
+                partial.unlink(missing_ok=True)
+                raise _Dropped
             os.replace(partial, target)
             return holds, size
 
-        return await asyncio.to_thread(write)
+        export_id = row["id"]
+        writer: asyncio.Future[Any] = asyncio.ensure_future(asyncio.to_thread(write))
+        self._writers[export_id] = (abort, writer)
+        writer.add_done_callback(lambda _: self._writers.pop(export_id, None))
+        result: tuple[dict[str, int], int] = await asyncio.shield(writer)
+        return result
 
     async def drop(self, sub: str) -> int:
         """Delete every download that may hold the person's data, theirs or of them, and stop
         any being made. Their log rows stay, marked deleted. How many files went."""
         gone = 0
         for row in await self.store.exports_holding(sub):
+            writing = self._writers.get(row["id"])
+            if writing is not None:
+                writing[0].set()
             task = self._tasks.pop(row["id"], None)
             if task is not None:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
+            if writing is not None:
+                # Its thread runs on after the task is cancelled: no file is removed, or the
+                # row marked deleted, until it has ended (and kept nothing).
+                await asyncio.gather(writing[1], return_exceptions=True)
             target = self.path_of(row["id"])
             for candidate in (target, target.with_suffix(".part")):
                 if candidate.exists():
@@ -351,10 +386,13 @@ class Exports:
         return gone
 
     async def aclose(self) -> None:
+        writers = list(self._writers.values())
+        for abort, _ in writers:
+            abort.set()
         tasks = list(self._tasks.values())
         for task in tasks:
             task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*tasks, *(w for _, w in writers), return_exceptions=True)
 
 
 def _readme(row: dict[str, Any], holds: dict[str, int], full: bool) -> str:

@@ -301,6 +301,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         courier.start()
         # Row 7: downloads of people's data, and what happens to a removed person's.
         exports = app.state.exports = Exports(store, settings.data_dir, app.state)
+        cut = await exports.resume()
+        if cut:
+            log.info("%d download(s) were cut off by the last stop; each can be made again", cut)
         removal = app.state.removal = Removal(
             store,
             provider,
@@ -310,6 +313,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             folder_sync=folder_sync,
             servers=app.state.memory_servers,
             exports=exports,
+            media=media,
+            courier=courier,
         )
         sessions.on_refused = removal.soon
         removal.start()

@@ -647,6 +647,11 @@ class Courier:
         self._wake = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self._closing = False
+        #: Row 7: people removed from Eugene, to whose servers nothing more is sent, and how
+        #: many calls are in flight for each person, so a purge can wait for them (`drain`).
+        self._stopped: set[str] = set()
+        self._busy: dict[str, int] = {}
+        self._calm = asyncio.Condition()
 
     def start(self) -> None:
         if self._task is None:
@@ -654,6 +659,23 @@ class Courier:
 
     def poke(self) -> None:
         self._wake.set()
+
+    def stop_owner(self, owner: str) -> None:
+        """The person was removed from Eugene: nothing more of theirs is sent or forgotten here
+        (the purge forgets what was sent)."""
+        self._stopped.add(owner)
+
+    def allow_owner(self, owner: str) -> None:
+        """Eugene has the person again."""
+        self._stopped.discard(owner)
+
+    async def drain(self, owner: str) -> None:
+        """Stop the person, and wait for a call to their server already in flight to end. A send
+        that ends after its row was deleted leaves a row to forget (`_one`), which the purge
+        then forgets with the rest."""
+        self.stop_owner(owner)
+        async with self._calm:
+            await self._calm.wait_for(lambda: not self._busy.get(owner))
 
     def finished(self, chat_id: str) -> None:
         """An answer in a chat ended: queue its exchange for the person's server, if any."""
@@ -701,10 +723,14 @@ class Courier:
         now = time.time() if now is None else now
         settled = 0
         for row in await self.store.memory_server_due(now):
+            if row["owner"] in self._stopped:
+                continue
             if now - row["created_at"] > GIVE_UP_SECONDS:
                 await self.store.memory_server_drop(row["document_id"])
                 log.warning("memory servers: gave up on one %s after a day", row["state"])
                 continue
+            owner = row["owner"]
+            self._busy[owner] = self._busy.get(owner, 0) + 1
             try:
                 if await self._one(row):
                     settled += 1
@@ -715,6 +741,12 @@ class Courier:
                     )
                 delay = RETRY_SECONDS[min(row["attempts"], len(RETRY_SECONDS) - 1)]
                 await self.store.memory_server_retry(row["document_id"], now + delay)
+            finally:
+                async with self._calm:
+                    self._busy[owner] -= 1
+                    if not self._busy[owner]:
+                        del self._busy[owner]
+                    self._calm.notify_all()
         return settled
 
     async def _one(self, row: dict[str, Any]) -> bool:

@@ -145,6 +145,8 @@ class Removal:
         folder_sync: Any = None,
         servers: Any = None,
         exports: Any = None,
+        media: Any = None,
+        courier: Any = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.store = store
@@ -155,6 +157,8 @@ class Removal:
         self.folder_sync = folder_sync
         self.servers = servers
         self.exports = exports
+        self.media = media
+        self.courier = courier
         self.clock = clock
         self._asking = asyncio.Lock()
         self._purges: dict[str, asyncio.Task[None]] = {}
@@ -282,6 +286,8 @@ class Removal:
         all" (`removedPeopleRetention`), a confirmed removal is deleted at once, by the same
         purge as Delete now; a held one still waits for the owner (nothing on a guess)."""
         at_once = await config.removed_people_retention(self.store) == config.RETENTION_NONE
+        # The date is fixed now, from the setting now: a later change never shortens it.
+        days = await config.removed_people_days(self.store)
         now = self.clock()
         entries = [
             (
@@ -289,13 +295,14 @@ class Removal:
                 p["name"],
                 "hidden" if p.get("known_at") is not None else "held",
                 now if p.get("known_at") is not None else None,
+                now + days * DAY if p.get("known_at") is not None else None,
             )
             for p in people
             if p["sub"] != "operator"
         ]
         done = await self.store.hide_people(entries)
         names = {p["sub"]: p["name"] for p in people}
-        confirmed = {sub for sub, _, state, _ in entries if state == "hidden"}
+        confirmed = {entry[0] for entry in entries if entry[2] == "hidden"}
         for sub in done:
             await self.stop(sub)
             if at_once and sub in confirmed:
@@ -307,8 +314,13 @@ class Removal:
                 )
         return done
 
-    async def stop(self, sub: str) -> None:
-        """Everything running for the person ends, and their index is closed for good."""
+    async def stop(self, sub: str, *, drain: bool = False) -> None:
+        """Everything running for the person ends, and their index is closed for good: their
+        answers, their folder checks, and their media jobs (stopped, and their files written or
+        not before this returns, so none makes their folder again after it is removed). Nothing
+        more is sent to their memory server. With `drain` (the purge), this also waits for a
+        send already in flight, so what it sent is forgotten with the rest before the server's
+        address and token go."""
         indexes = getattr(self.saved, "indexes", None)
         if indexes is not None:
             indexes.refuse(sub)
@@ -319,11 +331,20 @@ class Removal:
                     await self.answers.stop(chat_id)
         if self.folder_sync is not None:
             await self.folder_sync.stop_person(sub)
+        if self.media is not None:
+            await self.media.stop_person(sub)
+        if self.courier is not None:
+            if drain:
+                await self.courier.drain(sub)
+            else:
+                self.courier.stop_owner(sub)
 
     def _allow(self, sub: str) -> None:
         indexes = getattr(self.saved, "indexes", None)
         if indexes is not None:
             indexes.allow(sub)
+        if self.courier is not None:
+            self.courier.allow_owner(sub)
 
     async def signed_in(self, sub: str) -> str | None:
         """Someone signed in, so Eugene has them: if they were removed, they are not any more.
@@ -366,13 +387,13 @@ class Removal:
     # --- deleting --------------------------------------------------------------
 
     async def due(self) -> list[str]:
-        """Start the purge of everyone whose delete date has passed."""
-        days = await config.removed_people_days(self.store)
+        """Start the purge of everyone whose delete date has passed. The date is each one's
+        own, fixed when their wait began (`delete_at`)."""
         now = self.clock()
         started = []
         for row in await self.store.removed_people():
-            if row["state"] == "hidden" and row["clock_from"] is not None:
-                if row["clock_from"] + days * DAY <= now:
+            if row["state"] == "hidden" and row["delete_at"] is not None:
+                if row["delete_at"] <= now:
                     self.purge_soon(row["sub"])
                     started.append(row["sub"])
             elif row["state"] == "purging":
@@ -411,7 +432,7 @@ class Removal:
         ):
             return
         name, steps = str(row["name"]), dict(row["steps"])
-        await self.stop(sub)
+        await self.stop(sub, drain=True)
         failed: dict[str, str] = {}
         for step in STEPS:
             # The memory step is not tried twice: what it could not clear is said, and stays.
@@ -512,7 +533,7 @@ class Removal:
         return {
             "retention": await config.removed_people_retention(self.store),
             "days": days,
-            "people": [row_view(r, days) for r in await self.store.removed_people()],
+            "people": [row_view(r) for r in await self.store.removed_people()],
             "brake": (
                 {
                     "count": len(brake.get("subs") or []),
@@ -529,16 +550,16 @@ class Removal:
         }
 
 
-def row_view(row: dict[str, Any], days: int) -> dict[str, Any]:
-    """A removed person as Settings shows them. The delete date is worked out from the setting
-    in effect now, so it never says a date the setting no longer gives."""
-    hidden = row["state"] == "hidden" and row["clock_from"] is not None
+def row_view(row: dict[str, Any]) -> dict[str, Any]:
+    """A removed person as Settings shows them. The delete date is the one their wait was given
+    when it began (`delete_at`), which a later change of the setting does not move."""
+    hidden = row["state"] == "hidden" and row["delete_at"] is not None
     return {
         "sub": row["sub"],
         "name": row["name"],
         "state": row["state"],
         "removedAt": row["found_at"],
-        "deleteAt": row["clock_from"] + days * DAY if hidden else None,
+        "deleteAt": row["delete_at"] if hidden else None,
         "purgedAt": row["purged_at"],
         "problem": row["last_error"],
     }
@@ -593,27 +614,30 @@ async def keep(request: Request, sub: str) -> dict[str, Any]:
     _, removal = await _owner(request)
     row = await _removed_row(removal, sub)
     if not await removal.store.put_removed(
-        sub, only_from=("held", "hidden", "kept"), state="kept", clock_from=None
+        sub, only_from=("held", "hidden", "kept"), state="kept", clock_from=None, delete_at=None
     ):
         raise _problem(status.HTTP_409_CONFLICT, f"{row['name']}'s data is being deleted.")
     log.info("the owner kept %s's data until they delete it", row["name"])
-    return row_view(
-        await _removed_row(removal, sub), await config.removed_people_days(removal.store)
-    )
+    return row_view(await _removed_row(removal, sub))
 
 
 @router.post("/api/removed-people/{sub}/schedule")
 async def schedule(request: Request, sub: str) -> dict[str, Any]:
-    """Delete in N days: the clock starts now."""
+    """Delete in N days: the clock starts now, with the setting now."""
     _, removal = await _owner(request)
     row = await _removed_row(removal, sub)
+    days = await config.removed_people_days(removal.store)
+    now = time.time()
     if not await removal.store.put_removed(
-        sub, only_from=("held", "hidden", "kept"), state="hidden", clock_from=time.time()
+        sub,
+        only_from=("held", "hidden", "kept"),
+        state="hidden",
+        clock_from=now,
+        delete_at=now + days * DAY,
     ):
         raise _problem(status.HTTP_409_CONFLICT, f"{row['name']}'s data is being deleted.")
-    days = await config.removed_people_days(removal.store)
     log.info("the owner set %s's data to be deleted in %d days", row["name"], days)
-    return row_view(await _removed_row(removal, sub), days)
+    return row_view(await _removed_row(removal, sub))
 
 
 @router.post("/api/removed-people/{sub}/delete", status_code=status.HTTP_202_ACCEPTED)
@@ -625,9 +649,7 @@ async def delete_now(request: Request, sub: str) -> dict[str, Any]:
         raise _problem(status.HTTP_409_CONFLICT, f"{row['name']}'s data is already deleted.")
     await removal.delete_now(sub)
     log.info("the owner deleted %s's data now", row["name"])
-    return row_view(
-        await _removed_row(removal, sub), await config.removed_people_days(removal.store)
-    )
+    return row_view(await _removed_row(removal, sub))
 
 
 class BrakeAnswer(BaseModel):

@@ -669,13 +669,19 @@ def _removal(db: sqlite3.Connection) -> None:
         if column not in present:
             db.execute(f"ALTER TABLE people ADD COLUMN {column} {declaration}")
     states = ", ".join(f"'{s}'" for s in REMOVED_STATES)
+    # `delete_at`: when a hidden person's data is deleted, fixed when the wait began (from the
+    # setting then), so changing the setting never shortens a wait already begun (Troy).
     db.execute(
         "CREATE TABLE IF NOT EXISTS removed_people ("
         "sub TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT, "
         f"state TEXT NOT NULL CHECK (state IN ({states})), "
-        "found_at REAL NOT NULL, clock_from REAL, steps TEXT NOT NULL DEFAULT '{}', "
+        "found_at REAL NOT NULL, clock_from REAL, delete_at REAL, "
+        "steps TEXT NOT NULL DEFAULT '{}', "
         "attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, purged_at REAL)"
     )
+    present = {row[1] for row in db.execute("PRAGMA table_info(removed_people)")}
+    if "delete_at" not in present:
+        db.execute("ALTER TABLE removed_people ADD COLUMN delete_at REAL")
     db.execute(
         "CREATE TABLE IF NOT EXISTS exports ("
         "id TEXT PRIMARY KEY, asker TEXT NOT NULL, asker_name TEXT NOT NULL, "
@@ -1078,6 +1084,11 @@ def _purge_rows(db: sqlite3.Connection, sub: str) -> dict[str, int]:
         db.execute(
             f"DELETE FROM settings WHERE key IN ({', '.join('?' for _ in keys)})", tuple(keys)
         )
+    # The removal's own record stays (its id, name and dates), but not the email kept to give
+    # the data back (row 7b): it goes here, before the file is written again, so no free page,
+    # log or kept copy holds it.
+    if "email" in have.get("removed_people", set()):
+        db.execute("UPDATE removed_people SET email = NULL WHERE sub = ?", (sub,))
     return gone
 
 
@@ -5870,8 +5881,10 @@ class Store:
 
         return await self._run(go)
 
-    async def hide_people(self, hidden: Sequence[tuple[str, str, str, float | None]]) -> list[str]:
-        """Hide each `(sub, name, state, clock_from)`, in one transaction: their row in
+    async def hide_people(
+        self, hidden: Sequence[tuple[str, str, str, float | None, float | None]]
+    ) -> list[str]:
+        """Hide each `(sub, name, state, clock_from, delete_at)`, in one transaction: their row in
         `removed_people`, and their sign-ins, their connections to other apps and what waited
         to go to their memory server, gone. Their data stays until it is deleted. Which were
         hidden now (a person already removed is left as they are)."""
@@ -5884,18 +5897,20 @@ class Store:
             done: list[str] = []
             db.execute("BEGIN IMMEDIATE")
             try:
-                for sub, name, state, clock_from in hidden:
+                for sub, name, state, clock_from, delete_at in hidden:
                     # A person purged before, whom a restored Eugene brought back and who was
                     # removed again, is hidden again; anyone else already here is left alone.
                     cursor = db.execute(
                         "INSERT INTO removed_people (sub, name, email, state, found_at, "
-                        "clock_from) VALUES (?, ?, (SELECT email FROM people WHERE sub = ?), "
-                        "?, ?, ?) ON CONFLICT(sub) DO UPDATE SET "
+                        "clock_from, delete_at) VALUES (?, ?, "
+                        "(SELECT email FROM people WHERE sub = ?), ?, ?, ?, ?) "
+                        "ON CONFLICT(sub) DO UPDATE SET "
                         "name = excluded.name, email = excluded.email, state = excluded.state, "
                         "found_at = excluded.found_at, clock_from = excluded.clock_from, "
-                        "steps = '{}', attempts = 0, last_error = NULL, purged_at = NULL "
+                        "delete_at = excluded.delete_at, steps = '{}', attempts = 0, "
+                        "last_error = NULL, purged_at = NULL "
                         "WHERE removed_people.state = 'purged'",
-                        (sub, name, sub, state, now, clock_from),
+                        (sub, name, sub, state, now, clock_from, delete_at),
                     )
                     if cursor.rowcount <= 0:
                         continue
@@ -5943,7 +5958,16 @@ class Store:
         """Change a removed person's row: `state`, `clock_from`, `steps` (a dict), `attempts`,
         `last_error`, `purged_at`, `email`. With `only_from`, only while its state is one of
         those. Whether it changed."""
-        allowed = {"state", "clock_from", "steps", "attempts", "last_error", "purged_at", "email"}
+        allowed = {
+            "state",
+            "clock_from",
+            "delete_at",
+            "steps",
+            "attempts",
+            "last_error",
+            "purged_at",
+            "email",
+        }
         unknown = set(values) - allowed
         if unknown:
             raise ValueError(f"not removal fields: {sorted(unknown)}")
@@ -6181,6 +6205,27 @@ class Store:
                 )
             ]
         )
+
+    async def fail_unfinished_exports(self, error: str) -> list[str]:
+        """Start: every download still being made was cut off by a stop. Each fails with
+        `error`; their ids."""
+
+        def go() -> list[str]:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                cut = [r[0] for r in db.execute("SELECT id FROM exports WHERE state = 'making'")]
+                db.execute(
+                    "UPDATE exports SET state = 'failed', error = ? WHERE state = 'making'",
+                    (error,),
+                )
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return cut
+
+        return await self._run(go)
 
     async def exports_due(self, now: float) -> list[dict[str, Any]]:
         """Downloads kept past their day: their files go, their log rows stay."""

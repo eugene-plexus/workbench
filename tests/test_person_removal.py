@@ -18,10 +18,12 @@ import contextlib
 import io
 import json
 import sqlite3
+import threading
 import time
 import zipfile
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -171,14 +173,35 @@ def _rows_of(db: sqlite3.Connection, who: str) -> dict[str, int]:
     return found
 
 
+def _holds(data: bytes, needle: bytes) -> bool:
+    """Whether these bytes hold `needle`, looking inside a ZIP's members too: a download's
+    contents are compressed, so its raw bytes never show a word it keeps."""
+    if needle in data:
+        return True
+    if data[:4] != b"PK\x03\x04":
+        return False
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            return any(_holds(archive.read(name), needle) for name in archive.namelist())
+    except zipfile.BadZipFile:
+        return False
+
+
 def _holding(directory: Path, mark: str) -> list[str]:
-    """Every file under `directory` whose bytes hold `mark`."""
+    """Every file under `directory` that holds `mark`, a ZIP's members included."""
     needle = mark.encode()
     return sorted(
         str(p.relative_to(directory))
         for p in directory.rglob("*")
-        if p.is_file() and needle in p.read_bytes()
+        if p.is_file() and _holds(p.read_bytes(), needle)
     )
+
+
+def test_the_scan_finds_a_word_inside_a_download(tmp_path: Path) -> None:
+    with zipfile.ZipFile(tmp_path / "kept.zip", "w", compression=zipfile.ZIP_DEFLATED) as made:
+        made.writestr("chats.json", json.dumps({"words": MARK["a"] * 20}))
+    assert MARK["a"].encode() not in (tmp_path / "kept.zip").read_bytes()
+    assert _holding(tmp_path, MARK["a"]) == ["kept.zip"]
 
 
 def _purge(path: Path, sub: str) -> list[Path]:
@@ -296,6 +319,216 @@ def test_the_memory_server_forgets_what_workbench_sent_and_is_never_purged(
     assert all(wanted == {"document_id": "c1:m1"} for _, wanted in calls)
     assert len(calls) == min(fails + 1, 3)
     assert (owed == []) == (done == "done")
+
+
+#: A short MP3, as a gateway's speech answer starts (c3's).
+SPOKEN = b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\xff\xfb\x90\x00" + bytes(400)
+
+
+class _SlowHub:
+    """A gateway whose speech answer waits until it is let go."""
+
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+
+    async def speech(self, body: dict[str, Any]) -> tuple[bytes, dict[str, str]]:
+        await self.release.wait()
+        return SPOKEN, {}
+
+
+def test_a_removed_persons_media_job_is_stopped_before_the_purge(tmp_path: Path) -> None:
+    """A speech job running when its person is purged would make their folder and a file row
+    again after the purge: stopping the person stops and drains it first."""
+    from eugene_plexus_workbench.media import MediaJobs
+    from eugene_plexus_workbench.removal import Removal
+    from eugene_plexus_workbench.store import MediaRow
+
+    async def go() -> tuple[list[Any], bool]:
+        store = Store(tmp_path / "workbench.sqlite3")
+        await store.open()
+        hub = _SlowHub()
+        jobs = MediaJobs(store, hub, tmp_path)  # type: ignore[arg-type]
+        try:
+            row = MediaRow(
+                id="m-1",
+                owner="p-ann",
+                door="speech",
+                kind="made",
+                status="running",
+                created_at=time.time(),
+                request={"input": "hello"},
+            )
+            await jobs.start_speech(row, {"input": "hello", "model": "speaker"})
+            removal = Removal(store, None, tmp_path)  # type: ignore[arg-type]
+            removal.media = jobs
+            await removal.stop("p-ann")
+            hub.release.set()
+            await asyncio.sleep(0.3)  # time for a job that was not stopped to keep its file
+            return await store.files_for_media(["m-1"]), jobs.running("m-1")
+        finally:
+            hub.release.set()
+            await jobs.aclose()
+            await store.close()
+
+    records, running = asyncio.run(go())
+    assert records == [] and running is False
+    assert not (tmp_path / "files" / files.person_key("p-ann")).exists()
+
+
+def test_dropping_a_download_waits_for_its_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancelling the task that waits for a download's writer does not stop the writer's
+    thread: `drop` waits for it, so no ZIP appears after the row says it was deleted."""
+    from eugene_plexus_workbench import exports as exports_module
+    from eugene_plexus_workbench.exports import OWNER, Exports
+    from eugene_plexus_workbench.store import Person
+
+    gate, inside = threading.Event(), threading.Event()
+    readme = exports_module._readme
+
+    def slow(*args: Any) -> str:
+        inside.set()
+        gate.wait(10)
+        return readme(*args)
+
+    monkeypatch.setattr(exports_module, "_readme", slow)
+
+    async def go() -> tuple[dict[str, Any] | None, list[str]]:
+        store = Store(tmp_path / "workbench.sqlite3")
+        await store.open()
+        try:
+            made = Exports(store, tmp_path, SimpleNamespace(store=store))
+            owner = Person(sub="operator", name="Owner", role="operator")
+            row = await made.request(owner, "p-ann", "Ann", OWNER, full=False)
+            assert await asyncio.to_thread(inside.wait, 10)
+            dropping = asyncio.create_task(made.drop("p-ann"))
+            await asyncio.sleep(0.2)
+            gate.set()
+            await dropping
+            await asyncio.sleep(0.3)  # time for a writer nobody waited for
+            left = sorted(p.name for p in (tmp_path / "exports").iterdir())
+            return await store.export_row(row["id"]), left
+        finally:
+            gate.set()
+            await store.close()
+
+    row, left = asyncio.run(go())
+    assert row is not None and row["state"] == "deleted"
+    assert left == []
+
+
+class _SlowServer:
+    """A person's memory server whose `retain` waits until it is let go."""
+
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+        self.inside = asyncio.Event()
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call(
+        self, server: Any, mode: str, verb: str, wanted: dict[str, Any], seconds: float = 20.0
+    ) -> list[Any]:
+        self.calls.append((verb, dict(wanted)))
+        if verb == "retain":
+            self.inside.set()
+            await self.release.wait()
+        return []
+
+
+def test_an_exchange_being_sent_when_its_person_is_removed_is_forgotten(tmp_path: Path) -> None:
+    """Hiding deletes what waits to be sent, but not a send already in flight: the purge waits
+    for it, and asks the server to forget it before its address and token go."""
+    from eugene_plexus_workbench import config
+    from eugene_plexus_workbench.memory_servers import Courier
+    from eugene_plexus_workbench.removal import Removal
+    from eugene_plexus_workbench.store import Chat, Message, Person
+
+    async def go() -> list[tuple[str, dict[str, Any]]]:
+        store = Store(tmp_path / "workbench.sqlite3")
+        await store.open()
+        server = _SlowServer()
+        try:
+            await store.put_setting(config.MEMORY_SERVERS, "any")
+            await store.upsert_person(Person(sub="p-ann", name="Ann", role="member"))
+            await store.put_memory_server(
+                "p-ann",
+                "http://example.org/mcp",
+                "",
+                "Hers",
+                {"retain": {"tool": "retain"}, "forget": {"tool": "forget"}},
+            )
+            now = time.time()
+            await store.create_chat(
+                Chat(id="c1", owner="p-ann", title="t", model="m", created_at=now, updated_at=now)
+            )
+            await store.add_message(
+                Message(
+                    id="u1",
+                    chat_id="c1",
+                    seq=0,
+                    role="user",
+                    status="done",
+                    created_at=now,
+                    content="My favourite colour is green.",
+                ),
+                parent_id=None,
+            )
+            await store.add_message(
+                Message(
+                    id="a1",
+                    chat_id="c1",
+                    seq=0,
+                    role="assistant",
+                    status="done",
+                    created_at=now,
+                    content="Noted.",
+                ),
+                parent_id="u1",
+            )
+            assert await store.queue_memory_server_send("p-ann", "c1", "a1")
+            courier = Courier(store, server)  # type: ignore[arg-type]
+            sending = asyncio.create_task(courier.once())
+            await asyncio.wait_for(server.inside.wait(), 10)
+            removal = Removal(store, None, tmp_path, servers=server)  # type: ignore[arg-type]
+            removal.courier = courier
+            await removal.hide([{"sub": "p-ann", "name": "Ann", "known_at": now}])
+            purging = asyncio.create_task(removal.purge("p-ann"))
+            await asyncio.sleep(0.3)
+            server.release.set()
+            await sending
+            await purging
+            return server.calls
+        finally:
+            server.release.set()
+            await store.close()
+
+    calls = asyncio.run(go())
+    assert ("forget", {"document_id": "c1:a1"}) in calls, calls
+
+
+def test_a_download_cut_off_by_a_restart_says_so_and_can_be_made_again(
+    world: World, ann: Browser
+) -> None:
+    now = time.time()
+    _stop(world)
+    with _open(_database(world)) as db:
+        db.execute(
+            "INSERT INTO exports (id, asker, asker_name, subject, subject_name, scope, state, "
+            "created_at, expires_at) VALUES ('cutoff-export-01', 'p-ada', 'Ada', 'p-ada', 'Ada', "
+            "'self', 'making', ?, ?)",
+            (now, now + DAY),
+        )
+    (world.data / "exports").mkdir(exist_ok=True)
+    (world.data / "exports" / "cutoff-export-01.part").write_bytes(b"PK half a file")
+    _start(world)
+    cut = next(
+        e for e in ann.get("/api/exports").json()["exports"] if e["id"] == "cutoff-export-01"
+    )
+    assert cut["state"] == "failed", cut
+    assert "Workbench stopped" in (cut["error"] or "")
+    assert not (world.data / "exports" / "cutoff-export-01.part").exists()
+    assert "chats.json" in _export(ann, "/api/me/export").namelist()
 
 
 # --------------------------------------------------------------------------- #
@@ -449,15 +682,38 @@ def test_unknown_after_known_hides(world: World, ann: Browser) -> None:
         assert db.execute("SELECT COUNT(*) FROM sessions WHERE sub = 'p-ada'").fetchone()[0] == 0
 
 
-def test_the_delete_date_follows_the_setting(world: World, ann: Browser) -> None:
+def _days_ago(world: World, sub: str, days: float) -> None:
+    """Move a removal back in time, as if it happened `days` ago."""
+    with _open(_database(world)) as db:
+        columns = {r[1] for r in db.execute("PRAGMA table_info(removed_people)")}
+        dated = [c for c in ("found_at", "clock_from", "delete_at") if c in columns]
+        db.execute(
+            f"UPDATE removed_people SET {', '.join(f'{c} = {c} - ?' for c in dated)} WHERE sub = ?",
+            (*([days * DAY] * len(dated)), sub),
+        )
+
+
+def test_a_lower_setting_never_shortens_a_wait_already_begun(world: World, ann: Browser) -> None:
+    """Troy: changing the setting never shortens the wait of people already removed. Ada was
+    removed 10 days ago under 30 days; the owner lowers it to 7; she is not due, and her date
+    stands. Bo, removed after the change, gets 7."""
+    bo = _signed_in(world, "p-bo")
     owner = _owner(world)
     del world.eugene.people["p-ada"]
     row = next(p for p in _check(owner)["people"] if p["sub"] == "p-ada")
+    _days_ago(world, "p-ada", 10)
     _settings(world, removedPeopleDays=7)
+    _check(owner)  # asks Eugene and starts whatever is due
     later = _row(owner, "p-ada")
-    assert later is not None
-    assert later["deleteAt"] == pytest.approx(row["removedAt"] + 7 * DAY)
+    assert later is not None and later["state"] == "hidden", later
+    assert later["deleteAt"] == pytest.approx(row["deleteAt"] - 10 * DAY)
+    assert later["deleteAt"] == pytest.approx(later["removedAt"] + 30 * DAY)
+    assert (world.data / "knowledge" / files.person_key("p-ada")).is_dir()
+    del world.eugene.people["p-bo"]
+    bo_row = next(p for p in _check(owner)["people"] if p["sub"] == "p-bo")
+    assert bo_row["deleteAt"] == pytest.approx(bo_row["removedAt"] + 7 * DAY)
     assert _removed(owner)["days"] == 7
+    assert bo.get("/api/me").status_code == 401
     for wrong in (0, 366, True, "30"):
         refused = httpx.patch(
             f"{world.workbench}/v1/config",
@@ -475,11 +731,7 @@ def test_after_the_wait_the_same_purge_runs(world: World, ann: Browser) -> None:
     # Not yet due: nothing is deleted.
     _check(owner)
     assert _row(owner, "p-ada")["state"] == "hidden"  # type: ignore[index]
-    with _open(_database(world)) as db:
-        db.execute(
-            "UPDATE removed_people SET clock_from = clock_from - ? WHERE sub = 'p-ada'",
-            (31 * DAY,),
-        )
+    _days_ago(world, "p-ada", 31)
     _check(owner)
     _until_purged(owner, "p-ada")
     assert _holding(world.data, MARK["a"]) == []
@@ -645,11 +897,21 @@ def test_a_removed_persons_email_is_kept_with_their_hidden_data(world: World) ->
     with _open(_database(world)) as db:
         kept = db.execute("SELECT email FROM removed_people WHERE sub = 'p-ada'").fetchone()
     assert kept == ("ada@example.com",)
+    # A copy kept while she was hidden (a later migration's) holds it too.
+    database = _database(world)
+    with (
+        _open(database) as live,
+        _open(database.with_name(f"{database.name}.schema-28.bak")) as copy,
+    ):
+        live.backup(copy)
+    assert _holding(world.data, "ada@example.com")
     owner.post("/api/removed-people/p-ada/delete")
     _until_purged(owner, "p-ada")
     with _open(_database(world)) as db:
         gone = db.execute("SELECT email FROM removed_people WHERE sub = 'p-ada'").fetchone()
     assert gone == (None,)
+    # Its bytes too: no free page, log or copy keeps the address.
+    assert _holding(world.data, "ada@example.com") == []
 
 
 def test_only_the_owner_manages_removed_people(world: World, ann: Browser) -> None:
@@ -715,6 +977,7 @@ def test_the_owner_always_exports_a_removed_person_and_it_is_logged(
     world: World, ann: Browser
 ) -> None:
     owner = _owner(world)
+    _export(ann, "/api/me/export")  # her own, before she was removed
     del world.eugene.people["p-ada"]
     _check(owner)
     archive = _export(owner, "/api/people/p-ada/export")
@@ -722,11 +985,15 @@ def test_the_owner_always_exports_a_removed_person_and_it_is_logged(
     log = _removed(owner)["exportLog"]
     assert log[0]["subjectName"] == "Ada" and log[0]["askerName"] == "Owner"
     assert log[0]["scope"] == "owner" and log[0]["createdAt"] > 0
-    # The export goes with her when her data is deleted; the log stays.
+    made = sorted(p.name for p in (world.data / "exports").iterdir())
+    assert len(made) == 2 and all(n.endswith(".zip") for n in made), made
+    # Both downloads go with her when her data is deleted, files and all; the log stays.
     owner.post("/api/removed-people/p-ada/delete")
     _until_purged(owner, "p-ada")
+    assert list((world.data / "exports").iterdir()) == []
     assert _holding(world.data, MARK["a"]) == []
     assert _removed(owner)["exportLog"][0]["subjectName"] == "Ada"
+    assert owner.get("/api/exports").json()["exports"][0]["state"] == "deleted"
 
 
 def test_eugene_unreachable_hides_nobody_and_says_why(world: World, ann: Browser) -> None:
