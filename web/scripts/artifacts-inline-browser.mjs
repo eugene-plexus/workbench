@@ -1,5 +1,5 @@
 /* global process, console, URL, document, window, performance, requestAnimationFrame, setTimeout, getComputedStyle */
-// Artifacts shown and run in place, in Chrome (workbench-rich-content-roadmap.md
+// Artifacts shown and run in place, in the selected browser (workbench-rich-content-roadmap.md
 // RC6), under the headers Workbench really sends: Markdown and SVG drawn where
 // the answer puts them; a component started by itself on screen, answering
 // clicks and its own form, its frame as tall as its page; a page that tries
@@ -11,13 +11,14 @@
 // page; a phone. Each check is one PASS or FAIL line.
 import { mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { contextOptions, launchBrowser, readOptions } from "./browser-options.mjs";
 
-const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
+const { configPath, browserName } = readOptions();
+const cfg = JSON.parse(readFileSync(configPath, "utf8"));
 const require = createRequire(import.meta.url);
-const { chromium } = require(cfg.playwright);
 mkdirSync(cfg.shots, { recursive: true });
 const origin = new URL(cfg.url).origin;
-const browser = await chromium.launch({ executablePath: cfg.chrome, headless: true });
+const browser = await launchBrowser(require(cfg.playwright), cfg, browserName);
 const DESK = { width: 1440, height: 900 };
 const PHONE = { width: 390, height: 844 };
 const FRAME = `${origin}/preview/frame`;
@@ -45,7 +46,9 @@ const requests = [];
 const answered = [];
 
 async function open(scheme, viewport, who = cfg, extra = {}) {
-  const context = await browser.newContext({ colorScheme: scheme, viewport, ...extra });
+  const context = await browser.newContext(
+    contextOptions(browserName, { colorScheme: scheme, viewport, ...extra }),
+  );
   await context.addCookies(who.cookies);
   context.setDefaultTimeout(15_000);
   await context.addInitScript(() => {

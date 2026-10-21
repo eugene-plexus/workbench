@@ -1,5 +1,5 @@
 /* global process, console, URL, document, window, getComputedStyle, location */
-// Citations, charts and tables in Chrome (workbench-rich-content-roadmap.md
+// Citations, charts and tables in the selected browser (workbench-rich-content-roadmap.md
 // RC4), under the headers Workbench really sends: a web source's number after
 // the link it cites, moving to the source by mouse and keyboard, in each
 // branch; a source with no place only in the list; a passage's [n] opening
@@ -9,13 +9,14 @@
 // is one PASS or FAIL line.
 import { mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { contextOptions, launchBrowser, readOptions } from "./browser-options.mjs";
 
-const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
+const { configPath, browserName } = readOptions();
+const cfg = JSON.parse(readFileSync(configPath, "utf8"));
 const require = createRequire(import.meta.url);
-const { chromium } = require(cfg.playwright);
 mkdirSync(cfg.shots, { recursive: true });
 const origin = new URL(cfg.url).origin;
-const browser = await chromium.launch({ executablePath: cfg.chrome, headless: true });
+const browser = await launchBrowser(require(cfg.playwright), cfg, browserName);
 const DESK = { width: 1440, height: 900 };
 const PHONE = { width: 390, height: 844 };
 
@@ -31,12 +32,14 @@ const requests = [];
 const REFUSED = /Content Security Policy|Refused to/i;
 
 async function open(scheme, viewport, extra = {}) {
-  const context = await browser.newContext({
-    colorScheme: scheme,
-    viewport,
-    acceptDownloads: true,
-    ...extra,
-  });
+  const context = await browser.newContext(
+    contextOptions(browserName, {
+      colorScheme: scheme,
+      viewport,
+      acceptDownloads: true,
+      ...extra,
+    }),
+  );
   await context.addCookies(cfg.cookies);
   await context.addInitScript(() => {
     window.__policy = [];

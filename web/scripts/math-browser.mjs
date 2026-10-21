@@ -1,5 +1,5 @@
 /* global process, console, URL, document, getComputedStyle, window, Worker, requestAnimationFrame, performance, location */
-// Formulas and footnotes in Chrome (workbench-rich-content-roadmap.md RC1),
+// Formulas and footnotes in the selected browser (workbench-rich-content-roadmap.md RC1),
 // under the headers Workbench really sends: what a chat with no formula
 // loads, every formula drawn or kept as its source with its reason, a
 // formula that takes a minute stopped while the page keeps drawing, the
@@ -8,14 +8,15 @@
 // both themes, a phone and 200% zoom. Each check is one PASS or FAIL line.
 import { mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { contextOptions, launchBrowser, readOptions } from "./browser-options.mjs";
 
-const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
+const { configPath, browserName } = readOptions();
+const cfg = JSON.parse(readFileSync(configPath, "utf8"));
 const require = createRequire(import.meta.url);
-const { chromium } = require(cfg.playwright);
 mkdirSync(cfg.shots, { recursive: true });
 const shot = (name) => ({ path: `${cfg.shots}/${name}.png`, fullPage: false });
 const origin = new URL(cfg.url).origin;
-const browser = await chromium.launch({ executablePath: cfg.chrome, headless: true });
+const browser = await launchBrowser(require(cfg.playwright), cfg, browserName);
 const DESK = { width: 1440, height: 900 };
 const PHONE = { width: 390, height: 844 };
 // 200% zoom of a 1440 x 900 window: half the CSS pixels, each drawn twice.
@@ -33,7 +34,9 @@ const requests = [];
 const FORMULA_CODE = /mathView|mathWorker|KaTeX_/;
 
 async function open(scheme, viewport, extra = {}) {
-  const context = await browser.newContext({ colorScheme: scheme, viewport, ...extra });
+  const context = await browser.newContext(
+    contextOptions(browserName, { colorScheme: scheme, viewport, ...extra }),
+  );
   await context.addCookies(cfg.cookies);
   // What the page itself sees: refusals by its policy, the formulas sent to
   // the worker, and how long the page went between two frames.
@@ -230,6 +233,18 @@ try {
     const second = answers.nth(1).locator("[data-md-scope]").last();
     await settled(page, 30000);
     const gap = await page.evaluate(() => window.__gap);
+    const faces = await page.evaluate(() =>
+      [...document.fonts]
+        .filter((face) => face.family.replace(/["']/g, "").startsWith("KaTeX_"))
+        .map((face) => ({ family: face.family, display: face.display, status: face.status })),
+    );
+    check(
+      `${scheme}: KaTeX blocks fallback text while its own fonts load`,
+      faces.length > 0 &&
+        faces.every((face) => face.display === "block") &&
+        faces.some((face) => face.status === "loaded"),
+      JSON.stringify(faces),
+    );
 
     // --- every formula drawn, or its source with the reason --------------------
     const drawn = await first.locator(".katex").count();

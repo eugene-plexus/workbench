@@ -2005,7 +2005,7 @@ textarea {
 }
 
 /* Touch: 44 px targets, and no field under 16 px (iOS Safari zooms the page
-   into one). The composer is already 17 px (.text-read). */
+   into one). The composer's reading size has an iOS-only floor below. */
 @media (pointer: coarse) {
   .btn,
   .control:not(textarea),
@@ -2024,6 +2024,13 @@ textarea {
   select:not(.text-read),
   textarea:not(.text-read) {
     font-size: max(1rem, 16px);
+  }
+  /* Display's 90% text is 15.3 px with a 16 px root. iOS would zoom the
+     composer on focus. This feature query leaves Chromium's type as it is. */
+  @supports (-webkit-touch-callout: none) {
+    .control.text-read {
+      font-size: max(var(--text-read), 16px);
+    }
   }
 }
 @media (hover: none) {

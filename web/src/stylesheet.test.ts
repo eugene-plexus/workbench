@@ -38,6 +38,19 @@ const layer = plain.indexOf("@layer components {");
 const layerEnd = layer + braces(plain, plain.indexOf("{", layer)).length + 2;
 const inLayer = (rule: Rule) => rule.at > layer && rule.at < layerEnd;
 
+it("keeps the iOS composer at least 16 px even when reading text is set to 90%", () => {
+  // The ordinary 16 px control rule excludes .text-read. At 90%, that class
+  // is 15.3 px with a 16 px root, so it needs its own iOS focus-zoom floor.
+  const coarse = [...plain.matchAll(/@media \(pointer: coarse\)\s*\{/g)]
+    .map((match) => braces(plain, plain.indexOf("{", match.index)))
+    .find((block) => block.includes("@supports (-webkit-touch-callout: none)"));
+  expect(coarse).toBeDefined();
+  const ios = braces(coarse!, coarse!.indexOf("{", coarse!.indexOf("@supports")));
+  expect(ios.replace(/\s+/g, " ").trim()).toBe(
+    ".control.text-read { font-size: max(var(--text-read), 16px); }",
+  );
+});
+
 describe("the viewer's reading width", () => {
   it("defaults to a comfortable 36 rem", () => {
     expect(css).toMatch(/--measure:\s*36rem;/);

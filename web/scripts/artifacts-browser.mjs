@@ -1,5 +1,5 @@
 /* global process, console, URL, document, window, getComputedStyle, performance, requestAnimationFrame, setTimeout */
-// Artifacts and their previews in Chrome (workbench-rich-content-roadmap.md
+// Artifacts and their previews in the selected browser (workbench-rich-content-roadmap.md
 // RC5), under the headers Workbench really sends: the chat page's policy
 // unchanged and the preview's page its own; an answer's artifacts as cards
 // that run nothing; Markdown read, an SVG drawn and one with a script not; a
@@ -11,13 +11,14 @@
 // keyboard; both themes and a phone. Each check is one PASS or FAIL line.
 import { mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { contextOptions, launchBrowser, readOptions } from "./browser-options.mjs";
 
-const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
+const { configPath, browserName } = readOptions();
+const cfg = JSON.parse(readFileSync(configPath, "utf8"));
 const require = createRequire(import.meta.url);
-const { chromium } = require(cfg.playwright);
 mkdirSync(cfg.shots, { recursive: true });
 const origin = new URL(cfg.url).origin;
-const browser = await chromium.launch({ executablePath: cfg.chrome, headless: true });
+const browser = await launchBrowser(require(cfg.playwright), cfg, browserName);
 const DESK = { width: 1440, height: 900 };
 const PHONE = { width: 390, height: 844 };
 const FRAME = `${origin}/preview/frame`;
@@ -48,12 +49,14 @@ const answered = [];
 const failed = [];
 
 async function open(scheme, viewport, extra = {}) {
-  const context = await browser.newContext({
-    colorScheme: scheme,
-    viewport,
-    acceptDownloads: true,
-    ...extra,
-  });
+  const context = await browser.newContext(
+    contextOptions(browserName, {
+      colorScheme: scheme,
+      viewport,
+      acceptDownloads: true,
+      ...extra,
+    }),
+  );
   await context.addCookies(cfg.cookies);
   // A step that cannot happen fails in seconds, not in the run's whole time.
   context.setDefaultTimeout(15_000);
@@ -151,6 +154,13 @@ async function runIt(page, dialog) {
   step("running a preview");
   await dialog.getByRole("button", { name: "Run" }).click();
   await dialog.getByTestId("artifact-frame").waitFor();
+  const frame = dialog.getByTestId("artifact-frame");
+  check(
+    "a running preview keeps its sandbox and separate page",
+    (await frame.getAttribute("sandbox")) === "allow-scripts allow-forms" &&
+      (await frame.getAttribute("src")) === "/preview/frame" &&
+      (await frame.getAttribute("srcdoc")) === null,
+  );
   const handle = await dialog.getByTestId("artifact-frame").elementHandle();
   return handle.contentFrame();
 }

@@ -1,5 +1,5 @@
 /* global process, console, URL, document, getComputedStyle, window, Worker, requestAnimationFrame, performance, navigator */
-// Mermaid diagrams in Chrome (workbench-rich-content-roadmap.md RC2), under
+// Mermaid diagrams in the selected browser (workbench-rich-content-roadmap.md RC2), under
 // the headers Workbench really sends: what a chat with no diagram loads,
 // every diagram drawn or kept as its source with its reason, one that takes
 // 20 s stopped while the page keeps drawing, a diagram that tries to run,
@@ -9,14 +9,20 @@
 // is one PASS or FAIL line.
 import { mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import {
+  contextOptions,
+  launchBrowser,
+  readOptions,
+  watchClipboardWrites,
+} from "./browser-options.mjs";
 
-const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
+const { configPath, browserName } = readOptions();
+const cfg = JSON.parse(readFileSync(configPath, "utf8"));
 const require = createRequire(import.meta.url);
-const { chromium } = require(cfg.playwright);
 mkdirSync(cfg.shots, { recursive: true });
 const shot = (name) => ({ path: `${cfg.shots}/${name}.png`, fullPage: false });
 const origin = new URL(cfg.url).origin;
-const browser = await chromium.launch({ executablePath: cfg.chrome, headless: true });
+const browser = await launchBrowser(require(cfg.playwright), cfg, browserName);
 const DESK = { width: 1440, height: 900 };
 const PHONE = { width: 390, height: 844 };
 
@@ -34,7 +40,10 @@ const DIAGRAM_CODE = /diagramWorker|diagramMarkup|diagramDom|mermaid/i;
 const REFUSED = /Content Security Policy|Refused to/i;
 
 async function open(scheme, viewport, extra = {}) {
-  const context = await browser.newContext({ colorScheme: scheme, viewport, ...extra });
+  const context = await browser.newContext(
+    contextOptions(browserName, { colorScheme: scheme, viewport, ...extra }),
+  );
+  if (browserName !== "chromium") await context.addInitScript(watchClipboardWrites);
   await context.addCookies(cfg.cookies);
   // What the page itself sees: refusals by its policy, the diagrams sent to
   // the worker, and how long the page went between two frames.
@@ -238,7 +247,9 @@ try {
 
   for (const scheme of ["dark", "light"]) {
     const { context, page } = await open(scheme, DESK, { acceptDownloads: true });
-    await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin });
+    if (browserName === "chromium") {
+      await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin });
+    }
     await chat(page, cfg.chats.diagrams);
     await page.evaluate(() => (window.__gap = 0));
     // While the diagrams are drawn (one of them for 4 s, until it is stopped),
@@ -396,7 +407,13 @@ try {
       (await block.locator(".diagram-view img").count()) === 1,
     );
     await block.getByRole("button", { name: "Copy the diagram's source" }).click();
-    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    if (browserName !== "chromium") {
+      await page.waitForFunction(() => typeof window.__copied === "string");
+    }
+    const copied = await page.evaluate(
+      (name) => (name === "chromium" ? navigator.clipboard.readText() : window.__copied),
+      browserName,
+    );
     // Windows' clipboard ends its lines in \r\n.
     check(
       `${scheme}: Copy copies the source`,
