@@ -358,6 +358,11 @@ body,
 }
 #root {
   height: 100dvh;
+  /* WebKit can include hidden words outside a flex row in the document's
+     horizontal extent. The app is the viewport; its inner scrollers own
+     wide navigation, formulas and tables. clip creates no extra scroller. */
+  position: relative;
+  overflow-x: clip;
 }
 body {
   margin: 0;

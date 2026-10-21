@@ -13,6 +13,8 @@ It holds no operator or node-enrollment credential. Node folder tools additional
 
 Chrome, Edge and Firefox. Safari: checked with WebKit only.
 
+See [browser checks and known limits](docs/browsers.md), including looping previews.
+
 ## Installing
 
 Install Workbench from **Apps** in Eugene's console. The install does three things:

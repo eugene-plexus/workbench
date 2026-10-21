@@ -11,7 +11,14 @@
 // keyboard; both themes and a phone. Each check is one PASS or FAIL line.
 import { mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { contextOptions, launchBrowser, readOptions } from "./browser-options.mjs";
+import {
+  contextOptions,
+  launchBrowser,
+  readOptions,
+  watchPolicy,
+  watchServiceWorkers,
+  canCheckPreviewLoop,
+} from "./browser-options.mjs";
 
 const { configPath, browserName } = readOptions();
 const cfg = JSON.parse(readFileSync(configPath, "utf8"));
@@ -58,8 +65,10 @@ async function open(scheme, viewport, extra = {}) {
     }),
   );
   await context.addCookies(cfg.cookies);
+  await context.addInitScript(watchServiceWorkers);
   // A step that cannot happen fails in seconds, not in the run's whole time.
   context.setDefaultTimeout(15_000);
+  await context.addInitScript(watchPolicy, browserName);
   const page = await context.newPage();
   lastPage = page;
   // A preview's own errors are its own (and some are the point): only the page's count.
@@ -67,13 +76,6 @@ async function open(scheme, viewport, extra = {}) {
     if (!(error.stack ?? "").includes("/preview/")) errors.push(error.message);
   });
   // The chat page's own refusals: a preview's (in its own window) are the point.
-  await context.addInitScript(() => {
-    if (window.top !== window) return;
-    window.__policy = [];
-    document.addEventListener("securitypolicyviolation", (e) =>
-      window.__policy.push(`${e.violatedDirective} ${e.blockedURI}`),
-    );
-  });
   page.on("request", (request) => {
     const frame = request.frame();
     requests.push({
@@ -285,6 +287,7 @@ try {
           .locator("#out li")
           .evaluateAll((items) => items.map((li) => [li.dataset.name, li.textContent])),
       );
+      const serviceWorkers = await frame.evaluate(() => Promise.all(window.__serviceWorkers));
       for (const name of [
         "parent-dom",
         "top-dom",
@@ -300,7 +303,10 @@ try {
       ]) {
         check(
           `dark: the preview's ${name} is refused`,
-          (said[name] ?? "").startsWith(`${name}: blocked`),
+          (said[name] ?? "").startsWith(`${name}: blocked`) ||
+            (name === "service-worker" &&
+              serviceWorkers.length === 1 &&
+              serviceWorkers[0] === true),
           said[name],
         );
       }
@@ -338,31 +344,34 @@ try {
       check("dark: Stop takes the frame away", (await dialog.locator("iframe").count()) === 0);
       await closeDialog(page);
 
-      // --- a page that never stops -----------------------------------------------------------
-      step("a page that never stops");
-      dialog = await openArtifact(page, "Busy");
-      await runIt(page, dialog);
-      await page.waitForTimeout(1_500);
-      const gap = await page.evaluate(
-        () =>
-          new Promise((done) => {
-            const start = performance.now();
-            requestAnimationFrame(() => done(performance.now() - start));
-          }),
-      );
-      const stopping = performance.now();
-      await dialog.getByRole("button", { name: "Stop the page" }).click();
-      await dialog.locator("iframe").waitFor({ state: "detached" });
-      const stopped = performance.now() - stopping;
-      check(
-        "dark: a page that never stops leaves this page free, and Stop ends it",
-        gap < 250 && stopped < 2_000,
-        `frame gap ${gap.toFixed(0)} ms, stop ${stopped.toFixed(0)} ms`,
-      );
-      console.log(
-        `  measured: busy preview, page frame gap ${gap.toFixed(1)} ms; Stop ${stopped.toFixed(0)} ms`,
-      );
-      await closeDialog(page);
+      const loops = canCheckPreviewLoop(browserName);
+      if (loops) {
+        // --- a page that never stops -----------------------------------------------------------
+        step("a page that never stops");
+        dialog = await openArtifact(page, "Busy");
+        await runIt(page, dialog);
+        await page.waitForTimeout(1_500);
+        const gap = await page.evaluate(
+          () =>
+            new Promise((done) => {
+              const start = performance.now();
+              requestAnimationFrame(() => done(performance.now() - start));
+            }),
+        );
+        const stopping = performance.now();
+        await dialog.getByRole("button", { name: "Stop the page" }).click();
+        await dialog.locator("iframe").waitFor({ state: "detached" });
+        const stopped = performance.now() - stopping;
+        check(
+          "dark: a page that never stops leaves this page free, and Stop ends it",
+          gap < 250 && stopped < 2_000,
+          `frame gap ${gap.toFixed(0)} ms, stop ${stopped.toFixed(0)} ms`,
+        );
+        console.log(
+          `  measured: busy preview, page frame gap ${gap.toFixed(1)} ms; Stop ${stopped.toFixed(0)} ms`,
+        );
+        await closeDialog(page);
+      }
 
       // --- a page that tries to leave ----------------------------------------------------------
       step("a page that tries to leave");
@@ -371,26 +380,30 @@ try {
       await runIt(page, dialog);
       // Run at once after a page stuck in a loop was stopped: its first frames are put in
       // that page's process until Chrome ends it, and the preview says it waits.
-      const waited = await dialog
-        .getByRole("status")
-        .getByText(/waiting for the browser to end a preview stopped before/)
-        .waitFor({ timeout: 5_000 })
-        .then(
-          () => true,
-          () => false,
-        );
+      const waited =
+        loops &&
+        (await dialog
+          .getByRole("status")
+          .getByText(/waiting for the browser to end a preview stopped before/)
+          .waitFor({ timeout: 5_000 })
+          .then(
+            () => true,
+            () => false,
+          ));
       await dialog
         .getByText("The page tried to go to another page, and was stopped.")
         .waitFor({ timeout: 25_000 });
       const after = performance.now() - running;
-      check(
-        "dark: run at once after a stuck page was stopped, a page waits, saying why, and then runs",
-        waited,
-        `started ${after.toFixed(0)} ms after Run`,
-      );
-      console.log(
-        `  measured: run at once after Stop of a stuck page, it ran in ${after.toFixed(0)} ms`,
-      );
+      if (loops) {
+        check(
+          "dark: run at once after a stuck page was stopped, a page waits, saying why, and then runs",
+          waited,
+          `started ${after.toFixed(0)} ms after Run`,
+        );
+        console.log(
+          `  measured: run at once after Stop of a stuck page, it ran in ${after.toFixed(0)} ms`,
+        );
+      }
       const left = requests.some((r) => r.url.startsWith("https://example.com/away"))
         ? answered.some((r) => r.url.startsWith("https://example.com/away"))
           ? "went out and was answered"
@@ -405,10 +418,52 @@ try {
 
       // --- a React component -------------------------------------------------------------------
       step("a React component");
+      // Exercise the 3 s ready rule without a CPU loop: hold one bootstrap
+      // silent, then let the replacement run. This is portable even where
+      // the browser cannot isolate a looping frame from its parent.
+      let bootstraps = 0;
+      let resume = () => {};
+      const replacement = new Promise((resolve) => {
+        resume = resolve;
+      });
+      const runtimeUrl = `${origin}/preview/runtime.js`;
+      if (!loops) {
+        await context.route(runtimeUrl, async (route) => {
+          bootstraps++;
+          if (bootstraps === 1) {
+            await route.fulfill({
+              contentType: "text/javascript",
+              body: "// silent test bootstrap",
+            });
+          } else {
+            await replacement;
+            await route.continue();
+          }
+        });
+      }
       dialog = await openArtifact(page, "Counter");
-      const counter = await runIt(page, dialog);
+      const starting = performance.now();
+      let counter = await runIt(page, dialog);
+      if (!loops) {
+        await dialog
+          .getByRole("status")
+          .getByText(/waiting for the browser/)
+          .waitFor({ timeout: 5_000 });
+        const delay = performance.now() - starting;
+        check(
+          "a silent frame is replaced after 3 seconds, saying why",
+          delay >= 2_900 && delay < 5_500,
+          `${delay.toFixed(0)} ms`,
+        );
+        resume();
+        counter = await (await dialog.getByTestId("artifact-frame").elementHandle()).contentFrame();
+      }
       const button = counter.getByRole("button", { name: "Clicked 0" });
       await button.waitFor({ timeout: 10_000 });
+      if (!loops) {
+        check("the replacement frame starts", bootstraps === 2, `${bootstraps} bootstraps`);
+        await context.unroute(runtimeUrl);
+      }
       await button.click();
       check(
         "dark: a React component runs, and answers a click",

@@ -126,3 +126,22 @@ it("follows system changes only while System is chosen", () => {
   expect(result.current).toBe("dark");
   expect(document.documentElement).toHaveAttribute("data-theme", "dark");
 });
+
+it("reconciles a system theme that changed before the first subscription", () => {
+  let light = true;
+  vi.stubGlobal("matchMedia", () => ({
+    get matches() {
+      return light;
+    },
+    addEventListener() {},
+    removeEventListener() {},
+  }));
+  setDisplay({ theme: "system" });
+  expect(document.documentElement).toHaveAttribute("data-theme", "light");
+  // A browser can finish applying its preference between module evaluation
+  // and React mounting. No subscriber was present to hear that change.
+  light = false;
+  const { result } = renderHook(() => useTheme());
+  expect(result.current).toBe("dark");
+  expect(document.documentElement).toHaveAttribute("data-theme", "dark");
+});

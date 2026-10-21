@@ -8,7 +8,13 @@
 // both themes, a phone and 200% zoom. Each check is one PASS or FAIL line.
 import { mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { contextOptions, launchBrowser, readOptions } from "./browser-options.mjs";
+import {
+  contextOptions,
+  launchBrowser,
+  readOptions,
+  watchPolicy,
+  screenshotConsoleRefusal,
+} from "./browser-options.mjs";
 
 const { configPath, browserName } = readOptions();
 const cfg = JSON.parse(readFileSync(configPath, "utf8"));
@@ -41,12 +47,6 @@ async function open(scheme, viewport, extra = {}) {
   // What the page itself sees: refusals by its policy, the formulas sent to
   // the worker, and how long the page went between two frames.
   await context.addInitScript(() => {
-    window.__policy = [];
-    document.addEventListener("securitypolicyviolation", (e) =>
-      window.__policy.push(
-        `${e.violatedDirective} ${e.blockedURI} ${e.sourceFile}:${e.lineNumber}`,
-      ),
-    );
     window.__posts = [];
     const post = Worker.prototype.postMessage;
     Worker.prototype.postMessage = function (message, ...rest) {
@@ -62,14 +62,33 @@ async function open(scheme, viewport, extra = {}) {
     };
     requestAnimationFrame(frame);
   });
+  await context.exposeBinding("__reportPolicy", ({ frame }, message) => {
+    if (!frame.parentFrame()) policy.push(message);
+  });
+  await context.addInitScript(watchPolicy, browserName);
   const page = await context.newPage();
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => {
-    if (/Content Security Policy|Refused to/i.test(message.text())) policy.push(message.text());
+    if (
+      /Content Security Policy|Refused to/i.test(message.text()) &&
+      !screenshotConsoleRefusal(browserName, message.text())
+    )
+      policy.push(message.text());
   });
   page.on("request", (request) => requests.push(request.url()));
   await page.goto(`${cfg.url}/#signin=${cfg.secret}`);
   await page.getByTestId("new-chat").waitFor({ state: "attached" });
+  const close = context.close.bind(context);
+  context.close = async () => {
+    const snapshot = await page.evaluate(() => ({
+      screenshots: window.__screenshotRefusals,
+    }));
+    if (snapshot.screenshots)
+      console.log(
+        `SKIP  WebKit: ${snapshot.screenshots} Playwright screenshot body {} stylesheet refusals; app CSP remains checked.`,
+      );
+    await close();
+  };
   return { context, page };
 }
 
@@ -214,6 +233,18 @@ try {
 
   for (const scheme of ["dark", "light"]) {
     const { context, page } = await open(scheme, DESK);
+    // A real macro's cost varies by engine: WebKit can reach MAX_MARKUP
+    // before 1.5 s. Stall only that fixture job in the actual module worker,
+    // so the deadline, termination and following jobs are proved everywhere.
+    await context.route("**/mathWorker-*.js", async (route) => {
+      const response = await route.fetch();
+      await route.fulfill({
+        response,
+        body:
+          'self.addEventListener("message", (event) => { if (event.data.tex?.startsWith("\\\\def\\\\a{")) { for (;;) {} } });\n' +
+          (await response.text()),
+      });
+    });
     await chat(page, cfg.chats.math);
     await page.evaluate(() => (window.__gap = 0));
     // While the formulas are laid out (one of them for 1.5 s, until it is
@@ -431,14 +462,17 @@ try {
     await chat(page, cfg.chats.draft);
     await page.getByTestId("draft").locator("summary").click();
     await settled(page);
-    const regions = page.locator("[data-testid=answer] [data-md-scope]");
+    // Reasoning now contains Markdown too; it is a third, unrelated scope.
+    const draft = page.getByTestId("draft").locator("[data-md-scope]");
+    const answer = page.locator("[data-testid=answer] > [data-md-scope]");
+    const regions = draft.or(answer);
     check("draft: the draft and its answer are each their own", (await regions.count()) === 2);
     check(
       "draft: no id is used twice",
       (await duplicateIds(page)).length === 0,
       (await duplicateIds(page)).join(", "),
     );
-    const draftTrip = await footnoteTrip(page, regions.nth(0), 1);
+    const draftTrip = await footnoteTrip(page, draft, 1);
     check(
       "draft: the draft's reference moves to the draft's note and back",
       draftTrip.there.text.includes("Written before the search") &&
@@ -446,7 +480,7 @@ try {
         draftTrip.home.ref,
       JSON.stringify(draftTrip),
     );
-    const answerTrip = await footnoteTrip(page, regions.nth(1), 1);
+    const answerTrip = await footnoteTrip(page, answer, 1);
     check(
       "draft: the answer's reference moves to the answer's note and back",
       answerTrip.there.text.includes("Found by the search") &&

@@ -157,10 +157,32 @@ export function readPalette(read: (name: string) => string): Palette {
   return palette;
 }
 
+/** RC31a keeps Chrome's established drawing. The other engines get darker
+ * section fills where the existing dark palette's labels fall below 4.5:1.
+ * These are diagram fills only; status edges elsewhere stay as designed. */
+export function accessiblePalette(palette: Palette, userAgent: string): Palette {
+  if (
+    !/Firefox\//.test(userAgent) &&
+    !(/AppleWebKit\//.test(userAgent) && !/Chrome\/|Chromium\//.test(userAgent))
+  )
+    return palette;
+  return Object.fromEntries(
+    Object.entries(palette).map(([key, value]) => [
+      key,
+      /^(cScale\d+|git\d+)$/.test(key)
+        ? ({ "#38865a": "#32794f", "#976a25": "#8d6222" }[value.toLowerCase()] ?? value)
+        : value,
+    ]),
+  );
+}
+
 function pagePalette(): Palette {
   if (typeof document === "undefined") return {};
   const style = getComputedStyle(document.documentElement);
-  return readPalette((name) => style.getPropertyValue(name));
+  return accessiblePalette(
+    readPalette((name) => style.getPropertyValue(name)),
+    navigator.userAgent,
+  );
 }
 
 // --- what the page shows ----------------------------------------------------------------

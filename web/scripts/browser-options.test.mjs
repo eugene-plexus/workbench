@@ -1,10 +1,18 @@
-/* global process, navigator, window */
+/* global process, navigator, window, document, console */
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, expect, it, vi } from "vitest";
-import { contextOptions, readOptions, watchClipboardWrites } from "./browser-options.mjs";
+import {
+  contextOptions,
+  readOptions,
+  watchClipboardWrites,
+  watchServiceWorkers,
+  watchPolicy,
+  screenshotConsoleRefusal,
+  canCheckPreviewLoop,
+} from "./browser-options.mjs";
 
 const temp = mkdtempSync(join(tmpdir(), "workbench-browsers-"));
 const playwright = join(temp, "playwright.cjs");
@@ -28,7 +36,10 @@ writeFileSync(
   }),
 );
 afterAll(() => rmSync(temp, { recursive: true, force: true }));
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 const scripts = ["reading", "math", "diagram", "artifacts", "artifacts-inline", "structured"];
 for (const script of scripts) {
@@ -101,4 +112,71 @@ it("observes a clipboard write only after the browser accepts it", async () => {
   expect(window.__copied).toBe("flowchart LR\n  A --> B");
   await expect(navigator.clipboard.writeText("refused")).rejects.toThrow("blocked");
   expect(window.__copied).toBe("flowchart LR\n  A --> B");
+});
+
+it("observes registration rejection, resolution and synchronous refusal without replacing the result", async () => {
+  const refused = Promise.reject(new Error("opaque origin"));
+  const allowed = Promise.resolve({ scope: "/" });
+  const register = vi
+    .fn()
+    .mockReturnValueOnce(refused)
+    .mockReturnValueOnce(allowed)
+    .mockImplementation(() => {
+      throw new Error("blocked");
+    });
+  vi.stubGlobal("navigator", { serviceWorker: { register } });
+  watchServiceWorkers();
+  expect(navigator.serviceWorker.register("/sw.js")).toBe(refused);
+  expect(navigator.serviceWorker.register("/allowed.js")).toBe(allowed);
+  expect(() => navigator.serviceWorker.register("/throws.js")).toThrow("blocked");
+  expect(await Promise.all(window.__serviceWorkers)).toEqual([true, false]);
+});
+
+it("exempts only counted WebKit screenshot styles at Playwright's exact source location", () => {
+  let observe;
+  let report;
+  vi.stubGlobal(
+    "MutationObserver",
+    class {
+      constructor(callback) {
+        observe = callback;
+      }
+      observe() {}
+    },
+  );
+  vi.spyOn(document, "addEventListener").mockImplementation((_type, callback) => {
+    report = callback;
+  });
+  watchPolicy("webkit");
+  const event = {
+    violatedDirective: "style-src-elem",
+    blockedURI: "inline",
+    sourceFile: "",
+    lineNumber: 5,
+  };
+  report(event); // No screenshot: this must still fail.
+  expect(window.__policy).toHaveLength(1);
+  observe([{ addedNodes: [{ nodeName: "STYLE", textContent: "body {}" }] }]);
+  report({ ...event, sourceFile: "http://localhost/assets/app.js" });
+  report({ ...event, violatedDirective: "script-src-elem" });
+  report(event);
+  expect(window.__screenshotRefusals).toBe(1);
+  expect(window.__policy).toHaveLength(3);
+  report(event); // One style cannot excuse two violations.
+  expect(window.__policy).toHaveLength(4);
+  watchPolicy("firefox");
+  report(event);
+  expect(window.__policy).toHaveLength(1);
+  expect(screenshotConsoleRefusal("webkit", "Refused to load a script")).toBe(false);
+});
+
+it("skips only the loop scenarios in engines that share the chat's event loop", () => {
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  expect(canCheckPreviewLoop("chromium")).toBe(true);
+  expect(log).not.toHaveBeenCalled();
+  expect(canCheckPreviewLoop("firefox")).toBe(false);
+  expect(canCheckPreviewLoop("webkit")).toBe(false);
+  expect(
+    log.mock.calls.every(([line]) => line.includes("SKIP") && line.includes("docs/browsers.md")),
+  ).toBe(true);
 });

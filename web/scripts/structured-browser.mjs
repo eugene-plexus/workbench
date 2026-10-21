@@ -9,7 +9,13 @@
 // is one PASS or FAIL line.
 import { mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { contextOptions, launchBrowser, readOptions } from "./browser-options.mjs";
+import {
+  contextOptions,
+  launchBrowser,
+  readOptions,
+  watchPolicy,
+  screenshotConsoleRefusal,
+} from "./browser-options.mjs";
 
 const { configPath, browserName } = readOptions();
 const cfg = JSON.parse(readFileSync(configPath, "utf8"));
@@ -41,20 +47,30 @@ async function open(scheme, viewport, extra = {}) {
     }),
   );
   await context.addCookies(cfg.cookies);
-  await context.addInitScript(() => {
-    window.__policy = [];
-    document.addEventListener("securitypolicyviolation", (e) =>
-      window.__policy.push(`${e.violatedDirective} ${e.blockedURI}`),
-    );
+  await context.exposeBinding("__reportPolicy", ({ frame }, message) => {
+    if (!frame.parentFrame()) policy.push(message);
   });
+  await context.addInitScript(watchPolicy, browserName);
   const page = await context.newPage();
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => {
-    if (REFUSED.test(message.text())) policy.push(message.text());
+    if (REFUSED.test(message.text()) && !screenshotConsoleRefusal(browserName, message.text()))
+      policy.push(message.text());
   });
   page.on("request", (request) => requests.push(request.url()));
   await page.goto(`${cfg.url}/#signin=${cfg.secret}`);
   await page.getByTestId("new-chat").waitFor({ state: "attached" });
+  const close = context.close.bind(context);
+  context.close = async () => {
+    const snapshot = await page.evaluate(() => ({
+      screenshots: window.__screenshotRefusals,
+    }));
+    if (snapshot.screenshots)
+      console.log(
+        `SKIP  WebKit: ${snapshot.screenshots} Playwright screenshot body {} stylesheet refusals; app CSP remains checked.`,
+      );
+    await close();
+  };
   return { context, page };
 }
 
@@ -209,7 +225,16 @@ try {
     );
     check(
       `${scheme}: a chart that cannot be drawn is its source, saying why`,
-      (await drawn.getByText(/^Chart not shown: "type" must be/).count()) === 1,
+      (await drawn.getByText('Chart not shown: it has no "series"', { exact: true }).count()) ===
+        1 &&
+        (await drawn.locator("pre code").allInnerTexts()).some((source) => {
+          try {
+            const value = JSON.parse(source);
+            return value.type === "pie" && Array.isArray(value.series) && value.series.length === 0;
+          } catch {
+            return false;
+          }
+        }),
     );
     await chart.screenshot({ path: `${cfg.shots}/chart-${scheme}.png` });
 

@@ -74,6 +74,9 @@ function subscribe(listener: () => void) {
     };
     query?.addEventListener("change", changed);
     window.addEventListener("storage", storage);
+    // The preference may have settled since apply() ran at module load.
+    // Reconcile the DOM before a diagram reads its palette on subscription.
+    apply();
     stopListening = () => {
       query?.removeEventListener("change", changed);
       window.removeEventListener("storage", storage);

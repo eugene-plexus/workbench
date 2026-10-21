@@ -14,6 +14,8 @@ import {
   launchBrowser,
   readOptions,
   watchClipboardWrites,
+  watchPolicy,
+  screenshotConsoleRefusal,
 } from "./browser-options.mjs";
 
 const { configPath, browserName } = readOptions();
@@ -48,16 +50,12 @@ async function open(scheme, viewport, extra = {}) {
   // What the page itself sees: refusals by its policy, the diagrams sent to
   // the worker, and how long the page went between two frames.
   await context.addInitScript(() => {
-    window.__policy = [];
-    document.addEventListener("securitypolicyviolation", (e) =>
-      window.__policy.push(
-        `${e.violatedDirective} ${e.blockedURI} ${e.sourceFile}:${e.lineNumber}`,
-      ),
-    );
     window.__posts = [];
+    window.__palettes = [];
     const post = Worker.prototype.postMessage;
     Worker.prototype.postMessage = function (message, ...rest) {
       if (message && typeof message.source === "string") window.__posts.push(message.source);
+      if (message?.palette) window.__palettes.push(message.palette);
       return post.call(this, message, ...rest);
     };
     window.__gap = 0;
@@ -69,10 +67,15 @@ async function open(scheme, viewport, extra = {}) {
     };
     requestAnimationFrame(frame);
   });
+  await context.exposeBinding("__reportPolicy", ({ frame }, message) => {
+    if (!frame.parentFrame()) policy.push(message);
+  });
+  await context.addInitScript(watchPolicy, browserName);
   const page = await context.newPage();
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => {
-    if (REFUSED.test(message.text())) policy.push(message.text());
+    if (REFUSED.test(message.text()) && !screenshotConsoleRefusal(browserName, message.text()))
+      policy.push(message.text());
   });
   // The worker's own console: a refusal inside it is reported there.
   page.on("worker", (worker) =>
@@ -87,6 +90,17 @@ async function open(scheme, viewport, extra = {}) {
   page.on("request", (request) => requests.push(request.url()));
   await page.goto(`${cfg.url}/#signin=${cfg.secret}`);
   await page.getByTestId("new-chat").waitFor({ state: "attached" });
+  const close = context.close.bind(context);
+  context.close = async () => {
+    const snapshot = await page.evaluate(() => ({
+      screenshots: window.__screenshotRefusals,
+    }));
+    if (snapshot.screenshots)
+      console.log(
+        `SKIP  WebKit: ${snapshot.screenshots} Playwright screenshot body {} stylesheet refusals; app CSP remains checked.`,
+      );
+    await close();
+  };
   return { context, page };
 }
 
@@ -517,11 +531,16 @@ try {
       ...sections,
       ...slices,
     ]);
+    const palette = await page.evaluate(() => window.__palettes[0]);
     const pairs = [
       ["a box's text", c["--foreground-strong"], c["--tint"]],
       ["a line's label", c["--foreground"], c["--panel"]],
       ["a note's text", c["--foreground-strong"], c["--panel-soft"]],
-      ...sections.map((s) => [`a section's text on ${s}`, c["--foreground-strong"], c[s]]),
+      ...sections.map((s, i) => [
+        `a section's text on ${s}`,
+        palette[`cScaleLabel${i}`],
+        palette[`cScale${i}`],
+      ]),
       ...slices.map((s) => [`a pie slice's text on ${s}`, c["--on-accent-left"], c[s]]),
     ];
     const low = pairs

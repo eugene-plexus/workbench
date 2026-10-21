@@ -224,7 +224,8 @@ function structure() {
     const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
     return Math.round(((hi + 0.05) / (lo + 0.05)) * 100) / 100;
   };
-  const answer = document.querySelector(".answer");
+  // Reasoning is Markdown too. Inspect the main answer, outside its fold.
+  const answer = document.querySelector("[data-testid=answer] > .answer");
   const hr = answer?.querySelector("hr");
   const line = hr ? parse(getComputedStyle(hr).borderTopColor) : null;
   const head = document.querySelector(".code-block .code-head");
@@ -401,7 +402,15 @@ try {
         css.colors && css.viewport && css.wraps,
         JSON.stringify(css),
       );
-      await page.getByText("Reasoning", { exact: true }).first().click();
+      const reasoning = page
+        .locator("[data-testid=answer] summary")
+        .filter({ hasText: /^Reasoning/ })
+        .first();
+      await reasoning.click();
+      check(
+        `${scheme}: reasoning opens by its summary`,
+        await reasoning.evaluate((el) => el.parentElement.open),
+      );
       await settle(page);
       await page.screenshot(shot(`rich-reasoning-${scheme}-desk`));
       await tall(page);
