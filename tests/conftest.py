@@ -40,6 +40,32 @@ from eugene_plexus_workbench.settings import Settings
 
 from . import fake_embedding, fake_rerank
 
+
+def _one_tls_context_for_every_test_client() -> None:
+    """Each httpx client a test makes (every `httpx.get`, every `Browser`) would load certifi's
+    CA bundle into an SSL context of its own: about 100 ms a client on Windows. Made once, the
+    suite on four workers went from 356 s to 247 s there. The tests speak plain HTTP to loopback
+    and an SSL context is safe to share. Workbench's own clients already share theirs
+    (`_http.ssl_context`); this changes only clients made with httpx's default, in the tests."""
+    from httpx._transports import default as transports
+
+    made = getattr(transports, "create_ssl_context", None)
+    if made is None:  # httpx moved it: the suite is slower on Windows, nothing else
+        return
+    shared: dict[bool, Any] = {}
+
+    def create_ssl_context(verify: Any = True, cert: Any = None, trust_env: bool = True) -> Any:
+        if verify is not True or cert is not None:
+            return made(verify=verify, cert=cert, trust_env=trust_env)
+        if trust_env not in shared:
+            shared[trust_env] = made(verify=True, cert=None, trust_env=trust_env)
+        return shared[trust_env]
+
+    transports.create_ssl_context = create_ssl_context
+
+
+_one_tls_context_for_every_test_client()
+
 CLIENT_ID = "wb-client"
 CLIENT_SECRET = "wb-client-secret"
 APP_KEY = "app-key-token"
@@ -669,6 +695,9 @@ class FakeGateway:
     #: A batch of passages is held until this is set (a thread's event: the test and the
     #: server are not one loop). Requests of one text are not held.
     embed_gate: threading.Event | None = None
+    #: How many batches a closed gate still lets through, one each, before it holds the rest:
+    #: a test that needs some passages given meaning and the others not, whatever the timing.
+    embed_gate_lets: int = 0
     embed_delay: float = 0.0
     #: What an answer calls the model that was asked for, and how long its vectors are.
     embed_names: dict[str, str] = field(default_factory=dict)
@@ -1007,6 +1036,9 @@ class FakeGateway:
                 while (
                     self.embed_gate is not None and len(given) > 1 and not self.embed_gate.is_set()
                 ):
+                    if self.embed_gate_lets > 0:
+                        self.embed_gate_lets -= 1
+                        break
                     if await request.is_disconnected():
                         self.embed_disconnects += 1
                         return Response(status_code=499)

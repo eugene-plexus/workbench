@@ -596,15 +596,23 @@ def test_a_stop_in_the_middle_is_picked_up_at_boot_from_the_passages_that_have_n
     quick: None,  # noqa: F811
 ) -> None:
     ready_world(world)
-    world.gateway.embed_delay = 0.3
-    ada = start(world)
-    assert add(ada, ("big.md", big_document(), "text/markdown")).status_code == 201
-    until(lambda: by_name(ada, "big.md")["embedded"] >= 32)
-    world.restart_workbench()
-    ada = start(world)
-    stopped_at = len(world.gateway.embed_requests)
-    have = len(vectors_of(world))
-    assert 32 <= have < 80
+    # Two batches of sixteen are given meaning and the third is held, so Workbench stops in
+    # the middle whatever the timing: a delay instead let a loaded runner finish all 80
+    # before the restart was read.
+    gate = threading.Event()
+    world.gateway.embed_gate_lets = 2
+    world.gateway.embed_gate = gate
+    try:
+        ada = start(world)
+        assert add(ada, ("big.md", big_document(), "text/markdown")).status_code == 201
+        until(lambda: by_name(ada, "big.md")["embedded"] >= 32)
+        world.restart_workbench()
+        ada = start(world)
+        stopped_at = len(world.gateway.embed_requests)
+        have = len(vectors_of(world))
+        assert 32 <= have < 80
+    finally:
+        gate.set()
     until(lambda: by_name(ada, "big.md")["state"] == "ready", seconds=60)
     assert len(vectors_of(world)) == 80 and by_name(ada, "big.md")["embedded"] == 80
     later = [

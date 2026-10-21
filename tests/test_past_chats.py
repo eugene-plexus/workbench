@@ -275,20 +275,46 @@ def settle(world: World, sub: str, check: Callable[[dict[str, str]], bool]) -> d
         time.sleep(0.05)
 
 
-def _quiet(keeper: Any, seconds: float = 0.5) -> None:
-    """Wait until the index has had no chat to sync for `seconds`."""
-    deadline = time.perf_counter() + 15
-    calm_since: float | None = None
-    while time.perf_counter() < deadline:
-        now = time.perf_counter()
-        if keeper._touched:
-            calm_since = None
-        elif calm_since is None:
-            calm_since = now
-        elif now - calm_since >= seconds:
-            return
-        time.sleep(0.02)
-    raise AssertionError("the exchanges index never went quiet")
+class _Syncs:
+    """Every `sync_chat` the index makes, counted while it runs: the real one until `hold()`,
+    then a stand-in that puts and removes nothing, as an index that has not caught up would.
+
+    A sync takes its chat off the touched list before it starts, so an empty list says nothing
+    about one still running; and a real sync still running when the chat goes ends by taking
+    its exchanges out (workbench#16). So the count starts before the chat exists, and `hold()`
+    waits until no real sync is left, nor a backfill or refill that could remove one."""
+
+    def __init__(self, keeper: Any) -> None:
+        self.keeper = keeper
+        self.real = keeper.sync_chat
+        self.held = False
+        self.running = 0
+        keeper.sync_chat = self.sync
+
+    async def sync(self, owner: str, chat_id: str, signature: str | None = None) -> tuple[int, int]:
+        # Counted before `held` is read: a sync that reads False is one `hold()` waits for.
+        self.running += 1
+        try:
+            if self.held:
+                return 0, 0
+            result: tuple[int, int] = await self.real(owner, chat_id, signature)
+            return result
+        finally:
+            self.running -= 1
+
+    def hold(self, seconds: float = 30.0) -> None:
+        self.held = True
+        deadline = time.perf_counter() + seconds
+        while self.running or self._reconciling():
+            assert time.perf_counter() < deadline, "a sync of the index never finished"
+            time.sleep(0.01)
+
+    def _reconciling(self) -> bool:
+        tasks = [self.keeper._backfill, *self.keeper._refills]
+        return any(t is not None and not t.done() for t in tasks)
+
+    def restore(self) -> None:
+        self.keeper.sync_chat = self.real
 
 
 def _users(request: dict[str, Any]) -> list[str]:
@@ -445,30 +471,30 @@ def test_an_exchange_the_index_still_holds_is_never_shown_once_its_chat_is_gone(
     world: World,
 ) -> None:
     ada = signed_in(world)
-    _say(world, "The spare key is under the blue pot.")
-    old = ada.new_chat()
-    ask(world, ada, old, "Where is the spare house key?")
-    settle(world, "p-ada", lambda h: len(h) == 1)
     keeper = world.server.server.config.app.state.exchanges_index
-    # A sync already running when the stubs go in would still take the
-    # exchange out (workbench#16): wait until nothing is touched for a while.
-    _quiet(keeper)
-
-    async def lagging(owner: str, chat_id: str) -> int:
-        return 0  # the index is not told: it still holds the exchange
-
-    async def stalled(owner: str, chat_id: str, signature: str | None = None) -> tuple[int, int]:
-        return 0, 0  # nor does a sync touched by the delete catch up (seen on Windows CI)
-
-    remove, sync = keeper.remove_chat, keeper.sync_chat
-    keeper.remove_chat, keeper.sync_chat = lagging, stalled
+    syncs = _Syncs(keeper)  # before the chat exists, so every sync of it is counted
+    remove = keeper.remove_chat
     try:
+        _say(world, "The spare key is under the blue pot.")
+        old = ada.new_chat()
+        ask(world, ada, old, "Where is the spare house key?")
+        settle(world, "p-ada", lambda h: len(h) == 1)
+
+        async def lagging(owner: str, chat_id: str) -> int:
+            return 0  # the index is not told: it still holds the exchange
+
+        keeper.remove_chat = lagging
+        # Nor does a sync touched by the delete catch up (seen on Windows CI), and one
+        # already running has finished before the delete (workbench#16).
+        syncs.hold()
+        assert len(_index(world, "p-ada")) == 1
         assert ada.delete(f"/api/chats/{old}").status_code == 204
         assert len(_index(world, "p-ada")) == 1  # still in the index...
         found = ada.get("/api/past-chats", params={"q": "spare house key"}).json()
         assert found["results"] == []  # ...and never shown: the store is read
     finally:
-        keeper.remove_chat, keeper.sync_chat = remove, sync
+        keeper.remove_chat = remove
+        syncs.restore()
     # The backfill takes it out.
     world.restart_workbench()
     assert settle(world, "p-ada", lambda h: not h) == {}

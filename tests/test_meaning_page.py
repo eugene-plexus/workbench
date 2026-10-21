@@ -244,10 +244,12 @@ def test_a_documents_meaning_goes_through_every_state_the_page_has_words_for_but
     assert states == {"words_only"}
     assert all(d["meaning"]["message"] is None for d in done["documents"])
     # A search model starts, and its answers are held: each document is seen being given meaning.
-    ready_world(world)
+    # Held before the model is listed: a worker that wakes at once could otherwise give every
+    # document its meaning before the hold, and "adding" would never be seen (Windows CI).
     gate = threading.Event()
     world.gateway.embed_gate = gate
     try:
+        ready_world(world)
         until(lambda: any(d["meaning"]["state"] == "adding" for d in listing(ada)["documents"]))
         now = listing(ada)
         states |= {d["meaning"]["state"] for d in now["documents"]}
