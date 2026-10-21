@@ -131,7 +131,10 @@ def stand_in(monkeypatch: pytest.MonkeyPatch, code: str) -> None:
 
 HANG = """
     import os, sys, time
-    open(sys.argv[2] + ".pid", "w").write(str(os.getpid()))
+    # Written whole, then named: a test that sees the file reads the number.
+    with open(sys.argv[2] + ".pid.part", "w") as f:
+        f.write(str(os.getpid()))
+    os.replace(sys.argv[2] + ".pid.part", sys.argv[2] + ".pid")
     time.sleep(600)
 """
 

@@ -275,6 +275,22 @@ def settle(world: World, sub: str, check: Callable[[dict[str, str]], bool]) -> d
         time.sleep(0.05)
 
 
+def _quiet(keeper: Any, seconds: float = 0.5) -> None:
+    """Wait until the index has had no chat to sync for `seconds`."""
+    deadline = time.perf_counter() + 15
+    calm_since: float | None = None
+    while time.perf_counter() < deadline:
+        now = time.perf_counter()
+        if keeper._touched:
+            calm_since = None
+        elif calm_since is None:
+            calm_since = now
+        elif now - calm_since >= seconds:
+            return
+        time.sleep(0.02)
+    raise AssertionError("the exchanges index never went quiet")
+
+
 def _users(request: dict[str, Any]) -> list[str]:
     return [m["content"] for m in request["messages"] if m["role"] == "user"]
 
@@ -434,6 +450,9 @@ def test_an_exchange_the_index_still_holds_is_never_shown_once_its_chat_is_gone(
     ask(world, ada, old, "Where is the spare house key?")
     settle(world, "p-ada", lambda h: len(h) == 1)
     keeper = world.server.server.config.app.state.exchanges_index
+    # A sync already running when the stubs go in would still take the
+    # exchange out (workbench#16): wait until nothing is touched for a while.
+    _quiet(keeper)
 
     async def lagging(owner: str, chat_id: str) -> int:
         return 0  # the index is not told: it still holds the exchange

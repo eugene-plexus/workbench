@@ -391,8 +391,11 @@ def test_a_raised_budget_sorts_the_same_question(
     block = sort_of(got)
     assert block["used"] is True and block["budgetSeconds"] == 10.0
     assert got["mode"] == f"meaning and words, sorted by {SORTER}"
-    assert block["seconds"] is not None and block["seconds"] >= block["expectedSeconds"] * 0.5
-    assert len(world.gateway.sorts()) == 1
+    # It really sorted: at least half the time the stand-in takes at its own
+    # rate. Not the probe's estimate, which a slow runner can put above it.
+    [asked] = world.gateway.sorts()
+    slept = world.gateway.rerank_tokens(asked) / 1500.0
+    assert block["seconds"] is not None and block["seconds"] >= slept * 0.5
 
 
 def test_the_screen_says_the_same_thing_before_any_question_is_asked(
