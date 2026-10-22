@@ -106,8 +106,49 @@ async function tryVisit(page, address, waitUntil, timeout, pending) {
   }
 }
 
-export function goSignedIn(page, address) {
-  return visit(page, address, "domcontentloaded");
+export async function goSignedIn(page, address) {
+  // What the page said while it opened, kept for the failure message.
+  const seen = [];
+  const remember = (line) => seen.push(line.slice(0, 160));
+  const onConsole = (message) => remember(`${message.type()}: ${message.text()}`);
+  const onError = (error) => remember(`error: ${error.message}`);
+  const onFailed = (request) => remember(`failed ${request.url()} ${request.failure()?.errorText}`);
+  const onResponse = (response) => {
+    if (response.status() >= 400) remember(`${response.status()} ${response.url()}`);
+  };
+  page.on("console", onConsole);
+  page.on("pageerror", onError);
+  page.on("requestfailed", onFailed);
+  page.on("response", onResponse);
+  try {
+    await visit(page, address, "domcontentloaded");
+    // The app shows New chat once it has started. Firefox on CI sometimes left
+    // the page blank for 30 s after a navigation that took over 10 s; load the
+    // page again once, saying so, and then name what the page showed.
+    const button = page.getByTestId("new-chat");
+    const started = await button.waitFor({ state: "attached", timeout: 15_000 }).then(
+      () => true,
+      () => false,
+    );
+    if (started) return;
+    console.log(
+      `RETRY  the app did not start in 15 s; loading it again (seen: ${seen.join(" | ")})`,
+    );
+    await page.reload({ waitUntil: "domcontentloaded", timeout: 15_000 }).catch(() => {});
+    await button.waitFor({ state: "attached", timeout: 15_000 }).catch(async (error) => {
+      const text = await page
+        .evaluate(() => document.body.innerText.slice(0, 200))
+        .catch(() => "?");
+      throw new Error(
+        `the app did not start in 30 s; the page says ${JSON.stringify(text)}; seen: ${seen.join(" | ")}; ${error.message.split("\n")[0]}`,
+      );
+    });
+  } finally {
+    page.off("console", onConsole);
+    page.off("pageerror", onError);
+    page.off("requestfailed", onFailed);
+    page.off("response", onResponse);
+  }
 }
 
 // The longest gap between two frames that still counts as "the page kept
