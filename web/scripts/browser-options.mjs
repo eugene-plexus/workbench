@@ -1,4 +1,4 @@
-/* global process, console, navigator, window, document, MutationObserver */
+/* global process, console, navigator, window, document, MutationObserver, performance */
 import { parseArgs } from "node:util";
 
 // Usage: node <check>-browser.mjs config.json [--browser chromium|firefox|webkit].
@@ -54,6 +54,22 @@ export async function fillComposer(page, text) {
   throw new Error(
     `the composer kept ${value.length} of ${text.length} characters and Send stayed ${(await send.isEnabled()) ? "enabled" : "disabled"}`,
   );
+}
+
+// "New chat opens at once while a stall runs" is measured against how long New
+// chat takes on a quiet page in the same run: a slow runner moved a quiet open
+// to over a second (1311 ms), which no stall caused. A real stall of the page
+// adds its own length (1.5 s and more) to the quiet time, so the limit is the
+// quiet time plus 800 ms, never below the 1 s of a fast machine.
+export function newChatLimit(quietMs) {
+  return Math.max(1000, quietMs + 800);
+}
+
+export async function newChatMs(page) {
+  const start = performance.now();
+  await page.getByTestId("new-chat").click();
+  await page.getByTestId("composer").waitFor();
+  return performance.now() - start;
 }
 
 export function contextOptions(browserName, options) {

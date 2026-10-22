@@ -12,6 +12,8 @@ import {
   contextOptions,
   fillComposer,
   keepScheme,
+  newChatLimit,
+  newChatMs,
   ignorablePageError,
   launchBrowser,
   readOptions,
@@ -251,18 +253,17 @@ try {
           (await response.text()),
       });
     });
+    await chat(page, cfg.chats.plain);
+    const quietMs = await newChatMs(page);
     await chat(page, cfg.chats.math);
     await page.evaluate(() => (window.__gap = 0));
     // While the formulas are laid out (one of them for 1.5 s, until it is
     // stopped), the page's own controls answer at once.
-    const nav = performance.now();
-    await page.getByTestId("new-chat").click();
-    await page.getByTestId("composer").waitFor();
-    const navMs = performance.now() - nav;
+    const navMs = await newChatMs(page);
     check(
       `${scheme}: New chat opens at once while formulas are laid out`,
-      navMs < 1000,
-      `${Math.round(navMs)} ms`,
+      navMs < newChatLimit(quietMs),
+      `${Math.round(navMs)} ms, ${Math.round(quietMs)} ms on a quiet page`,
     );
     await chat(page, cfg.chats.math);
     const answers = page.locator("[data-testid=answer]");
