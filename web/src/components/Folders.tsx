@@ -23,6 +23,8 @@ export function Folders({ owner }: { owner: boolean }) {
   const [writable, setWritable] = useState(false);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
+  const [giveAccessUrl, setGiveAccessUrl] = useState<string | null>(null);
+  const [accessAction, setAccessAction] = useState("Give access in Eugene");
   const [loadProblem, setLoadProblem] = useState<string | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
@@ -89,6 +91,11 @@ export function Folders({ owner }: { owner: boolean }) {
         <p role="alert" className="notice notice--error">
           <CircleAlert size={16} aria-hidden />
           {problem}
+          {giveAccessUrl && (
+            <a className="link" href={giveAccessUrl} target="_blank" rel="noopener noreferrer">
+              {accessAction}
+            </a>
+          )}
         </p>
       )}
       {data === null && !loadProblem && !problem && (
@@ -216,7 +223,14 @@ export function Folders({ owner }: { owner: boolean }) {
                         setBusy(true);
                         setProblem(null);
                         try {
-                          await del(`/api/folders/${grant.id}`);
+                          const result = await del<
+                            { warning?: string; giveAccessUrl?: string } | undefined
+                          >(`/api/folders/${grant.id}`);
+                          if (result?.warning) {
+                            setProblem(result.warning);
+                            setGiveAccessUrl(result.giveAccessUrl ?? null);
+                            setAccessAction("Remove access in Eugene");
+                          }
                           setData(await api<FolderGrants>("/api/folders"));
                           setRemoving(null);
                         } catch (error) {
@@ -252,6 +266,8 @@ export function Folders({ owner }: { owner: boolean }) {
             event.preventDefault();
             setBusy(true);
             setProblem(null);
+            setGiveAccessUrl(null);
+            setAccessAction("Give access in Eugene");
             try {
               await post("/api/folders", { name, path, subject, writable });
               setData(await api<FolderGrants>("/api/folders"));
@@ -260,6 +276,10 @@ export function Folders({ owner }: { owner: boolean }) {
               setWritable(false);
             } catch (error) {
               setProblem(problemOf(error));
+              const detail = (error as { detail?: { giveAccessUrl?: unknown } })?.detail;
+              setGiveAccessUrl(
+                typeof detail?.giveAccessUrl === "string" ? detail.giveAccessUrl : null,
+              );
             } finally {
               setBusy(false);
             }

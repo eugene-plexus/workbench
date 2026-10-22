@@ -8,6 +8,9 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
+
+import httpx
 
 from . import folder_io
 from .local_tools import unavailable
@@ -99,6 +102,7 @@ class GrantGone(folder_io.FolderError):
 class Folders:
     def __init__(self, store: Store, settings: Settings) -> None:
         self.store, self.settings = store, settings
+        self.http: httpx.AsyncClient | None = None
         # Grant mutations and small file operations serialize. Once revocation
         # returns, an earlier queued call cannot open a file under that grant.
         self.lock = asyncio.Lock()
@@ -138,14 +142,75 @@ class Folders:
                 raise folder_io.FolderError("Choose someone who has signed into this Workbench.")
             if len(await self.store.folder_grants()) >= 64:
                 raise folder_io.FolderError("There are already 64 folder grants. Remove one first.")
-            grant["path"] = await self._io(folder_io.check_root_path, grant["path"], self.protected)
-            grant["identity"] = await self._io(folder_io.inspect, grant["path"], self.protected)
+            try:
+                grant["path"] = await self._io(
+                    folder_io.check_root_path, grant["path"], self.protected
+                )
+                grant["identity"] = await self._io(folder_io.inspect, grant["path"], self.protected)
+            except folder_io.FolderError as exc:
+                if isinstance(exc.__cause__, PermissionError) or isinstance(
+                    exc.cause, PermissionError
+                ):
+                    raise folder_io.FolderError(
+                        f"Workbench's account cannot open {grant['path']}. {exc.cause}",
+                        cause=exc.cause,
+                    ) from None
+                raise
             await self.store.add_folder_grant(grant)
             return grant
 
-    async def remove(self, grant_id: str) -> None:
+    async def remove(self, grant_id: str) -> str | None:
         async with self.lock:
+            grant = next((g for g in await self.store.folder_grants() if g["id"] == grant_id), None)
             await self.store.delete_folder_grant(grant_id)
+            if grant is not None and not any(
+                g["identity"] == grant["identity"] for g in await self.store.folder_grants()
+            ):
+                try:
+                    await self.release(grant["path"])
+                except (OSError, ValueError, httpx.HTTPError) as exc:
+                    return (
+                        f"Workbench no longer uses {grant['path']}, but its access stays: "
+                        f"{str(exc) or type(exc).__name__}. Remove it in Eugene."
+                    )
+            return None
+
+    def give_access_url(self, path: str, writable: bool = False) -> str | None:
+        if not self.settings.oidc_issuer:
+            return None
+        query = urlencode(
+            {
+                "sel": f"app:{self.settings.id}",
+                "path": path,
+                "mode": "write" if writable else "read",
+            }
+        )
+        return self.settings.oidc_issuer.removesuffix("/oidc") + "/apps/app?" + query
+
+    async def release(self, path: str) -> None:
+        if not self.settings.agent_url:
+            # A launcher from before folder access cannot have added managed
+            # permissions. Its manual provisioning remains the expert override.
+            return
+        if self.http is None or not self.settings.agent_url or not self.settings.key_file:
+            raise ValueError("This Workbench has no local agent address or app key")
+        key = await asyncio.to_thread(self.settings.key_file.read_text, encoding="utf-8")
+        response = await self.http.post(
+            self.settings.agent_url.rstrip("/")
+            + f"/v1/apps/{self.settings.id}/folder-access/release",
+            headers={"Authorization": f"Bearer {key.strip()}"},
+            json={"path": path},
+        )
+        if response.status_code != 200:
+            try:
+                detail = response.json().get("detail", {})
+                cause = detail.get("detail", detail) if isinstance(detail, dict) else detail
+            except ValueError:
+                cause = response.text[:400]
+            raise ValueError(f"Eugene answered {response.status_code}: {cause}")
+        for grant in response.json()["grants"]:
+            if grant["state"] != "removed":
+                raise ValueError(grant["message"])
 
     async def _grant_of(self, grant_id: str, sub: str) -> dict[str, Any]:
         """The grant, if it is still there and names this person; else `GrantGone`."""

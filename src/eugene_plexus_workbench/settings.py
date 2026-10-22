@@ -76,5 +76,7 @@ class Settings(BaseSettings):
 
     #: Set only by the app-account launcher, never a user-facing setting.
     account_kind: str | None = None
+    agent_url: str | None = None
+    """The app-account launcher supplies this node's agent address."""
     #: A developer's own build of the front end; the package's otherwise.
     static_dir: Path | None = None

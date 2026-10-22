@@ -177,6 +177,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         sessions = Sessions(store, provider, *([provider_https] if provider_https else []))
         hub = Hub(settings.gateway_url, settings.key_file, person_token=sessions.gateway_token)
         tools = Tools(store, settings)
+        tools.folders.http = http
         tools.node_folders = NodeFolders(store, provider, http)
         answers = Answers(store, hub, tools)
         media = MediaJobs(store, hub, settings.data_dir)
