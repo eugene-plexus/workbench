@@ -6,7 +6,7 @@ import asyncio
 import errno
 import sys
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 from urllib.parse import urlencode
 
@@ -164,7 +164,8 @@ class Folders:
             grant = next((g for g in await self.store.folder_grants() if g["id"] == grant_id), None)
             await self.store.delete_folder_grant(grant_id)
             if grant is not None and not any(
-                g["identity"] == grant["identity"] for g in await self.store.folder_grants()
+                g["identity"] == grant["identity"] or _inside(g["path"], grant["path"])
+                for g in await self.store.folder_grants()
             ):
                 try:
                     await self.release(grant["path"])
@@ -195,22 +196,35 @@ class Folders:
         if self.http is None or not self.settings.agent_url or not self.settings.key_file:
             raise ValueError("This Workbench has no local agent address or app key")
         key = await asyncio.to_thread(self.settings.key_file.read_text, encoding="utf-8")
-        response = await self.http.post(
+        url = (
             self.settings.agent_url.rstrip("/")
-            + f"/v1/apps/{self.settings.id}/folder-access/release",
-            headers={"Authorization": f"Bearer {key.strip()}"},
-            json={"path": path},
+            + f"/v1/apps/{self.settings.id}/folder-access/release"
         )
-        if response.status_code != 200:
-            try:
-                detail = response.json().get("detail", {})
-                cause = detail.get("detail", detail) if isinstance(detail, dict) else detail
-            except ValueError:
-                cause = response.text[:400]
-            raise ValueError(f"Eugene answered {response.status_code}: {cause}")
-        for grant in response.json()["grants"]:
-            if grant["state"] != "removed":
-                raise ValueError(grant["message"])
+        headers = {"Authorization": f"Bearer {key.strip()}"}
+
+        async def ask(body: dict[str, str]) -> list[dict[str, Any]]:
+            assert self.http is not None
+            response = await self.http.post(url, headers=headers, json=body)
+            if response.status_code != 200:
+                try:
+                    detail = response.json().get("detail", {})
+                    cause = detail.get("detail", detail) if isinstance(detail, dict) else detail
+                except ValueError:
+                    cause = response.text[:400]
+                raise ValueError(f"Eugene answered {response.status_code}: {cause}")
+            records: list[dict[str, Any]] = response.json()["grants"]
+            if not records:
+                raise ValueError("Eugene returned no matching folder access record")
+            return records
+
+        records = await ask({"path": path})
+        remaining = await self.store.folder_grants()
+        for record in records:
+            if any(_inside(g["path"], record["path"]) for g in remaining):
+                continue
+            for outcome in await ask({"id": record["id"]}):
+                if outcome["state"] != "removed":
+                    raise ValueError(outcome["message"])
 
     async def _grant_of(self, grant_id: str, sub: str) -> dict[str, Any]:
         """The grant, if it is still there and names this person; else `GrantGone`."""
@@ -276,3 +290,8 @@ class Folders:
             return await self._io(
                 folder_io.operate, grant["path"], grant["identity"], tool, arguments, self.protected
             )
+
+
+def _inside(child: str, parent: str) -> bool:
+    cls = PureWindowsPath if ":" in parent or parent.startswith("\\\\") else PurePosixPath
+    return cls(child).is_relative_to(cls(parent))
