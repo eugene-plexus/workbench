@@ -2647,6 +2647,9 @@ class Store:
             await self._run(lambda: branch_store.resolve(self._conn(), payload))
         )
         summary["token"] = branch_store.fingerprint(payload)
+        summary["legacyRecalls"] = bool(
+            await self._run(lambda: self._branch_legacy_recalls(payload, overlapping=False))
+        )
         return summary
 
     async def prepare_branch(
@@ -2825,11 +2828,48 @@ class Store:
         )
 
     async def expire_chat_branches(self, chat_id: str, *, now: float) -> None:
-        await self._run(
-            lambda: self._conn().execute(
+        def go() -> None:
+            db = self._conn()
+            # Check every branch before changing any Undo deadline or purging a sibling.
+            for row in db.execute(
+                "SELECT payload FROM deleted_branches WHERE chat_id=?", (chat_id,)
+            ):
+                payload = branch_store.resolve(db, json.loads(row[0]))
+                payload["deleting_chat"] = True
+                if recalls := self._branch_legacy_recalls(payload):
+                    from .interaction_store import InteractionError
+
+                    recall = recalls[0]
+                    raise InteractionError(
+                        "This chat cannot be deleted while an older memory recall may quote "
+                        f"one of its deleted answers: {recall['title']} "
+                        f"(answer {recall['id']}), {recall['text']!r}. "
+                        "Remove that recall to finish.",
+                        503,
+                    )
+            db.execute(
                 "UPDATE deleted_branches SET delete_at=?,state='purging' WHERE chat_id=?",
                 (now, chat_id),
             )
+
+        await self._run(go)
+
+    def _branch_legacy_recalls(
+        self, payload: dict[str, Any], *, overlapping: bool = True
+    ) -> list[dict[str, str]]:
+        found = branch_store.legacy_recalls(self._conn(), payload, overlapping=overlapping)
+        backup_payload = branch_store.backup_scope(self._conn(), payload)
+        for path in _all_copies(self._path):
+            copy = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+            try:
+                found.extend(
+                    branch_store.legacy_recalls(copy, backup_payload, overlapping=overlapping)
+                )
+            finally:
+                copy.close()
+        return sorted(
+            {tuple(r.items()): r for r in found}.values(),
+            key=lambda r: (r["id"], r["signature"]),
         )
 
     async def branch_legacy_recalls(
@@ -2845,17 +2885,7 @@ class Store:
                 return []
             payload = branch_store.resolve(self._conn(), json.loads(row[0]))
             payload["deleting_chat"] = deleting_chat
-            found = branch_store.legacy_recalls(self._conn(), payload)
-            for path in _all_copies(self._path):
-                copy = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
-                try:
-                    found.extend(branch_store.legacy_recalls(copy, payload))
-                finally:
-                    copy.close()
-            return sorted(
-                {tuple(r.items()): r for r in found}.values(),
-                key=lambda r: (r["id"], r["signature"]),
-            )
+            return self._branch_legacy_recalls(payload)
 
         return await self._run(go)
 
@@ -6457,8 +6487,11 @@ class Store:
             for partial in self._path.parent.glob(f"{self._path.name}.schema-*.bak.part"):
                 partial.unlink(missing_ok=True)
             copies = _all_copies(self._path)
+            backup_payload = (
+                branch_store.backup_scope(self._conn(), branch) if branch is not None else None
+            )
             for copy in copies:
-                _purge_copy(copy, sub, branch=branch)
+                _purge_copy(copy, sub, branch=backup_payload)
             return copies
 
         return await self._run(go)

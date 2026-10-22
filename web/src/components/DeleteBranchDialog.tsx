@@ -53,6 +53,7 @@ type Summary = {
   artifacts: number;
   pendingNotes: number;
   keptNotes: number;
+  legacyRecalls: boolean;
 };
 
 export function DeleteBranchDialog({
@@ -111,6 +112,13 @@ export function DeleteBranchDialog({
           {summary.artifacts === 1 ? "artifact" : "artifacts"} go with them. {summary.pendingNotes}{" "}
           pending {summary.pendingNotes === 1 ? "note goes" : "notes go"} too. Notes kept from them
           stay. You can Undo for 30 days. Then they are deleted permanently.
+          {summary.legacyRecalls && (
+            <>
+              {" "}
+              An older memory recall shorter than 8 words or differently punctuated may keep a
+              phrase from this answer.
+            </>
+          )}
         </p>
       ) : (
         <p role="status">Counting what goes…</p>

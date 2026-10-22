@@ -29,20 +29,40 @@ def _branch_runs(payload: dict[str, Any]) -> set[tuple[str, ...]]:
 
 class LegacyRecall(InteractionError):
     def __init__(self, recalls: list[dict[str, str]]) -> None:
-        self.recalls = recalls
+        # Retry metadata must not keep another copy of the recalled answer's words.
+        self.recalls = [
+            {key: recall[key] for key in ("id", "title", "signature")} for recall in recalls
+        ]
         super().__init__(
             "This answer cannot be deleted for good while an older memory recall may quote it: "
             f"{recalls[0]['title']}. Remove that recall to finish."
         )
 
 
-def legacy_recalls(db: sqlite3.Connection, payload: dict[str, Any]) -> list[dict[str, str]]:
+def backup_scope(db: sqlite3.Connection, payload: dict[str, Any]) -> dict[str, Any]:
+    """A backup recall can block only while its answer is reachable in the live store."""
+    return {
+        **payload,
+        "live_recall_messages": {
+            (r[0], r[1])
+            for r in db.execute(
+                "SELECT m.chat_id,m.id FROM messages m JOIN chats c ON c.id=m.chat_id "
+                "WHERE c.owner=?",
+                (payload["owner"],),
+            )
+        },
+    }
+
+
+def legacy_recalls(
+    db: sqlite3.Connection, payload: dict[str, Any], *, overlapping: bool = True
+) -> list[dict[str, str]]:
     """Only an unidentified recall sharing eight consecutive words can hold this purge."""
     payload = flatten(payload)
     ids = set(payload["ids"])
 
     branch_runs = _branch_runs(payload)
-    if not branch_runs:
+    if overlapping and not branch_runs:
         return []
     chats = {r["id"]: r["title"] for r in rows(db, "chats") if r["owner"] == payload["owner"]}
     copies = rows(db, "messages")
@@ -53,19 +73,23 @@ def legacy_recalls(db: sqlite3.Connection, payload: dict[str, Any]) -> list[dict
     for message in copies:
         if message["chat_id"] not in chats or message["id"] in ids:
             continue
+        live = payload.get("live_recall_messages")
+        if live is not None and (message["chat_id"], message["id"]) not in live:
+            continue
         if payload.get("deleting_chat") and message["chat_id"] == payload["chat"]:
             continue
         used = json.loads(message.get("memory_used") or "null") or {}
         recalled = (used.get("memoryServer") or {}).get("memories") or []
         for recall in recalled:
-            if not recall.get("documentId") and branch_runs & _word_runs(
-                str(recall.get("text") or "")
+            if not recall.get("documentId") and (
+                not overlapping or branch_runs & _word_runs(str(recall.get("text") or ""))
             ):
                 found.append(
                     {
                         "id": message["id"],
                         "title": chats[message["chat_id"]],
                         "signature": fingerprint(recall),
+                        "text": str(recall.get("text") or ""),
                     }
                 )
     return sorted(found, key=lambda r: (r["id"], r["signature"]))
@@ -439,13 +463,16 @@ def scrub_message(row: dict[str, Any], payload: dict[str, Any]) -> dict[str, str
             documents = {r["document_id"] for r in payload["tables"].get("memory_server_sent", [])}
             old_memories = server.get("memories") or []
             chat_deleted = payload.get("deleting_chat") and row.get("chat_id") == payload["chat"]
-            branch_runs = _branch_runs(payload) if chat_deleted else set()
+            live = payload.get("live_recall_messages")
+            orphaned = live is not None and (row.get("chat_id"), row.get("id")) not in live
+            scrub_legacy = chat_deleted or orphaned
+            branch_runs = _branch_runs(payload) if scrub_legacy else set()
             kept_memories = [
                 m
                 for m in old_memories
                 if m.get("documentId") not in documents
                 and not (
-                    chat_deleted
+                    scrub_legacy
                     and not m.get("documentId")
                     and branch_runs & _word_runs(str(m.get("text") or ""))
                 )

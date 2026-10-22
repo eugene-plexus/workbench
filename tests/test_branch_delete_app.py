@@ -368,6 +368,7 @@ def test_legacy_pause_waits_for_recall_change_or_a_day(
         == f"This answer cannot be deleted for good while an older memory recall may quote it: {title}. Remove that recall to finish."
     )
     paused = json.loads(row["steps"])["legacy"]
+    assert all("text" not in recall for recall in paused["recalls"])
     for _ in range(3):
         now += 60
         on_app(world, state.branches.due())
@@ -393,3 +394,50 @@ def test_legacy_pause_waits_for_recall_change_or_a_day(
     on_app(world, state.branches.due())
     assert on_app(world, state.store.deleted_branches(chat)) == []
     assert drop.call_count == 1 and forget.call_count == 1
+
+
+@pytest.mark.parametrize("overlap", [False, True])
+def test_chat_delete_checks_all_recalls_before_expiring_any_branch(
+    world: World, overlap: bool
+) -> None:
+    ada = world.browser()
+    ada.sign_in("p-ada")
+    chat = ada.new_chat()
+    state = world.server.server.config.app.state
+    words = "one two three four five six seven eight nine"
+    world.gateway.words = ["First answer"]
+    ada.post(f"/api/chats/{chat}/messages", json={"content": "Question"})
+    first = ada.wait_answer(chat)
+    world.gateway.words = [words]
+    ada.post(f"/api/chats/{chat}/messages/{first['id']}/retry")
+    second = ada.wait_answer(chat)
+    later = ada.new_chat()
+    ada.post(f"/api/chats/{later}/messages", json={"content": "Later"})
+    legacy = ada.wait_answer(later)
+    recalled = words if overlap else "unrelated old recall with eight words that never match"
+    on_app(
+        world,
+        state.store.update_message(
+            legacy["id"], memory_used={"memoryServer": {"memories": [{"text": recalled}]}}
+        ),
+    )
+    for answer in (first, second):
+        assert (
+            confirmed_delete(ada, f"/api/chats/{chat}/messages/{answer['id']}").status_code == 200
+        )
+    before = on_app(world, state.store.deleted_branches(chat))
+    response = ada.delete(f"/api/chats/{chat}")
+    if overlap:
+        assert response.status_code == 503, response.text
+        title = ada.get(f"/api/chats/{later}").json()["chat"]["title"]
+        assert title in response.text and legacy["id"] in response.text
+        on_app(world, state.branches.due())
+        assert on_app(world, state.store.deleted_branches(chat)) == before
+        for answer in (first, second):
+            assert ada.post(f"/api/chats/{chat}/messages/{answer['id']}/undo").status_code == 200
+    else:
+        assert response.status_code == 204, response.text
+        assert on_app(world, state.store.deleted_branches(chat)) == []
+    assert ada.get(f"/api/chats/{later}").json()["messages"][-1]["memoryUsed"]["memoryServer"][
+        "memories"
+    ] == [{"text": recalled}]

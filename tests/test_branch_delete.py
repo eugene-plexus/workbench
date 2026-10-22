@@ -7,6 +7,7 @@ import base64
 import io
 import json
 import sqlite3
+import time
 import zipfile
 from dataclasses import asdict
 from pathlib import Path
@@ -803,6 +804,110 @@ async def test_removing_an_old_recall_also_unblocks_schema_backups(tmp_path: Pat
         assert (await store.message("a3")).memory_used["memoryServer"]["memories"] == [
             {"text": "Keep this recall"}
         ]
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_refused_chat_delete_preserves_every_hidden_branch(tmp_path: Path) -> None:
+    store = Store(tmp_path / "workbench.sqlite3")
+    await store.open()
+    try:
+        await seed(store)
+        words = "one two three four five six seven eight nine"
+        await store.update_message("a2", content=words)
+        await store.create_chat(Chat("later", "p", "Later recall", None, 0, 0))
+        await store.add_message(
+            Message("legacy", "later", 0, "assistant", "done", 0), parent_id=None
+        )
+        await store.update_message(
+            "legacy", memory_used={"memoryServer": {"memories": [{"text": words}]}}
+        )
+        now = time.time()
+        await store.delete_branch("c", "a1", now=now)
+        await store.delete_branch("c", "a2", now=now + 1)
+        before = await store.deleted_branches("c")
+        with pytest.raises(InteractionError) as caught:
+            await store.delete_chat("c")
+        assert caught.value.status == 503
+        assert "Later recall" in str(caught.value) and "legacy" in str(caught.value)
+        assert await store.chat("c") is not None
+        assert await store.deleted_branches("c") == before
+        for row in before:
+            assert await store.undo_branch("c", row["id"], now=now + 2)
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["chat", "message"])
+async def test_backup_only_legacy_recall_is_scrubbed_without_blocking(
+    tmp_path: Path, missing: str
+) -> None:
+    store = Store(tmp_path / "workbench.sqlite3")
+    await store.open()
+    try:
+        await seed(store)
+        words = MARK + " one two three four five six seven eight nine"
+        await store.update_message("a2", content=words)
+        await store.create_chat(Chat("later", "p", "Later", None, 0, 0))
+        await store.add_message(
+            Message("legacy", "later", 0, "assistant", "done", 0), parent_id=None
+        )
+        await store.update_message(
+            "legacy",
+            memory_used={"memoryServer": {"memories": [{"text": words}, {"text": "Keep"}]}},
+        )
+        backup_path = Path(str(store.path) + ".schema-28.bak")
+
+        def backup() -> None:
+            with sqlite3.connect(backup_path) as copy:
+                store._conn().backup(copy)
+
+        await store._run(backup)
+        if missing == "chat":
+            await store.delete_chat("later")
+        else:
+            await store._run(
+                lambda: store._conn().execute("DELETE FROM messages WHERE id='legacy'")
+            )
+        await store.delete_branch("c", "a2", now=0)
+        assert await store.branch_legacy_recalls("a2") == []
+        assert await store.purge_branch("a2", now=30 * DAY)
+        assert _holding(tmp_path, MARK) == []
+        with sqlite3.connect(backup_path) as copy:
+            used = json.loads(
+                copy.execute("SELECT memory_used FROM messages WHERE id='legacy'").fetchone()[0]
+            )
+            assert used["memoryServer"]["memories"] == [{"text": "Keep"}]
+            assert copy.execute("SELECT title FROM chats WHERE id='later'").fetchone() == ("Later",)
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text, document_id, warning",
+    [
+        ("short phrase", None, True),
+        ("ONE, two three four five six seven eight nine", None, True),
+        ("one two three four five six seven eight nine", "known", False),
+        (None, None, False),
+    ],
+)
+async def test_branch_summary_warns_only_when_an_unidentified_recall_exists(
+    tmp_path: Path, text: str | None, document_id: str | None, warning: bool
+) -> None:
+    store = Store(tmp_path / "workbench.sqlite3")
+    await store.open()
+    try:
+        await seed(store)
+        if text is not None:
+            recall = {"text": text}
+            if document_id is not None:
+                recall["documentId"] = document_id
+            await store.update_message("a3", memory_used={"memoryServer": {"memories": [recall]}})
+        assert (await store.branch_summary("c", "a2"))["legacyRecalls"] is warning
     finally:
         await store.close()
 

@@ -97,3 +97,35 @@ it("lets the owner compare but has no write actions", () => {
   expect(screen.queryByRole("button", { name: "Name this version" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Delete this version" })).toBeNull();
 });
+
+it.each([false, true])(
+  "shows the legacy recall caveat only when needed (%s)",
+  async (legacyRecalls) => {
+    vi.mocked(api).mockResolvedValue({
+      messages: 1,
+      answers: 1,
+      files: 0,
+      artifacts: 0,
+      pendingNotes: 0,
+      keptNotes: 0,
+      legacyRecalls,
+    });
+    render(
+      <VersionArrows
+        chatId="c"
+        message={message}
+        busy={false}
+        readOnly={false}
+        onChanged={vi.fn()}
+        onProblem={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Version actions" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete this version" }));
+    await screen.findByRole("button", { name: "Delete version" });
+    const caveat =
+      "An older memory recall shorter than 8 words or differently punctuated may keep a phrase from this answer.";
+    if (legacyRecalls) expect(screen.getByRole("dialog")).toHaveTextContent(caveat);
+    else expect(screen.getByRole("dialog")).not.toHaveTextContent(caveat);
+  },
+);
