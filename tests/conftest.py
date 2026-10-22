@@ -496,6 +496,15 @@ class FakeEugene:
     token_calls: int = 0
     #: Row 7: each `/oidc/subjects` call's ids; a person deleted from `people` is `unknown`.
     subject_calls: list[list[str]] = field(default_factory=list)
+    #: Row 70c: claims each person's ID token carries beyond the standard ones
+    #: (`eugene_groups`, `eugene_policies`, `eugene_groups_truncated`).
+    claims: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: Row 70c: what `/oidc/userinfo` says of a person beyond `sub`; their `claims` if unset.
+    userinfo: dict[str, dict[str, Any]] = field(default_factory=dict)
+    userinfo_calls: int = 0
+    #: Row 70c: what `/oidc/groups` lists, or None for an Eugene too old to have it (404).
+    groups: list[dict[str, str]] | None = field(default_factory=list)
+    access: dict[str, str] = field(default_factory=dict)
 
     @property
     def issuer(self) -> str:
@@ -525,6 +534,7 @@ class FakeEugene:
         }
         if "email" in person:  # row 7: only when the person has one, as Eugene sends it
             claims["email"] = person["email"]
+        claims.update(self.claims.get(sub, {}))
         if nonce is not None:
             claims["nonce"] = nonce
         return jwt.encode({"alg": "RS256", "typ": typ, "kid": "k1"}, claims, self.key)
@@ -547,6 +557,7 @@ class FakeEugene:
                 "token_endpoint": f"{self.issuer}/token",
                 "jwks_uri": f"{self.issuer}/jwks",
                 "revocation_endpoint": f"{self.issuer}/revoke",
+                "userinfo_endpoint": f"{self.issuer}/userinfo",
             }
 
         @app.get("/oidc/jwks")
@@ -599,8 +610,10 @@ class FakeEugene:
                 sub = found["sub"]
                 refresh = secrets.token_urlsafe(16)
                 self.refresh_tokens[refresh] = sub
+                access = "at-" + secrets.token_urlsafe(8)
+                self.access[access] = sub
                 return {
-                    "access_token": "at",
+                    "access_token": access,
                     "token_type": "Bearer",
                     "expires_in": self.expires_in,
                     "id_token": self.id_token(sub, nonce=found["nonce"]),
@@ -617,8 +630,10 @@ class FakeEugene:
                         },
                         status_code=400,
                     )
+                access = "at-" + secrets.token_urlsafe(8)
+                self.access[access] = sub
                 return {
-                    "access_token": "at",
+                    "access_token": access,
                     "token_type": "Bearer",
                     "expires_in": self.expires_in,
                     "id_token": self.id_token(sub),
@@ -632,6 +647,30 @@ class FakeEugene:
             self.revoked.append(token)
             self.refresh_tokens.pop(token, None)
             return {}
+
+        @app.get("/oidc/userinfo")
+        async def userinfo(request: Request) -> Any:
+            self.userinfo_calls += 1
+            if not self.up:
+                return JSONResponse({}, status_code=503)
+            token = request.headers.get("authorization", "").removeprefix("Bearer ")
+            sub = self.access.get(token)
+            if sub is None or sub in self.disabled:
+                return JSONResponse({"error": "invalid_token"}, status_code=401)
+            person = self.people[sub]
+            told = self.userinfo.get(sub, self.claims.get(sub, {}))
+            extra = {k: v for k, v in told.items() if k != "eugene_groups_truncated"}
+            return {"sub": sub, "name": person["name"], "eugene_role": person["role"], **extra}
+
+        @app.get("/oidc/groups")
+        async def groups(request: Request) -> Any:
+            if not self.up:
+                return JSONResponse({"error": "temporarily_unavailable"}, status_code=503)
+            if self.groups is None:
+                return JSONResponse({"detail": "Not Found"}, status_code=404)
+            if not client_ok(request):
+                return JSONResponse({"error": "invalid_client"}, status_code=401)
+            return {"groups": self.groups}
 
         @app.post("/oidc/subjects")
         async def subjects(request: Request) -> Any:

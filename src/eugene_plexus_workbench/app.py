@@ -44,6 +44,7 @@ from .branches import Branches, BranchWrites
 from .connections import Connections
 from .exports import Exports
 from .exports import router as exports_router
+from .groups_api import router as groups_router
 from .hub import Hub
 from .interaction_store import InteractionError
 from .interactions import Interactions
@@ -433,6 +434,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(past_chats_router)
     app.include_router(projects_router)
     app.include_router(memory_servers_router)
+    app.include_router(groups_router)
     app.include_router(removal_router)
     app.include_router(exports_router)
     app.include_router(documents_api.router)

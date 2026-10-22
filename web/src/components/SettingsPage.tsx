@@ -2,6 +2,8 @@
  * The Settings page (MV4: app before config): every setting a person has in Workbench, apart from
  * the pages that hold their data. Memory's, then Documents', then the connections other apps have,
  * then downloading all of one's data, and for the owner, the people removed from Eugene (row 7).
+ * A person in a permission group sees what their groups set; the owner sets each group's memory
+ * server (row 70c).
  * Each section links to its page, and each page links here (to its section, by the address's
  * `#memory` or `#documents`).
  */
@@ -11,6 +13,7 @@ import { useEffect } from "react";
 
 import { Connections } from "./Connections";
 import { DocumentsSettings } from "./DocumentsSettings";
+import { GroupServers, YourGroups } from "./GroupsSettings";
 import { MemorySettings } from "./MemorySettings";
 import { RemovedPeople } from "./RemovedPeople";
 import { YourData } from "./YourData";
@@ -51,6 +54,8 @@ export function SettingsPage({
         </p>
         <MemorySettings onOpenMemory={onOpenMemory} />
         <DocumentsSettings onOpenDocuments={onOpenDocuments} />
+        <YourGroups />
+        {owner && <GroupServers />}
         <div id="connections" className="scroll-mt-4">
           <Connections />
         </div>

@@ -27,6 +27,18 @@ vi.mock("./RemovedPeople", () => ({
     </section>
   ),
 }));
+vi.mock("./GroupsSettings", () => ({
+  YourGroups: () => (
+    <section>
+      <h2>Your groups</h2>
+    </section>
+  ),
+  GroupServers: () => (
+    <section>
+      <h2>Group memory servers</h2>
+    </section>
+  ),
+}));
 vi.mock("./MemoryModels", () => ({ MemoryModels: () => null }));
 vi.mock("./MemoryServer", () => ({ MemoryServer: () => null }));
 
@@ -64,10 +76,16 @@ describe("the Settings page", () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
-  it("shows its sections in order: Memory, Documents, Connections, Your data", async () => {
+  it("shows its sections in order: Memory, Documents, groups, Connections, Your data", async () => {
     await opened();
     const names = screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent?.trim());
-    expect(names).toEqual(["Memory", "Documents", "Connections to other apps", "Your data"]);
+    expect(names).toEqual([
+      "Memory",
+      "Documents",
+      "Your groups",
+      "Connections to other apps",
+      "Your data",
+    ]);
     const memory = screen.getByTestId("settings-memory");
     const documents = screen.getByTestId("settings-documents");
     const connections = document.getElementById("connections")!;
@@ -88,6 +106,15 @@ describe("the Settings page", () => {
     await waitFor(() => expect(screen.queryByText("Loading your memory settings…")).toBeNull());
     const names = screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent?.trim());
     expect(names.slice(-2)).toEqual(["Your data", "Removed people"]);
+    expect(names).toContain("Group memory servers");
+  });
+
+  it("shows everyone their groups, and only the owner each group's memory server", async () => {
+    await opened();
+    const names = () =>
+      screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent?.trim());
+    expect(names()).toContain("Your groups");
+    expect(names()).not.toContain("Group memory servers");
   });
 
   it("holds the controls of both settings", async () => {

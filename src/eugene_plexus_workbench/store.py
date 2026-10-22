@@ -101,7 +101,7 @@ from .agui_store import AGUIStore, allow_chat_write
 from .interaction_store import SCHEMA as INTERACTION_SCHEMA
 from .interaction_store import InteractionStore
 
-SCHEMA_VERSION = 29
+SCHEMA_VERSION = 30
 
 #: The oldest schema this migrates from: what Workbench v0.1.0 wrote. Schema 1 predates
 #: it, and nobody holds one.
@@ -695,6 +695,17 @@ def _removal(db: sqlite3.Connection) -> None:
     db.execute("CREATE INDEX IF NOT EXISTS exports_by_asker ON exports (asker, created_at)")
 
 
+def _group_claims(db: sqlite3.Connection) -> None:
+    """Schema 30 (row 70c): the permission groups a person is in and the policies those set,
+    as Eugene's sign-in claims last said (`eugene_groups`, `eugene_policies`), kept with the
+    person so their groups' memory servers apply when no request of theirs is open. NULL is
+    "Eugene said nothing" (an Eugene from before row 70), not "in no group"."""
+    present = {row[1] for row in db.execute("PRAGMA table_info(people)")}
+    for column in ("groups_json", "policies_json"):
+        if column not in present:
+            db.execute(f"ALTER TABLE people ADD COLUMN {column} TEXT")
+
+
 #: What brings a store written at version N-1 to N, for N above `OLDEST_SCHEMA`.
 #: `_SCHEMA` already holds the result, for a store made new. A step is a statement,
 #: or a function of the connection for what SQL alone cannot say.
@@ -845,6 +856,7 @@ _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
     # A removed person (row 7, 2026-10-21): two new tables and one new column.
     28: [_removal],
     29: [branch_store.migration],
+    30: [_group_claims],
 }
 
 
@@ -982,6 +994,7 @@ def _initialize_schema(
         _projects(db)
         _removal(db)
         branch_store.migration(db)
+        _group_claims(db)
         db.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?)",
             (str(SCHEMA_VERSION),),
@@ -1172,6 +1185,11 @@ class Person:
     username: str | None = None
     #: The email Eugene's ID token carried, if any (row 7: kept with a removed person's data).
     email: str | None = None
+    #: The permission groups Eugene's sign-in said they are in, as `{id, name}` (row 70c), or
+    #: None when Eugene said nothing of groups (an Eugene from before row 70).
+    groups: list[dict[str, str]] | None = None
+    #: The policies their groups set (`PoliciesInEffect`, `setBy` included), or None as above.
+    policies: dict[str, Any] | None = None
     # Request-only context. Never persisted with the person or sent to a browser.
     session_id: str | None = None
 
@@ -2151,10 +2169,12 @@ class Store:
             now = time.time()
             self._conn().execute(
                 "INSERT INTO people (sub, name, username, role, first_seen, last_seen, known_at, "
-                "email) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(sub) DO UPDATE SET "
+                "email, groups_json, policies_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(sub) DO UPDATE SET "
                 "name = excluded.name, username = excluded.username, role = excluded.role, "
                 "last_seen = excluded.last_seen, known_at = excluded.known_at, "
-                "email = excluded.email",
+                "email = excluded.email, groups_json = excluded.groups_json, "
+                "policies_json = excluded.policies_json",
                 (
                     person.sub,
                     person.name,
@@ -2164,6 +2184,8 @@ class Store:
                     now,
                     now,
                     person.email,
+                    None if person.groups is None else json.dumps(person.groups),
+                    None if person.policies is None else json.dumps(person.policies),
                 ),
             )
 
@@ -2180,8 +2202,14 @@ class Store:
             )
             if row is None:
                 return None
+            groups, policies = row["groups_json"], row["policies_json"]
             return Person(
-                sub=row["sub"], name=row["name"], role=row["role"], username=row["username"]
+                sub=row["sub"],
+                name=row["name"],
+                role=row["role"],
+                username=row["username"],
+                groups=None if groups is None else json.loads(groups),
+                policies=None if policies is None else json.loads(policies),
             )
 
         return await self._run(go)
@@ -6066,6 +6094,25 @@ class Store:
                 raise
 
         await self._run(go)
+
+    async def group_memory_servers(self) -> list[dict[str, Any]]:
+        """Every group's memory server (row 70c): kept as owner `group:<id>`, which no person's
+        id is, with its verbs decoded, by owner."""
+
+        def go() -> list[dict[str, Any]]:
+            rows = (
+                self._conn()
+                .execute("SELECT * FROM memory_servers WHERE owner LIKE 'group:%' ORDER BY owner")
+                .fetchall()
+            )
+            found = []
+            for row in rows:
+                server = dict(row)
+                server["verbs"] = json.loads(server["verbs"] or "{}")
+                found.append(server)
+            return found
+
+        return await self._run(go)
 
     async def delete_memory_server(self, owner: str) -> None:
         def go() -> None:

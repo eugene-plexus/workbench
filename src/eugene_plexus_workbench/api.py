@@ -198,6 +198,8 @@ async def sign_in_callback(request: Request) -> Response:
             role=identity.role,
             username=identity.username,
             email=identity.email,
+            groups=identity.groups,
+            policies=identity.policies,
         )
     )
     created = await sessions.create(
