@@ -63,6 +63,7 @@ function revisionLabel(revision: RevisionView, count: number, tool?: string): st
 }
 
 type Tab = "preview" | "source";
+type ShownTab = Tab | "changes";
 
 export default function ArtifactDialog({
   scope,
@@ -245,21 +246,29 @@ export default function ArtifactDialog({
     else onClose();
   };
 
+  const tabs: ShownTab[] =
+    compare === null ? ["preview", "source"] : ["preview", "source", "changes"];
+  const activeTab: ShownTab = compare === null ? tab : "changes";
+  const showTab = (name: ShownTab) => {
+    if (name === "changes") return;
+    setTab(name);
+    setCompare(null);
+  };
   const onTabKey = (event: KeyboardEvent<HTMLButtonElement>) => {
-    const next: Tab | null =
-      event.key === "ArrowLeft" || event.key === "ArrowRight"
-        ? tab === "preview"
-          ? "source"
-          : "preview"
-        : event.key === "Home"
-          ? "preview"
-          : event.key === "End"
-            ? "source"
-            : null;
+    const index = tabs.indexOf(activeTab);
+    const next =
+      event.key === "ArrowLeft"
+        ? tabs[(index + tabs.length - 1) % tabs.length]
+        : event.key === "ArrowRight"
+          ? tabs[(index + 1) % tabs.length]
+          : event.key === "Home"
+            ? tabs[0]
+            : event.key === "End"
+              ? tabs[tabs.length - 1]
+              : null;
     if (!next) return;
     event.preventDefault();
-    setTab(next);
-    setCompare(null);
+    showTab(next);
     document.getElementById(`${uid}-${next}-tab`)?.focus();
   };
 
@@ -323,23 +332,20 @@ export default function ArtifactDialog({
       </div>
       <div className="artifact-dialog-bar">
         <span role="tablist" aria-label="Show" className="artifact-tabs">
-          {(["preview", "source"] as const).map((name) => (
+          {tabs.map((name) => (
             <button
               key={name}
               id={`${uid}-${name}-tab`}
               type="button"
               role="tab"
               className="artifact-tab"
-              aria-selected={tab === name}
+              aria-selected={activeTab === name}
               aria-controls={`${uid}-${name}-panel`}
-              tabIndex={tab === name ? 0 : -1}
-              onClick={() => {
-                setTab(name);
-                setCompare(null);
-              }}
+              tabIndex={activeTab === name ? 0 : -1}
+              onClick={() => showTab(name)}
               onKeyDown={onTabKey}
             >
-              {name === "preview" ? "Preview" : "Source"}
+              {name === "preview" ? "Preview" : name === "source" ? "Source" : "Changes"}
             </button>
           ))}
         </span>
@@ -387,8 +393,10 @@ export default function ArtifactDialog({
       </div>
       {compare !== null && (
         <section
+          id={`${uid}-changes-panel`}
+          role="tabpanel"
           className="artifact-diff"
-          aria-label={`Changes from revision ${compare} to revision ${selected}`}
+          aria-labelledby={`${uid}-changes-tab`}
         >
           {compareProblem ? (
             <p role="alert" className="notice notice--error">

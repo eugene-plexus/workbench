@@ -14,6 +14,7 @@ import {
   canCheckPreviewLoop,
   ignorablePageError,
   keepScheme,
+  newChatLimit,
   frameGapLimit,
   goChat,
   goSignedIn,
@@ -208,6 +209,15 @@ it("ignores only WebKit's report of an abandoned request to the app's own API", 
     ignorablePageError("webkit", "https://example.com/api/x due to access control checks."),
   ).toBe(false);
   expect(ignorablePageError("webkit", "TypeError: undefined is not an object")).toBe(false);
+});
+
+it("limits New chat by its quiet time, so a slow runner passes and a stall does not", () => {
+  expect(newChatLimit(150)).toBe(1000);
+  // 1311 ms on a runner where New chat takes 700 ms quiet: no stall in that.
+  expect(1311 < newChatLimit(700)).toBe(true);
+  // A page held for 1.5 s adds that to its quiet time.
+  expect(700 + 1500 < newChatLimit(700)).toBe(false);
+  expect(150 + 1500 < newChatLimit(150)).toBe(false);
 });
 
 it("opens the sign-in page without waiting for every resource to load", async () => {
