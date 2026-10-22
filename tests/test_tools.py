@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 from mcp.server import MCPServer
+from mcp.types import CallToolResult, ImageContent
 from starlette.responses import JSONResponse
 
 from eugene_plexus_workbench.store import Store
@@ -34,6 +35,7 @@ class Remote:
     huge: bool = False
     status: int | None = None
     oversized: bool = False
+    picture: bytes | None = None
 
 
 @pytest.fixture
@@ -47,7 +49,26 @@ def remote(request: Any) -> Iterator[Remote]:
         remote.calls.append(text)
         if remote.slow:
             await asyncio.sleep(5)
-        return "x" * 2_100_000 if remote.oversized else "x" * 100_000 if remote.huge else text
+        if remote.picture is not None:
+            import base64
+
+            return CallToolResult(
+                content=[
+                    ImageContent(
+                        type="image",
+                        data=base64.b64encode(remote.picture).decode(),
+                        mimeType="image/png",
+                    )
+                ],
+                structuredContent={"result": text},
+            )  # type: ignore[return-value]
+        return (
+            "x" * (8 * 1024 * 1024 + 100)
+            if remote.oversized
+            else "x" * 100_000
+            if remote.huge
+            else text
+        )
 
     app = mcp.streamable_http_app(json_response=getattr(request, "param", True))
 
@@ -281,6 +302,23 @@ def test_oversized_wire_result_is_uncertain_and_never_retried(world: World, remo
     assert done["status"] == "failed"
     assert done["toolRounds"][0]["calls"][0]["status"] == "uncertain"
     assert remote.calls == ["hello"]
+
+
+@pytest.mark.parametrize("remote", [True, False], indirect=True, ids=["json", "sse"])
+def test_a_direct_mcp_picture_of_4_mib_is_kept(world: World, remote: Remote) -> None:
+    from .conftest import png
+
+    _, ada, chat, _ = setup(world, remote)
+    remote.picture = png(3, 2).ljust(4 * 1024 * 1024, b"\0")
+    ada.post(f"/api/chats/{chat}/messages", json={"content": "Use echo"})
+    decide(ada, chat, pending(ada, chat), True)
+    done = ada.wait_answer(chat)
+    assert done["status"] == "done", done
+    block = done["toolRounds"][0]["calls"][0]["content"][0]
+    assert block["type"] == "image" and block["size"] == 4 * 1024 * 1024
+    assert ada.get(f"/api/files/{block['fileId']}").content == remote.picture
+    sent = world.gateway.requests[-1]["messages"][-1]["content"]
+    assert isinstance(sent, list) and sent[1]["type"] == "image_url"
 
 
 def test_expired_approval_does_not_run(world: World, remote: Remote, monkeypatch: Any) -> None:

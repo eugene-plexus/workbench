@@ -29,7 +29,7 @@ from .content import Keeper, let_go
 from .hub import Hub, HubError
 from .node_folders import Held
 from .store import Message, Person, Store, interrupt_tools
-from .tools import Calls, Signer, ToolError, Tools, transcript
+from .tools import Calls, Signer, ToolError, Tools, attach_pictures, transcript
 
 log = logging.getLogger(__name__)
 
@@ -587,6 +587,46 @@ class Answers:
             **body,
             "stream_options": {**body.get("stream_options", {}), "include_usage": True},
         }
+        if (
+            any(message.get("role") == "tool" for message in body.get("messages", []))
+            and self._tools is not None
+        ):
+            history = await self._store.messages(running.chat_id, via=running.message.id)
+            rounds = [
+                turn
+                for message in history
+                for turn in (
+                    running.message.tool_rounds
+                    if message.id == running.message.id
+                    else message.tool_rounds
+                )
+            ]
+            if any(
+                block.get("type") == "image"
+                for turn in rounds
+                for call in turn["calls"]
+                for block in call.get("content", [])
+            ):
+                try:
+                    listing = await self._hub.models()
+                except HubError:
+                    listing = {}
+                vision = any(
+                    model.get("id") == body["model"]
+                    and (model.get("x_eugene_plexus") or {}).get("image_input") is True
+                    for model in listing.get("data", [])
+                )
+                chat = await self._store.chat(running.chat_id)
+                if chat is not None:
+                    body["messages"] = await attach_pictures(
+                        body["messages"],
+                        rounds,
+                        self._store,
+                        self._tools.data_dir,
+                        chat.owner,
+                        chat.id,
+                        image_input=vision,
+                    )
         calls = Calls()
         running.message.finish = None
         prior_searches = running.message.searches
