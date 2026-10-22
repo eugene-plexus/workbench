@@ -15,15 +15,7 @@ it("run_artifacts_defaults_on_and_keeps_an_off_choice", async () => {
   });
   expect(switch_).toBeChecked();
   fireEvent.click(switch_);
-  expect(
-    screen.getByRole("checkbox", {
-      name: "Run pages and components by themselves: Off",
-    }),
-  ).not.toBeChecked();
-  fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
-  await waitFor(() =>
-    expect(save).toHaveBeenCalledWith(expect.objectContaining({ runArtifacts: false })),
-  );
+  await waitFor(() => expect(save).toHaveBeenCalledExactlyOnceWith({ runArtifacts: false }));
   shown.unmount();
   render(<ChatSettings settings={{ runArtifacts: false }} onSave={save} onClose={vi.fn()} />);
   expect(
@@ -31,6 +23,55 @@ it("run_artifacts_defaults_on_and_keeps_an_off_choice", async () => {
       name: "Run pages and components by themselves: Off",
     }),
   ).not.toBeChecked();
+});
+
+it.each([true, false])(
+  "run_artifacts_keeps_the_effective_value_while_saving_and_after_failure (%s)",
+  async (runArtifacts) => {
+    let refuse!: (error: Error) => void;
+    const save = vi.fn().mockReturnValue(new Promise<void>((_, reject) => (refuse = reject)));
+    render(<ChatSettings settings={{ runArtifacts }} onSave={save} onClose={vi.fn()} />);
+    const switch_ = screen.getByRole("checkbox", {
+      name: `Run pages and components by themselves: ${runArtifacts ? "On" : "Off"}`,
+    });
+    fireEvent.click(switch_);
+    expect(save).toHaveBeenCalledExactlyOnceWith({ runArtifacts: !runArtifacts });
+    expect(switch_).toHaveProperty("checked", runArtifacts);
+    expect(switch_).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save settings" })).toBeDisabled();
+    await act(async () => refuse(new Error("This chat is read only.")));
+    expect(await screen.findByRole("alert")).toHaveTextContent("This chat is read only.");
+    expect(switch_).toHaveProperty("checked", runArtifacts);
+    expect(switch_).toBeEnabled();
+  },
+);
+
+it("run_artifacts_follows_the_saved_settings_while_the_menu_is_open", () => {
+  const save = vi.fn();
+  const shown = render(<ChatSettings settings={{}} onSave={save} onClose={vi.fn()} />);
+  shown.rerender(
+    <ChatSettings settings={{ runArtifacts: false }} onSave={save} onClose={vi.fn()} />,
+  );
+  expect(
+    screen.getByRole("checkbox", { name: "Run pages and components by themselves: Off" }),
+  ).not.toBeChecked();
+  shown.rerender(
+    <ChatSettings settings={{ runArtifacts: null }} onSave={save} onClose={vi.fn()} />,
+  );
+  expect(
+    screen.getByRole("checkbox", { name: "Run pages and components by themselves: On" }),
+  ).toBeChecked();
+});
+
+it("saving_answer_settings_leaves_the_run_artifacts_choice_alone", async () => {
+  const save = vi.fn().mockResolvedValue(undefined);
+  render(<ChatSettings settings={{ runArtifacts: false }} onSave={save} onClose={vi.fn()} />);
+  fireEvent.change(screen.getByRole("textbox", { name: "Temperature" }), {
+    target: { value: "0.5" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+  await waitFor(() => expect(save).toHaveBeenCalled());
+  expect(save.mock.calls[0]?.[0]).not.toHaveProperty("runArtifacts");
 });
 
 it("inherits protection by default and saves an explicit off override", async () => {
