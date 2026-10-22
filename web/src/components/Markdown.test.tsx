@@ -48,6 +48,47 @@ it("chooses Korean and the viewer's Han font, leaving Latin text alone", () => {
   vi.restoreAllMocks();
 });
 
+it.each(["ー", "ﾞ", "〱"])("kana mark %s gets lang ja", (mark) => {
+  const { container } = render(<Markdown text={mark} />);
+  expect(container.querySelector("p")).toHaveAttribute("lang", "ja");
+});
+
+it("a CJK image label gives its block the language of the visible text", () => {
+  const { container } = render(<Markdown text="![日本の猫](https://example.org/cat.png)" />);
+  expect(container.querySelector("p")).toHaveAttribute("lang", "ja");
+  expect(container.querySelector("a")).toHaveTextContent("[Image: 日本の猫]");
+  expect(container.querySelector("img")).toBeNull();
+});
+
+it.each([
+  [["en-US", "zh-TW", "ja-JP"], "zh-TW"],
+  [["ko-KR", "en-US"], "zh"],
+  [[], "zh"],
+])("Han-only text uses the first Chinese or Japanese preference in %j", (languages, lang) => {
+  const preference = vi.spyOn(navigator, "languages", "get").mockReturnValue(languages);
+  try {
+    const { container } = render(<Markdown text="漢字。「漢字」、漢字・漢字" />);
+    expect(container.querySelector("p")).toHaveAttribute("lang", lang);
+  } finally {
+    preference.mockRestore();
+  }
+});
+
+it("shared CJK punctuation does not turn a Korean block into Japanese", () => {
+  const { container } = render(<Markdown text="한국어。「한국어」、한국어・한국어" />);
+  expect(container.querySelector("p")).toHaveAttribute("lang", "ko");
+});
+
+it("keeps CJK languages on custom code and table blocks, including nested text", () => {
+  const { container } = render(
+    <Markdown text={"```text\n한국어\n```\n\n| 日本の名前 |\n| --- |\n| **かな** |"} />,
+  );
+  expect(container.querySelector("pre")?.closest("[lang]")).toHaveAttribute("lang", "ko");
+  for (const selector of ["table", "thead", "tbody", "tr", "th", "td"]) {
+    expect(container.querySelector(selector), selector).toHaveAttribute("lang", "ja");
+  }
+});
+
 describe("an answer is untrusted (W5)", () => {
   it("shows an image an answer names as a link, never fetching it", () => {
     const { container } = render(

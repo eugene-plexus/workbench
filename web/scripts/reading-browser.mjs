@@ -1,4 +1,4 @@
-/* global process, console, document, getComputedStyle, window, NodeFilter, CSS */
+/* global process, console, document, getComputedStyle, window, navigator, NodeFilter, CSS */
 // Reading Workbench in the selected browser (workbench-reading.md): what each kind of text
 // looks like, in pictures and in numbers. Screenshots of a rich answer, a
 // story, a length stop, the settings, a chat's Memory drawer, the Memory page,
@@ -549,6 +549,118 @@ async function phoneDisplaySettings(page, scheme) {
   await page.setViewportSize(PHONE);
 }
 
+// Read a fixture through the real message and Markdown components. Keep it in
+// the browser response so these checks do not change any saved conversation.
+async function checkOutlineAndLanguages(page, scheme) {
+  const path = `${cfg.url}/api/chats/${cfg.chats.story}`;
+  const fixture = [
+    "# First",
+    "## Second",
+    "### Third",
+    "#### Fourth",
+    "##### Fifth",
+    "###### Sixth",
+    "かなと漢字",
+    "한국어。",
+    "漢字。",
+    "ー",
+    "![日本の猫](https://example.org/cat.png)",
+    "- **カナ**",
+    "> 日本語です",
+    "| 日本の名前 |\n| --- |\n| **かな** |",
+    "```text\n한국어\n```",
+  ].join("\n\n");
+  const respond = async (route) => {
+    const response = await route.fetch();
+    const data = await response.json();
+    for (const message of data.messages) {
+      if (message.role === "assistant") {
+        message.content = fixture;
+        message.model = "qwen3-8b";
+      }
+    }
+    await route.fulfill({ response, json: data });
+  };
+  await page.route(path, respond);
+  try {
+    await chat(page, cfg.chats.story);
+    const answer = page.getByTestId("answer").first();
+    const user = page.getByTestId("user-message").first();
+    check(
+      `${scheme}: each message has a level two heading for screen readers`,
+      (await answer.getByRole("heading", { level: 2, name: "Answer from qwen3-8b" }).count()) ===
+        1 && (await user.getByRole("heading", { level: 2, name: "You" }).count()) === 1,
+    );
+    const reading = await answer.evaluate((el) => {
+      const body = el.querySelector(":scope > .answer");
+      const title = el.querySelector(":scope > h2");
+      const hidden = getComputedStyle(title);
+      const headings = [...body.querySelectorAll("[data-md]")];
+      const paragraphs = [...body.querySelectorAll(":scope > p")];
+      return {
+        hidden:
+          hidden.position === "absolute" &&
+          parseFloat(hidden.width) <= 1 &&
+          parseFloat(hidden.height) <= 1 &&
+          hidden.display !== "none" &&
+          hidden.visibility === "visible",
+        levels: headings.map((heading) => [heading.tagName, heading.dataset.md]),
+        sizes: headings.map((heading) => parseFloat(getComputedStyle(heading).fontSize)),
+        weights: headings.map((heading) => getComputedStyle(heading).fontWeight),
+        textSize: parseFloat(getComputedStyle(body).fontSize),
+        languages: paragraphs.map((p) => [p.textContent, p.lang]),
+        han: navigator.languages.find((lang) => /^(zh|ja)(-|$)/i.test(lang)) ?? "zh",
+        nested: ["ul", "li", "blockquote", "table", "thead", "tbody", "tr", "th", "td"].map(
+          (tag) => [tag, body.querySelector(tag)?.lang],
+        ),
+        code: body.querySelector("pre")?.closest("[lang]")?.lang,
+      };
+    });
+    check(`${scheme}: the message heading takes no room on screen`, reading.hidden);
+    check(
+      `${scheme}: answer headings nest under the message and stop at level six`,
+      JSON.stringify(reading.levels) ===
+        JSON.stringify([
+          ["H3", "h1"],
+          ["H4", "h2"],
+          ["H5", "h3"],
+          ["H6", "h4"],
+          ["H6", "h5"],
+          ["H6", "h6"],
+        ]),
+      JSON.stringify(reading.levels),
+    );
+    check(
+      `${scheme}: all six Markdown heading sizes and weights keep their look`,
+      [1.5, 1.25, 1.1, 1, 0.8125, 0.8125].every(
+        (scale, i) => Math.abs(reading.sizes[i] - scale * reading.textSize) < 0.05,
+      ) &&
+        JSON.stringify(reading.weights) ===
+          JSON.stringify(["600", "600", "600", "600", "600", "500"]),
+      JSON.stringify({ sizes: reading.sizes, weights: reading.weights }),
+    );
+    check(
+      `${scheme}: CJK paragraphs use the language of their visible text`,
+      JSON.stringify(reading.languages) ===
+        JSON.stringify([
+          ["かなと漢字", "ja"],
+          ["한국어。", "ko"],
+          ["漢字。", reading.han],
+          ["ー", "ja"],
+          ["[Image: 日本の猫]", "ja"],
+        ]),
+      JSON.stringify(reading.languages),
+    );
+    check(
+      `${scheme}: lists, quotes, tables and code keep their CJK language`,
+      reading.nested.every(([, lang]) => lang === "ja") && reading.code === "ko",
+      JSON.stringify({ nested: reading.nested, code: reading.code }),
+    );
+  } finally {
+    await page.unroute(path, respond);
+  }
+}
+
 try {
   for (const scheme of ["dark", "light"]) {
     {
@@ -598,6 +710,7 @@ try {
       await chat(page, cfg.chats.story);
       await tall(page);
       await page.screenshot(shot(`story-all-${scheme}-desk`));
+      await checkOutlineAndLanguages(page, scheme);
 
       await page.setViewportSize(DESK);
       await chat(page, cfg.chats.cut);
