@@ -14,6 +14,7 @@ import {
   canCheckPreviewLoop,
   ignorablePageError,
   keepScheme,
+  goChat,
   goSignedIn,
 } from "./browser-options.mjs";
 
@@ -212,6 +213,16 @@ it("opens the sign-in page without waiting for every resource to load", async ()
   const goto = vi.fn(async () => {});
   await goSignedIn({ goto }, "http://127.0.0.1:1/#signin=x");
   expect(goto).toHaveBeenCalledWith("http://127.0.0.1:1/#signin=x", {
+    waitUntil: "domcontentloaded",
+  });
+});
+
+it("opens a chat for the document outside Chromium, and as before in Chromium", async () => {
+  const goto = vi.fn(async () => {});
+  await goChat({ goto }, "chromium", "http://127.0.0.1:1/chats/a");
+  expect(goto).toHaveBeenLastCalledWith("http://127.0.0.1:1/chats/a");
+  await goChat({ goto }, "firefox", "http://127.0.0.1:1/chats/a");
+  expect(goto).toHaveBeenLastCalledWith("http://127.0.0.1:1/chats/a", {
     waitUntil: "domcontentloaded",
   });
 });
