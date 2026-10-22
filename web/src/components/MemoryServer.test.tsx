@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
-import { api, put } from "../lib/api";
+import { api, post, put } from "../lib/api";
 import type { ChatMemory, MemoryServerPage, MemoryTurn } from "../lib/types";
 import { MemoryServer } from "./MemoryServer";
 import { ThisTurn } from "./MemoryTurn";
@@ -9,6 +9,7 @@ vi.mock("../lib/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/api")>()),
   api: vi.fn(),
   put: vi.fn(),
+  post: vi.fn(),
 }));
 
 type Connected = NonNullable<MemoryServerPage["server"]>;
@@ -170,4 +171,34 @@ it("says why a turn was given nothing from the server", () => {
   const box = screen.getByTestId("memory-turn-server");
   expect(box).toHaveTextContent("From Your memory server");
   expect(box).toHaveTextContent("The memory server did not answer in time.");
+});
+
+it("removes the exact old recall from the selected answer and keeps others", async () => {
+  const recall = { text: "Old words without a source", date: null };
+  const view = {
+    turn: {
+      messageId: "m1",
+      memoryServer: { name: "Memory", memories: [recall, { text: "Keep", date: null }] },
+    },
+    turns: ["m1"],
+  } as unknown as ChatMemory;
+  vi.mocked(post).mockResolvedValue({ removed: true });
+  render(<ThisTurn chatId="c1" view={view} />);
+  fireEvent.click(screen.getAllByRole("button", { name: "Remove" })[0]!);
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith("/api/chats/c1/messages/m1/recalls/remove", { recall }),
+  );
+  expect(screen.queryByText(recall.text)).toBeNull();
+  expect(screen.getByText("Keep")).toBeInTheDocument();
+});
+
+it("keeps an old recall visible when its removal fails", async () => {
+  vi.mocked(post).mockRejectedValue(new Error("The recall changed."));
+  const view = {
+    turn: { messageId: "m1", memoryServer: { memories: [{ text: "Old recall", date: null }] } },
+  } as unknown as ChatMemory;
+  render(<ThisTurn chatId="c1" view={view} />);
+  fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("The recall changed.");
+  expect(screen.getByText("Old recall")).toBeInTheDocument();
 });

@@ -12,8 +12,102 @@ from .interaction_store import InteractionError
 DAY = 86400
 
 
+def _word_runs(text: str) -> set[tuple[str, ...]]:
+    words = text.casefold().split()
+    return {tuple(words[n : n + 8]) for n in range(len(words) - 7)}
+
+
+def _branch_runs(payload: dict[str, Any]) -> set[tuple[str, ...]]:
+    return set().union(
+        *(
+            _word_runs(str(message.get(field) or ""))
+            for message in payload["tables"]["messages"]
+            for field in ("content", "reasoning")
+        )
+    )
+
+
+class LegacyRecall(InteractionError):
+    def __init__(self, recalls: list[dict[str, str]]) -> None:
+        self.recalls = recalls
+        super().__init__(
+            "This answer cannot be deleted for good while an older memory recall may quote it: "
+            f"{recalls[0]['title']}. Remove that recall to finish."
+        )
+
+
+def legacy_recalls(db: sqlite3.Connection, payload: dict[str, Any]) -> list[dict[str, str]]:
+    """Only an unidentified recall sharing eight consecutive words can hold this purge."""
+    payload = flatten(payload)
+    ids = set(payload["ids"])
+
+    branch_runs = _branch_runs(payload)
+    if not branch_runs:
+        return []
+    chats = {r["id"]: r["title"] for r in rows(db, "chats") if r["owner"] == payload["owner"]}
+    copies = rows(db, "messages")
+    for archive in rows(db, "deleted_branches"):
+        if archive["owner"] == payload["owner"] and archive["id"] not in ids:
+            copies += flatten(json.loads(archive["payload"]))["tables"].get("messages", [])
+    found = []
+    for message in copies:
+        if message["chat_id"] not in chats or message["id"] in ids:
+            continue
+        if payload.get("deleting_chat") and message["chat_id"] == payload["chat"]:
+            continue
+        used = json.loads(message.get("memory_used") or "null") or {}
+        recalled = (used.get("memoryServer") or {}).get("memories") or []
+        for recall in recalled:
+            if not recall.get("documentId") and branch_runs & _word_runs(
+                str(recall.get("text") or "")
+            ):
+                found.append(
+                    {
+                        "id": message["id"],
+                        "title": chats[message["chat_id"]],
+                        "signature": fingerprint(recall),
+                    }
+                )
+    return sorted(found, key=lambda r: (r["id"], r["signature"]))
+
+
 def fingerprint(payload: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def remove_recall(db: sqlite3.Connection, chat: str, mid: str, recall: dict[str, Any]) -> bool:
+    def clean(message: dict[str, Any]) -> bool:
+        if message["chat_id"] != chat or message["id"] != mid:
+            return False
+        used = json.loads(message.get("memory_used") or "null") or {}
+        server = used.get("memoryServer") or {}
+        memories = server.get("memories") or []
+        if recall not in memories:
+            return False
+        server["memories"] = [m for m in memories if m != recall]
+        server["forgotten"] = (
+            int(server.get("forgotten") or 0) + len(memories) - len(server["memories"])
+        )
+        message["memory_used"] = json.dumps(used)
+        return True
+
+    changed = False
+    for message in rows(db, "messages"):
+        if clean(message):
+            db.execute(
+                "UPDATE messages SET memory_used=? WHERE id=?", (message["memory_used"], mid)
+            )
+            changed = True
+    for archive in rows(db, "deleted_branches"):
+        payload = json.loads(archive["payload"])
+        updates = [clean(message) for message in payload["tables"].get("messages", [])]
+        if any(updates):
+            db.execute(
+                "UPDATE deleted_branches SET payload=? WHERE id=?",
+                (json.dumps(payload), archive["id"]),
+            )
+            changed = True
+    return changed
 
 
 def deleted_view(row: dict[str, Any]) -> dict[str, Any]:
@@ -344,7 +438,18 @@ def scrub_message(row: dict[str, Any], payload: dict[str, Any]) -> dict[str, str
         if isinstance(server, dict):
             documents = {r["document_id"] for r in payload["tables"].get("memory_server_sent", [])}
             old_memories = server.get("memories") or []
-            kept_memories = [m for m in old_memories if m.get("documentId") not in documents]
+            chat_deleted = payload.get("deleting_chat") and row.get("chat_id") == payload["chat"]
+            branch_runs = _branch_runs(payload) if chat_deleted else set()
+            kept_memories = [
+                m
+                for m in old_memories
+                if m.get("documentId") not in documents
+                and not (
+                    chat_deleted
+                    and not m.get("documentId")
+                    and branch_runs & _word_runs(str(m.get("text") or ""))
+                )
+            ]
             if len(kept_memories) != len(old_memories):
                 server["memories"] = kept_memories
                 server["forgotten"] = (
@@ -461,22 +566,8 @@ def purge_rows(
     payload = flatten(payload)
     owner, chat, ids = payload["owner"], payload["chat"], set(payload["ids"])
     tables = payload["tables"]
-    if not hiding and tables.get("memory_server_sent"):
-        own = {r["id"] for r in rows(db, "chats") if r["owner"] == owner}
-        copies = rows(db, "messages")
-        for archive in rows(db, "deleted_branches"):
-            if archive["owner"] == owner and archive["id"] not in ids:
-                copies += json.loads(archive["payload"])["tables"].get("messages", [])
-        for message in copies:
-            if message["chat_id"] not in own or message["id"] in ids:
-                continue
-            used = json.loads(message.get("memory_used") or "null") or {}
-            recalled = (used.get("memoryServer") or {}).get("memories") or []
-            if any(not m.get("documentId") for m in recalled):
-                raise InteractionError(
-                    "An older memory-server excerpt has no source ID. Workbench cannot "
-                    "finish deleting this version without risking another version's data."
-                )
+    if not hiding and (recalls := legacy_recalls(db, payload)):
+        raise LegacyRecall(recalls)
     # Backups may predate a child or its records. Find dependencies in that copy too.
     local = {r["id"] for r in rows(db, "messages") if r["chat_id"] == chat and r["id"] in ids}
     actual = dict(tables)
@@ -529,7 +620,7 @@ def purge_rows(
     if hiding:
         actual["deleted_branches"] = []
     own_chats = {r["id"] for r in rows(db, "chats") if r["owner"] == owner}
-    for r in rows(db, "messages"):
+    for r in [] if hiding else rows(db, "messages"):
         if r["chat_id"] not in own_chats:
             continue
         if r["id"] in local:
@@ -541,9 +632,12 @@ def purge_rows(
                 (*changes.values(), r["id"]),
             )
     titles = {r["id"]: r["text"] for r in actual["memory_notes"]}
-    if titles and {"memory_used", "tool_rounds"} <= {
-        r[1] for r in db.execute("PRAGMA table_info(messages)")
-    }:
+    if (
+        not hiding
+        and titles
+        and {"memory_used", "tool_rounds"}
+        <= {r[1] for r in db.execute("PRAGMA table_info(messages)")}
+    ):
         Store._drop_from_answers(db, owner, titles)
         Store._drop_from_chats(db, owner, set(titles))
     scrub_runs(db, payload)
@@ -566,7 +660,7 @@ def purge_rows(
     )
     gone = {table: _delete(db, table, actual.get(table, [])) for table in order}
     for archive in rows(db, "deleted_branches"):
-        if archive["owner"] != owner:
+        if hiding or archive["owner"] != owner:
             continue
         saved = json.loads(archive["payload"])
         for message in saved["tables"].get("messages", []):

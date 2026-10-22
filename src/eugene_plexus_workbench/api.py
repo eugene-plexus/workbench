@@ -903,6 +903,7 @@ async def remove_chat(request: Request, person: Person, chat: Chat) -> None:
                 f"nothing was deleted ({type(exc).__name__}). Try again in a moment.",
             ) from None
     try:
+        await _state(request).branches.purge_chat(chat.id)
         await store.delete_chat(chat.id)
     except BaseException:
         # The chat is still there with no exchanges in the index: put them back.
@@ -1386,7 +1387,32 @@ async def delete_branch(
 ) -> dict[str, Any]:
     person, chat = await _branch_owner(request, chat_id)
     _no_running(request, chat)
+    if expected is None:
+        summary = await _state(request).store.branch_summary(chat.id, message_id)
+        raise HTTPException(
+            status_code=428,
+            detail={
+                "message": "Review what goes and confirm this deletion.",
+                "summary": summary,
+            },
+        )
     await _state(request).branches.delete(person.sub, chat.id, message_id, expected)
+    return await _chat_detail(request, chat, read_only=False)
+
+
+class RecallRemoval(BaseModel):
+    recall: dict[str, Any]
+
+
+@router.post("/api/chats/{chat_id}/messages/{message_id}/recalls/remove")
+async def remove_answer_recall(
+    request: Request, chat_id: str, message_id: str, body: RecallRemoval
+) -> dict[str, Any]:
+    _, chat = await _branch_owner(request, chat_id)
+    _no_running(request, chat)
+    if not await _state(request).store.remove_answer_recall(chat.id, message_id, body.recall):
+        raise _problem(409, "This recall changed. Read the answer's memory list again.")
+    _answers(request).publish(chat.id, {"type": "path"})
     return await _chat_detail(request, chat, read_only=False)
 
 

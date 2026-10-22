@@ -98,7 +98,7 @@ class Branches:
             try:
                 await self.state.learner.drain_chat(chat)
                 payload = await self.store.branch_payload(chat, mid)
-                if expected is not None and branch_store.fingerprint(payload) != expected:
+                if expected is None or branch_store.fingerprint(payload) != expected:
                     raise InteractionError("This version changed. Review what goes and try again.")
                 records = payload["tables"]["files"]
                 await self.state.reader.cancel([r["id"] for r in records])
@@ -216,59 +216,97 @@ class Branches:
                         await self._resume_readers(payload)
                     self.state.exchanges_index.touch(row["owner"], row["chat_id"])
                     continue
-                async with (
-                    self._owners.setdefault(row["owner"], asyncio.Lock()),
-                    self.state.notes_index.lock(row["owner"]),
+                await self._purge(current)
+
+    async def purge_chat(self, chat: str) -> None:
+        """The chat write lock is already held by the route (or the project delete)."""
+        await self.store.expire_chat_branches(chat, now=self.clock())
+        for row in await self.store.deleted_branches(chat):
+            if not await self._purge(row, deleting_chat=True):
+                current = next(
+                    r for r in await self.store.deleted_branches(chat) if r["id"] == row["id"]
+                )
+                raise InteractionError(current["problem"], 503)
+
+    async def _purge(self, row: dict[str, Any], *, deleting_chat: bool = False) -> bool:
+        async with (
+            self._owners.setdefault(row["owner"], asyncio.Lock()),
+            self.state.notes_index.lock(row["owner"]),
+        ):
+            steps = json.loads(row["steps"])
+            paused = steps.get("legacy")
+            if paused and not deleting_chat and self.clock() < paused["retry_at"]:
+                current = await self.store.branch_legacy_recalls(row["id"])
+                if [(r["id"], r["signature"]) for r in current] == [
+                    (r["id"], r["signature"]) for r in paused["recalls"]
+                ]:
+                    return False
+            await self.store.put_branch(row["id"], state="purging", problem=None)
+            payload = await self.store.branch_purge_payload(row["id"])
+            if not payload:
+                return True
+            try:
+                if recalls := await self.store.branch_legacy_recalls(
+                    row["id"], deleting_chat=deleting_chat
                 ):
-                    await self.store.put_branch(row["id"], state="purging", problem=None)
-                    payload = await self.store.branch_purge_payload(row["id"])
-                    try:
-                        await self.state.memory_courier.drain(row["owner"])
-                        owed = [
-                            r
-                            for r in payload["tables"]["memory_server_sent"]
-                            if r["state"] != "send"
-                        ]
-                        problem = await self.state.removal.forget_exchanges(row["owner"], owed)
-                        if problem != "done":
-                            raise RuntimeError(problem)
-                        await self.state.reader.cancel(
-                            [r["id"] for r in payload["tables"]["files"]]
+                    raise branch_store.LegacyRecall(recalls)
+                await self.state.memory_courier.drain(row["owner"])
+                owed = [r for r in payload["tables"]["memory_server_sent"] if r["state"] != "send"]
+                if not deleting_chat and not steps.get("forgotten"):
+                    problem = await self.state.removal.forget_exchanges(row["owner"], owed)
+                    if problem != "done":
+                        raise RuntimeError(problem)
+                    steps["forgotten"] = True
+                    await self.store.put_branch(row["id"], steps=json.dumps(steps))
+                await self.state.reader.cancel([r["id"] for r in payload["tables"]["files"]])
+                if not steps.get("exports"):
+                    await self.state.exports.drop(row["owner"], before=row["deleted_at"])
+                    steps["exports"] = True
+                    await self.store.put_branch(row["id"], steps=json.dumps(steps))
+                async with self.state.exchanges_index.lock(row["chat_id"]):
+                    await self.state.exchanges_index.remove_exchanges(
+                        row["owner"], row["chat_id"], payload["ids"]
+                    )
+                    index = self.state.saved.index(row["owner"], create=False)
+                    if index is not None:
+                        await index.delete_notes(
+                            [r["id"] for r in payload["tables"]["memory_notes"]]
                         )
-                        await self.state.exports.drop(row["owner"], before=row["deleted_at"])
-                        async with self.state.exchanges_index.lock(row["chat_id"]):
-                            await self.state.exchanges_index.remove_exchanges(
-                                row["owner"], row["chat_id"], payload["ids"]
-                            )
-                            index = self.state.saved.index(row["owner"], create=False)
-                            if index is not None:
-                                await index.delete_notes(
-                                    [r["id"] for r in payload["tables"]["memory_notes"]]
-                                )
-                                await branch_index.remove(index, payload.get("index", {}))
-                            for record in payload["tables"]["files"]:
-                                await self.state.saved.drop_attachment(
-                                    row["owner"], row["chat_id"], record["id"]
-                                )
-                                await asyncio.to_thread(
-                                    files.remove_stored,
-                                    self.state.settings.data_dir,
-                                    row["owner"],
-                                    record["id"],
-                                )
-                            await self.store.purge_branch(row["id"], now=self.clock())
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as exc:
-                        await self.store.put_branch(
-                            row["id"],
-                            problem=(
-                                f"Workbench could not finish deleting this version: {exc}. "
-                                "It will try again."
-                            ),
+                        await branch_index.remove(index, payload.get("index", {}))
+                    for record in payload["tables"]["files"]:
+                        await self.state.saved.drop_attachment(
+                            row["owner"], row["chat_id"], record["id"]
                         )
-                        log.warning("deleting a branch failed: %s", exc)
-                    finally:
-                        with contextlib.suppress(Exception):
-                            if row["owner"] not in await self.store.hidden_subs():
-                                self.state.memory_courier.allow_owner(row["owner"])
+                        await asyncio.to_thread(
+                            files.remove_stored,
+                            self.state.settings.data_dir,
+                            row["owner"],
+                            record["id"],
+                        )
+                    await self.store.purge_branch(
+                        row["id"], now=self.clock(), queue_forget=deleting_chat
+                    )
+                return True
+            except asyncio.CancelledError:
+                raise
+            except branch_store.LegacyRecall as exc:
+                steps["legacy"] = {
+                    "recalls": exc.recalls,
+                    "retry_at": self.clock() + branch_store.DAY,
+                }
+                await self.store.put_branch(row["id"], problem=str(exc), steps=json.dumps(steps))
+                return False
+            except Exception as exc:
+                await self.store.put_branch(
+                    row["id"],
+                    problem=(
+                        f"Workbench could not finish deleting this version: {exc}. "
+                        "It will try again."
+                    ),
+                )
+                log.warning("deleting a branch failed: %s", exc)
+                return False
+            finally:
+                with contextlib.suppress(Exception):
+                    if row["owner"] not in await self.store.hidden_subs():
+                        self.state.memory_courier.allow_owner(row["owner"])

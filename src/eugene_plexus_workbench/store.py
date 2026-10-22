@@ -2589,6 +2589,11 @@ class Store:
         was sent (`memory_used.pastChats`) and a kept `search_chats` result that quoted it.
         Its exchanges in the person's index go first, by the route (`exchanges_index`)."""
 
+        now = time.time()
+        await self.expire_chat_branches(chat_id, now=now)
+        for archive in await self.deleted_branches(chat_id):
+            await self.purge_branch(archive["id"], now=now, queue_forget=True)
+
         def go() -> None:
             db = self._conn()
             db.execute("BEGIN")
@@ -2819,7 +2824,73 @@ class Store:
             )
         )
 
-    async def purge_branch(self, message_id: str, *, now: float | None = None) -> bool:
+    async def expire_chat_branches(self, chat_id: str, *, now: float) -> None:
+        await self._run(
+            lambda: self._conn().execute(
+                "UPDATE deleted_branches SET delete_at=?,state='purging' WHERE chat_id=?",
+                (now, chat_id),
+            )
+        )
+
+    async def branch_legacy_recalls(
+        self, message_id: str, *, deleting_chat: bool = False
+    ) -> list[dict[str, str]]:
+        def go() -> list[dict[str, str]]:
+            row = (
+                self._conn()
+                .execute("SELECT payload FROM deleted_branches WHERE id=?", (message_id,))
+                .fetchone()
+            )
+            if row is None:
+                return []
+            payload = branch_store.resolve(self._conn(), json.loads(row[0]))
+            payload["deleting_chat"] = deleting_chat
+            found = branch_store.legacy_recalls(self._conn(), payload)
+            for path in _all_copies(self._path):
+                copy = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+                try:
+                    found.extend(branch_store.legacy_recalls(copy, payload))
+                finally:
+                    copy.close()
+            return sorted(
+                {tuple(r.items()): r for r in found}.values(),
+                key=lambda r: (r["id"], r["signature"]),
+            )
+
+        return await self._run(go)
+
+    async def remove_answer_recall(
+        self, chat_id: str, message_id: str, recall: dict[str, Any]
+    ) -> bool:
+        """Remove the exact recall reviewed by the owner, without trusting a stale list index."""
+
+        def go() -> bool:
+            db = self._conn()
+            row = db.execute(
+                "SELECT memory_used FROM messages WHERE id=? AND chat_id=?", (message_id, chat_id)
+            ).fetchone()
+            used = json.loads(row[0] or "null") if row else None
+            server = (used or {}).get("memoryServer") or {}
+            memories = server.get("memories") or []
+            if recall not in memories:
+                return False
+            for path in _all_copies(self._path):
+                copy = sqlite3.connect(path, isolation_level=None)
+                try:
+                    copy.execute("PRAGMA secure_delete=ON")
+                    if branch_store.remove_recall(copy, chat_id, message_id, recall):
+                        _rewrite(copy)
+                finally:
+                    copy.close()
+            branch_store.remove_recall(db, chat_id, message_id, recall)
+            _rewrite(db)
+            return True
+
+        return await self._run(go)
+
+    async def purge_branch(
+        self, message_id: str, *, now: float | None = None, queue_forget: bool = False
+    ) -> bool:
         """Use row 7's scoped purge, VACUUM/checkpoints and every-backup cleanup."""
         now = time.time() if now is None else now
         row = next((r for r in await self.deleted_branches() if r["id"] == message_id), None)
@@ -2828,6 +2899,7 @@ class Store:
         payload = await self._run(
             lambda: branch_store.resolve(self._conn(), json.loads(row["payload"]))
         )
+        payload["deleting_chat"] = queue_forget
         await self.put_branch(message_id, state="purging")
         # Copies first: the durable recovery record survives any failed copy or rewrite.
         await self.purge_copies(row["owner"], branch=payload)
@@ -2837,6 +2909,18 @@ class Store:
             db.execute("BEGIN IMMEDIATE")
             try:
                 _purge_rows(db, row["owner"], branch=payload)
+                if queue_forget:
+                    # Chat deletion uses the same durable courier queue as its live answers.
+                    for sent in payload["tables"].get("memory_server_sent", []):
+                        if sent["state"] != "send":
+                            record = {
+                                **sent,
+                                "state": "forget",
+                                "attempts": 0,
+                                "created_at": now,
+                                "next_at": now,
+                            }
+                            branch_store.restore_rows(db, {"memory_server_sent": [record]})
                 # This recovery flag carries no person's words or branch identifiers.
                 # It survives a failed rewrite after the deletion transaction commits.
                 db.execute("INSERT OR REPLACE INTO settings VALUES ('branchRewrite', 'true')")

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 import json
 import sqlite3
+import zipfile
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -15,13 +18,57 @@ from eugene_plexus_workbench import store as storage
 from eugene_plexus_workbench.interaction_store import InteractionError
 from eugene_plexus_workbench.store import Chat, FileRecord, MemoryNote, Message, Person, Store
 
-from .conftest import World
+from .conftest import Browser, World
 from .test_memory_api import config
-from .test_person_removal import _holding
 from .test_versions import _shown, _two_turns
 
 MARK = "zqxtbranchsecretmarker"
 DAY = 86400
+
+
+def _holding(directory: Path, mark: str) -> list[str]:
+    raw = mark.encode()
+    needles = [
+        raw,
+        json.dumps(mark)[1:-1].encode(),
+        "".join(f"\\u{ord(c):04x}" for c in mark).encode(),
+    ]
+    # An archived file can start at any byte offset inside a base64 snapshot.
+    needles += [base64.b64encode(raw[n : len(raw) - (len(raw) - n) % 3]) for n in range(3)]
+
+    def holds(data: bytes) -> bool:
+        if any(n and n in data for n in needles):
+            return True
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                return any(holds(archive.read(name)) for name in archive.namelist())
+        except zipfile.BadZipFile:
+            return False
+
+    return sorted(
+        str(p.relative_to(directory))
+        for p in directory.rglob("*")
+        if p.is_file() and holds(p.read_bytes())
+    )
+
+
+def confirmed_delete(browser: Browser, path: str) -> Any:
+    token = browser.get(path + "/branch").json()["token"]
+    return browser.delete(path + f"?expected={token}")
+
+
+@pytest.mark.parametrize("encoding", ["base64", "escaped", "json"])
+@pytest.mark.parametrize("prefix", ["", "x", "xx"])
+def test_branch_scan_detects_encoded_payloads(tmp_path: Path, encoding: str, prefix: str) -> None:
+    mark = MARK + "雪" if encoding == "json" else MARK
+    if encoding == "base64":
+        content = base64.b64encode((prefix + mark + "suffix").encode())
+    elif encoding == "json":
+        content = json.dumps({"text": prefix + mark}).encode()
+    else:
+        content = "".join(f"\\u{ord(c):04x}" for c in mark).encode()
+    (tmp_path / "payload").write_bytes(content)
+    assert _holding(tmp_path, mark) == ["payload"]
 
 
 async def seed(store: Store) -> None:
@@ -151,13 +198,72 @@ async def test_undo_restores_the_whole_branch_after_restart(tmp_path: Path) -> N
     await store.open()
     try:
         await seed(store)
+        await store.add_memory_note(
+            MemoryNote(
+                "pending",
+                "p",
+                MARK,
+                "fact",
+                0,
+                0,
+                status="pending",
+                source_message_id="a2",
+                source_chat_id="c",
+            ),
+            limit=100,
+        )
+        await store.create_chat(Chat("later", "p", "Later", None, 0, 0))
+        await store.add_message(
+            Message("recall", "later", 0, "assistant", "done", 0), parent_id=None
+        )
+        for mid in ("a3", "recall"):
+            await store.update_message(
+                mid,
+                memory_used={
+                    "pastChats": {"exchanges": [{"chatId": "c", "messageId": "a2", "text": MARK}]},
+                    "notes": [{"id": "pending", "text": MARK}],
+                },
+                tool_rounds=[
+                    {"calls": [{"serverId": "past-chats", "chats": ["c"], "result": MARK}]}
+                ],
+            )
+        others = await store._run(
+            lambda: [
+                tuple(r)
+                for r in store._conn().execute(
+                    "SELECT * FROM messages WHERE id IN ('a3','recall') ORDER BY id"
+                )
+            ]
+        )
         before = [asdict(m) for m in await store.tree("c")]
         await store.delete_branch("c", "a2", now=10)
+        assert (
+            await store._run(
+                lambda: [
+                    tuple(r)
+                    for r in store._conn().execute(
+                        "SELECT * FROM messages WHERE id IN ('a3','recall') ORDER BY id"
+                    )
+                ]
+            )
+            == others
+        )
         await store.close()
         store = Store(store.path)
         await store.open()
         assert await store.undo_branch("c", "a2", now=11)
         assert [asdict(m) for m in await store.tree("c")] == before
+        assert (
+            await store._run(
+                lambda: [
+                    tuple(r)
+                    for r in store._conn().execute(
+                        "SELECT * FROM messages WHERE id IN ('a3','recall') ORDER BY id"
+                    )
+                ]
+            )
+            == others
+        )
         await store.delete_branch("c", "a2", now=12)
         assert not await store.undo_branch("c", "a2", now=12 + 30 * DAY)
     finally:
@@ -198,7 +304,7 @@ def test_index_failure_deletes_nothing(world: World, monkeypatch: pytest.MonkeyP
         world.server.server.config.app.state.exchanges_index, "remove_exchanges", failed
     )
     before = _shown(ada, chat)
-    got = ada.delete(f"/api/chats/{chat}/messages/{messages[1]['id']}")
+    got = confirmed_delete(ada, f"/api/chats/{chat}/messages/{messages[1]['id']}")
     assert got.status_code == 503
     assert _shown(ada, chat) == before
 
@@ -209,7 +315,7 @@ def test_delete_from_here_on_single_version(world: World) -> None:
     summary = ada.get(path + "/branch")
     assert summary.status_code == 200
     assert summary.json()["messages"] == 2
-    got = ada.delete(path)
+    got = confirmed_delete(ada, path)
     assert got.status_code == 200
     assert len(got.json()["messages"]) == 2
     assert got.json()["deletedBranches"][0]["id"] == messages[2]["id"]
@@ -370,17 +476,31 @@ async def test_failed_rewrite_is_recovered_after_restart(
 
 
 @pytest.mark.asyncio
-async def test_deleting_the_chat_does_not_cancel_its_branch_purge(tmp_path: Path) -> None:
+async def test_deleting_the_chat_purges_its_hidden_branches(tmp_path: Path) -> None:
     store = Store(tmp_path / "workbench.sqlite3")
     await store.open()
     try:
         await seed(store)
+        words = f"{MARK} one two three four five six seven eight"
+        await store.update_message("a2", content=words)
+        await store.update_message(
+            "a3", memory_used={"memoryServer": {"memories": [{"text": words}]}}
+        )
+        await store._run(
+            lambda: store._conn().execute(
+                "INSERT INTO memory_server_sent (document_id,owner,chat_id,message_id,state,created_at,next_at) VALUES ('c:a2','p','c','a2','sent',0,0)"
+            )
+        )
         await store.delete_branch("c", "a2", now=0)
         await store.delete_chat("c")
-        assert len(await store.deleted_branches()) == 1
         assert not await store.undo_branch("c", "a2", now=1)
-        assert await store.purge_branch("a2", now=30 * DAY)
         assert await store.deleted_branches() == []
+        assert await store._run(
+            lambda: [
+                tuple(r)
+                for r in store._conn().execute("SELECT document_id,state FROM memory_server_sent")
+            ]
+        ) == [("c:a2", "forget")]
         assert _holding(tmp_path, MARK) == []
     finally:
         await store.close()
@@ -486,6 +606,17 @@ def test_a_stale_confirmation_deletes_nothing(world: World) -> None:
     assert _shown(ada, chat) == before
 
 
+def test_delete_requires_confirmation_counts_and_token(world: World) -> None:
+    ada, chat, messages = _two_turns(world)
+    path = f"/api/chats/{chat}/messages/{messages[1]['id']}"
+    before = _shown(ada, chat)
+    refused = ada.delete(path)
+    assert refused.status_code == 428
+    assert refused.json()["detail"]["summary"] == ada.get(path + "/branch").json()
+    assert _shown(ada, chat) == before
+    assert ada.get(f"/api/chats/{chat}").json()["deletedBranches"] == []
+
+
 def test_index_rewrite_failure_restores_documents(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -516,7 +647,9 @@ def test_index_rewrite_failure_restores_documents(
 
     monkeypatch.setattr(branch_index, "_rewrite", fail_once)
     before = _shown(ada, chat)
-    assert ada.delete(f"/api/chats/{chat}/messages/{messages[1]['id']}").status_code == 503
+    assert (
+        confirmed_delete(ada, f"/api/chats/{chat}/messages/{messages[1]['id']}").status_code == 503
+    )
     assert _shown(ada, chat) == before
     assert not ada.get(f"/api/chats/{chat}").json()["deletedBranches"]
     assert "source-note" in asyncio.run(state.saved.index("p-ada").note_digests())
@@ -594,11 +727,15 @@ async def test_identical_words_in_another_persons_memory_stay(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_legacy_server_excerpts_pause_purge_without_guessing(tmp_path: Path) -> None:
+@pytest.mark.parametrize("overlap", [False, True])
+async def test_only_overlapping_legacy_server_excerpts_pause_purge(
+    tmp_path: Path, overlap: bool
+) -> None:
     store = Store(tmp_path / "workbench.sqlite3")
     await store.open()
     try:
         await seed(store)
+        await store.update_message("a2", content="one two three four five six seven eight nine")
         await store.create_chat(Chat("later", "p", "Later", None, 0, 0))
         await store.add_message(
             Message("legacy", "later", 0, "assistant", "done", 0), parent_id=None
@@ -607,7 +744,13 @@ async def test_legacy_server_excerpts_pause_purge_without_guessing(tmp_path: Pat
             "legacy",
             memory_used={
                 "memoryServer": {
-                    "memories": [{"text": "Independent words with no source identity"}]
+                    "memories": [
+                        {
+                            "text": "TWO three\nFOUR five six seven eight nine"
+                            if overlap
+                            else "one two three four five six seven unrelated"
+                        }
+                    ]
                 }
             },
         )
@@ -618,9 +761,67 @@ async def test_legacy_server_excerpts_pause_purge_without_guessing(tmp_path: Pat
             )
         )
         await store.delete_branch("c", "a2", now=0)
-        with pytest.raises(InteractionError, match="no source ID"):
-            await store.purge_branch("a2", now=30 * DAY)
-        assert await store.deleted_branches()
+        if overlap:
+            with pytest.raises(InteractionError) as caught:
+                await store.purge_branch("a2", now=30 * DAY)
+            assert (
+                str(caught.value)
+                == "This answer cannot be deleted for good while an older memory recall may quote it: Later. Remove that recall to finish."
+            )
+            assert await store.deleted_branches()
+        else:
+            assert await store.purge_branch("a2", now=30 * DAY)
+            assert await store.deleted_branches() == []
         assert asdict(await store.message("legacy")) == before
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_removing_an_old_recall_also_unblocks_schema_backups(tmp_path: Path) -> None:
+    store = Store(tmp_path / "workbench.sqlite3")
+    await store.open()
+    try:
+        await seed(store)
+        words = "one two three four five six seven eight nine"
+        await store.update_message("a2", content=words)
+        recall = {"text": words}
+        await store.update_message(
+            "a3", memory_used={"memoryServer": {"memories": [recall, {"text": "Keep this recall"}]}}
+        )
+
+        def backup() -> None:
+            with sqlite3.connect(str(store.path) + ".schema-28.bak") as copy:
+                store._conn().backup(copy)
+
+        await store._run(backup)
+        await store.delete_branch("c", "a2", now=0)
+        with pytest.raises(InteractionError):
+            await store.purge_branch("a2", now=30 * DAY)
+        assert await store.remove_answer_recall("c", "a3", recall)
+        assert await store.purge_branch("a2", now=30 * DAY)
+        assert (await store.message("a3")).memory_used["memoryServer"]["memories"] == [
+            {"text": "Keep this recall"}
+        ]
+    finally:
+        await store.close()
+
+
+def test_recall_removal_requires_the_chat_owner_and_the_exact_recall(world: World) -> None:
+    ada, chat, messages = _two_turns(world)
+    state = world.server.server.config.app.state
+    recall = {"text": "Old recall"}
+    asyncio.run(
+        state.store.update_message(
+            messages[1]["id"],
+            memory_used={"memoryServer": {"memories": [recall, {"text": "Keep"}]}},
+        )
+    )
+    path = f"/api/chats/{chat}/messages/{messages[1]['id']}/recalls/remove"
+    operator = world.browser()
+    operator.sign_in("operator")
+    assert operator.post(path, json={"recall": recall}).status_code == 403
+    assert ada.post(path, json={"recall": {"text": "Stale"}}).status_code == 409
+    assert ada.post(path, json={"recall": recall}).status_code == 200
+    used = asyncio.run(state.store.message(messages[1]["id"])).memory_used
+    assert used["memoryServer"]["memories"] == [{"text": "Keep"}]

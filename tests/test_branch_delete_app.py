@@ -10,15 +10,16 @@ import time
 from collections.abc import Coroutine
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
+from eugene_plexus_workbench import files
 from eugene_plexus_workbench.store import MemoryNote
 
 from .conftest import World
-from .test_branch_delete import DAY, MARK
+from .test_branch_delete import DAY, MARK, _holding, confirmed_delete
 from .test_memory_servers import connected, remote, until
-from .test_person_removal import _holding
 
 __all__ = ["remote"]
 
@@ -173,7 +174,9 @@ def test_branch_delete_app(world: World, remote: Any) -> None:
     on_app(world, seed_related())
     kept = on_app(world, state.store.memory_note("p-ada", "kept", with_body=True))
     pending = on_app(world, state.store.memory_note("p-ada", "pending", with_body=True))
-    untouched_documents = set(memory.memories) - owed
+    untouched_documents = {
+        document for document in memory.memories if document.rsplit(":", 1)[-1] not in branch_ids
+    }
     exported = ada.post("/api/me/export")
     assert exported.status_code == 202
     until(lambda: ada.get("/api/exports").json()["exports"][0]["state"] == "ready")
@@ -183,12 +186,12 @@ def test_branch_delete_app(world: World, remote: Any) -> None:
     assert summary.json()["messages"] == 5
     assert summary.json()["files"] == 1 and summary.json()["artifacts"] == 1
     assert summary.json()["pendingNotes"] == 1 and summary.json()["keptNotes"] == 1
-    removed = ada.delete(f"/api/chats/{chat}/messages/{mid}")
+    removed = confirmed_delete(ada, f"/api/chats/{chat}/messages/{mid}")
     assert removed.status_code == 200, removed.text
     assert [m["id"] for m in removed.json()["messages"]] == [first_user, first["id"]]
     assert ada.get(f"/api/files/{fid}").status_code == 404
     assert ada.get(f"/api/chats/{chat}?via={mid}").status_code == 404
-    assert MARK not in ada.get(f"/api/chats/{later}").text
+    assert MARK in ada.get(f"/api/chats/{later}").text
     assert kept_text in ada.get(f"/api/chats/{later}").text
     assert on_app(world, state.store.memory_note("p-ada", "kept", with_body=True)) == kept
     assert on_app(world, state.store.memory_note("p-ada", "pending")) is None
@@ -198,9 +201,11 @@ def test_branch_delete_app(world: World, remote: Any) -> None:
     assert restored.status_code == 200, restored.text
     assert {m["id"] for m in restored.json()["messages"][1:]} == branch_ids
     assert ada.get(f"/api/files/{fid}").status_code == 200
+    after_undo = ada.get(f"/api/chats/{chat}?via={third['id']}").json()["messages"][-1]
+    assert after_undo == before_other
     assert on_app(world, state.store.memory_note("p-ada", "pending", with_body=True)) == pending
     assert on_app(world, state.store.memory_note("p-ada", "kept", with_body=True)) == kept
-    assert ada.delete(f"/api/chats/{chat}/messages/{mid}").status_code == 200
+    assert confirmed_delete(ada, f"/api/chats/{chat}/messages/{mid}").status_code == 200
     world.restart_workbench()
     state = world.server.server.config.app.state
     state.branches.clock = lambda: time.time() + 31 * DAY
@@ -247,7 +252,7 @@ def test_undo_index_failure_keeps_a_recovery_record(
     state = world.server.server.config.app.state
     on_app(world, state.exchanges_index.sync_chat("p-ada", chat))
     path = f"/api/chats/{chat}/messages/{answer['id']}"
-    assert ada.delete(path).status_code == 200
+    assert confirmed_delete(ada, path).status_code == 200
     original = branch_index.restore
 
     async def failed(*args: Any, **kwargs: Any) -> None:
@@ -262,3 +267,129 @@ def test_undo_index_failure_keeps_a_recovery_record(
     on_app(world, state.branches.due())
     assert on_app(world, state.store.deleted_branches(chat)) == []
     assert ada.get(f"/api/chats/{chat}").json()["messages"][-1]["id"] == answer["id"]
+
+
+@pytest.mark.parametrize("project", [False, True])
+def test_chat_or_project_delete_erases_hidden_branch_now(
+    world: World, project: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ada = world.browser()
+    ada.sign_in("p-ada")
+    chat = ada.new_chat()
+    state = world.server.server.config.app.state
+    pid = ada.post("/api/projects", json={"name": "Project"}).json()["id"]
+    ada.patch(f"/api/chats/{chat}", json={"projectId": pid})
+    page = f"<p>{MARK}</p>"
+    world.gateway.words = [f"```html\n{page}\n```"]
+    fid = ada.post(
+        f"/api/chats/{chat}/files", files={"file": ("branch.txt", MARK.encode(), "text/plain")}
+    ).json()["id"]
+    ada.wait_read(chat, fid)
+    ada.post(f"/api/chats/{chat}/messages", json={"content": "Question"})
+    answer = ada.wait_answer(chat)
+    on_app(world, state.store.update_message(answer["id"], attachments=[fid]))
+    artifact = ada.post(
+        f"/api/chats/{chat}/messages/{answer['id']}/artifacts",
+        json={"kind": "html", "title": MARK, "original": page, "source": page},
+    )
+    assert artifact.status_code == 201
+    on_app(
+        world,
+        state.store._run(
+            lambda: state.store._conn().execute(
+                "INSERT OR REPLACE INTO memory_server_sent (document_id,owner,chat_id,message_id,state,created_at,next_at) VALUES (?, 'p-ada', ?, ?, 'sent', 0, 0)",
+                (chat + ":" + answer["id"], chat, answer["id"]),
+            )
+        ),
+    )
+    monkeypatch.setattr(state.memory_courier, "poke", lambda: None)
+    path = f"/api/chats/{chat}/messages/{answer['id']}"
+    assert confirmed_delete(ada, path).status_code == 200
+    stored = files.path_of(world.data, "p-ada", fid)
+    assert stored.is_file()
+    response = ada.delete(f"/api/projects/{pid}" if project else f"/api/chats/{chat}")
+    assert response.status_code in (200, 204), response.text
+    assert on_app(world, state.store.deleted_branches(chat)) == []
+    assert not stored.exists()
+    assert on_app(
+        world,
+        state.store._run(
+            lambda: [
+                tuple(r)
+                for r in state.store._conn().execute(
+                    "SELECT document_id,state FROM memory_server_sent WHERE chat_id=?", (chat,)
+                )
+            ]
+        ),
+    ) == [(chat + ":" + answer["id"], "forget")]
+    assert _holding(world.data, MARK) == []
+
+
+@pytest.mark.parametrize("late", [False, True])
+def test_legacy_pause_waits_for_recall_change_or_a_day(
+    world: World, monkeypatch: pytest.MonkeyPatch, late: bool
+) -> None:
+    ada = world.browser()
+    ada.sign_in("p-ada")
+    chat = ada.new_chat()
+    words = "one two three four five six seven eight nine"
+    world.gateway.words = [words]
+    ada.post(f"/api/chats/{chat}/messages", json={"content": "Question"})
+    answer = ada.wait_answer(chat)
+    later = ada.new_chat()
+    ada.post(f"/api/chats/{later}/messages", json={"content": "Later"})
+    legacy = ada.wait_answer(later)
+    state = world.server.server.config.app.state
+    recall = {"memoryServer": {"memories": [{"text": words}]}}
+    if not late:
+        on_app(world, state.store.update_message(legacy["id"], memory_used=recall))
+    path = f"/api/chats/{chat}/messages/{answer['id']}"
+    assert confirmed_delete(ada, path).status_code == 200
+    now = time.time() + 31 * DAY
+    state.branches.clock = lambda: now
+    drop = AsyncMock(wraps=state.exports.drop)
+    forget = AsyncMock(return_value="done")
+    original_purge = state.store.purge_branch
+
+    async def purge_with_new_recall(*args: Any, **kwargs: Any) -> Any:
+        if late and not (await state.store.message(legacy["id"])).memory_used:
+            await state.store.update_message(legacy["id"], memory_used=recall)
+        return await original_purge(*args, **kwargs)
+
+    purge = AsyncMock(side_effect=purge_with_new_recall)
+    monkeypatch.setattr(state.exports, "drop", drop)
+    monkeypatch.setattr(state.removal, "forget_exchanges", forget)
+    monkeypatch.setattr(state.store, "purge_branch", purge)
+    on_app(world, state.branches.due())
+    row = on_app(world, state.store.deleted_branches(chat))[0]
+    title = ada.get(f"/api/chats/{later}").json()["chat"]["title"]
+    assert (
+        row["problem"]
+        == f"This answer cannot be deleted for good while an older memory recall may quote it: {title}. Remove that recall to finish."
+    )
+    paused = json.loads(row["steps"])["legacy"]
+    for _ in range(3):
+        now += 60
+        on_app(world, state.branches.due())
+    assert (
+        json.loads(on_app(world, state.store.deleted_branches(chat))[0]["steps"])["legacy"]
+        == paused
+    )
+    now += DAY
+    on_app(world, state.branches.due())
+    assert (
+        json.loads(on_app(world, state.store.deleted_branches(chat))[0]["steps"])["legacy"][
+            "retry_at"
+        ]
+        > paused["retry_at"]
+    )
+    assert drop.call_count <= 1 and forget.call_count <= 1
+    # Removing only the matching old recall wakes the purge before another day passes.
+    removed = ada.post(
+        f"/api/chats/{later}/messages/{legacy['id']}/recalls/remove",
+        json={"recall": {"text": words}},
+    )
+    assert removed.status_code == 200, removed.text
+    on_app(world, state.branches.due())
+    assert on_app(world, state.store.deleted_branches(chat)) == []
+    assert drop.call_count == 1 and forget.call_count == 1
