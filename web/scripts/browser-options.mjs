@@ -1,4 +1,4 @@
-/* global process, console, navigator, window, document, MutationObserver, performance */
+/* global process, console, navigator, window, document, MutationObserver, performance, URL, fetch, AbortSignal */
 import { parseArgs } from "node:util";
 
 // Usage: node <check>-browser.mjs config.json [--browser chromium|firefox|webkit].
@@ -76,8 +76,36 @@ export async function newChatMs(page) {
 // button. Firefox under load sometimes did not fire "load" for 30 s (once in
 // about sixty runs on a busy machine; once on CI), which says nothing about
 // what the checks measure. Wait for the document, not for every resource.
-export async function goSignedIn(page, address) {
-  await page.goto(address, { waitUntil: "domcontentloaded" });
+//
+// On CI, Firefox also let a navigation stand for the full 30 s without the
+// page committing (reading and math scripts, four runs of about twenty) while
+// the same run's server was fine. Try for 10 s, ask the server whether it
+// answers, and try again twice if it does; if it does not, say so. Each retry
+// is printed, never silent.
+async function visit(page, address, waitUntil, timeout = 10_000) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await page.goto(address, { waitUntil, timeout });
+      return;
+    } catch (error) {
+      const origin = new URL(address).origin;
+      const answered = await fetch(`${origin}/`, { signal: AbortSignal.timeout(5_000) }).then(
+        (response) => response.status,
+        () => null,
+      );
+      if (answered === null) {
+        throw new Error(`the server at ${origin} did not answer in 5 s: ${error.message}`);
+      }
+      if (attempt === 3) throw error;
+      console.log(
+        `RETRY  the page did not open in ${timeout / 1000} s though the server answered ${answered} (try ${attempt} of 3)`,
+      );
+    }
+  }
+}
+
+export function goSignedIn(page, address) {
+  return visit(page, address, "domcontentloaded");
 }
 
 // A chat with pictures, formulas and running previews fires "load" only when
@@ -85,9 +113,11 @@ export async function goSignedIn(page, address) {
 // that (a goto timeout on CI) while the page was already usable. Outside
 // Chromium, whose "load" has not failed, the checks' own waits (an answer, a
 // card, a frame) say when the page is ready.
-export async function goChat(page, browserName, address) {
-  if (browserName === "chromium") await page.goto(address);
-  else await page.goto(address, { waitUntil: "domcontentloaded" });
+export function goChat(page, browserName, address) {
+  // Chromium keeps its full load and a longer try: its pages have not stalled.
+  return browserName === "chromium"
+    ? visit(page, address, "load", 30_000)
+    : visit(page, address, "domcontentloaded");
 }
 
 export function contextOptions(browserName, options) {
