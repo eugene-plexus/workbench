@@ -518,7 +518,10 @@ try {
       await page.screenshot({ path: `${cfg.shots}/counter-dark.png` });
       await closeDialog(page);
       dialog = await openArtifact(page, "Needs lodash");
-      await runIt(page, dialog);
+      // This frame is taken away as soon as the page says it could not run, which
+      // WebKit does before a check could look at it: wait for the words instead.
+      step("running a preview that cannot start");
+      await dialog.getByRole("button", { name: "Run" }).click();
       await dialog
         .getByText('This preview has React only: it cannot load "lodash"', { exact: false })
         .waitFor({ timeout: 10_000 });

@@ -37,6 +37,25 @@ export async function keepScheme(page, browserName, scheme) {
   await page.emulateMedia({ colorScheme: scheme });
 }
 
+// A new chat opens at its own address and may mount its composer again as the
+// page settles (WebKit on Linux lost the text typed into the first one and
+// left Send disabled). Fill until the text stays and Send is enabled; an
+// enabled Send is what a person waits for too. Say what held it otherwise.
+export async function fillComposer(page, text) {
+  const composer = page.getByTestId("composer");
+  const send = page.getByTestId("send");
+  await composer.waitFor();
+  for (let attempt = 0; attempt < 20; attempt++) {
+    await composer.fill(text).catch(() => {});
+    if ((await composer.inputValue().catch(() => "")) === text && (await send.isEnabled())) return;
+    await page.waitForTimeout(500);
+  }
+  const value = await composer.inputValue().catch(() => "");
+  throw new Error(
+    `the composer kept ${value.length} of ${text.length} characters and Send stayed ${(await send.isEnabled()) ? "enabled" : "disabled"}`,
+  );
+}
+
 export function contextOptions(browserName, options) {
   const result = { ...options };
   // Firefox supports a phone-sized viewport and touch, but Playwright rejects

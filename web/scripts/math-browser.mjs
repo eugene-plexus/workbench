@@ -10,6 +10,7 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import {
   contextOptions,
+  fillComposer,
   keepScheme,
   ignorablePageError,
   launchBrowser,
@@ -501,11 +502,7 @@ try {
   {
     const { context, page } = await open("dark", DESK);
     await page.getByTestId("new-chat").click();
-    // The chat's own composer replaces the first one; fill the one that stays.
-    await page.waitForURL(/\/chats\/[^/]+$/);
-    const composer = page.getByTestId("composer");
-    await composer.waitFor();
-    await composer.fill(cfg.live);
+    await fillComposer(page, cfg.live);
     await page.evaluate(() => (window.__posts = []));
     await page.getByTestId("send").click();
     const running = page.locator('[data-testid=answer][data-status="running"]');

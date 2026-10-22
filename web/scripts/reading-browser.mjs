@@ -13,6 +13,7 @@ import { createRequire } from "node:module";
 import {
   contextOptions,
   ignorablePageError,
+  fillComposer,
   keepScheme,
   launchBrowser,
   readOptions,
@@ -689,13 +690,7 @@ try {
   for (const scheme of ["dark", "light"]) {
     const { context, page } = await open(scheme, DESK);
     await page.getByTestId("new-chat").click();
-    // New chat opens the chat's own address and mounts its composer there; a
-    // slower engine (WebKit) filled the first composer, which was then
-    // replaced and empty. Fill the one the page keeps.
-    await page.waitForURL(/\/chats\/[^/]+$/);
-    const composer = page.getByTestId("composer");
-    await composer.waitFor();
-    await composer.fill(cfg.live);
+    await fillComposer(page, cfg.live);
     await page.getByTestId("send").click();
     await page.locator('[data-testid=answer][data-status="running"]').waitFor();
     await page.waitForTimeout(1200);
