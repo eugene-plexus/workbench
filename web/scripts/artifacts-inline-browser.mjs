@@ -177,6 +177,75 @@ try {
   policy.push(...(await page.evaluate(() => window.__policy)));
   await context.close();
 
+  // --- tool results use the same inline preview and saved revisions ------------------------
+  step("artifacts from tool text and resources");
+  const toolView = await open("dark", DESK);
+  const toolPage = toolView.page;
+  await chat(toolPage, cfg.chats.tool);
+  await card(toolPage, "Document").getByText("Notes from the tool.").waitFor();
+  await card(toolPage, "Picture").getByRole("img", { name: "Logo" }).waitFor();
+  check(
+    "tool text uses its Markdown MIME type and an SVG resource is shown inline",
+    (await toolPage.getByRole("button", { name: /Open this .* as an artifact/ }).count()) === 3,
+  );
+  const sinceTool = answered.length;
+  const toolPreview = await shownRuns(toolPage, "Page");
+  for (const name of ["api", "network", "worker"]) {
+    await toolPreview.locator(`li[data-name="${name}"]`).waitFor();
+  }
+  const blocked = await toolPreview.locator("#out li").allTextContents();
+  const toolFrame = card(toolPage, "Page").getByTestId("artifact-frame");
+  check(
+    "a tool page runs by itself in the isolated frame and cannot reach the chat or network",
+    (await toolFrame.getAttribute("sandbox")) === "allow-scripts allow-forms" &&
+      ["parent-dom", "top-dom", "cookie", "storage", "api", "network", "form-button"].every(
+        (name) => blocked.some((line) => line.startsWith(`${name}: blocked`)),
+      ) &&
+      answered
+        .slice(sinceTool)
+        .every(
+          (r) => r.main || r.url.startsWith(FRAME) || r.url === `${origin}/preview/runtime.js`,
+        ) &&
+      toolPage.url().endsWith(cfg.chats.tool),
+    blocked.join(" | "),
+  );
+  await card(toolPage, "Page")
+    .getByRole("button", { name: "Open this HTML as an artifact" })
+    .click();
+  const toolDialog = toolPage.getByTestId("artifact-dialog");
+  await toolDialog.getByRole("tab", { name: "Source", exact: true }).click();
+  const toolSource = toolDialog.getByRole("textbox", { name: "Source of Page" });
+  check(
+    "a tool artifact keeps its original source exactly",
+    (await toolSource.inputValue()) === cfg.toolOriginal,
+  );
+  const toolEdit = "<!doctype html><p>Edited tool page</p>\n";
+  await toolSource.fill(toolEdit);
+  await toolDialog.getByRole("button", { name: "Save as revision 2" }).click();
+  await toolDialog
+    .getByRole("option", { name: /^Revision 2 of 2, edited/ })
+    .waitFor({ state: "attached" });
+  await toolDialog.getByRole("combobox", { name: "Revision", exact: true }).selectOption("1");
+  check(
+    "a saved tool artifact names its origin and keeps revision one unchanged",
+    (
+      await toolDialog
+        .getByRole("combobox", { name: "Revision", exact: true })
+        .locator('option[value="1"]')
+        .innerText()
+    ).includes("from fetch_page's result") && (await toolSource.inputValue()) === cfg.toolOriginal,
+  );
+  await toolPage.reload();
+  await shownRuns(toolPage, "Page");
+  // Reading the saved edit can replace the initial frame during startup.
+  await card(toolPage, "Page")
+    .frameLocator('[data-testid="artifact-frame"]')
+    .getByText("Edited tool page", { exact: true })
+    .waitFor();
+  check("a tool artifact's saved edit runs inline after reload", true);
+  policy.push(...(await toolPage.evaluate(() => window.__policy)));
+  await toolView.context.close();
+
   // --- an answer's artifacts, where they stand --------------------------------------------
   step("an answer's artifacts");
   ({ context, page } = await open("dark", DESK));

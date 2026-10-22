@@ -7,6 +7,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { releaseAllFileUrls } from "../lib/api";
+import { digest } from "../lib/artifacts";
 import { chatMarkdown } from "../lib/conveniences";
 import type { ChatDetail, ContentBlock, ToolCall } from "../lib/types";
 import { runner } from "../lib/previewRunner";
@@ -105,6 +106,54 @@ it("tool_html_runs_inline_and_opens_as_an_artifact_with_its_origin", async () =>
   fireEvent.click(screen.getByRole("button", { name: "Open this HTML as an artifact" }));
   const dialog = await screen.findByTestId("artifact-dialog");
   expect(dialog.querySelector("option")).toHaveTextContent("from fetch_page's result");
+});
+
+it("tool_artifact_source_keeps_its_trailing_newlines", async () => {
+  const text = "Words from the tool.\n\n";
+  toolArtifact({ id: "md", type: "text", text, mimeType: "text/markdown" });
+  fireEvent.click(screen.getByRole("button", { name: "Open this Markdown as an artifact" }));
+  await screen.findByTestId("artifact-dialog");
+  fireEvent.click(screen.getByRole("tab", { name: "Source" }));
+  expect(screen.getByRole("textbox", { name: "Source of Document" })).toHaveValue(text);
+});
+
+it("tool_artifact_still_finds_revisions_saved_with_a_stripped_newline", async () => {
+  const text = "Words from the tool.\n\n";
+  const kept = {
+    id: "saved",
+    kind: "markdown" as const,
+    title: "Saved notes",
+    digest: digest(text.slice(0, -1)),
+    revisions: 2,
+    createdAt: 1,
+    updatedAt: 2,
+  };
+  vi.mocked(fetch).mockImplementation(async (url) =>
+    Response.json(
+      String(url).endsWith("/revisions/2")
+        ? { number: 2, source: "Edited notes." }
+        : {
+            ...kept,
+            messageId: "m",
+            origin: "tool",
+            tool: "pages/fetch_page",
+            revisionList: [
+              { number: 1, author: "answer", size: text.length - 1, createdAt: 1 },
+              { number: 2, author: "person", size: 13, createdAt: 2 },
+            ],
+          },
+    ),
+  );
+  toolArtifact({ id: "md", type: "text", text, mimeType: "text/markdown" }, { artifacts: [kept] });
+  expect(await screen.findByText("Edited notes.")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Open this Markdown as an artifact" }));
+  await screen.findByTestId("artifact-dialog");
+  fireEvent.click(screen.getByRole("tab", { name: "Source" }));
+  await waitFor(() =>
+    expect(screen.getByRole("textbox", { name: "Source of Saved notes" })).toHaveValue(
+      "Edited notes.",
+    ),
+  );
 });
 
 it("tool_artifact_waits_for_run_when_the_chat_switch_is_off", async () => {

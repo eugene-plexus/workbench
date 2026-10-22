@@ -2,6 +2,7 @@
 sends (workbench-rich-content-roadmap.md RC6). Opt-in, like the other browser
 checks; set WORKBENCH_SHOTS to keep the pictures."""
 
+import asyncio
 import json
 import os
 import shutil
@@ -9,6 +10,10 @@ import subprocess
 from pathlib import Path
 
 import pytest
+
+from eugene_plexus_workbench.app import DATABASE
+from eugene_plexus_workbench.content import normalize
+from eugene_plexus_workbench.store import Store
 
 from .conftest import World
 from .test_job_sites import _owner_reads
@@ -87,6 +92,51 @@ def test_artifacts_shown_and_run_in_place_in_chrome(
         assert sent.status_code == 201, sent.text
         ada.wait_answer(chat)
         chats[name] = chat
+    chat = ada.new_chat()
+    world.gateway.words = ["The tool returned a page, a picture and notes."]
+    assert (
+        ada.post(f"/api/chats/{chat}/messages", json={"content": "Fetch them"}).status_code == 201
+    )
+    message = ada.wait_answer(chat)
+    tool_original = ESCAPES + "\n\n"
+
+    async def tool_returned() -> None:
+        blocks, result = await normalize(
+            "fetch",
+            [
+                {"type": "resource", "resource": {"uri": "tool:///page", "text": tool_original}},
+                {"type": "resource", "resource": {"uri": "tool:///picture", "text": LOGO}},
+                {"type": "text", "text": "Notes from the tool.", "mimeType": "text/markdown"},
+            ],
+        )
+        store = Store(world.settings.data_dir / DATABASE)
+        await store.open()
+        try:
+            await store.update_message(
+                message["id"],
+                tool_rounds=[
+                    {
+                        "calls": [
+                            {
+                                "id": "fetch",
+                                "serverId": "pages",
+                                "serverName": "Pages",
+                                "tool": "fetch_page",
+                                "arguments": {},
+                                "status": "done",
+                                "result": result,
+                                "content": blocks,
+                                "contentVersion": 1,
+                            }
+                        ]
+                    }
+                ],
+            )
+        finally:
+            await store.close()
+
+    asyncio.run(tool_returned())
+    chats["tool"] = chat
     _owner_reads(world)
 
     def cookies(who: object) -> list[dict[str, object]]:
@@ -115,6 +165,7 @@ def test_artifacts_shown_and_run_in_place_in_chrome(
                 "secret": ada.secret,
                 "owner": {"cookies": cookies(owner), "secret": owner.secret},
                 "chats": chats,
+                "toolOriginal": tool_original,
                 "shots": str(shots),
             }
         ),
