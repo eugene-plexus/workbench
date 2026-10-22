@@ -110,6 +110,14 @@ export function goSignedIn(page, address) {
   return visit(page, address, "domcontentloaded");
 }
 
+// The longest gap between two frames that still counts as "the page kept
+// drawing" while a formula or diagram is stopped. A stall of the page lasts the
+// whole stop (1.5 s for a formula, 4 s for a diagram); Firefox's frames on a
+// busy CI runner showed 253 ms with no stall. Chromium keeps 250 ms.
+export function frameGapLimit(browserName) {
+  return browserName === "chromium" ? 250 : 600;
+}
+
 // A chat with pictures, formulas and running previews fires "load" only when
 // every one of its frames has loaded; Firefox under load took over 15 s for
 // that (a goto timeout on CI) while the page was already usable. Outside
