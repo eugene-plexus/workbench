@@ -83,6 +83,24 @@ export async function newChatMs(page) {
 // answers, and try again twice if it does; if it does not, say so. Each retry
 // is printed, never silent.
 async function visit(page, address, waitUntil, timeout = 10_000) {
+  // What the page was still waiting for when it did not open: named in the
+  // retry line, so a stall has its observed cause.
+  const pending = new Set();
+  const started = (request) => pending.add(request.url());
+  const ended = (request) => pending.delete(request.url());
+  page.on("request", started);
+  page.on("requestfinished", ended);
+  page.on("requestfailed", ended);
+  try {
+    return await tryVisit(page, address, waitUntil, timeout, pending);
+  } finally {
+    page.off("request", started);
+    page.off("requestfinished", ended);
+    page.off("requestfailed", ended);
+  }
+}
+
+async function tryVisit(page, address, waitUntil, timeout, pending) {
   for (let attempt = 1; ; attempt++) {
     try {
       await page.goto(address, { waitUntil, timeout });
@@ -98,7 +116,7 @@ async function visit(page, address, waitUntil, timeout = 10_000) {
       }
       if (attempt === 3) throw error;
       console.log(
-        `RETRY  the page did not open in ${timeout / 1000} s though the server answered ${answered} (try ${attempt} of 3)`,
+        `RETRY  the page did not open in ${timeout / 1000} s though the server answered ${answered} (try ${attempt} of 3); still waiting for: ${[...pending].map((u) => u.slice(-60)).join(", ") || "nothing"}`,
       );
     }
   }
