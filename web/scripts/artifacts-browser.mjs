@@ -7,7 +7,7 @@
 // that never stops, stopped; one that tries to leave, stopped; a React
 // component run and clicked; one that imports what is not there, saying so;
 // an edit kept as a revision across a reload, the first version's own and not
-// the second's; a download; the search suggestions' frame as it was; the
+// the second's; revision comparisons, their layout and downloads; the search suggestions' frame as it was; the
 // keyboard; both themes and a phone. Each check is one PASS or FAIL line.
 import { mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -174,6 +174,99 @@ async function runIt(page, dialog) {
   return handle.contentFrame();
 }
 
+async function compareRevisions(page, dialog, scheme) {
+  step(`${scheme}: comparing revisions`);
+  await dialog.getByRole("combobox", { name: "Compare with revision" }).selectOption("1");
+  const changes = dialog.getByRole("tabpanel", { name: "Changes" });
+  await changes.locator("del").waitFor();
+  check(
+    `${scheme}: comparing selects Changes and marks removed and added lines`,
+    (await dialog.getByRole("tab", { name: "Changes" }).getAttribute("aria-selected")) === "true" &&
+      (await dialog.getByRole("tab", { name: "Preview" }).getAttribute("aria-selected")) ===
+        "false" &&
+      (await changes.locator("del").innerText()).includes("- bread") &&
+      (await changes.locator("ins").allTextContents()).some((line) => line.includes("- oats")) &&
+      (await changes.locator("ins").allTextContents()).some((line) => line.includes("- eggs")),
+  );
+  // WebKit on Windows sizes in display pixels (819 CSS px for 1024 at 125%).
+  // Exercise the design's actual CSS breakpoints in every engine.
+  const scale = page.viewportSize().width / (await page.evaluate(() => window.innerWidth));
+  // Its media queries round fractional CSS widths up; use a whole CSS width below the boundary.
+  const belowBoundary = Number.isInteger(1023 * scale) ? 1023 : 1020;
+  for (const width of [1024, belowBoundary, PHONE.width]) {
+    await page.setViewportSize({ width: Math.ceil(width * scale), height: DESK.height });
+    await page.evaluate(
+      () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))),
+    );
+    const layout = await changes.evaluate((element) => {
+      const removed = element.querySelector("del");
+      const added = removed.closest(".artifact-diff-line").querySelector("ins");
+      const left = removed.parentElement;
+      const right = added.parentElement;
+      const leftBox = left.getBoundingClientRect();
+      const rightBox = right.getBoundingClientRect();
+      return {
+        width: window.innerWidth,
+        sideBySide: Math.abs(leftBox.top - rightBox.top) < 1 && leftBox.right <= rightBox.left + 1,
+        oneColumn: leftBox.bottom <= rightBox.top + 1 && Math.abs(leftBox.left - rightBox.left) < 1,
+        fits: element.scrollWidth <= element.clientWidth + 1,
+        removedColor: getComputedStyle(left).backgroundColor,
+        addedColor: getComputedStyle(right).backgroundColor,
+        struck: getComputedStyle(removed).textDecorationLine.includes("line-through"),
+        unchangedCopies: [...element.querySelectorAll('[data-change="same"]')].filter(
+          (line) => line.getBoundingClientRect().height > 0,
+        ).length,
+      };
+    });
+    const red = rgb(layout.removedColor);
+    const green = rgb(layout.addedColor);
+    check(
+      `${scheme}: comparison at ${width}px fits, uses ${width >= 1024 ? "two columns" : "one column"}, red removals and green additions`,
+      layout.width === width &&
+        (width >= 1024 ? layout.sideBySide : layout.oneColumn) &&
+        layout.fits &&
+        layout.struck &&
+        red[0] > red[1] &&
+        green[1] > green[0],
+      JSON.stringify(layout),
+    );
+    const sameCount = await changes.locator('.diff-before[data-change="same"]').count();
+    check(
+      `${scheme}: comparison at ${width}px shows unchanged lines once per column`,
+      layout.unchangedCopies === sameCount * (width >= 1024 ? 2 : 1),
+      JSON.stringify(layout),
+    );
+  }
+  await page.screenshot({ path: `${cfg.shots}/comparison-phone-${scheme}.png` });
+  await page.setViewportSize(DESK);
+  await page.screenshot({ path: `${cfg.shots}/comparison-${scheme}.png` });
+  await dialog.getByRole("tab", { name: "Changes" }).focus();
+  await page.keyboard.press("ArrowLeft");
+  check(
+    `${scheme}: the keyboard returns from Changes to Source`,
+    (await dialog.getByRole("tab", { name: "Source" }).getAttribute("aria-selected")) === "true" &&
+      (await dialog.getByRole("combobox", { name: "Compare with revision" }).inputValue()) === "" &&
+      (await dialog.getByRole("textbox").inputValue()).includes("- oats"),
+  );
+}
+
+async function downloadComparison(page, dialog, before, after, label) {
+  const downloads = await Promise.all([
+    page.waitForEvent("download", {
+      predicate: (item) => item.suggestedFilename() === "notes-revision-1.md",
+    }),
+    page.waitForEvent("download", {
+      predicate: (item) => item.suggestedFilename() === "notes-revision-2.md",
+    }),
+    dialog.getByRole("button", { name: "Download both", exact: true }).click(),
+  ]);
+  check(
+    label,
+    readFileSync(await downloads[0].path(), "utf8") === before &&
+      readFileSync(await downloads[1].path(), "utf8") === after,
+  );
+}
+
 try {
   // --- the two policies, as the built app sends them -----------------------------------
   step("the two policies, as the built app sends them");
@@ -245,6 +338,7 @@ try {
       `${await dialog.getByRole("heading", { name: "Shopping" }).count()} headings, ${await dialog.locator("li").count()} items`,
     );
     await page.screenshot({ path: `${cfg.shots}/notes-${scheme}.png` });
+    if (scheme === "light") await compareRevisions(page, dialog, scheme);
     await closeDialog(page);
     check(
       `${scheme}: Escape closes it and gives focus back to Open`,
@@ -537,8 +631,8 @@ try {
       dialog = await openArtifact(page, "Notes");
       await dialog.getByRole("tab", { name: "Source" }).click();
       const editor = dialog.getByRole("textbox");
-      await editor.press("Control+End");
-      await editor.pressSequentially("\n- eggs");
+      const edited = `${cfg.sources.notes.replace("- bread", "- oats")}\n- eggs`;
+      await editor.fill(edited);
       await dialog.getByRole("button", { name: "Save as revision 2" }).click();
       await dialog
         .getByRole("combobox", { name: "Revision", exact: true })
@@ -551,7 +645,7 @@ try {
       const saved = readFileSync(await download.path(), "utf8");
       check(
         "dark: an edit is saved as revision 2 and downloads under the title",
-        download.suggestedFilename() === "notes.md" && saved === `${cfg.sources.notes}\n- eggs`,
+        download.suggestedFilename() === "notes.md" && saved === edited,
         `${download.suggestedFilename()} ${JSON.stringify(saved.slice(-20))}`,
       );
       await closeDialog(page);
@@ -559,7 +653,17 @@ try {
       await card(page, "Notes").getByText("Markdown · 2 revisions").waitFor();
       dialog = await openArtifact(page, "Notes");
       await dialog.getByRole("tab", { name: "Source" }).click();
+      await compareRevisions(page, dialog, scheme);
       const latest = await dialog.getByRole("textbox").inputValue();
+      await dialog.getByRole("combobox", { name: "Compare with revision" }).selectOption("1");
+      await downloadComparison(
+        page,
+        dialog,
+        cfg.sources.notes,
+        edited,
+        "dark: Download both keeps each revision's source and number",
+      );
+      await dialog.getByRole("tab", { name: "Source" }).click();
       await dialog.getByRole("combobox", { name: "Revision", exact: true }).selectOption("1");
       await page.waitForTimeout(300);
       const first = await dialog.getByRole("textbox").inputValue();
@@ -569,6 +673,31 @@ try {
         JSON.stringify([latest.slice(-10), first.slice(-10)]),
       );
       await closeDialog(page);
+
+      // A long response uses the same revision route, without changing the saved artifact.
+      step("a comparison over 5000 lines");
+      const longSource = Array(5001).fill("long").join("\n");
+      const revisionRoute = "**/artifacts/*/revisions/2";
+      await page.route(revisionRoute, async (route) => {
+        const response = await route.fetch();
+        await route.fulfill({ response, json: { ...(await response.json()), source: longSource } });
+      });
+      dialog = await openArtifact(page, "Notes");
+      await dialog.getByRole("combobox", { name: "Compare with revision" }).selectOption("1");
+      await dialog.getByText("Too long to compare here. Download both.", { exact: true }).waitFor();
+      check(
+        "dark: over 5000 lines says why and draws no comparison",
+        (await dialog.locator(".artifact-diff-line").count()) === 0,
+      );
+      await downloadComparison(
+        page,
+        dialog,
+        cfg.sources.notes,
+        longSource,
+        "dark: a comparison over 5000 lines still downloads both complete revisions",
+      );
+      await closeDialog(page);
+      await page.unroute(revisionRoute);
 
       // --- another version of the answer has its own -------------------------------------------
       step("another version of the answer has its own");
