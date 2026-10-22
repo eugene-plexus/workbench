@@ -143,8 +143,13 @@ export function useChat(chatId: string | null) {
     [setDetail],
   );
 
+  // The newest read is the one shown. Reads can come back out of order (an
+  // answer's first events each ask for one), and an older read that lands last
+  // would put back an answer that had already finished.
+  const reads = useRef(0);
   const reload = useCallback(async () => {
     if (!chatId) return;
+    const mine = ++reads.current;
     try {
       const through = via.current ? `?via=${encodeURIComponent(via.current)}` : "";
       let next: ChatDetail;
@@ -155,6 +160,7 @@ export function useChat(chatId: string | null) {
         via.current = null;
         next = await api<ChatDetail>(`/api/chats/${encodeURIComponent(chatId)}`);
       }
+      if (mine !== reads.current) return;
       for (const event of held.current) next = applyEvent(next, event).detail;
       held.current = [];
       setDetail(next);
