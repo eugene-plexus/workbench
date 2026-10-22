@@ -335,7 +335,9 @@ def test_a_turn_carries_what_the_server_recalls_after_the_notes(
     assert 0 < server.recalled[-1]["max_tokens"] <= 2000
     answer = person.get(f"/api/chats/{chat}").json()["messages"][-1]
     used = answer["memoryUsed"]["memoryServer"]
-    assert used["memories"] == [{"text": "Ada's sister is called Grace.", "date": None}]
+    assert used["memories"] == [
+        {"text": "Ada's sister is called Grace.", "date": None, "documentId": "m1"}
+    ]
     assert used["name"] == "Test memory" and used["why"] is None
 
 

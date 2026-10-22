@@ -118,7 +118,12 @@ def test_each_group_of_versions_has_exactly_one_chosen(tmp_path: Path) -> None:
         assert all(len(chosen) == 1 for chosen in groups.values()), groups
         assert groups[None] == ["u1b"] and groups["u1"] == ["a1b"]
         tree = await store.tree("c")
-        assert storage.versions(tree)["a1b"] == {"index": 2, "count": 2, "ids": ["a1", "a1b"]}
+        assert storage.versions(tree)["a1b"] == {
+            "index": 2,
+            "count": 2,
+            "ids": ["a1", "a1b"],
+            "names": [None, None],
+        }
         assert storage.versions(tree)["u1b"]["index"] == 2
 
     _run(tmp_path, steps)

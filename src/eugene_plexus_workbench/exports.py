@@ -348,11 +348,13 @@ class Exports:
         result: tuple[dict[str, int], int] = await asyncio.shield(writer)
         return result
 
-    async def drop(self, sub: str) -> int:
+    async def drop(self, sub: str, *, before: float | None = None) -> int:
         """Delete every download that may hold the person's data, theirs or of them, and stop
         any being made. Their log rows stay, marked deleted. How many files went."""
         gone = 0
         for row in await self.store.exports_holding(sub):
+            if before is not None and row["created_at"] > before:
+                continue
             writing = self._writers.get(row["id"])
             if writing is not None:
                 writing[0].set()

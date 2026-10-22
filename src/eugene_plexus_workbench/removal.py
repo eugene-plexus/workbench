@@ -478,10 +478,15 @@ class Removal:
 
     async def _step_memory(self, sub: str) -> str:
         """Ask the person's own memory server to forget what Workbench sent it."""
+        return await self.forget_exchanges(
+            sub, await self.store.forgets_owed(sub) + await self.store.branch_forgets_owed(sub)
+        )
+
+    async def forget_exchanges(self, sub: str, owed: list[dict[str, Any]]) -> str:
+        """The same targeted forget and retry rule for a removed person or branch."""
         from .memory_servers import ServerProblem, mode_for
 
         server = await self.store.memory_server(sub)
-        owed = await self.store.forgets_owed(sub)
         if server is None or not owed:
             return "done"
         mode, why_not = await mode_for(self.store)

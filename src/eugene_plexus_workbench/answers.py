@@ -280,6 +280,7 @@ def message_view(message: Message) -> dict[str, Any]:
         "outputCap": message.output_cap,
         "retrieval": message.retrieval,
         "memoryUsed": message.memory_used,
+        "branchName": message.branch_name,
     }
 
 
@@ -444,6 +445,17 @@ class Answers:
                 finished_at=m.finished_at,
                 output_cap=m.output_cap,
             )
+        clean = await self._store.filter_retained(
+            m.id, memory_used=m.memory_used, tool_rounds=m.tool_rounds
+        )
+        m.memory_used = clean["memory_used"]
+        # Keep live call objects: tool tasks still hold them while an approval waits.
+        for before, after in zip(m.tool_rounds, clean["tool_rounds"], strict=True):
+            for call, filtered in zip(before.get("calls", []), after.get("calls", []), strict=True):
+                if call != filtered:
+                    call.clear()
+                    call.update(filtered)
+        values.update(memory_used=m.memory_used, tool_rounds=m.tool_rounds)
         await self._store.update_message(m.id, **values)
         running.saved_at = time.perf_counter()
 

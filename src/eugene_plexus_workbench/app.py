@@ -40,6 +40,7 @@ from ._http import ssl_context
 from .a2ui import A2UI
 from .agui import AGUI
 from .answers import Answers
+from .branches import Branches, BranchWrites
 from .connections import Connections
 from .exports import Exports
 from .exports import router as exports_router
@@ -359,6 +360,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         tools.a2ui = A2UI(tools, app.state.interactions, tools.apps)
         app.state.interactions.adapters[(a2ui_state.PROTOCOL, a2ui_state.VERSION)] = tools.a2ui
         await store.interactions.sweep(restart=True)
+        app.state.branches = Branches(app.state)
+        try:
+            await app.state.branches.due()
+        except Exception as exc:
+            log.warning("a branch deletion will be retried after start: %s", exc)
+        app.state.branches.start()
         # Connections (MR9b): other apps reach a person's own notes and documents at `/mcp`.
         mcp_door = app.state.connections = Connections(app.state)
         for problem in (provider.why_not(), hub.why_not()):
@@ -375,6 +382,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             async with mcp_door.running():
                 yield
         finally:
+            await app.state.branches.aclose()
             await app.state.agui.aclose()
             await app.state.interactions.aclose()
             await removal.aclose()
@@ -396,6 +404,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await store.close()
 
     app = FastAPI(title="Workbench", lifespan=lifespan, docs_url=None, redoc_url=None)
+    app.add_middleware(BranchWrites)
     app.state.settings = settings
     app.state.degraded = None
     # Innermost: the headers and the canonical origin wrap what a degraded Workbench says.

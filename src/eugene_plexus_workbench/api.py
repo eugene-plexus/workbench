@@ -25,7 +25,7 @@ from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFil
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field, StrictBool
 
-from . import artifacts, config, files, memory_write
+from . import artifacts, branch_store, config, files, memory_write
 from .answers import Answers, Preparation, Progress, message_view
 from .context import reading_view
 from .conversation import SAMPLING, request_for
@@ -539,7 +539,9 @@ async def _chat_detail(
     if running is not None:
         # The answer being written, as it stands now rather than as last saved.
         tree = [
-            replace(running.message, parent_id=m.parent_id, chosen=m.chosen)
+            replace(
+                running.message, parent_id=m.parent_id, chosen=m.chosen, branch_name=m.branch_name
+            )
             if m.id == running.message.id
             else m
             for m in tree
@@ -547,6 +549,13 @@ async def _chat_detail(
     if via is not None and all(m.id != via for m in tree):
         raise _problem(status.HTTP_404_NOT_FOUND, "There is no such message in this chat.")
     places = versions(tree)
+    if read_only:
+        hidden = hidden_from_owner(tree, (await install_mode(request))["mode"])
+        for place in places.values():
+            place["names"] = [
+                None if mid in hidden else name
+                for mid, name in zip(place["ids"], place["names"], strict=True)
+            ]
     attached = {f.id: f for f in await store.files_for_chat(chat.id, uploads=True)}
     kept: dict[str, list[dict[str, Any]]] = {}
     for record in await store.artifacts_for_chat(chat.id):
@@ -582,6 +591,9 @@ async def _chat_detail(
         ),
         "messages": views,
         "ownerName": owner.name if owner else None,
+        "deletedBranches": []
+        if read_only
+        else [branch_store.deleted_view(r) for r in await store.deleted_branches(chat.id)],
     }
 
 
@@ -1090,6 +1102,10 @@ async def _ask(
         if past.record is not None:
             record = {**(record or {}), "pastChats": past.record}
         if server.record is not None:
+            # Preserve source identity so deletion never guesses from recalled words.
+            for item, recalled in zip(server.items, server.record.get("memories", []), strict=True):
+                if item.id is not None:
+                    recalled["documentId"] = item.id
             record = {**(record or {}), "memoryServer": server.record}
         found = await saved_api.retrieve(
             request,
@@ -1348,6 +1364,59 @@ async def choose(request: Request, chat_id: str, message_id: str) -> dict[str, A
     answers.publish(chat.id, {"type": "path"})
     _touch_exchanges(request, person.sub, chat.id)
     return await _chat_detail(request, chat, read_only=False)
+
+
+async def _branch_owner(request: Request, chat_id: str) -> tuple[Person, Chat]:
+    person = await _person(request)
+    chat = await _state(request).store.chat(chat_id)
+    if chat is not None and person.is_owner and chat.owner != person.sub:
+        raise _problem(403, "You can only read this person's chat.")
+    return person, await _own_chat(request, person, chat_id)
+
+
+@router.get("/api/chats/{chat_id}/messages/{message_id}/branch")
+async def branch_summary(request: Request, chat_id: str, message_id: str) -> dict[str, Any]:
+    _, chat = await _branch_owner(request, chat_id)
+    return dict(await _state(request).store.branch_summary(chat.id, message_id))
+
+
+@router.delete("/api/chats/{chat_id}/messages/{message_id}")
+async def delete_branch(
+    request: Request, chat_id: str, message_id: str, expected: str | None = None
+) -> dict[str, Any]:
+    person, chat = await _branch_owner(request, chat_id)
+    _no_running(request, chat)
+    await _state(request).branches.delete(person.sub, chat.id, message_id, expected)
+    return await _chat_detail(request, chat, read_only=False)
+
+
+@router.post("/api/chats/{chat_id}/messages/{message_id}/undo")
+async def undo_branch(request: Request, chat_id: str, message_id: str) -> dict[str, Any]:
+    person, chat = await _branch_owner(request, chat_id)
+    _no_running(request, chat)
+    if not await _state(request).branches.undo(person.sub, chat.id, message_id):
+        raise _problem(409, "This version can no longer be restored. The 30 days have ended.")
+    return await _chat_detail(request, chat, read_only=False)
+
+
+class BranchName(BaseModel):
+    name: str | None
+
+
+@router.put("/api/chats/{chat_id}/messages/{message_id}/name")
+async def name_version(
+    request: Request, chat_id: str, message_id: str, body: BranchName
+) -> dict[str, Any]:
+    _, chat = await _branch_owner(request, chat_id)
+    store: Store = _state(request).store
+    try:
+        found = await store.name_version(chat.id, message_id, body.name)
+    except ValueError as exc:
+        raise _problem(422, str(exc)) from None
+    if not found:
+        raise _problem(404, "There is no such message in this chat.")
+    _answers(request).publish(chat.id, {"type": "path"})
+    return {"versions": versions(await store.tree(chat.id))[message_id]}
 
 
 @router.post("/api/chats/{chat_id}/stop", status_code=status.HTTP_204_NO_CONTENT)

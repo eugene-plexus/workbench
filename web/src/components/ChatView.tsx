@@ -38,6 +38,7 @@ import { MemoryChip, MemoryDrawer } from "./MemoryChip";
 import { MemoryOffer } from "./MemoryOffer";
 import { MemoryToast, outcomeOf, type ToastOutcome } from "./MemoryToast";
 import { MessageView } from "./MessageView";
+import { DeletedBranches } from "./Versions";
 import type { RememberProps } from "./RememberThis";
 
 export function ChatView({
@@ -492,6 +493,14 @@ export function ChatView({
           {detail.ownerName ? `${detail.ownerName}'s chat.` : "Someone else's chat."} You can read
           it, because this Workbench lets its owner read people&apos;s chats. You cannot change it.
         </p>
+      )}
+      {!chat.readOnly && detail.deletedBranches && (
+        <DeletedBranches
+          chatId={chat.id}
+          branches={detail.deletedBranches}
+          busy={chat.running}
+          onChanged={() => void reload()}
+        />
       )}
       {showSettings && !chat.readOnly && (
         <ChatSettings

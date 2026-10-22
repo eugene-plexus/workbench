@@ -12,6 +12,13 @@ import pytest
 from .conftest import World
 
 
+@pytest.fixture(autouse=True)
+def clear_eugene_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in list(os.environ):
+        if key.startswith("EUGENE_PLEXUS_"):
+            monkeypatch.delenv(key)
+
+
 @pytest.mark.skipif(not os.getenv("WORKBENCH_PLAYWRIGHT"), reason="opt-in system Chrome acceptance")
 def test_answer_versions_in_chrome(world: World, tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[1]

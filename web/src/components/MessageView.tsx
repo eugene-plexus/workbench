@@ -1,5 +1,4 @@
 import {
-  ChevronLeft,
   ChevronRight,
   CircleAlert,
   FileText,
@@ -45,8 +44,8 @@ import {
   SEARCHED_MARK,
   splitWorking,
   statusWords,
-  VERSIONS_WAIT,
 } from "../lib/words";
+import { VersionArrows } from "./Versions";
 import { Markdown } from "./Markdown";
 import { ArtifactScope, type Scope } from "./Artifact";
 import { CopyButton } from "./CopyButton";
@@ -716,88 +715,6 @@ function FoldText({
 
 /** `‹ 2 of 3 ›`: the versions of a message, or the tries of an answer.
  * Moving chooses that version for every tab; the owner's arrows only look. */
-function VersionArrows({
-  chatId,
-  message,
-  busy,
-  readOnly,
-  onChanged,
-  onLook,
-  onProblem,
-}: {
-  chatId: string;
-  message: Message;
-  busy: boolean;
-  readOnly: boolean;
-  onChanged: () => void;
-  onLook?: (id: string) => void;
-  onProblem: (problem: string | null) => void;
-}) {
-  const [moving, setMoving] = useState(false);
-  const versions = message.versions;
-  if (!versions || versions.count < 2) return null;
-  const what = message.role === "user" ? "Message" : "Answer";
-  // Looking changes nothing, so a running answer holds only the person's.
-  const held = busy && !readOnly;
-
-  async function go(step: number) {
-    const id = versions?.ids[versions.index - 1 + step];
-    if (!id || moving) return;
-    if (readOnly) {
-      onLook?.(id);
-      return;
-    }
-    setMoving(true);
-    onProblem(null);
-    try {
-      await post(`/api/chats/${chatId}/messages/${id}/choose`);
-      onChanged();
-    } catch (error) {
-      onProblem(error instanceof Error ? error.message : String(error));
-    } finally {
-      setMoving(false);
-    }
-  }
-
-  const arrow = (step: number, label: string, Icon: typeof ChevronLeft, end: boolean) => (
-    <button
-      type="button"
-      aria-label={label}
-      title={held ? VERSIONS_WAIT : label}
-      disabled={held || moving || end}
-      onClick={() => void go(step)}
-      className="act justify-center"
-    >
-      <Icon size={14} aria-hidden />
-    </button>
-  );
-  return (
-    <span
-      role="group"
-      aria-label={`${what} ${versions.index} of ${versions.count}`}
-      title={held ? VERSIONS_WAIT : undefined}
-      data-testid="versions"
-      className="flex items-center gap-0.5 whitespace-nowrap"
-    >
-      {arrow(
-        -1,
-        `Previous version of this ${what.toLowerCase()}`,
-        ChevronLeft,
-        versions.index <= 1,
-      )}
-      <span aria-hidden>
-        {versions.index} of {versions.count}
-      </span>
-      {arrow(
-        1,
-        `Next version of this ${what.toLowerCase()}`,
-        ChevronRight,
-        versions.index >= versions.count,
-      )}
-    </span>
-  );
-}
-
 /** The time alone today; with its date on any earlier day, so an old chat
  * does not read as if it were written this morning. */
 export function shortTime(date: Date, now = new Date()): string {

@@ -202,6 +202,14 @@ class Learner:
                 await task
         self._timers.clear()
 
+    async def drain_chat(self, chat_id: str) -> None:
+        """A branch is being hidden: finish no pass from the old path after it goes."""
+        self._again.pop(chat_id, None)
+        task = self._timers.pop(chat_id, None)
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
     def _budget_left(self, owner: str, now: float) -> bool:
         calls = self._calls.setdefault(owner, deque())
         while calls and now - calls[0] > HOUR_SECONDS:

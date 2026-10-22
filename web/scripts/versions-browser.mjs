@@ -87,6 +87,25 @@ try {
   assert.equal(await page.getByText("Final question").count(), 0);
   await group("Answer 1 of 2").getByRole("button", { name: "Next version" }).click();
   await page.getByText("Final question").waitFor();
+  // Delete the first try, restore it, then compare it with the chosen try.
+  await group("Answer 2 of 2").getByRole("button", { name: "Previous version" }).click();
+  await answer(1).waitFor();
+  await group("Answer 1 of 2").getByRole("button", { name: "Version actions" }).click();
+  await page.getByRole("button", { name: "Delete this version", exact: true }).click();
+  const deletion = page.getByRole("dialog", { name: "Delete this version?" });
+  await deletion.getByRole("button", { name: "Delete version", exact: true }).click();
+  await answer(2).waitFor();
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await answer(1).waitFor();
+  await group("Answer 1 of 2").getByRole("button", { name: "Next version" }).click();
+  await answer(2).waitFor();
+  await group("Answer 2 of 2").getByRole("button", { name: "Version actions" }).click();
+  await page.getByRole("button", { name: "Compare with version 1", exact: true }).click();
+  const comparison = page.getByRole("dialog", { name: "Compare versions" });
+  await comparison.getByText("Hello from the model. #1", { exact: true }).waitFor();
+  await comparison.getByText("Hello from the model. #2", { exact: true }).waitFor();
+  assert.equal(await comparison.getByText("First question", { exact: true }).count(), 1);
+  await comparison.getByRole("button", { name: "Close", exact: true }).click();
   await answer(4).waitFor();
   await group("Message 1 of 2").getByRole("button", { name: "Next version" }).click();
   await page.getByText("Edited question").waitFor();

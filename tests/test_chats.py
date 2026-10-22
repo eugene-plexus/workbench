@@ -343,7 +343,12 @@ def test_try_again_shows_a_new_answer_and_keeps_the_last_as_a_version(world: Wor
     messages = ada.get(f"/api/chats/{chat}").json()["messages"]
     assert [m["role"] for m in messages] == ["user", "assistant"]
     assert second["id"] != first["id"] and second["content"] == "Another answer."
-    assert second["versions"] == {"index": 2, "count": 2, "ids": [first["id"], second["id"]]}
+    assert second["versions"] == {
+        "index": 2,
+        "count": 2,
+        "ids": [first["id"], second["id"]],
+        "names": [None, None],
+    }
 
 
 def test_editing_a_message_shows_the_edit_and_keeps_the_old_branch(world: World) -> None:

@@ -11,7 +11,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { api } from "./api";
+import { api, ApiError } from "./api";
 import { watch } from "./events";
 import type { ChatDetail, ChatEvent, LearnedNote, Message, Progress } from "./types";
 
@@ -40,6 +40,7 @@ export function applyEvent(detail: ChatDetail, event: ChatEvent): Outcome {
       ...message,
       files: message.files ?? shown?.files,
       versions: message.versions ?? shown?.versions,
+      branchName: message.branchName ?? shown?.branchName,
     };
     return {
       ...detail,
@@ -146,7 +147,14 @@ export function useChat(chatId: string | null) {
     if (!chatId) return;
     try {
       const through = via.current ? `?via=${encodeURIComponent(via.current)}` : "";
-      let next = await api<ChatDetail>(`/api/chats/${encodeURIComponent(chatId)}${through}`);
+      let next: ChatDetail;
+      try {
+        next = await api<ChatDetail>(`/api/chats/${encodeURIComponent(chatId)}${through}`);
+      } catch (error) {
+        if (!(error instanceof ApiError) || error.status !== 404 || !via.current) throw error;
+        via.current = null;
+        next = await api<ChatDetail>(`/api/chats/${encodeURIComponent(chatId)}`);
+      }
       for (const event of held.current) next = applyEvent(next, event).detail;
       held.current = [];
       setDetail(next);
