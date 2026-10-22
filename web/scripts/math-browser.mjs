@@ -11,6 +11,7 @@ import { createRequire } from "node:module";
 import {
   contextOptions,
   fillComposer,
+  goChat,
   goSignedIn,
   keepScheme,
   ignorablePageError,
@@ -100,7 +101,7 @@ async function open(scheme, viewport, extra = {}) {
 }
 
 async function chat(page, id) {
-  await page.goto(`${cfg.url}/chats/${id}`);
+  await goChat(page, browserName, `${cfg.url}/chats/${id}`);
   await page.locator('[data-testid=answer]:not([data-status="running"])').first().waitFor();
 }
 
