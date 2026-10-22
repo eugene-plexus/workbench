@@ -481,6 +481,52 @@ describe("reasoning is Markdown in a folded box that scrolls", () => {
     expect(thought.closest("[dir]")).toHaveAttribute("dir", "auto");
   });
 
+  it("keeps reasoning footnotes separate from the draft and answer", () => {
+    const draft = "Draft.[^1]\n\n[^1]: Draft note.\n\n";
+    const { container } = show(
+      answer({
+        reasoning: "Thinking.[^1]\n\n[^1]: Reasoning note.",
+        content: `${draft}Answer.[^1]\n\n[^1]: Answer note.`,
+        answerFrom: draft.length,
+      }),
+    );
+    const box = screen.getByRole("group", { name: "Reasoning text" });
+    const ref = box.querySelector<HTMLAnchorElement>("[data-footnote-ref]")!;
+    const note = box.querySelector<HTMLElement>("[data-footnotes] li")!;
+    expect(ref).toHaveAttribute("href", `#${note.id}`);
+    fireEvent.click(ref);
+    expect(note).toHaveFocus();
+    expect(note).toHaveTextContent("Reasoning note.");
+    fireEvent.click(box.querySelector<HTMLAnchorElement>("[data-footnote-backref]")!);
+    expect(ref).toHaveFocus();
+    const notes = [...container.querySelectorAll("[data-footnotes] li")];
+    expect(notes.map((item) => item.textContent)).toEqual([
+      expect.stringContaining("Reasoning note."),
+      expect.stringContaining("Draft note."),
+      expect.stringContaining("Answer note."),
+    ]);
+    expect(new Set(notes.map((item) => item.id)).size).toBe(3);
+  });
+
+  it("uses the answer's safe Markdown rules for reasoning", () => {
+    show(
+      answer({
+        reasoning:
+          '**Check** [the docs](https://example.org). ![private](https://example.org/track.png) <img src=x onerror="alert(1)"> [unsafe](javascript:alert(1))',
+      }),
+    );
+    const box = screen.getByRole("group", { name: "Reasoning text" });
+    expect(box.querySelector("strong")).toHaveTextContent("Check");
+    expect(box.querySelector("img, script, [onerror], a[href^='javascript:']")).toBeNull();
+    expect(box.querySelector('a[href="https://example.org"]')).toHaveAttribute(
+      "rel",
+      "noopener noreferrer",
+    );
+    expect(box.querySelector('a[href="https://example.org/track.png"]')).toHaveTextContent(
+      "[Image: private]",
+    );
+  });
+
   it("is a keyboard stop only while it overflows", () => {
     const { unmount } = show(answer({ reasoning }));
     expect(screen.getByRole("group", { name: "Reasoning text" })).not.toHaveAttribute("tabindex");
@@ -502,6 +548,25 @@ describe("reasoning is Markdown in a folded box that scrolls", () => {
         onChanged={() => undefined}
       />
     );
+
+    it("renders streamed Markdown without reopening a fold the reader closed", () => {
+      const { rerender } = render(thinking("First **step**."));
+      const fold = screen.getByText("Reasoning").closest("details")!;
+      const box = screen.getByRole("group", { name: "Reasoning text" });
+      expect(fold).not.toHaveAttribute("open");
+      rerender(thinking("First **step**.\n\n```python\nprint(1)"));
+      expect(fold).not.toHaveAttribute("open");
+      // The native disclosure is controlled by the reader while tokens arrive.
+      fireEvent.click(screen.getByText("Reasoning"));
+      rerender(thinking("First **step**.\n\n```python\nprint(1)\n```"));
+      expect(fold).toHaveAttribute("open");
+      expect(box.querySelector("strong")).toHaveTextContent("step");
+      expect(box.querySelector("pre code")).toHaveTextContent("print(1)");
+      fireEvent.click(screen.getByText("Reasoning"));
+      rerender(thinking("First **step**.\n\n```python\nprint(1)\n```\n\nDone."));
+      expect(fold).not.toHaveAttribute("open");
+      expect(box.querySelector("p:last-child")).toHaveTextContent("Done.");
+    });
 
     it("follows the bottom as text arrives, and lets go once the reader scrolls up", () => {
       vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(900);

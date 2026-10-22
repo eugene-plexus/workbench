@@ -416,10 +416,34 @@ try {
         .locator("[data-testid=answer] summary")
         .filter({ hasText: /^Reasoning/ })
         .first();
-      await reasoning.click();
       check(
-        `${scheme}: reasoning opens by its summary`,
+        `${scheme}: reasoning starts collapsed`,
+        !(await reasoning.evaluate((el) => el.parentElement.open)),
+      );
+      await reasoning.focus();
+      await reasoning.press("Enter");
+      check(
+        `${scheme}: reasoning opens by keyboard from its summary`,
         await reasoning.evaluate((el) => el.parentElement.open),
+      );
+      const reasoningStyle = await reasoning.evaluate((el) => {
+        const fold = el.parentElement;
+        const thought = fold.querySelector(".answer > p");
+        const answer = fold.closest("article").querySelector(":scope > .answer > p");
+        const properties = ["fontFamily", "fontSize", "lineHeight", "color"];
+        return {
+          paragraphs: fold.querySelectorAll(".answer > p").length,
+          thought: thought && properties.map((key) => getComputedStyle(thought)[key]),
+          answer: answer && properties.map((key) => getComputedStyle(answer)[key]),
+        };
+      });
+      check(
+        `${scheme}: reasoning is Markdown in the answer's style`,
+        reasoningStyle.paragraphs >= 2 &&
+          reasoningStyle.thought !== null &&
+          reasoningStyle.answer !== null &&
+          JSON.stringify(reasoningStyle.thought) === JSON.stringify(reasoningStyle.answer),
+        JSON.stringify(reasoningStyle),
       );
       await settle(page);
       await page.screenshot(shot(`rich-reasoning-${scheme}-desk`));
