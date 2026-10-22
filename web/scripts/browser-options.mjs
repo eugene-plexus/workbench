@@ -27,6 +27,16 @@ export async function launchBrowser(playwright, cfg, browserName) {
   return browser;
 }
 
+// Workbench answers with Cross-Origin-Opener-Policy: same-origin. On that
+// first navigation Playwright's Firefox drops the context's colorScheme (the
+// engine's page then reports "light"; reproduced against a bare server that
+// sends the same header). A real Firefox honours the person's setting, so the
+// check states the scheme again once the page is open; it holds from then on.
+export async function keepScheme(page, browserName, scheme) {
+  if (browserName === "chromium" || !scheme) return;
+  await page.emulateMedia({ colorScheme: scheme });
+}
+
 export function contextOptions(browserName, options) {
   const result = { ...options };
   // Firefox supports a phone-sized viewport and touch, but Playwright rejects
@@ -112,6 +122,17 @@ export function screenshotConsoleRefusal(browserName, text) {
     browserName === "webkit" &&
     text ===
       "Refused to apply a stylesheet because its hash, its nonce, or 'unsafe-inline' does not appear in the style-src directive of the Content Security Policy."
+  );
+}
+
+// WebKit reports a request the page itself abandons (a chat's own API calls,
+// cut off when the next navigation starts) as "... due to access control
+// checks", also for the same origin. Only that text, for the app's own /api,
+// is ignored; every other page error still fails the run.
+export function ignorablePageError(browserName, message) {
+  return (
+    browserName === "webkit" &&
+    /\/\/?127\.0\.0\.1:\d+\/api\/\S* due to access control checks\.$/.test(message)
   );
 }
 

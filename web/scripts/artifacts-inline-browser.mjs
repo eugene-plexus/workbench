@@ -13,6 +13,8 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import {
   contextOptions,
+  keepScheme,
+  ignorablePageError,
   launchBrowser,
   readOptions,
   watchPolicy,
@@ -63,7 +65,11 @@ async function open(scheme, viewport, who = cfg, extra = {}) {
   const page = await context.newPage();
   lastPage = page;
   page.on("pageerror", (error) => {
-    if (!(error.stack ?? "").includes("/preview/")) errors.push(error.message);
+    if (
+      !(error.stack ?? "").includes("/preview/") &&
+      !ignorablePageError(browserName, error.message)
+    )
+      errors.push(error.message);
   });
   page.on("request", (request) =>
     requests.push({ url: request.url(), main: request.frame() === page.mainFrame() }),
@@ -75,6 +81,7 @@ async function open(scheme, viewport, who = cfg, extra = {}) {
     }),
   );
   await page.goto(`${cfg.url}/#signin=${who.secret}`);
+  await keepScheme(page, browserName, scheme);
   await page.getByTestId("new-chat").waitFor({ state: "attached" });
   return { context, page };
 }

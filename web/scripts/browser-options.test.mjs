@@ -12,6 +12,8 @@ import {
   watchPolicy,
   screenshotConsoleRefusal,
   canCheckPreviewLoop,
+  ignorablePageError,
+  keepScheme,
 } from "./browser-options.mjs";
 
 const temp = mkdtempSync(join(tmpdir(), "workbench-browsers-"));
@@ -179,4 +181,28 @@ it("skips only the loop scenarios in engines that share the chat's event loop", 
   expect(
     log.mock.calls.every(([line]) => line.includes("SKIP") && line.includes("docs/browsers.md")),
   ).toBe(true);
+});
+
+it("states the colour scheme again where Firefox drops it on a COOP page", async () => {
+  const emulateMedia = vi.fn(async () => {});
+  await keepScheme({ emulateMedia }, "firefox", "dark");
+  expect(emulateMedia).toHaveBeenCalledWith({ colorScheme: "dark" });
+  await keepScheme({ emulateMedia }, "chromium", "dark");
+  expect(emulateMedia).toHaveBeenCalledTimes(1);
+});
+
+it("ignores only WebKit's report of an abandoned request to the app's own API", () => {
+  const abandoned = "http://127.0.0.1:41913/api/chats due to access control checks.";
+  expect(ignorablePageError("webkit", abandoned)).toBe(true);
+  expect(
+    ignorablePageError(
+      "webkit",
+      "/127.0.0.1:41913/api/chats/x/events due to access control checks.",
+    ),
+  ).toBe(true);
+  expect(ignorablePageError("firefox", abandoned)).toBe(false);
+  expect(
+    ignorablePageError("webkit", "https://example.com/api/x due to access control checks."),
+  ).toBe(false);
+  expect(ignorablePageError("webkit", "TypeError: undefined is not an object")).toBe(false);
 });

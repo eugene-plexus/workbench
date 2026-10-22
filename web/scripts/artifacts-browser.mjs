@@ -13,6 +13,8 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import {
   contextOptions,
+  keepScheme,
+  ignorablePageError,
   launchBrowser,
   readOptions,
   watchPolicy,
@@ -73,7 +75,11 @@ async function open(scheme, viewport, extra = {}) {
   lastPage = page;
   // A preview's own errors are its own (and some are the point): only the page's count.
   page.on("pageerror", (error) => {
-    if (!(error.stack ?? "").includes("/preview/")) errors.push(error.message);
+    if (
+      !(error.stack ?? "").includes("/preview/") &&
+      !ignorablePageError(browserName, error.message)
+    )
+      errors.push(error.message);
   });
   // The chat page's own refusals: a preview's (in its own window) are the point.
   page.on("request", (request) => {
@@ -98,6 +104,7 @@ async function open(scheme, viewport, extra = {}) {
     failed.push(`${request.url()} ${request.failure()?.errorText ?? ""}`);
   });
   await page.goto(`${cfg.url}/#signin=${cfg.secret}`);
+  await keepScheme(page, browserName, scheme);
   await page.getByTestId("new-chat").waitFor({ state: "attached" });
   return { context, page };
 }
@@ -390,9 +397,15 @@ try {
             () => true,
             () => false,
           ));
-      await dialog
-        .getByText("The page tried to go to another page, and was stopped.")
-        .waitFor({ timeout: 25_000 });
+      // WebKit enforces the chat page's frame-src on the frame's own move: the
+      // move is refused before the page can say it is leaving, so the frame
+      // stays where it was and no message follows (docs/browsers.md).
+      const refusedEarly = browserName === "webkit";
+      if (refusedEarly) await page.waitForTimeout(2_000);
+      else
+        await dialog
+          .getByText("The page tried to go to another page, and was stopped.")
+          .waitFor({ timeout: 25_000 });
       const after = performance.now() - running;
       if (loops) {
         check(
@@ -409,10 +422,21 @@ try {
           ? "went out and was answered"
           : "was asked for, with no answer before the frame went"
         : "was never asked for";
-      check(
-        "dark: a page that tries to leave is stopped, and says so",
-        (await dialog.locator("iframe").count()) === 0,
-      );
+      if (refusedEarly) {
+        console.log(
+          "SKIP  webkit: a page that tries to leave is refused before it can say so; checking that it stayed (docs/browsers.md).",
+        );
+        check(
+          "dark: a page that tries to leave stays in its frame, and is never asked for",
+          left === "was never asked for" &&
+            page.frames().some((f) => f.url().endsWith("/preview/frame")),
+          left,
+        );
+      } else
+        check(
+          "dark: a page that tries to leave is stopped, and says so",
+          (await dialog.locator("iframe").count()) === 0,
+        );
       console.log(`  measured: the leaving page's address ${left}`);
       await closeDialog(page);
 
@@ -514,7 +538,7 @@ try {
       await editor.pressSequentially("\n- eggs");
       await dialog.getByRole("button", { name: "Save as revision 2" }).click();
       await dialog
-        .getByRole("combobox")
+        .getByRole("combobox", { name: "Revision", exact: true })
         .getByText(/^Revision 2 of 2, edited/)
         .waitFor({ state: "attached" });
       const [download] = await Promise.all([
@@ -533,7 +557,7 @@ try {
       dialog = await openArtifact(page, "Notes");
       await dialog.getByRole("tab", { name: "Source" }).click();
       const latest = await dialog.getByRole("textbox").inputValue();
-      await dialog.getByRole("combobox").selectOption("1");
+      await dialog.getByRole("combobox", { name: "Revision", exact: true }).selectOption("1");
       await page.waitForTimeout(300);
       const first = await dialog.getByRole("textbox").inputValue();
       check(
@@ -621,12 +645,22 @@ try {
     await context.close();
   }
 } catch (error) {
-  check(`the run went on past: ${at}`, false, String(error?.message ?? error).split("\n")[0]);
+  check(
+    `the run went on past: ${at}`,
+    false,
+    String(error?.message ?? error)
+      .split("\n")
+      .slice(0, 12)
+      .join(" | "),
+  );
   const shown = await lastPage
     ?.getByTestId("artifact-dialog")
     .innerText({ timeout: 2_000 })
     .catch(() => "");
   console.log(`  the dialog showed: ${JSON.stringify(shown ?? "").slice(0, 600)}`);
+  await lastPage
+    ?.screenshot({ path: `${cfg.shots}/failed-at.png`, timeout: 5_000 })
+    .catch(() => {});
 } finally {
   step("closing the browser");
   // A renderer still stuck in a stopped preview can hold the browser's close.

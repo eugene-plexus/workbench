@@ -11,6 +11,8 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import {
   contextOptions,
+  keepScheme,
+  ignorablePageError,
   launchBrowser,
   readOptions,
   watchClipboardWrites,
@@ -72,7 +74,9 @@ async function open(scheme, viewport, extra = {}) {
   });
   await context.addInitScript(watchPolicy, browserName);
   const page = await context.newPage();
-  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("pageerror", (error) => {
+    if (!ignorablePageError(browserName, error.message)) errors.push(error.message);
+  });
   page.on("console", (message) => {
     if (REFUSED.test(message.text()) && !screenshotConsoleRefusal(browserName, message.text()))
       policy.push(message.text());
@@ -89,6 +93,7 @@ async function open(scheme, viewport, extra = {}) {
   });
   page.on("request", (request) => requests.push(request.url()));
   await page.goto(`${cfg.url}/#signin=${cfg.secret}`);
+  await keepScheme(page, browserName, scheme);
   await page.getByTestId("new-chat").waitFor({ state: "attached" });
   const close = context.close.bind(context);
   context.close = async () => {
@@ -703,6 +708,8 @@ try {
   {
     const { context, page } = await open("dark", DESK);
     await page.getByTestId("new-chat").click();
+    // The chat's own composer replaces the first one; fill the one that stays.
+    await page.waitForURL(/\/chats\/[^/]+$/);
     const composer = page.getByTestId("composer");
     await composer.waitFor();
     await composer.fill(cfg.live.ask);

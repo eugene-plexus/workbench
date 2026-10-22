@@ -10,7 +10,13 @@
 // beside the Memory chip from a small tablet to a desk.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { contextOptions, launchBrowser, readOptions } from "./browser-options.mjs";
+import {
+  contextOptions,
+  ignorablePageError,
+  keepScheme,
+  launchBrowser,
+  readOptions,
+} from "./browser-options.mjs";
 
 const { configPath, browserName } = readOptions();
 const cfg = JSON.parse(readFileSync(configPath, "utf8"));
@@ -28,8 +34,11 @@ async function open(scheme, viewport, extra = {}) {
   );
   await context.addCookies(cfg.cookies);
   const page = await context.newPage();
-  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("pageerror", (error) => {
+    if (!ignorablePageError(browserName, error.message)) errors.push(error.message);
+  });
   await page.goto(`${cfg.url}/#signin=${cfg.secret}`);
+  await keepScheme(page, browserName, scheme);
   await page.getByTestId("new-chat").waitFor({ state: "attached" });
   return { context, page };
 }
@@ -522,6 +531,7 @@ try {
       const away = await browser.newContext({ colorScheme: scheme, viewport: DESK });
       const signedOut = await away.newPage();
       await signedOut.goto(cfg.url);
+      await keepScheme(signedOut, browserName, scheme);
       await settle(signedOut);
       await signedOut.screenshot(shot(`signin-${scheme}-desk`));
       await away.close();
@@ -679,6 +689,10 @@ try {
   for (const scheme of ["dark", "light"]) {
     const { context, page } = await open(scheme, DESK);
     await page.getByTestId("new-chat").click();
+    // New chat opens the chat's own address and mounts its composer there; a
+    // slower engine (WebKit) filled the first composer, which was then
+    // replaced and empty. Fill the one the page keeps.
+    await page.waitForURL(/\/chats\/[^/]+$/);
     const composer = page.getByTestId("composer");
     await composer.waitFor();
     await composer.fill(cfg.live);
