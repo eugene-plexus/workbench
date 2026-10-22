@@ -1,6 +1,7 @@
 /**
  * The Settings page (MV4: app before config): every setting a person has in Workbench, apart from
- * the pages that hold their data. Memory's, then Documents', then the connections other apps have.
+ * the pages that hold their data. Memory's, then Documents', then the connections other apps have,
+ * then downloading all of one's data, and for the owner, the people removed from Eugene (row 7).
  * Each section links to its page, and each page links here (to its section, by the address's
  * `#memory` or `#documents`).
  */
@@ -11,15 +12,20 @@ import { useEffect } from "react";
 import { Connections } from "./Connections";
 import { DocumentsSettings } from "./DocumentsSettings";
 import { MemorySettings } from "./MemorySettings";
+import { RemovedPeople } from "./RemovedPeople";
+import { YourData } from "./YourData";
 
 export function SettingsPage({
   onClose,
   onOpenMemory,
   onOpenDocuments,
+  owner = false,
 }: {
   onClose: () => void;
   onOpenMemory: () => void;
   onOpenDocuments: () => void;
+  /** The install's owner also manages people removed from Eugene (row 7). */
+  owner?: boolean;
 }) {
   // A page's own link names its section: it is brought into view once the page is drawn.
   useEffect(() => {
@@ -48,6 +54,8 @@ export function SettingsPage({
         <div id="connections" className="scroll-mt-4">
           <Connections />
         </div>
+        <YourData />
+        {owner && <RemovedPeople />}
       </div>
     </section>
   );

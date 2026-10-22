@@ -32,6 +32,7 @@ import logging
 import secrets
 import shutil
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -245,6 +246,17 @@ class MediaJobs:
         )
         await self._changed(row)
 
+    async def stop_person(self, owner: str) -> int:
+        """Row 7: stop every job of a person removed from Eugene, and wait for each to end, its
+        file written or not (`_write_through`), so none makes their folder or a file row again
+        after their data is deleted. How many were stopped."""
+        mine = [r for r in self._running.values() if r.row.owner == owner and r.task is not None]
+        for running in mine:
+            assert running.task is not None
+            running.task.cancel()
+        await asyncio.gather(*(r.task for r in mine if r.task is not None), return_exceptions=True)
+        return len(mine)
+
     async def stop(self, media_id: str) -> bool:
         running = self._running.get(media_id)
         if running is None or running.task is None:
@@ -394,7 +406,7 @@ class MediaJobs:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(data)
 
-            await asyncio.to_thread(write)
+            await _write_through(write)
             await self._store.add_file(record)
             records.append(record)
         row.units = {
@@ -566,9 +578,23 @@ class MediaJobs:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
 
-        await asyncio.to_thread(write)
+        await _write_through(write)
         await self._store.add_file(record)
         return record
+
+
+async def _write_through(write: Callable[[], None]) -> None:
+    """Write on a thread, and never leave the write behind: a job stopped while its file is
+    being written waits for the write to end before it ends itself (row 7: a removed person's
+    folder is removed right after their jobs stop, and a write still running would make it
+    again)."""
+    done = asyncio.ensure_future(asyncio.to_thread(write))
+    try:
+        await asyncio.shield(done)
+    except asyncio.CancelledError:
+        with contextlib.suppress(Exception):
+            await done
+        raise
 
 
 def _seconds(raw: Any) -> int | None:

@@ -13,6 +13,20 @@ vi.mock("./Connections", () => ({
     </section>
   ),
 }));
+vi.mock("./YourData", () => ({
+  YourData: () => (
+    <section>
+      <h2>Your data</h2>
+    </section>
+  ),
+}));
+vi.mock("./RemovedPeople", () => ({
+  RemovedPeople: () => (
+    <section>
+      <h2>Removed people</h2>
+    </section>
+  ),
+}));
 vi.mock("./MemoryModels", () => ({ MemoryModels: () => null }));
 vi.mock("./MemoryServer", () => ({ MemoryServer: () => null }));
 
@@ -50,10 +64,10 @@ describe("the Settings page", () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
-  it("shows its three sections in order: Memory, Documents, Connections", async () => {
+  it("shows its sections in order: Memory, Documents, Connections, Your data", async () => {
     await opened();
     const names = screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent?.trim());
-    expect(names).toEqual(["Memory", "Documents", "Connections to other apps"]);
+    expect(names).toEqual(["Memory", "Documents", "Connections to other apps", "Your data"]);
     const memory = screen.getByTestId("settings-memory");
     const documents = screen.getByTestId("settings-documents");
     const connections = document.getElementById("connections")!;
@@ -65,6 +79,15 @@ describe("the Settings page", () => {
     expect(
       documents.compareDocumentPosition(connections) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+  });
+
+  it("shows the owner the people removed from Eugene, last", async () => {
+    render(
+      <SettingsPage owner onClose={vi.fn()} onOpenMemory={vi.fn()} onOpenDocuments={vi.fn()} />,
+    );
+    await waitFor(() => expect(screen.queryByText("Loading your memory settings…")).toBeNull());
+    const names = screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent?.trim());
+    expect(names.slice(-2)).toEqual(["Your data", "Removed people"]);
   });
 
   it("holds the controls of both settings", async () => {

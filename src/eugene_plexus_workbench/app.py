@@ -41,6 +41,8 @@ from .a2ui import A2UI
 from .agui import AGUI
 from .answers import Answers
 from .connections import Connections
+from .exports import Exports
+from .exports import router as exports_router
 from .hub import Hub
 from .interaction_store import InteractionError
 from .interactions import Interactions
@@ -56,6 +58,8 @@ from .memory_servers import router as memory_servers_router
 from .node_folders import NodeFolders
 from .past_chats import router as past_chats_router
 from .projects_api import router as projects_router
+from .removal import Removal
+from .removal import router as removal_router
 from .sessions import Sessions
 from .settings import Settings
 from .signin import Provider, https_twin
@@ -196,6 +200,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         saved = SavedDocuments(
             settings.data_dir, reader, passage_limit, gateway=hub, settings=document_settings
         )
+        # Row 7: a person removed from Eugene keeps no index that any job opens or makes again,
+        # from before the first job runs.
+        for sub in await store.hidden_subs():
+            saved.indexes.refuse(sub)
         reconciled = await saved.start(store.chat_owners, store.project_owners)
 
         async def folder_settings() -> config.FolderSettings:
@@ -291,6 +299,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.memory_servers = Servers(store, settings)
         courier = app.state.memory_courier = Courier(store, app.state.memory_servers)
         courier.start()
+        # Row 7: downloads of people's data, and what happens to a removed person's.
+        exports = app.state.exports = Exports(store, settings.data_dir, app.state)
+        cut = await exports.resume()
+        if cut:
+            log.info("%d download(s) were cut off by the last stop; each can be made again", cut)
+        removal = app.state.removal = Removal(
+            store,
+            provider,
+            settings.data_dir,
+            saved=saved,
+            answers=answers,
+            folder_sync=folder_sync,
+            servers=app.state.memory_servers,
+            exports=exports,
+            media=media,
+            courier=courier,
+        )
+        sessions.on_refused = removal.soon
+        removal.start()
 
         def finished(chat_id: str) -> None:
             exchanges.touch(None, chat_id)
@@ -350,6 +377,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             await app.state.agui.aclose()
             await app.state.interactions.aclose()
+            await removal.aclose()
+            await exports.aclose()
             await learner.aclose()
             await courier.aclose()
             measurer = getattr(app.state, "measurer", None)
@@ -395,6 +424,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(past_chats_router)
     app.include_router(projects_router)
     app.include_router(memory_servers_router)
+    app.include_router(removal_router)
+    app.include_router(exports_router)
     app.include_router(documents_api.router)
     # Before `saved_api`: `/api/documents/folders` is not a document's id.
     app.include_router(folder_docs_api.router)

@@ -9,7 +9,8 @@ from Eugene's console, by its operator.
 
 Nineteen settings. `ownerReadsChats` (W13): whether the owner may read the chats
 of the people they give Workbench to (Troy, C3 call 3: each business
-decides). Three are memory's (`memory.py`, MR1): whether people
+decides). `removedPeopleDays` (row 7): how long the data of a person removed from Eugene is
+hidden before it is deleted (`removal.py`). Three are memory's (`memory.py`, MR1): whether people
 may keep notes at all, how many each may keep, and whether notes may be sent
 to a model that runs outside this install's machines. Memory is not covered
 by `ownerReadsChats`: no setting here lets anyone read another person's
@@ -60,6 +61,13 @@ from .store import Store
 log = logging.getLogger(__name__)
 
 OWNER_READS_CHATS = "ownerReadsChats"
+#: Row 7: whether a removed person's data is kept (hidden) for a number of days, or not at all,
+#: and how many days.
+REMOVED_PEOPLE_RETENTION = "removedPeopleRetention"
+RETENTION_DAYS, RETENTION_NONE = "days", "none"
+RETENTION_CHOICES = (RETENTION_DAYS, RETENTION_NONE)
+REMOVED_PEOPLE_DAYS = "removedPeopleDays"
+MIN_REMOVED_DAYS, MAX_REMOVED_DAYS = 1, 365
 MEMORY_ENABLED = "memoryEnabled"
 MEMORY_MAX_NOTES = "memoryMaxNotes"
 MEMORY_MAX_BODY_CHARS = "memoryMaxBodyChars"
@@ -137,6 +145,40 @@ FIELDS = [
         category="people",
         valueType=ConfigValueType.boolean,
         default=False,
+    ),
+    ConfigField(
+        key=REMOVED_PEOPLE_RETENTION,
+        label="Keep a removed person's data",
+        description=(
+            "Whether a person removed from Eugene has their data kept, hidden, for some days, "
+            "or deleted at once.\n\n"
+            "Kept, their chats, files, notes and documents are hidden from everyone, the owner "
+            "included; the owner can export them, keep them longer, or delete them now from "
+            "Workbench's Settings. **Not at all** deletes them the moment Workbench finds out, "
+            "with every copy Workbench keeps. A change applies to people removed after it: "
+            "people already removed keep their dates."
+        ),
+        category="people",
+        valueType=ConfigValueType.enum,
+        enumValues=list(RETENTION_CHOICES),
+        enumLabels=["For a number of days", "Not at all"],
+        default=RETENTION_DAYS,
+    ),
+    ConfigField(
+        key=REMOVED_PEOPLE_DAYS,
+        label="Days before a removed person's data is deleted",
+        description=(
+            "How long Workbench hides the data of a person removed from Eugene before it "
+            "deletes it.\n\n"
+            "Deleting removes every copy Workbench keeps. A change applies to people removed "
+            "after it: people already removed keep their dates."
+        ),
+        category="people",
+        valueType=ConfigValueType.integer,
+        default=30,
+        minimum=MIN_REMOVED_DAYS,
+        maximum=MAX_REMOVED_DAYS,
+        showWhen=ConfigFieldShowWhen(key=REMOVED_PEOPLE_RETENTION, equals=RETENTION_DAYS),
     ),
     ConfigField(
         key=MEMORY_ENABLED,
@@ -609,6 +651,8 @@ FIELDS += POLICY_FIELDS
 
 DEFAULTS: dict[str, Any] = {
     OWNER_READS_CHATS: False,
+    REMOVED_PEOPLE_RETENTION: RETENTION_DAYS,
+    REMOVED_PEOPLE_DAYS: 30,
     MEMORY_ENABLED: True,
     MEMORY_MAX_NOTES: 20_000,
     MEMORY_MAX_BODY_CHARS: MAX_BODY_CHARS_LIMIT,
@@ -647,6 +691,17 @@ async def connections_enabled(store: Store) -> bool:
 async def owner_reads_chats(store: Store) -> bool:
     value = await store.setting(OWNER_READS_CHATS)
     return bool(value) if value is not None else bool(DEFAULTS[OWNER_READS_CHATS])
+
+
+async def removed_people_days(store: Store) -> int:
+    value = await store.setting(REMOVED_PEOPLE_DAYS)
+    return int(value) if value is not None else int(DEFAULTS[REMOVED_PEOPLE_DAYS])
+
+
+async def removed_people_retention(store: Store) -> str:
+    """`days` (kept hidden for `removedPeopleDays`) or `none` (deleted at once)."""
+    value = await store.setting(REMOVED_PEOPLE_RETENTION)
+    return str(value) if value in RETENTION_CHOICES else str(DEFAULTS[REMOVED_PEOPLE_RETENTION])
 
 
 @dataclass(frozen=True)
@@ -925,6 +980,8 @@ async def get_config(request: Request) -> ConfigDocument:
     return ConfigDocument.model_validate(
         {
             OWNER_READS_CHATS: await owner_reads_chats(store),
+            REMOVED_PEOPLE_RETENTION: await removed_people_retention(store),
+            REMOVED_PEOPLE_DAYS: await removed_people_days(store),
             MEMORY_ENABLED: memory.enabled,
             MEMORY_MAX_NOTES: memory.max_notes,
             MEMORY_MAX_BODY_CHARS: memory.max_body_chars,
@@ -992,6 +1049,7 @@ def _problem_with(key: str, value: Any) -> str | None:
             return None
         return f"Must be a whole number from {MIN_EMBED_PER_MINUTE} to {MAX_EMBED_PER_MINUTE:,}."
     ranges = {
+        REMOVED_PEOPLE_DAYS: (MIN_REMOVED_DAYS, MAX_REMOVED_DAYS),
         DOCUMENTS_FOLDER_SYNC_MINUTES: (MIN_SYNC_MINUTES, MAX_SYNC_MINUTES),
         DOCUMENTS_FOLDER_MAX_FILES: (MIN_FOLDER_FILES, MAX_FOLDER_FILES),
         DOCUMENTS_FOLDER_MAX_MB: (MIN_FOLDER_MB, MAX_FOLDER_MB),
@@ -1052,6 +1110,8 @@ def _problem_with(key: str, value: Any) -> str | None:
         )
     if key == MEMORY_SERVERS:
         return None if value in SERVER_CHOICES else "Must be off, outside or any."
+    if key == REMOVED_PEOPLE_RETENTION:
+        return None if value in RETENTION_CHOICES else "Must be days or none."
     for row, row_key in POLICY_ROW_KEYS.items():
         if key == row_key:
             values = memory_policy.ROWS[row]

@@ -66,6 +66,15 @@ here: those are documents in the person's own index, named by `folder:<grant id>
 (`artifacts.py`). `artifacts` names the message, the block (`digest`, the number of its first
 revision's words) and its kind and title; `artifact_revisions` holds each revision's source,
 numbered from 1 and never rewritten. They go with their chat.
+
+**A removed person** (schema 28, row 7): `people.known_at` is when Eugene last said it has the
+person; `removed_people` is each person it no longer has, hidden (`held`, `hidden`, `kept`) until
+their data is deleted (`purging`, then `purged`, which keeps only the id, name and dates). Every
+read of a person, a chat, a file or a media row leaves out a hidden person's (`_HIDDEN`). The
+purge deletes every row `PERSON_TABLES` names, from the store and from every copy kept beside it
+(`*.schema-N.bak`), and rewrites each file so no free page or log still holds their words.
+`exports` is the log of every download of a person's data, and where each file is while it is
+kept.
 """
 
 from __future__ import annotations
@@ -91,7 +100,7 @@ from .agui_store import AGUIStore, allow_chat_write
 from .interaction_store import SCHEMA as INTERACTION_SCHEMA
 from .interaction_store import InteractionStore
 
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
 
 #: The oldest schema this migrates from: what Workbench v0.1.0 wrote. Schema 1 predates
 #: it, and nobody holds one.
@@ -640,6 +649,51 @@ def _projects(db: sqlite3.Connection) -> None:
         db.execute(f"CREATE INDEX IF NOT EXISTS {table}_by_project ON {table} (owner, project_id)")
 
 
+#: The states of a removed person (row 7). `held`: removed before Eugene ever confirmed them,
+#: so hidden with no delete date until the owner chooses. `hidden`: hidden, and deleted
+#: `removedPeopleDays` after `clock_from`. `kept`: the owner pressed Keep. `purging`: being
+#: deleted (resumed after a restart). `purged`: deleted; the row keeps the id, name and dates.
+REMOVED_STATES = ("held", "hidden", "kept", "purging", "purged")
+#: The states whose data is still there and hidden from every read.
+HIDDEN_STATES = ("held", "hidden", "kept", "purging")
+
+
+def _removal(db: sqlite3.Connection) -> None:
+    """Schema 28 (row 7): when Eugene last confirmed each person, the people it no longer has,
+    and the log of every download of a person's data. New tables and one column; nothing moves."""
+    # `email`: the address Eugene's ID token carried, if the person has one. Kept with a removed
+    # person's hidden data so a later row (7b) can give it back to a new account that proves
+    # the same address, and cleared when the data is deleted.
+    present = {row[1] for row in db.execute("PRAGMA table_info(people)")}
+    for column, declaration in (("known_at", "REAL"), ("email", "TEXT")):
+        if column not in present:
+            db.execute(f"ALTER TABLE people ADD COLUMN {column} {declaration}")
+    states = ", ".join(f"'{s}'" for s in REMOVED_STATES)
+    # `delete_at`: when a hidden person's data is deleted, fixed when the wait began (from the
+    # setting then), so changing the setting never shortens a wait already begun (Troy).
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS removed_people ("
+        "sub TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT, "
+        f"state TEXT NOT NULL CHECK (state IN ({states})), "
+        "found_at REAL NOT NULL, clock_from REAL, delete_at REAL, "
+        "steps TEXT NOT NULL DEFAULT '{}', "
+        "attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, purged_at REAL)"
+    )
+    present = {row[1] for row in db.execute("PRAGMA table_info(removed_people)")}
+    if "delete_at" not in present:
+        db.execute("ALTER TABLE removed_people ADD COLUMN delete_at REAL")
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS exports ("
+        "id TEXT PRIMARY KEY, asker TEXT NOT NULL, asker_name TEXT NOT NULL, "
+        "subject TEXT NOT NULL, subject_name TEXT NOT NULL, "
+        "scope TEXT NOT NULL CHECK (scope IN ('self', 'owner')), "
+        "state TEXT NOT NULL CHECK (state IN ('making', 'ready', 'failed', 'expired', 'deleted')), "
+        "holds TEXT NOT NULL DEFAULT '{}', size INTEGER, error TEXT, "
+        "created_at REAL NOT NULL, expires_at REAL NOT NULL)"
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS exports_by_asker ON exports (asker, created_at)")
+
+
 #: What brings a store written at version N-1 to N, for N above `OLDEST_SCHEMA`.
 #: `_SCHEMA` already holds the result, for a store made new. A step is a statement,
 #: or a function of the connection for what SQL alone cannot say.
@@ -787,6 +841,8 @@ _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
     26: [_provenance],
     # Projects (MV7, 2026-10-19): one new table and two new columns; nothing moves.
     27: [_projects],
+    # A removed person (row 7, 2026-10-21): two new tables and one new column.
+    28: [_removal],
 }
 
 
@@ -922,6 +978,7 @@ def _initialize_schema(
         _memory_servers(db)
         _provenance(db)
         _projects(db)
+        _removal(db)
         db.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?)",
             (str(SCHEMA_VERSION),),
@@ -935,12 +992,157 @@ def _initialize_schema(
         raise
 
 
+#: The people whose data is hidden from every read (row 7): removed from Eugene, not yet deleted.
+_HIDDEN = (
+    "(SELECT sub FROM removed_people WHERE state IN ("
+    + ", ".join(f"'{s}'" for s in HIDDEN_STATES)
+    + "))"
+)
+
+#: Every table that holds a person's rows, by the column that finds them, in the order a purge
+#: deletes them (row 7). `owner`, `sub` and `subject` name the person; `chat_id` is one of
+#: their chats, and `artifact_id` one of their artifacts. A table that holds a person's rows
+#: must be listed: `tests/test_person_removal.py` seeds every table with a person column and
+#: fails on one the purge leaves. A copy kept from an older schema is purged of the tables and
+#: columns it has. `memory_measurements.owner` is who measured a model for the whole install:
+#: the measurement stays and the name goes (`_NULLED`).
+PERSON_TABLES: tuple[tuple[str, str], ...] = (
+    ("artifact_revisions", "artifact_id"),
+    ("agui_events", "chat_id"),
+    ("agui_runs", "chat_id"),
+    ("agui_runs", "owner"),
+    ("interaction_actions", "chat_id"),
+    ("interaction_surfaces", "chat_id"),
+    ("interaction_surfaces", "owner"),
+    ("interaction_cursors", "chat_id"),
+    ("messages", "chat_id"),
+    ("files", "chat_id"),
+    ("files", "owner"),
+    ("artifacts", "chat_id"),
+    ("artifacts", "owner"),
+    ("memory_server_sent", "chat_id"),
+    ("memory_server_sent", "owner"),
+    ("memory_servers", "owner"),
+    ("memory_note_documents", "owner"),
+    ("memory_note_tags", "owner"),
+    ("memory_events", "owner"),
+    ("memory_notes", "owner"),
+    ("memory_tags", "owner"),
+    ("memory_prefs", "owner"),
+    ("memory_dismissed", "owner"),
+    ("memory_model_choices", "owner"),
+    ("memory_tidy", "owner"),
+    ("connections", "owner"),
+    ("documents_prefs", "owner"),
+    ("document_folders", "owner"),
+    ("media", "owner"),
+    ("projects", "owner"),
+    ("folder_grants", "subject"),
+    ("sessions", "sub"),
+    ("chats", "owner"),
+    ("people", "sub"),
+)
+_NULLED: tuple[tuple[str, str], ...] = (("memory_measurements", "owner"),)
+#: The settings kept per person, as `<name>:<sub>` (`api.py`).
+_PERSON_SETTINGS = ("installModeSeen", "runPreviews")
+
+
+def _purge_rows(db: sqlite3.Connection, sub: str) -> dict[str, int]:
+    """Delete every row of `sub`'s that `PERSON_TABLES` names, in an open transaction, from the
+    tables this store (or copy) has. How many rows went from each table."""
+    have: dict[str, set[str]] = {}
+    for (name,) in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'"):
+        have[name] = {row[1] for row in db.execute(f"PRAGMA table_info({name})")}
+    chats: list[str] = []
+    if "owner" in have.get("chats", set()):
+        chats = [r[0] for r in db.execute("SELECT id FROM chats WHERE owner = ?", (sub,))]
+    artifacts: list[str] = []
+    if {"owner", "chat_id"} <= have.get("artifacts", set()):
+        marks = ", ".join("?" for _ in chats)
+        artifacts = [
+            r[0]
+            for r in db.execute(
+                f"SELECT id FROM artifacts WHERE owner = ? OR chat_id IN ({marks})", (sub, *chats)
+            )
+        ]
+    found = {"chat_id": chats, "artifact_id": artifacts}
+    gone: dict[str, int] = {}
+    for table, column in PERSON_TABLES:
+        if column not in have.get(table, set()):
+            continue
+        values = found.get(column, [sub])
+        if not values:
+            continue
+        marks = ", ".join("?" for _ in values)
+        cursor = db.execute(f"DELETE FROM {table} WHERE {column} IN ({marks})", values)
+        gone[table] = gone.get(table, 0) + max(cursor.rowcount, 0)
+    for table, column in _NULLED:
+        if column in have.get(table, set()):
+            db.execute(f"UPDATE {table} SET {column} = NULL WHERE {column} = ?", (sub,))
+    if "settings" in have:
+        keys = [f"{name}:{sub}" for name in _PERSON_SETTINGS]
+        db.execute(
+            f"DELETE FROM settings WHERE key IN ({', '.join('?' for _ in keys)})", tuple(keys)
+        )
+    # The removal's own record stays (its id, name and dates), but not the email kept to give
+    # the data back (row 7b): it goes here, before the file is written again, so no free page,
+    # log or kept copy holds it.
+    if "email" in have.get("removed_people", set()):
+        db.execute("UPDATE removed_people SET email = NULL WHERE sub = ?", (sub,))
+    return gone
+
+
+def _rewrite(db: sqlite3.Connection) -> None:
+    """Leave nothing deleted anywhere in the file: the full-text index's segments merged (a
+    deleted word is otherwise kept in them), every page written again (`VACUUM`), and the
+    write-ahead log folded in and emptied. `secure_delete` is on, so the pages a delete freed
+    held zeros already; this takes them out of the file."""
+    if db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_notes_fts'"
+    ).fetchone():
+        db.execute("INSERT INTO memory_notes_fts (memory_notes_fts) VALUES ('optimize')")
+    db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    db.execute("VACUUM")
+    db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+
+def _all_copies(path: Path) -> list[Path]:
+    """Every copy kept beside the store before a migration (`_keep_backup`), any schema."""
+    named = re.compile(rf"{re.escape(path.name)}\.schema-\d+(?:\.\d+)?\.bak")
+    if not path.parent.is_dir():
+        return []
+    return sorted(p for p in path.parent.iterdir() if named.fullmatch(p.name) and p.is_file())
+
+
+def _purge_copy(copy: Path, sub: str) -> None:
+    """The purge, on one kept copy: its own tables, then the file written again. The copy stays
+    for everyone else in it; a copy is one file in rollback-journal mode, as `_keep_backup` makes
+    it, and is left that way."""
+    db = sqlite3.connect(copy, isolation_level=None)
+    try:
+        db.execute("PRAGMA journal_mode=DELETE")
+        db.execute("PRAGMA secure_delete=ON")
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            _purge_rows(db, sub)
+            db.execute("COMMIT")
+        except BaseException:
+            with contextlib.suppress(sqlite3.Error):
+                db.execute("ROLLBACK")
+            raise
+        _rewrite(db)
+    finally:
+        db.close()
+
+
 @dataclass
 class Person:
     sub: str
     name: str
     role: str
     username: str | None = None
+    #: The email Eugene's ID token carried, if any (row 7: kept with a removed person's data).
+    email: str | None = None
     # Request-only context. Never persisted with the person or sent to a browser.
     session_id: str | None = None
 
@@ -1905,21 +2107,39 @@ class Store:
     # --- people ---------------------------------------------------------
 
     async def upsert_person(self, person: Person) -> None:
+        """A sign-in or a refresh: Eugene vouched for the person just now (`known_at`)."""
+
         def go() -> None:
             now = time.time()
             self._conn().execute(
-                "INSERT INTO people (sub, name, username, role, first_seen, last_seen) "
-                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(sub) DO UPDATE SET "
+                "INSERT INTO people (sub, name, username, role, first_seen, last_seen, known_at, "
+                "email) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(sub) DO UPDATE SET "
                 "name = excluded.name, username = excluded.username, role = excluded.role, "
-                "last_seen = excluded.last_seen",
-                (person.sub, person.name, person.username, person.role, now, now),
+                "last_seen = excluded.last_seen, known_at = excluded.known_at, "
+                "email = excluded.email",
+                (
+                    person.sub,
+                    person.name,
+                    person.username,
+                    person.role,
+                    now,
+                    now,
+                    now,
+                    person.email,
+                ),
             )
 
         await self._run(go)
 
     async def person(self, sub: str) -> Person | None:
+        """Who `sub` is, or None: never signed in here, or removed from Eugene (row 7)."""
+
         def go() -> Person | None:
-            row = self._conn().execute("SELECT * FROM people WHERE sub = ?", (sub,)).fetchone()
+            row = (
+                self._conn()
+                .execute(f"SELECT * FROM people WHERE sub = ? AND sub NOT IN {_HIDDEN}", (sub,))
+                .fetchone()
+            )
             if row is None:
                 return None
             return Person(
@@ -1929,14 +2149,14 @@ class Store:
         return await self._run(go)
 
     async def people(self) -> list[tuple[Person, int, int]]:
-        """Everyone who has signed in, with how many chats and how many media
-        results each has."""
+        """Everyone who has signed in and is not removed, with how many chats and how many
+        media results each has."""
 
         def go() -> list[tuple[Person, int, int]]:
             rows = self._conn().execute(
                 "SELECT p.*, (SELECT COUNT(*) FROM chats c WHERE c.owner = p.sub) AS chats, "
                 "(SELECT COUNT(*) FROM media m WHERE m.owner = p.sub) AS media "
-                "FROM people p ORDER BY p.name COLLATE NOCASE"
+                f"FROM people p WHERE p.sub NOT IN {_HIDDEN} ORDER BY p.name COLLATE NOCASE"
             )
             return [
                 (
@@ -2017,7 +2237,7 @@ class Store:
                 self._conn()
                 .execute(
                     "SELECT id_hash FROM sessions WHERE sub = ? AND expires_at > ? "
-                    "ORDER BY created_at DESC, id_hash DESC LIMIT 1",
+                    f"AND sub NOT IN {_HIDDEN} ORDER BY created_at DESC, id_hash DESC LIMIT 1",
                     (sub, now),
                 )
                 .fetchone()
@@ -2061,8 +2281,14 @@ class Store:
         await self._run(go)
 
     async def chat(self, chat_id: str) -> Chat | None:
+        """A chat, or None: none such, or its person was removed (row 7)."""
+
         def go() -> Chat | None:
-            r = self._conn().execute("SELECT * FROM chats WHERE id = ?", (chat_id,)).fetchone()
+            r = (
+                self._conn()
+                .execute(f"SELECT * FROM chats WHERE id = ? AND owner NOT IN {_HIDDEN}", (chat_id,))
+                .fetchone()
+            )
             return _chat(r) if r is not None else None
 
         return await self._run(go)
@@ -2070,7 +2296,9 @@ class Store:
     async def chats(self, owner: str) -> list[Chat]:
         def go() -> list[Chat]:
             rows = self._conn().execute(
-                "SELECT * FROM chats WHERE owner = ? ORDER BY updated_at DESC", (owner,)
+                f"SELECT * FROM chats WHERE owner = ? AND owner NOT IN {_HIDDEN} "
+                "ORDER BY updated_at DESC",
+                (owner,),
             )
             return [_chat(r) for r in rows]
 
@@ -2526,7 +2754,10 @@ class Store:
 
         def go() -> list[str]:
             return [
-                r[0] for r in self._conn().execute("SELECT DISTINCT owner FROM chats ORDER BY 1")
+                r[0]
+                for r in self._conn().execute(
+                    f"SELECT DISTINCT owner FROM chats WHERE owner NOT IN {_HIDDEN} ORDER BY 1"
+                )
             ]
 
         return await self._run(go)
@@ -2735,7 +2966,9 @@ class Store:
         ran): the reader starts them again at boot."""
 
         def go() -> list[FileRecord]:
-            rows = self._conn().execute("SELECT * FROM files WHERE reading IS NOT NULL")
+            rows = self._conn().execute(
+                f"SELECT * FROM files WHERE reading IS NOT NULL AND owner NOT IN {_HIDDEN}"
+            )
             return [
                 r
                 for r in (_file(row) for row in rows)
@@ -2746,7 +2979,11 @@ class Store:
 
     async def file(self, file_id: str) -> FileRecord | None:
         def go() -> FileRecord | None:
-            r = self._conn().execute("SELECT * FROM files WHERE id = ?", (file_id,)).fetchone()
+            r = (
+                self._conn()
+                .execute(f"SELECT * FROM files WHERE id = ? AND owner NOT IN {_HIDDEN}", (file_id,))
+                .fetchone()
+            )
             return _file(r) if r is not None else None
 
         return await self._run(go)
@@ -3003,7 +3240,13 @@ class Store:
 
     async def media(self, media_id: str) -> MediaRow | None:
         def go() -> MediaRow | None:
-            r = self._conn().execute("SELECT * FROM media WHERE id = ?", (media_id,)).fetchone()
+            r = (
+                self._conn()
+                .execute(
+                    f"SELECT * FROM media WHERE id = ? AND owner NOT IN {_HIDDEN}", (media_id,)
+                )
+                .fetchone()
+            )
             return _media(r) if r is not None else None
 
         return await self._run(go)
@@ -3016,7 +3259,7 @@ class Store:
         def go() -> list[MediaRow]:
             rows = self._conn().execute(
                 "SELECT * FROM media WHERE owner = ? AND door = ? AND created_at < ? "
-                "ORDER BY created_at DESC LIMIT ?",
+                f"AND owner NOT IN {_HIDDEN} ORDER BY created_at DESC LIMIT ?",
                 (owner, door, before if before is not None else float("inf"), limit),
             )
             return [_media(r) for r in rows]
@@ -3100,7 +3343,7 @@ class Store:
         def go() -> list[MediaRow]:
             rows = self._conn().execute(
                 "SELECT * FROM media WHERE status = 'running' AND job IS NOT NULL "
-                "ORDER BY created_at"
+                f"AND owner NOT IN {_HIDDEN} ORDER BY created_at"
             )
             return [_media(r) for r in rows]
 
@@ -3370,7 +3613,12 @@ class Store:
         """Everyone who has a note of any kind: whose index holds notes, or may."""
 
         def go() -> list[str]:
-            return [r[0] for r in self._conn().execute("SELECT DISTINCT owner FROM memory_notes")]
+            return [
+                r[0]
+                for r in self._conn().execute(
+                    f"SELECT DISTINCT owner FROM memory_notes WHERE owner NOT IN {_HIDDEN}"
+                )
+            ]
 
         return await self._run(go)
 
@@ -4986,7 +5234,10 @@ class Store:
         def go() -> ConnectionRecord | None:
             row = (
                 self._conn()
-                .execute("SELECT * FROM connections WHERE token_hash = ?", (token_hash,))
+                .execute(
+                    f"SELECT * FROM connections WHERE token_hash = ? AND owner NOT IN {_HIDDEN}",
+                    (token_hash,),
+                )
                 .fetchone()
             )
             return _connection(row) if row is not None else None
@@ -5164,12 +5415,14 @@ class Store:
     # --- the folders a person's documents are read from -------------------
 
     async def folder_records(self, owner: str | None = None) -> list[FolderRecord]:
-        """Every folder, or one person's, oldest first."""
+        """Every folder, or one person's, oldest first; never a removed person's (row 7)."""
 
         def go() -> list[FolderRecord]:
-            where, params = ("", ()) if owner is None else (" WHERE owner = ?", (owner,))
+            where, params = ("", ()) if owner is None else (" AND owner = ?", (owner,))
             rows = self._conn().execute(
-                f"SELECT * FROM document_folders{where} ORDER BY added_at, rowid", params
+                f"SELECT * FROM document_folders WHERE owner NOT IN {_HIDDEN}{where} "
+                "ORDER BY added_at, rowid",
+                params,
             )
             return [_folder_record(r) for r in rows]
 
@@ -5399,9 +5652,10 @@ class Store:
         def go() -> list[dict[str, Any]]:
             return [
                 dict(row)
+                # A removed person's are the purge's to forget (`removal.py`), not the courier's.
                 for row in self._conn().execute(
                     "SELECT * FROM memory_server_sent WHERE state IN ('send','forget') "
-                    "AND next_at <= ? ORDER BY next_at LIMIT ?",
+                    f"AND next_at <= ? AND owner NOT IN {_HIDDEN} ORDER BY next_at LIMIT ?",
                     (now, limit),
                 )
             ]
@@ -5450,14 +5704,17 @@ class Store:
             )
         )
 
-    async def memory_server_retry(self, document_id: str, next_at: float) -> None:
-        await self._run(
+    async def memory_server_retry(self, document_id: str, next_at: float) -> bool:
+        """Try this exchange again at `next_at`. False when its row had gone meanwhile (its
+        chat was deleted, or its person removed, while it was being sent)."""
+        cursor = await self._run(
             lambda: self._conn().execute(
                 "UPDATE memory_server_sent SET attempts = attempts + 1, next_at = ? "
                 "WHERE document_id = ?",
                 (next_at, document_id),
             )
         )
+        return bool(cursor.rowcount > 0)
 
     async def memory_server_drop(self, document_id: str) -> None:
         await self._run(
@@ -5563,3 +5820,433 @@ class Store:
                 )
 
         await self._run(go)
+
+    # --- removed people (row 7) -----------------------------------------
+
+    async def people_to_ask(self) -> list[dict[str, Any]]:
+        """Whom to ask Eugene about: everyone who signed in here, but the owner (who is never
+        removed) and those already removed. Each with `sub`, `name` and `known_at`."""
+
+        def go() -> list[dict[str, Any]]:
+            rows = self._conn().execute(
+                "SELECT sub, name, known_at FROM people WHERE role != 'operator' "
+                "AND sub != 'operator' AND sub NOT IN "
+                "(SELECT sub FROM removed_people WHERE state != 'purged') "
+                "ORDER BY first_seen, sub"
+            )
+            return [dict(r) for r in rows]
+
+        return await self._run(go)
+
+    async def confirm_known(self, subs: Sequence[str], at: float) -> None:
+        """Eugene said it has these people, now."""
+        if not subs:
+            return
+
+        def go() -> None:
+            marks = ", ".join("?" for _ in subs)
+            self._conn().execute(
+                f"UPDATE people SET known_at = ? WHERE sub IN ({marks})", (at, *subs)
+            )
+
+        await self._run(go)
+
+    async def back_from_removed(self, subs: Sequence[str]) -> list[str]:
+        """Eugene has these people again (a root restored from a backup): their data is theirs
+        again. A purge that began finishes, and a purged person's record stays. Which came
+        back."""
+        if not subs:
+            return []
+
+        def go() -> list[str]:
+            db = self._conn()
+            marks = ", ".join("?" for _ in subs)
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                back = [
+                    r[0]
+                    for r in db.execute(
+                        f"SELECT sub FROM removed_people WHERE sub IN ({marks}) "
+                        "AND state IN ('held', 'hidden', 'kept')",
+                        tuple(subs),
+                    )
+                ]
+                if back:
+                    db.execute(
+                        f"DELETE FROM removed_people WHERE sub IN ({', '.join('?' for _ in back)})",
+                        tuple(back),
+                    )
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return back
+
+        return await self._run(go)
+
+    async def hide_people(
+        self, hidden: Sequence[tuple[str, str, str, float | None, float | None]]
+    ) -> list[str]:
+        """Hide each `(sub, name, state, clock_from, delete_at)`, in one transaction: their row in
+        `removed_people`, and their sign-ins, their connections to other apps and what waited
+        to go to their memory server, gone. Their data stays until it is deleted. Which were
+        hidden now (a person already removed is left as they are)."""
+        if not hidden:
+            return []
+
+        def go() -> list[str]:
+            db = self._conn()
+            now = time.time()
+            done: list[str] = []
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                for sub, name, state, clock_from, delete_at in hidden:
+                    # A person purged before, whom a restored Eugene brought back and who was
+                    # removed again, is hidden again; anyone else already here is left alone.
+                    cursor = db.execute(
+                        "INSERT INTO removed_people (sub, name, email, state, found_at, "
+                        "clock_from, delete_at) VALUES (?, ?, "
+                        "(SELECT email FROM people WHERE sub = ?), ?, ?, ?, ?) "
+                        "ON CONFLICT(sub) DO UPDATE SET "
+                        "name = excluded.name, email = excluded.email, state = excluded.state, "
+                        "found_at = excluded.found_at, clock_from = excluded.clock_from, "
+                        "delete_at = excluded.delete_at, steps = '{}', attempts = 0, "
+                        "last_error = NULL, purged_at = NULL "
+                        "WHERE removed_people.state = 'purged'",
+                        (sub, name, sub, state, now, clock_from, delete_at),
+                    )
+                    if cursor.rowcount <= 0:
+                        continue
+                    done.append(sub)
+                    db.execute("DELETE FROM sessions WHERE sub = ?", (sub,))
+                    db.execute("DELETE FROM connections WHERE owner = ?", (sub,))
+                    db.execute(
+                        "DELETE FROM memory_server_sent WHERE owner = ? AND state = 'send'", (sub,)
+                    )
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return done
+
+        return await self._run(go)
+
+    async def removed_people(self) -> list[dict[str, Any]]:
+        """Everyone removed from Eugene that Workbench knows of, newest first."""
+
+        def go() -> list[dict[str, Any]]:
+            rows = self._conn().execute(
+                "SELECT * FROM removed_people ORDER BY found_at DESC, name COLLATE NOCASE"
+            )
+            return [{**dict(r), "steps": json.loads(r["steps"] or "{}")} for r in rows]
+
+        return await self._run(go)
+
+    async def removed_person(self, sub: str) -> dict[str, Any] | None:
+        def go() -> dict[str, Any] | None:
+            r = (
+                self._conn()
+                .execute("SELECT * FROM removed_people WHERE sub = ?", (sub,))
+                .fetchone()
+            )
+            return {**dict(r), "steps": json.loads(r["steps"] or "{}")} if r is not None else None
+
+        return await self._run(go)
+
+    async def hidden_subs(self) -> list[str]:
+        """Whose data is hidden now: removed, and not yet deleted."""
+        return await self._run(lambda: [r[0] for r in self._conn().execute(_HIDDEN[1:-1])])
+
+    async def put_removed(self, sub: str, *, only_from: Sequence[str] = (), **values: Any) -> bool:
+        """Change a removed person's row: `state`, `clock_from`, `steps` (a dict), `attempts`,
+        `last_error`, `purged_at`, `email`. With `only_from`, only while its state is one of
+        those. Whether it changed."""
+        allowed = {
+            "state",
+            "clock_from",
+            "delete_at",
+            "steps",
+            "attempts",
+            "last_error",
+            "purged_at",
+            "email",
+        }
+        unknown = set(values) - allowed
+        if unknown:
+            raise ValueError(f"not removal fields: {sorted(unknown)}")
+        if "steps" in values:
+            values["steps"] = json.dumps(values["steps"])
+
+        def go() -> bool:
+            columns = ", ".join(f"{k} = ?" for k in values)
+            where, params = "sub = ?", [sub]
+            if only_from:
+                where += f" AND state IN ({', '.join('?' for _ in only_from)})"
+                params += list(only_from)
+            cursor = self._conn().execute(
+                f"UPDATE removed_people SET {columns} WHERE {where}", (*values.values(), *params)
+            )
+            return cursor.rowcount > 0
+
+        return await self._run(go)
+
+    async def person_chat_ids(self, sub: str) -> list[str]:
+        """Every chat of the person's, removed or not: what to stop when they are hidden."""
+        return await self._run(
+            lambda: [
+                r[0] for r in self._conn().execute("SELECT id FROM chats WHERE owner = ?", (sub,))
+            ]
+        )
+
+    async def forgets_owed(self, sub: str) -> list[dict[str, Any]]:
+        """What Workbench sent the person's memory server and has not had it forget yet."""
+        return await self._run(
+            lambda: [
+                dict(r)
+                for r in self._conn().execute(
+                    "SELECT * FROM memory_server_sent WHERE owner = ? AND state IN ('sent', "
+                    "'forget') ORDER BY created_at",
+                    (sub,),
+                )
+            ]
+        )
+
+    async def purge_person(self, sub: str) -> dict[str, int]:
+        """Delete every row of the person's in one transaction, then write the file again so no
+        free page, full-text segment or log holds their words (`_rewrite`). How many rows went
+        from each table. While it runs, nothing else reads or writes the store (one thread)."""
+
+        def go() -> dict[str, int]:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                gone = _purge_rows(db, sub)
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            _rewrite(db)
+            return gone
+
+        return await self._run(go)
+
+    async def purge_copies(self, sub: str) -> list[Path]:
+        """The purge, on every copy kept beside the store before a migration. The copies stay,
+        for everyone else in them. A half-written copy (`.bak.part`, left by a stop) is removed.
+        The copies purged."""
+
+        def go() -> list[Path]:
+            self._path.with_name(f"{self._path.name}.part").unlink(missing_ok=True)
+            for partial in self._path.parent.glob(f"{self._path.name}.schema-*.bak.part"):
+                partial.unlink(missing_ok=True)
+            copies = _all_copies(self._path)
+            for copy in copies:
+                _purge_copy(copy, sub)
+            return copies
+
+        return await self._run(go)
+
+    async def export_snapshot(self, sub: str) -> dict[str, Any]:
+        """Everything of the person's the store holds that a download carries, whether or not
+        they are removed: their chats with every version of every message, their files, media,
+        artifacts with every revision, projects and connections (never a token's hash)."""
+
+        def go() -> dict[str, Any]:
+            db = self._conn()
+            chats = [
+                _chat(r)
+                for r in db.execute(
+                    "SELECT * FROM chats WHERE owner = ? ORDER BY created_at", (sub,)
+                )
+            ]
+            trees = {
+                c.id: [
+                    _message(r)
+                    for r in db.execute(
+                        "SELECT * FROM messages WHERE chat_id = ? ORDER BY seq", (c.id,)
+                    )
+                ]
+                for c in chats
+            }
+            records = [
+                _file(r)
+                for r in db.execute(
+                    "SELECT * FROM files WHERE owner = ? ORDER BY created_at", (sub,)
+                )
+            ]
+            media = [
+                _media(r)
+                for r in db.execute(
+                    "SELECT * FROM media WHERE owner = ? ORDER BY created_at", (sub,)
+                )
+            ]
+            artifacts = []
+            for r in db.execute(
+                f"{_ARTIFACT_SELECT} WHERE a.owner = ? GROUP BY a.id ORDER BY a.created_at", (sub,)
+            ):
+                artifact = _artifact(r)
+                revisions = [
+                    dict(x)
+                    for x in db.execute(
+                        "SELECT number, source, author, created_at FROM artifact_revisions "
+                        "WHERE artifact_id = ? ORDER BY number",
+                        (artifact.id,),
+                    )
+                ]
+                artifacts.append((artifact, revisions))
+            projects = [
+                self._project(r)
+                for r in db.execute("SELECT * FROM projects WHERE owner = ? ORDER BY name", (sub,))
+            ]
+            connections = [
+                {
+                    "name": r["name"],
+                    "readsNotes": bool(r["read_notes"]),
+                    "searchesDocuments": bool(r["search_documents"]),
+                    "suggestsNotes": bool(r["suggest_notes"]),
+                    "createdAt": r["created_at"],
+                    "expiresAt": r["expires_at"],
+                    "lastUsedAt": r["last_used_at"],
+                }
+                for r in db.execute(
+                    "SELECT * FROM connections WHERE owner = ? ORDER BY created_at", (sub,)
+                )
+            ]
+            return {
+                "chats": chats,
+                "trees": trees,
+                "files": records,
+                "media": media,
+                "artifacts": artifacts,
+                "projects": projects,
+                "connections": connections,
+            }
+
+        return await self._run(go)
+
+    # --- the export log (row 7) -----------------------------------------
+
+    async def add_export(self, row: dict[str, Any]) -> bool:
+        """Record a download being made, in the same statement that checks its subject's data
+        is not being deleted (row 7): False, and nothing recorded, once their purge has begun,
+        so none begins after the purge deleted their downloads."""
+
+        def go() -> bool:
+            cursor = self._conn().execute(
+                "INSERT INTO exports (id, asker, asker_name, subject, subject_name, scope, state, "
+                "created_at, expires_at) SELECT ?, ?, ?, ?, ?, ?, 'making', ?, ? "
+                "WHERE NOT EXISTS (SELECT 1 FROM removed_people WHERE sub = ? "
+                "AND state IN ('purging', 'purged'))",
+                (
+                    row["id"],
+                    row["asker"],
+                    row["asker_name"],
+                    row["subject"],
+                    row["subject_name"],
+                    row["scope"],
+                    row["created_at"],
+                    row["expires_at"],
+                    row["subject"],
+                ),
+            )
+            return bool(cursor.rowcount > 0)
+
+        return await self._run(go)
+
+    @staticmethod
+    def _export(row: sqlite3.Row) -> dict[str, Any]:
+        return {**dict(row), "holds": json.loads(row["holds"] or "{}")}
+
+    async def export_row(self, export_id: str) -> dict[str, Any] | None:
+        def go() -> dict[str, Any] | None:
+            r = self._conn().execute("SELECT * FROM exports WHERE id = ?", (export_id,)).fetchone()
+            return self._export(r) if r is not None else None
+
+        return await self._run(go)
+
+    async def exports_by(self, asker: str) -> list[dict[str, Any]]:
+        """The downloads `asker` asked for, newest first."""
+        return await self._run(
+            lambda: [
+                self._export(r)
+                for r in self._conn().execute(
+                    "SELECT * FROM exports WHERE asker = ? ORDER BY created_at DESC LIMIT 50",
+                    (asker,),
+                )
+            ]
+        )
+
+    async def export_log(self, limit: int = 200) -> list[dict[str, Any]]:
+        """Every download the owner made of another person's data, newest first."""
+        return await self._run(
+            lambda: [
+                self._export(r)
+                for r in self._conn().execute(
+                    "SELECT * FROM exports WHERE scope = 'owner' ORDER BY created_at DESC LIMIT ?",
+                    (limit,),
+                )
+            ]
+        )
+
+    async def put_export(self, export_id: str, **values: Any) -> None:
+        allowed = {"state", "holds", "size", "error"}
+        unknown = set(values) - allowed
+        if unknown:
+            raise ValueError(f"not export fields: {sorted(unknown)}")
+        if "holds" in values:
+            values["holds"] = json.dumps(values["holds"])
+
+        def go() -> None:
+            columns = ", ".join(f"{k} = ?" for k in values)
+            self._conn().execute(
+                f"UPDATE exports SET {columns} WHERE id = ?", (*values.values(), export_id)
+            )
+
+        await self._run(go)
+
+    async def exports_holding(self, sub: str) -> list[dict[str, Any]]:
+        """Downloads whose file may still hold the person's data: theirs, or of them."""
+        return await self._run(
+            lambda: [
+                self._export(r)
+                for r in self._conn().execute(
+                    "SELECT * FROM exports WHERE (asker = ? OR subject = ?) "
+                    "AND state IN ('making', 'ready', 'failed')",
+                    (sub, sub),
+                )
+            ]
+        )
+
+    async def fail_unfinished_exports(self, error: str) -> list[str]:
+        """Start: every download still being made was cut off by a stop. Each fails with
+        `error`; their ids."""
+
+        def go() -> list[str]:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                cut = [r[0] for r in db.execute("SELECT id FROM exports WHERE state = 'making'")]
+                db.execute(
+                    "UPDATE exports SET state = 'failed', error = ? WHERE state = 'making'",
+                    (error,),
+                )
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return cut
+
+        return await self._run(go)
+
+    async def exports_due(self, now: float) -> list[dict[str, Any]]:
+        """Downloads kept past their day: their files go, their log rows stay."""
+        return await self._run(
+            lambda: [
+                self._export(r)
+                for r in self._conn().execute(
+                    "SELECT * FROM exports WHERE state IN ('ready', 'failed', 'making') "
+                    "AND expires_at <= ?",
+                    (now,),
+                )
+            ]
+        )

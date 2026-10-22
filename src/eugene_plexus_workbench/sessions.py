@@ -25,6 +25,7 @@ import hashlib
 import hmac
 import secrets
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from fastapi import HTTPException, Request, status
@@ -90,6 +91,9 @@ class Sessions:
             issuer: p for p in (provider, *others) if (issuer := getattr(p, "issuer", None))
         }
         self._locks: dict[str, asyncio.Lock] = {}
+        #: Told when Eugene refuses a sign-in's refresh: the person may have been removed, so
+        #: Workbench asks Eugene about everyone soon (row 7, `removal.Removal.soon`).
+        self.on_refused: Callable[[], None] | None = None
 
     async def create(
         self,
@@ -177,6 +181,8 @@ class Sessions:
                 )
             except SignInRefused:
                 await self._store.delete_session(row.id_hash)
+                if self.on_refused is not None:
+                    self.on_refused()
                 raise SignedOut("revoked", _REVOKED) from None
             except SignInUnavailable as exc:
                 # Not signed out: nobody can be revoked while Eugene cannot
@@ -197,6 +203,7 @@ class Sessions:
                     name=identity.name,
                     role=identity.role,
                     username=identity.username,
+                    email=identity.email,
                 )
             )
             await self._store.refreshed(

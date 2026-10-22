@@ -18,6 +18,7 @@ import { Mascot } from "./components/Mascot";
 import { Memory } from "./components/Memory";
 import { PastChats } from "./components/PastChats";
 import { ProjectPage } from "./components/Project";
+import { RemovedPeopleNotice } from "./components/RemovedPeople";
 import { SettingsPage } from "./components/SettingsPage";
 import { type Handoff, Media } from "./components/Media";
 import { Sidebar } from "./components/Sidebar";
@@ -765,6 +766,9 @@ export default function App() {
               </button>
             </aside>
           )}
+          {phase.me.owner && !settingsOpen && (
+            <RemovedPeopleNotice onReview={() => openSettings("removed-people")} />
+          )}
           {showSites ? (
             <JobSites onClose={() => setShowSites(false)} sub={phase.me.sub} />
           ) : showTools ? (
@@ -811,6 +815,7 @@ export default function App() {
               onClose={() => open(chatId)}
               onOpenMemory={openMemory}
               onOpenDocuments={openDocuments}
+              owner={phase.me.owner}
             />
           ) : searchOpen ? (
             <PastChats

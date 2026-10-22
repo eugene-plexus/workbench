@@ -333,7 +333,7 @@ def test_a_schema_21_store_keeps_every_note_and_takes_the_v2_shape(tmp_path: Pat
         assert db.execute("SELECT value FROM meta WHERE key='schema'").fetchone() == (
             str(SCHEMA_VERSION),
         )
-    assert SCHEMA_VERSION == 27
+    assert SCHEMA_VERSION == 28
     assert list(tmp_path.glob("w.sqlite3.schema-21*.bak")), "backed up first"
 
 

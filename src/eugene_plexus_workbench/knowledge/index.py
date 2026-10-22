@@ -152,6 +152,10 @@ NO_FTS = (
 )
 
 
+#: What a removed person's index says to a job that asks for it (row 7).
+REMOVED = "This person was removed from Eugene, so Workbench keeps no documents for them."
+
+
 class IndexUnavailable(Exception):
     """The index cannot be used, and why, in words a person reads."""
 
@@ -575,6 +579,9 @@ class Index:
         #: How many times the vectors have been cleared (Rebuild). A batch of vectors made
         #: before one is never stored after it (`store_vectors`).
         self.epoch = 0
+        #: Row 7: the person was removed from Eugene. A job still holding this index cannot
+        #: open it again, so none makes their folder again after it is deleted.
+        self.retired = False
 
     # --- where things are ----------------------------------------------
 
@@ -673,6 +680,8 @@ class Index:
     # --- the connection -------------------------------------------------
 
     def _connect(self) -> sqlite3.Connection:
+        if self.retired:
+            raise IndexUnavailable(REMOVED, code="removed")
         self.dir.mkdir(parents=True, exist_ok=True)
         db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None, timeout=5.0)
         db.row_factory = sqlite3.Row
@@ -2381,13 +2390,44 @@ class Indexes:
         self.root = root / "knowledge"
         self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="wb-index")
         self._open: dict[str, Index] = {}
+        #: Row 7: people removed from Eugene, by `sub` and by their directory's name. Their
+        #: index is not opened, made, or walked by a job that visits every person's.
+        self._refused: set[str] = set()
+        self._refused_keys: set[str] = set()
 
     def dir_of(self, sub: str) -> Path:
         return self.root / files.person_key(sub)
 
+    def refuse(self, sub: str) -> None:
+        """The person was removed from Eugene: their index is not opened or made again."""
+        self._refused.add(sub)
+        self._refused_keys.add(files.person_key(sub))
+
+    def allow(self, sub: str) -> None:
+        """Eugene has the person again: their index is theirs again."""
+        self._refused.discard(sub)
+        self._refused_keys.discard(files.person_key(sub))
+
+    def refused(self, sub: str) -> bool:
+        return sub in self._refused
+
+    async def forget(self, sub: str) -> None:
+        """Close the person's index for good and let it go, so their directory can be removed
+        (Windows does not remove a file that is open). A job that still holds it cannot open it
+        again (`Index.retired`)."""
+        found = self._open.pop(sub, None)
+        if found is not None:
+            found.retired = True
+            await found.close()
+
     def get(self, sub: str, *, create: bool = True) -> Index | None:
         """The person's index. With `create=False`, None when they have none yet:
-        reading a person's documents never makes a directory for them."""
+        reading a person's documents never makes a directory for them. A removed person's
+        (row 7) is None to read and refused to make."""
+        if sub in self._refused:
+            if not create:
+                return None
+            raise IndexUnavailable(REMOVED, code="removed")
         found = self._open.get(sub)
         if found is None:
             directory = self.dir_of(sub)
@@ -2399,10 +2439,14 @@ class Indexes:
         return found
 
     def person_dirs(self) -> list[Path]:
-        """Every person's directory that holds an index."""
+        """Every person's directory that holds an index, but a removed person's."""
         if not self.root.is_dir():
             return []
-        return sorted(p for p in self.root.iterdir() if (p / INDEX_FILE).is_file())
+        return sorted(
+            p
+            for p in self.root.iterdir()
+            if p.name not in self._refused_keys and (p / INDEX_FILE).is_file()
+        )
 
     @staticmethod
     def owner_of(directory: Path) -> str | None:

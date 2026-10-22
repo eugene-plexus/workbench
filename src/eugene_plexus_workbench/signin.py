@@ -73,6 +73,8 @@ class Identity:
     refresh_token: str | None
     expires_in: float
     access_token: str | None = None
+    #: The person's email, when Eugene has one and sent it (the `email` scope).
+    email: str | None = None
 
 
 def _secret(path: Path | None) -> str | None:
@@ -241,7 +243,9 @@ class Provider:
                 "response_type": "code",
                 "client_id": self.client_id,
                 "redirect_uri": redirect_uri,
-                "scope": "openid profile",
+                # `email` (row 7): a removed person's email stays with their hidden data, so a
+                # later row can give it back to a new account that proves the same address.
+                "scope": "openid profile email",
                 "state": pending.state,
                 "nonce": pending.nonce,
                 "code_challenge": create_s256_code_challenge(pending.verifier),
@@ -308,6 +312,52 @@ class Provider:
                 auth=self._auth(),
             )
 
+    async def subjects(self, subs: list[str]) -> tuple[list[str], list[str]]:
+        """Row 7: which of these people Eugene still has, as `(known, unknown)`.
+
+        `POST <issuer>/subjects`, with this client's secret as `/revoke` sends it. Workbench
+        hides and later deletes the data of an `unknown` person, so nothing here is guessed:
+        an answer that leaves out anyone asked about, or that cannot be read, raises
+        `SignInUnavailable` with the cause, as does any answer but 200."""
+        if not self.issuer:
+            raise SignInUnavailable(self.why_not() or "sign-in is not set up")
+        try:
+            response = await self._http.post(
+                self.transport_url(f"{self.issuer}/subjects"),
+                json={"subjects": subs},
+                auth=self._auth(),
+            )
+        except httpx.HTTPError as exc:
+            raise SignInUnavailable(
+                f"Eugene did not answer ({str(exc) or type(exc).__name__})"
+            ) from exc
+        if response.status_code == 404:
+            raise SignInUnavailable(
+                "this Eugene cannot say who was removed (it answered 404). Update Eugene"
+            )
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        if response.status_code != 200:
+            said = body.get("error_description") if isinstance(body, dict) else None
+            raise SignInUnavailable(
+                f"Eugene answered {response.status_code}" + (f": {said}" if said else "")
+            )
+        known = body.get("known") if isinstance(body, dict) else None
+        unknown = body.get("unknown") if isinstance(body, dict) else None
+        if not (
+            isinstance(known, list)
+            and isinstance(unknown, list)
+            and all(isinstance(s, str) for s in [*known, *unknown])
+        ):
+            raise SignInUnavailable("Eugene's answer could not be read")
+        asked = set(subs)
+        found_known, found_unknown = set(known) & asked, set(unknown) & asked
+        if found_known & found_unknown or (found_known | found_unknown) != asked:
+            raise SignInUnavailable("Eugene's answer did not name each person once")
+        return [s for s in subs if s in found_known], [s for s in subs if s in found_unknown]
+
     async def _token(self, meta: dict[str, Any], form: dict[str, str]) -> dict[str, Any]:
         try:
             response = await self._http.post(
@@ -368,7 +418,9 @@ def _identity(claims: dict[str, Any], token: dict[str, Any]) -> Identity:
     role = "operator" if claims.get("eugene_role") == "operator" else "member"
     refresh = token.get("refresh_token")
     expires = token.get("expires_in")
+    email = claims.get("email")
     return Identity(
+        email=email if isinstance(email, str) and email else None,
         sub=sub,
         name=str(name),
         username=str(username) if username else None,
