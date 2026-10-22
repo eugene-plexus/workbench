@@ -11,6 +11,7 @@ import { createRequire } from "node:module";
 import {
   contextOptions,
   fillComposer,
+  frameGapLimit,
   goChat,
   goSignedIn,
   keepScheme,
@@ -348,7 +349,7 @@ try {
     );
     check(
       `${scheme}: the page kept drawing while a formula was stopped`,
-      gap < 250,
+      gap < frameGapLimit(browserName),
       `${Math.round(gap)} ms between frames`,
     );
 
