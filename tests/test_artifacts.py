@@ -12,6 +12,7 @@ import pytest
 
 from eugene_plexus_workbench import artifacts
 from eugene_plexus_workbench.app import DATABASE
+from eugene_plexus_workbench.content import normalize
 from eugene_plexus_workbench.store import Message, Store
 from eugene_plexus_workbench.web import CSP, PREVIEW_CSP
 
@@ -220,6 +221,19 @@ def test_block_from_tool_result_is_kept_with_origin_tool(world: World, where: st
             == "This block is not in the answer or its tools' results"
         )
     assert len(ada.get(f"/api/chats/{chat}").json()["messages"][-1]["artifacts"]) == 1
+
+
+@pytest.mark.parametrize("where", ["text", "resource"])
+@pytest.mark.parametrize("mime", ["text/html", "image/svg+xml", "text/markdown; charset=utf-8"])
+def test_tool_text_keeps_mime_type_for_artifacts(where: str, mime: str) -> None:
+    # Plain Markdown has no syntax to sniff, and a resource need not have a file extension.
+    text = "Words from the tool.\n\n"
+    raw: dict[str, Any] = {"type": "text", "text": text, "mimeType": mime}
+    if where == "resource":
+        raw = {"type": "resource", "resource": {"uri": "tool:///report", **raw}}
+    blocks, result = asyncio.run(normalize("fetch", [raw]))
+    assert blocks[0]["mimeType"] == mime
+    assert blocks[0]["text"] == result == text
 
 
 def test_each_version_of_an_answer_keeps_its_own(world: World) -> None:
