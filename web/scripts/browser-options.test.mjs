@@ -211,7 +211,7 @@ it("ignores only WebKit's report of an abandoned request to the app's own API", 
 
 it("opens the sign-in page without waiting for every resource to load", async () => {
   const goto = vi.fn(async () => {});
-  await goSignedIn({ goto }, "http://127.0.0.1:1/#signin=x");
+  await goSignedIn({ goto, on() {}, off() {} }, "http://127.0.0.1:1/#signin=x");
   expect(goto).toHaveBeenCalledWith("http://127.0.0.1:1/#signin=x", {
     waitUntil: "domcontentloaded",
     timeout: 10_000,
@@ -228,12 +228,14 @@ it("tries a navigation that does not commit again, saying so, while the server a
     .fn()
     .mockRejectedValueOnce(new Error("Timeout 10000ms exceeded"))
     .mockResolvedValueOnce(undefined);
-  await goSignedIn({ goto }, "http://127.0.0.1:1/#signin=x");
+  await goSignedIn({ goto, on() {}, off() {} }, "http://127.0.0.1:1/#signin=x");
   expect(goto).toHaveBeenCalledTimes(2);
   expect(log.mock.calls.some(([line]) => String(line).startsWith("RETRY"))).toBe(true);
   // Three failures in a row end the run with the engine's own error.
   goto.mockReset().mockRejectedValue(new Error("Timeout 10000ms exceeded"));
-  await expect(goSignedIn({ goto }, "http://127.0.0.1:1/#signin=x")).rejects.toThrow("Timeout");
+  await expect(
+    goSignedIn({ goto, on() {}, off() {} }, "http://127.0.0.1:1/#signin=x"),
+  ).rejects.toThrow("Timeout");
   expect(goto).toHaveBeenCalledTimes(3);
   // A server that does not answer is the cause, named at once.
   vi.stubGlobal(
@@ -243,20 +245,20 @@ it("tries a navigation that does not commit again, saying so, while the server a
     }),
   );
   goto.mockReset().mockRejectedValue(new Error("Timeout 10000ms exceeded"));
-  await expect(goSignedIn({ goto }, "http://127.0.0.1:1/#signin=x")).rejects.toThrow(
-    "did not answer in 5 s",
-  );
+  await expect(
+    goSignedIn({ goto, on() {}, off() {} }, "http://127.0.0.1:1/#signin=x"),
+  ).rejects.toThrow("did not answer in 5 s");
   expect(goto).toHaveBeenCalledTimes(1);
 });
 
 it("opens a chat for the document outside Chromium, and as before in Chromium", async () => {
   const goto = vi.fn(async () => {});
-  await goChat({ goto }, "chromium", "http://127.0.0.1:1/chats/a");
+  await goChat({ goto, on() {}, off() {} }, "chromium", "http://127.0.0.1:1/chats/a");
   expect(goto).toHaveBeenLastCalledWith("http://127.0.0.1:1/chats/a", {
     waitUntil: "load",
     timeout: 30_000,
   });
-  await goChat({ goto }, "firefox", "http://127.0.0.1:1/chats/a");
+  await goChat({ goto, on() {}, off() {} }, "firefox", "http://127.0.0.1:1/chats/a");
   expect(goto).toHaveBeenLastCalledWith("http://127.0.0.1:1/chats/a", {
     waitUntil: "domcontentloaded",
     timeout: 10_000,
