@@ -222,7 +222,7 @@ it("limits New chat by its quiet time, so a slow runner passes and a stall does 
 
 it("opens the sign-in page without waiting for every resource to load", async () => {
   const goto = vi.fn(async () => {});
-  await goSignedIn({ goto, on() {}, off() {} }, "http://127.0.0.1:1/#signin=x");
+  await goSignedIn(fakePage(goto), "http://127.0.0.1:1/#signin=x");
   expect(goto).toHaveBeenCalledWith("http://127.0.0.1:1/#signin=x", {
     waitUntil: "domcontentloaded",
     timeout: 10_000,
@@ -239,14 +239,14 @@ it("tries a navigation that does not commit again, saying so, while the server a
     .fn()
     .mockRejectedValueOnce(new Error("Timeout 10000ms exceeded"))
     .mockResolvedValueOnce(undefined);
-  await goSignedIn({ goto, on() {}, off() {} }, "http://127.0.0.1:1/#signin=x");
+  await goSignedIn(fakePage(goto), "http://127.0.0.1:1/#signin=x");
   expect(goto).toHaveBeenCalledTimes(2);
   expect(log.mock.calls.some(([line]) => String(line).startsWith("RETRY"))).toBe(true);
   // Three failures in a row end the run with the engine's own error.
   goto.mockReset().mockRejectedValue(new Error("Timeout 10000ms exceeded"));
-  await expect(
-    goSignedIn({ goto, on() {}, off() {} }, "http://127.0.0.1:1/#signin=x"),
-  ).rejects.toThrow("Timeout");
+  await expect(goSignedIn(fakePage(goto), "http://127.0.0.1:1/#signin=x")).rejects.toThrow(
+    "Timeout",
+  );
   expect(goto).toHaveBeenCalledTimes(3);
   // A server that does not answer is the cause, named at once.
   vi.stubGlobal(
@@ -256,20 +256,20 @@ it("tries a navigation that does not commit again, saying so, while the server a
     }),
   );
   goto.mockReset().mockRejectedValue(new Error("Timeout 10000ms exceeded"));
-  await expect(
-    goSignedIn({ goto, on() {}, off() {} }, "http://127.0.0.1:1/#signin=x"),
-  ).rejects.toThrow("did not answer in 5 s");
+  await expect(goSignedIn(fakePage(goto), "http://127.0.0.1:1/#signin=x")).rejects.toThrow(
+    "did not answer in 5 s",
+  );
   expect(goto).toHaveBeenCalledTimes(1);
 });
 
 it("opens a chat for the document outside Chromium, and as before in Chromium", async () => {
   const goto = vi.fn(async () => {});
-  await goChat({ goto, on() {}, off() {} }, "chromium", "http://127.0.0.1:1/chats/a");
+  await goChat(fakePage(goto), "chromium", "http://127.0.0.1:1/chats/a");
   expect(goto).toHaveBeenLastCalledWith("http://127.0.0.1:1/chats/a", {
     waitUntil: "load",
     timeout: 30_000,
   });
-  await goChat({ goto, on() {}, off() {} }, "firefox", "http://127.0.0.1:1/chats/a");
+  await goChat(fakePage(goto), "firefox", "http://127.0.0.1:1/chats/a");
   expect(goto).toHaveBeenLastCalledWith("http://127.0.0.1:1/chats/a", {
     waitUntil: "domcontentloaded",
     timeout: 10_000,
@@ -280,4 +280,42 @@ it("allows a frame gap of 250 ms in Chromium and 600 ms elsewhere, far under any
   expect(frameGapLimit("chromium")).toBe(250);
   expect(253 < frameGapLimit("firefox")).toBe(true);
   expect(1500 < frameGapLimit("webkit")).toBe(false);
+});
+
+/** A page that opens at once and shows New chat, as far as these checks look. */
+function fakePage(goto, waitFor = async () => {}) {
+  return {
+    goto,
+    on() {},
+    off() {},
+    reload: vi.fn(async () => {}),
+    getByTestId: () => ({ waitFor }),
+    evaluate: async () => "a blank page",
+  };
+}
+
+it("loads the page again once when the app does not start, and names what it showed", async () => {
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => ({ status: 200 })),
+  );
+  const goto = vi.fn(async () => {});
+  const waitFor = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("Timeout 15000ms exceeded"))
+    .mockResolvedValueOnce(undefined);
+  const page = fakePage(goto, waitFor);
+  await goSignedIn(page, "http://127.0.0.1:1/#signin=x");
+  expect(page.reload).toHaveBeenCalledTimes(1);
+  expect(
+    log.mock.calls.some(([line]) => String(line).startsWith("RETRY  the app did not start")),
+  ).toBe(true);
+  // Still blank after the second load: the error says what the page showed.
+  const stuck = fakePage(goto, async () => {
+    throw new Error("Timeout 15000ms exceeded");
+  });
+  await expect(goSignedIn(stuck, "http://127.0.0.1:1/#signin=x")).rejects.toThrow(
+    'the app did not start in 30 s; the page says "a blank page"',
+  );
 });
