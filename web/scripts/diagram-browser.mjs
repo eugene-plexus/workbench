@@ -12,6 +12,7 @@ import { createRequire } from "node:module";
 import {
   contextOptions,
   fillComposer,
+  goSignedIn,
   keepScheme,
   ignorablePageError,
   launchBrowser,
@@ -93,7 +94,7 @@ async function open(scheme, viewport, extra = {}) {
     await dialog.dismiss();
   });
   page.on("request", (request) => requests.push(request.url()));
-  await page.goto(`${cfg.url}/#signin=${cfg.secret}`);
+  await goSignedIn(page, `${cfg.url}/#signin=${cfg.secret}`);
   await keepScheme(page, browserName, scheme);
   await page.getByTestId("new-chat").waitFor({ state: "attached" });
   const close = context.close.bind(context);
