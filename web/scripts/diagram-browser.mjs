@@ -12,6 +12,7 @@ import { createRequire } from "node:module";
 import {
   contextOptions,
   fillComposer,
+  frameGapLimit,
   goChat,
   goSignedIn,
   keepScheme,
@@ -381,7 +382,7 @@ try {
     );
     check(
       `${scheme}: the page kept drawing while a diagram was stopped`,
-      gap < 250,
+      gap < frameGapLimit(browserName),
       `${Math.round(gap)} ms between frames`,
     );
     check(`${scheme}: no id is used twice on the page`, (await duplicateIds(page)).length === 0);
