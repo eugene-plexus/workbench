@@ -119,6 +119,7 @@ export function useChat(chatId: string | null) {
   const [detail, setDetailState] = useState<ChatDetail | null>(null);
   const [progress, setProgress] = useState<Progress | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   // MV3b: notes the chat's model kept by itself after it went quiet, for their receipts.
   const [learned, setLearned] = useState<LearnedNote[]>([]);
   // The chat as last shown, kept beside the state so an event can be
@@ -183,6 +184,7 @@ export function useChat(chatId: string | null) {
     setDetail(null);
     setProgress(null);
     setError(null);
+    setNotice(null);
     setLearned([]);
     held.current = [];
     via.current = null;
@@ -192,6 +194,7 @@ export function useChat(chatId: string | null) {
       (event) => {
         // Another version is shown in some tab: every tab follows.
         if (event.type === "reload" || event.type === "path") {
+          if (event.type === "path") setNotice(event.notice ?? null);
           void reload();
           return;
         }
@@ -218,5 +221,5 @@ export function useChat(chatId: string | null) {
     return () => watching.close();
   }, [chatId, reload, setDetail]);
 
-  return { detail, update, progress, error, reload, look, learned };
+  return { detail, update, progress, error, reload, look, learned, notice };
 }

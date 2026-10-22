@@ -16,6 +16,7 @@ vi.mock("../lib/api", () => ({
 const reload = vi.fn();
 let detail: ChatDetail;
 let loadError: string | null = null;
+let purgeNotice: string | null = null;
 // The settings panel's own lists fetch; this file is about the chat around it.
 vi.mock("./Tools", () => ({ ToolSelection: () => null }));
 vi.mock("./Folders", () => ({ FolderSelection: () => null }));
@@ -27,6 +28,7 @@ vi.mock("../lib/useChat", () => ({
     update: vi.fn(),
     progress: null,
     error: loadError,
+    notice: purgeNotice,
     reload,
     look: vi.fn(),
   }),
@@ -127,6 +129,7 @@ beforeEach(() => {
   vi.mocked(post).mockReset();
   reload.mockReset();
   loadError = null;
+  purgeNotice = null;
   detail = { chat, messages: [], ownerName: null };
 });
 
@@ -137,6 +140,12 @@ it("names the chat in the delete question and on the button", () => {
     screen.getByText('Delete "Build a birdhouse" and the files attached to it?'),
   ).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Delete chat" })).toBeInTheDocument();
+});
+
+it("shows the older recall removal notice after a purge", () => {
+  purgeNotice = "Also removed 3 older memory recalls that could quote this answer.";
+  view();
+  expect(screen.getByText(purgeNotice)).toHaveAttribute("role", "status");
 });
 
 it("offers Dismiss, not Reload chat, after a failed delete", async () => {

@@ -10,7 +10,7 @@ import time
 from collections.abc import Coroutine
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -326,8 +326,9 @@ def test_chat_or_project_delete_erases_hidden_branch_now(
 
 
 @pytest.mark.parametrize("late", [False, True])
-def test_legacy_pause_waits_for_recall_change_or_a_day(
-    world: World, monkeypatch: pytest.MonkeyPatch, late: bool
+@pytest.mark.parametrize("count", [0, 1, 3])
+def test_purge_removes_recalls_including_one_saved_after_purge_started(
+    world: World, monkeypatch: pytest.MonkeyPatch, late: bool, count: int
 ) -> None:
     ada = world.browser()
     ada.sign_in("p-ada")
@@ -340,16 +341,26 @@ def test_legacy_pause_waits_for_recall_change_or_a_day(
     ada.post(f"/api/chats/{later}/messages", json={"content": "Later"})
     legacy = ada.wait_answer(later)
     state = world.server.server.config.app.state
-    recall = {"memoryServer": {"memories": [{"text": words}]}}
+    recall = {"memoryServer": {"memories": [{"text": f"{words} {i}"} for i in range(count)]}}
     if not late:
         on_app(world, state.store.update_message(legacy["id"], memory_used=recall))
     path = f"/api/chats/{chat}/messages/{answer['id']}"
     assert confirmed_delete(ada, path).status_code == 200
     now = time.time() + 31 * DAY
     state.branches.clock = lambda: now
+    if not late:
+        # A hold recorded by the previous version must not postpone this purge.
+        on_app(
+            world,
+            state.store.put_branch(
+                answer["id"],
+                steps=json.dumps({"legacy": {"retry_at": now + DAY, "recalls": []}}),
+            ),
+        )
     drop = AsyncMock(wraps=state.exports.drop)
     forget = AsyncMock(return_value="done")
     original_purge = state.store.purge_branch
+    publish = Mock(wraps=state.answers.publish)
 
     async def purge_with_new_recall(*args: Any, **kwargs: Any) -> Any:
         if late and not (await state.store.message(legacy["id"])).memory_used:
@@ -360,45 +371,28 @@ def test_legacy_pause_waits_for_recall_change_or_a_day(
     monkeypatch.setattr(state.exports, "drop", drop)
     monkeypatch.setattr(state.removal, "forget_exchanges", forget)
     monkeypatch.setattr(state.store, "purge_branch", purge)
-    on_app(world, state.branches.due())
-    row = on_app(world, state.store.deleted_branches(chat))[0]
-    title = ada.get(f"/api/chats/{later}").json()["chat"]["title"]
-    assert (
-        row["problem"]
-        == f"This answer cannot be deleted for good while an older memory recall may quote it: {title}. Remove that recall to finish."
-    )
-    paused = json.loads(row["steps"])["legacy"]
-    assert all("text" not in recall for recall in paused["recalls"])
-    for _ in range(3):
-        now += 60
-        on_app(world, state.branches.due())
-    assert (
-        json.loads(on_app(world, state.store.deleted_branches(chat))[0]["steps"])["legacy"]
-        == paused
-    )
-    now += DAY
-    on_app(world, state.branches.due())
-    assert (
-        json.loads(on_app(world, state.store.deleted_branches(chat))[0]["steps"])["legacy"][
-            "retry_at"
-        ]
-        > paused["retry_at"]
-    )
-    assert drop.call_count <= 1 and forget.call_count <= 1
-    # Removing only the matching old recall wakes the purge before another day passes.
-    removed = ada.post(
-        f"/api/chats/{later}/messages/{legacy['id']}/recalls/remove",
-        json={"recall": {"text": words}},
-    )
-    assert removed.status_code == 200, removed.text
+    monkeypatch.setattr(state.answers, "publish", publish)
     on_app(world, state.branches.due())
     assert on_app(world, state.store.deleted_branches(chat)) == []
+    server = on_app(world, state.store.message(legacy["id"])).memory_used["memoryServer"]
+    assert server["memories"] == []
+    assert server.get("forgotten", 0) == count
+    if count:
+        notice = (
+            f"Also removed {count} older memory {'recall' if count == 1 else 'recalls'} "
+            "that could quote this answer."
+        )
+        publish.assert_any_call(chat, {"type": "path", "notice": notice})
+        publish.assert_any_call(later, {"type": "path", "notice": notice})
+    else:
+        publish.assert_any_call(chat, {"type": "path"})
+        assert all("notice" not in call.args[1] for call in publish.call_args_list)
     assert drop.call_count == 1 and forget.call_count == 1
 
 
 @pytest.mark.parametrize("overlap", [False, True])
-def test_chat_delete_checks_all_recalls_before_expiring_any_branch(
-    world: World, overlap: bool
+def test_chat_delete_removes_all_later_recalls_with_its_hidden_branches(
+    world: World, overlap: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ada = world.browser()
     ada.sign_in("p-ada")
@@ -425,19 +419,25 @@ def test_chat_delete_checks_all_recalls_before_expiring_any_branch(
         assert (
             confirmed_delete(ada, f"/api/chats/{chat}/messages/{answer['id']}").status_code == 200
         )
-    before = on_app(world, state.store.deleted_branches(chat))
+    publish = Mock(wraps=state.answers.publish)
+    monkeypatch.setattr(state.answers, "publish", publish)
     response = ada.delete(f"/api/chats/{chat}")
-    if overlap:
-        assert response.status_code == 503, response.text
-        title = ada.get(f"/api/chats/{later}").json()["chat"]["title"]
-        assert title in response.text and legacy["id"] in response.text
-        on_app(world, state.branches.due())
-        assert on_app(world, state.store.deleted_branches(chat)) == before
-        for answer in (first, second):
-            assert ada.post(f"/api/chats/{chat}/messages/{answer['id']}/undo").status_code == 200
-    else:
-        assert response.status_code == 204, response.text
-        assert on_app(world, state.store.deleted_branches(chat)) == []
-    assert ada.get(f"/api/chats/{later}").json()["messages"][-1]["memoryUsed"]["memoryServer"][
-        "memories"
-    ] == [{"text": recalled}]
+    assert response.status_code == 204, response.text
+    assert on_app(world, state.store.deleted_branches(chat)) == []
+    assert (
+        on_app(world, state.store.message(legacy["id"])).memory_used["memoryServer"]["memories"]
+        == []
+    )
+    publish.assert_any_call(
+        later,
+        {
+            "type": "path",
+            "notice": "Also removed 1 older memory recall that could quote this answer.",
+        },
+    )
+    assert (
+        ada.get(f"/api/chats/{later}").json()["messages"][-1]["memoryUsed"]["memoryServer"][
+            "memories"
+        ]
+        == []
+    )

@@ -71,7 +71,7 @@ export function ChatView({
   /** MV7: open a project's page, from the header's project name. */
   onOpenProject?: (id: string) => void;
 }) {
-  const { detail, update, progress, error, reload, look, learned } = useChat(chatId);
+  const { detail, update, progress, error, reload, look, learned, notice } = useChat(chatId);
   const interactive = useInteractions(
     chatId,
     detail?.chat.readOnly ? detail.messages.at(-1)?.id : undefined,
@@ -501,6 +501,11 @@ export function ChatView({
           busy={chat.running}
           onChanged={() => void reload()}
         />
+      )}
+      {!chat.readOnly && notice && (
+        <p role="status" className="notice notice--bar">
+          {notice}
+        </p>
       )}
       {showSettings && !chat.readOnly && (
         <ChatSettings
