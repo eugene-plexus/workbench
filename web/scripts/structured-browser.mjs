@@ -1,5 +1,5 @@
 /* global process, console, URL, document, window, getComputedStyle, location */
-// Citations, charts and tables in Chrome (workbench-rich-content-roadmap.md
+// Citations, charts and tables in the selected browser (workbench-rich-content-roadmap.md
 // RC4), under the headers Workbench really sends: a web source's number after
 // the link it cites, moving to the source by mouse and keyboard, in each
 // branch; a source with no place only in the list; a passage's [n] opening
@@ -9,13 +9,22 @@
 // is one PASS or FAIL line.
 import { mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import {
+  contextOptions,
+  keepScheme,
+  ignorablePageError,
+  launchBrowser,
+  readOptions,
+  watchPolicy,
+  screenshotConsoleRefusal,
+} from "./browser-options.mjs";
 
-const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
+const { configPath, browserName } = readOptions();
+const cfg = JSON.parse(readFileSync(configPath, "utf8"));
 const require = createRequire(import.meta.url);
-const { chromium } = require(cfg.playwright);
 mkdirSync(cfg.shots, { recursive: true });
 const origin = new URL(cfg.url).origin;
-const browser = await chromium.launch({ executablePath: cfg.chrome, headless: true });
+const browser = await launchBrowser(require(cfg.playwright), cfg, browserName);
 const DESK = { width: 1440, height: 900 };
 const PHONE = { width: 390, height: 844 };
 
@@ -31,27 +40,42 @@ const requests = [];
 const REFUSED = /Content Security Policy|Refused to/i;
 
 async function open(scheme, viewport, extra = {}) {
-  const context = await browser.newContext({
-    colorScheme: scheme,
-    viewport,
-    acceptDownloads: true,
-    ...extra,
-  });
+  const context = await browser.newContext(
+    contextOptions(browserName, {
+      colorScheme: scheme,
+      viewport,
+      acceptDownloads: true,
+      ...extra,
+    }),
+  );
   await context.addCookies(cfg.cookies);
-  await context.addInitScript(() => {
-    window.__policy = [];
-    document.addEventListener("securitypolicyviolation", (e) =>
-      window.__policy.push(`${e.violatedDirective} ${e.blockedURI}`),
-    );
+  await context.exposeBinding("__reportPolicy", ({ frame }, message) => {
+    if (!frame.parentFrame()) policy.push(message);
   });
+  await context.addInitScript(watchPolicy, browserName);
   const page = await context.newPage();
-  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("pageerror", (error) => {
+    if (!ignorablePageError(browserName, error.message)) errors.push(error.message);
+  });
   page.on("console", (message) => {
-    if (REFUSED.test(message.text())) policy.push(message.text());
+    if (REFUSED.test(message.text()) && !screenshotConsoleRefusal(browserName, message.text()))
+      policy.push(message.text());
   });
   page.on("request", (request) => requests.push(request.url()));
   await page.goto(`${cfg.url}/#signin=${cfg.secret}`);
+  await keepScheme(page, browserName, scheme);
   await page.getByTestId("new-chat").waitFor({ state: "attached" });
+  const close = context.close.bind(context);
+  context.close = async () => {
+    const snapshot = await page.evaluate(() => ({
+      screenshots: window.__screenshotRefusals,
+    }));
+    if (snapshot.screenshots)
+      console.log(
+        `SKIP  WebKit: ${snapshot.screenshots} Playwright screenshot body {} stylesheet refusals; app CSP remains checked.`,
+      );
+    await close();
+  };
   return { context, page };
 }
 
@@ -206,7 +230,16 @@ try {
     );
     check(
       `${scheme}: a chart that cannot be drawn is its source, saying why`,
-      (await drawn.getByText(/^Chart not shown: "type" must be/).count()) === 1,
+      (await drawn.getByText('Chart not shown: it has no "series"', { exact: true }).count()) ===
+        1 &&
+        (await drawn.locator("pre code").allInnerTexts()).some((source) => {
+          try {
+            const value = JSON.parse(source);
+            return value.type === "pie" && Array.isArray(value.series) && value.series.length === 0;
+          } catch {
+            return false;
+          }
+        }),
     );
     await chart.screenshot({ path: `${cfg.shots}/chart-${scheme}.png` });
 

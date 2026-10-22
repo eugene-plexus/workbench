@@ -1,5 +1,5 @@
-/* global process, console, document, getComputedStyle, window, NodeFilter */
-// Reading Workbench in Chrome (workbench-reading.md): what each kind of text
+/* global process, console, document, getComputedStyle, window, NodeFilter, CSS */
+// Reading Workbench in the selected browser (workbench-reading.md): what each kind of text
 // looks like, in pictures and in numbers. Screenshots of a rich answer, a
 // story, a length stop, the settings, a chat's Memory drawer, the Memory page,
 // a chat whose message carried a PDF and a composer holding files that need the
@@ -10,23 +10,36 @@
 // beside the Memory chip from a small tablet to a desk.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import {
+  contextOptions,
+  ignorablePageError,
+  fillComposer,
+  keepScheme,
+  launchBrowser,
+  readOptions,
+} from "./browser-options.mjs";
 
-const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
+const { configPath, browserName } = readOptions();
+const cfg = JSON.parse(readFileSync(configPath, "utf8"));
 const require = createRequire(import.meta.url);
-const { chromium } = require(cfg.playwright);
 mkdirSync(cfg.shots, { recursive: true });
 const shot = (name) => ({ path: `${cfg.shots}/${name}.png` });
-const browser = await chromium.launch({ executablePath: cfg.chrome, headless: true });
+const browser = await launchBrowser(require(cfg.playwright), cfg, browserName);
 const errors = [];
 const DESK = { width: 1440, height: 900 };
 const PHONE = { width: 390, height: 844 };
 
 async function open(scheme, viewport, extra = {}) {
-  const context = await browser.newContext({ colorScheme: scheme, viewport, ...extra });
+  const context = await browser.newContext(
+    contextOptions(browserName, { colorScheme: scheme, viewport, ...extra }),
+  );
   await context.addCookies(cfg.cookies);
   const page = await context.newPage();
-  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("pageerror", (error) => {
+    if (!ignorablePageError(browserName, error.message)) errors.push(error.message);
+  });
   await page.goto(`${cfg.url}/#signin=${cfg.secret}`);
+  await keepScheme(page, browserName, scheme);
   await page.getByTestId("new-chat").waitFor({ state: "attached" });
   return { context, page };
 }
@@ -221,7 +234,8 @@ function structure() {
     const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
     return Math.round(((hi + 0.05) / (lo + 0.05)) * 100) / 100;
   };
-  const answer = document.querySelector(".answer");
+  // Reasoning is Markdown too. Inspect the main answer, outside its fold.
+  const answer = document.querySelector("[data-testid=answer] > .answer");
   const hr = answer?.querySelector("hr");
   const line = hr ? parse(getComputedStyle(hr).borderTopColor) : null;
   const head = document.querySelector(".code-block .code-head");
@@ -383,7 +397,30 @@ try {
       const numbers = await page.evaluate(probe);
       writeFileSync(`${cfg.shots}/styles-${scheme}.json`, JSON.stringify(numbers, null, 2));
       judge(scheme, numbers, await page.evaluate(structure));
-      await page.getByText("Reasoning", { exact: true }).first().click();
+      const css = await page.evaluate(() => {
+        const answer = document.querySelector(".answer");
+        const text = getComputedStyle(answer);
+        return {
+          colors: CSS.supports("color", "color-mix(in srgb, red 50%, transparent)"),
+          viewport: CSS.supports("height", "100dvh"),
+          // Unsupported `pretty` falls back to normal wrapping, never nowrap.
+          wraps: text.whiteSpace !== "nowrap" && text.whiteSpace !== "pre",
+        };
+      });
+      check(
+        `${scheme}: mixed colours, dynamic viewport units and prose wrapping work`,
+        css.colors && css.viewport && css.wraps,
+        JSON.stringify(css),
+      );
+      const reasoning = page
+        .locator("[data-testid=answer] summary")
+        .filter({ hasText: /^Reasoning/ })
+        .first();
+      await reasoning.click();
+      check(
+        `${scheme}: reasoning opens by its summary`,
+        await reasoning.evaluate((el) => el.parentElement.open),
+      );
       await settle(page);
       await page.screenshot(shot(`rich-reasoning-${scheme}-desk`));
       await tall(page);
@@ -495,6 +532,7 @@ try {
       const away = await browser.newContext({ colorScheme: scheme, viewport: DESK });
       const signedOut = await away.newPage();
       await signedOut.goto(cfg.url);
+      await keepScheme(signedOut, browserName, scheme);
       await settle(signedOut);
       await signedOut.screenshot(shot(`signin-${scheme}-desk`));
       await away.close();
@@ -504,6 +542,14 @@ try {
       await chat(page, cfg.chats.rich);
       await toTop(page);
       await page.screenshot(shot(`rich-${scheme}-phone`));
+      const composerSize = await page
+        .getByTestId("composer")
+        .evaluate((element) => parseFloat(getComputedStyle(element).fontSize));
+      check(
+        `${scheme} phone: the composer is at least 16 px to avoid WebKit focus zoom`,
+        composerSize >= 16,
+        `${composerSize}px`,
+      );
       const wide = (await page.evaluate(structure)).overflow;
       check(`${scheme} phone: nothing is wider than the screen`, wide <= 1, `${wide}px too wide`);
       await chat(page, cfg.chats.story);
@@ -644,9 +690,7 @@ try {
   for (const scheme of ["dark", "light"]) {
     const { context, page } = await open(scheme, DESK);
     await page.getByTestId("new-chat").click();
-    const composer = page.getByTestId("composer");
-    await composer.waitFor();
-    await composer.fill(cfg.live);
+    await fillComposer(page, cfg.live);
     await page.getByTestId("send").click();
     await page.locator('[data-testid=answer][data-status="running"]').waitFor();
     await page.waitForTimeout(1200);

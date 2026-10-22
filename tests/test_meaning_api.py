@@ -670,7 +670,7 @@ def test_the_search_model_setting_shows_what_it_comes_to_and_the_new_settings_re
         }
 
     none = schema()["documentsEmbeddingModel"]
-    assert none["default"] == "auto" and none["suggestions"] == ["auto"]
+    assert none["default"] == "auto" and none["suggestions"] == ["role:embeddings", "auto"]
     assert none["status"] == {
         "level": "warning",
         "text": "Searching by words only: no search model is set up.",
@@ -681,7 +681,7 @@ def test_the_search_model_setting_shows_what_it_comes_to_and_the_new_settings_re
     )
     time.sleep(0.1)
     model = schema()["documentsEmbeddingModel"]
-    assert model["suggestions"] == ["auto", "mine", "other", "cloud"]
+    assert model["suggestions"] == ["role:embeddings", "auto", "mine", "other", "cloud"]
     assert model["status"] == {"level": "info", "text": "In use: mine (automatic)."}
     assert config(world, documentsEmbeddingModel="other").status_code == 200
     time.sleep(0.1)

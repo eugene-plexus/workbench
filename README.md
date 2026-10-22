@@ -2,12 +2,18 @@
 
 Eugene Plexus's own chat app. It lets you chat with the models your Eugene install serves, and search the web while you do. It signs people in with Eugene. One person can use it with Eugene's passphrase, or a small business can use it with an account for each person.
 
-Workbench is an *app* (a spoke), not part of the hub. It reaches Eugene the same way any other app does:
+Workbench is an _app_ (a spoke), not part of the hub. It reaches Eugene the same way any other app does:
 
 - one client key, used at the gateway's public OpenAI-compatible endpoints;
 - sign-in with Eugene over OpenID Connect.
 
 It holds no operator or node-enrollment credential. Node folder tools additionally use Workbench's sign-in registration and the initiating person's session, checked by Eugene for each operation. The core design is [`specs/docs/design/workbench-v1.md`](https://github.com/eugene-plexus/specs/blob/main/docs/design/workbench-v1.md); [node file helpers](https://github.com/eugene-plexus/specs/blob/main/docs/design/node-file-helpers.md) describe central hosting and per-person access.
+
+## Supported browsers
+
+Chrome, Edge and Firefox. Safari: checked with WebKit only.
+
+See [browser checks and known limits](docs/browsers.md), including looping previews.
 
 ## Installing
 

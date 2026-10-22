@@ -928,7 +928,7 @@ def test_the_two_settings_are_in_the_config_with_their_defaults_and_say_what_the
     model, seconds = fields["documentsSortModel"], fields["documentsSortSeconds"]
     assert model["label"] == "Result sorter for My documents" and model["category"] == "documents"
     assert model["valueType"] == "string" and model["default"] == "auto"
-    assert model["suggestions"] == ["auto", "off", SORTER, "second-sorter"]
+    assert model["suggestions"] == ["role:rerank", "auto", "off", SORTER, "second-sorter"]
     assert model["status"] == {"level": "info", "text": f"In use: {SORTER} (automatic)."}
     assert seconds["label"] == "Sort time (seconds; a sort is given up on after twice this)"
     assert seconds["category"] == "documents"

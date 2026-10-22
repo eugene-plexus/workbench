@@ -1,5 +1,5 @@
 /* global process, console, URL, document, window, performance, requestAnimationFrame, setTimeout, getComputedStyle */
-// Artifacts shown and run in place, in Chrome (workbench-rich-content-roadmap.md
+// Artifacts shown and run in place, in the selected browser (workbench-rich-content-roadmap.md
 // RC6), under the headers Workbench really sends: Markdown and SVG drawn where
 // the answer puts them; a component started by itself on screen, answering
 // clicks and its own form, its frame as tall as its page; a page that tries
@@ -11,13 +11,23 @@
 // page; a phone. Each check is one PASS or FAIL line.
 import { mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import {
+  contextOptions,
+  keepScheme,
+  ignorablePageError,
+  launchBrowser,
+  readOptions,
+  watchPolicy,
+  watchServiceWorkers,
+  canCheckPreviewLoop,
+} from "./browser-options.mjs";
 
-const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
+const { configPath, browserName } = readOptions();
+const cfg = JSON.parse(readFileSync(configPath, "utf8"));
 const require = createRequire(import.meta.url);
-const { chromium } = require(cfg.playwright);
 mkdirSync(cfg.shots, { recursive: true });
 const origin = new URL(cfg.url).origin;
-const browser = await chromium.launch({ executablePath: cfg.chrome, headless: true });
+const browser = await launchBrowser(require(cfg.playwright), cfg, browserName);
 const DESK = { width: 1440, height: 900 };
 const PHONE = { width: 390, height: 844 };
 const FRAME = `${origin}/preview/frame`;
@@ -45,20 +55,21 @@ const requests = [];
 const answered = [];
 
 async function open(scheme, viewport, who = cfg, extra = {}) {
-  const context = await browser.newContext({ colorScheme: scheme, viewport, ...extra });
+  const context = await browser.newContext(
+    contextOptions(browserName, { colorScheme: scheme, viewport, ...extra }),
+  );
   await context.addCookies(who.cookies);
+  await context.addInitScript(watchServiceWorkers);
   context.setDefaultTimeout(15_000);
-  await context.addInitScript(() => {
-    if (window.top !== window) return;
-    window.__policy = [];
-    document.addEventListener("securitypolicyviolation", (e) =>
-      window.__policy.push(`${e.violatedDirective} ${e.blockedURI}`),
-    );
-  });
+  await context.addInitScript(watchPolicy, browserName);
   const page = await context.newPage();
   lastPage = page;
   page.on("pageerror", (error) => {
-    if (!(error.stack ?? "").includes("/preview/")) errors.push(error.message);
+    if (
+      !(error.stack ?? "").includes("/preview/") &&
+      !ignorablePageError(browserName, error.message)
+    )
+      errors.push(error.message);
   });
   page.on("request", (request) =>
     requests.push({ url: request.url(), main: request.frame() === page.mainFrame() }),
@@ -70,6 +81,7 @@ async function open(scheme, viewport, who = cfg, extra = {}) {
     }),
   );
   await page.goto(`${cfg.url}/#signin=${who.secret}`);
+  await keepScheme(page, browserName, scheme);
   await page.getByTestId("new-chat").waitFor({ state: "attached" });
   return { context, page };
 }
@@ -181,6 +193,7 @@ try {
       .locator("#out li")
       .evaluateAll((items) => items.map((li) => [li.dataset.name, li.textContent])),
   );
+  const serviceWorkers = await escapes.evaluate(() => Promise.all(window.__serviceWorkers));
   const refused = [
     "parent-dom",
     "top-dom",
@@ -193,7 +206,13 @@ try {
     "form-button",
     "api",
     "network",
-  ].filter((name) => !(said[name] ?? "").startsWith(`${name}: blocked`));
+  ].filter(
+    (name) =>
+      !(
+        (said[name] ?? "").startsWith(`${name}: blocked`) ||
+        (name === "service-worker" && serviceWorkers.length === 1 && serviceWorkers[0] === true)
+      ),
+  );
   const reached = answered
     .slice(sinceEscapes)
     .filter((r) => !r.main && !r.url.startsWith(FRAME) && r.url !== `${origin}/preview/runtime.js`);
@@ -299,41 +318,43 @@ try {
   policy.push(...(await page.evaluate(() => window.__policy)));
   await context.close();
 
-  // --- one that loops ----------------------------------------------------------------------
-  step("a preview that loops");
-  ({ context, page } = await open("dark", DESK));
-  await chat(page, cfg.chats.stuck);
-  const named = card(page, "Busy").getByTestId("artifact-notes");
-  await named.getByText(/stopped answering/).waitFor({ timeout: 30_000 });
-  const stoppedAt = performance.now();
-  await card(page, "Calm").getByRole("status").getByText("Running").waitFor({ timeout: 30_000 });
-  await card(page, "Calm too")
-    .getByRole("status")
-    .getByText("Running")
-    .waitFor({ timeout: 30_000 });
-  const back = performance.now() - stoppedAt;
-  check(
-    "a preview that loops is named and stopped, and the others run again",
-    (await card(page, "Busy").getByTestId("artifact-frame").count()) === 0 &&
-      (await card(page, "Busy").getByRole("button", { name: "Run" }).count()) === 1 &&
-      (await card(page, "Calm").getByTestId("artifact-frame").count()) === 1 &&
-      (await card(page, "Calm too").getByTestId("artifact-frame").count()) === 1,
-    await notes(page, "Busy"),
-  );
-  console.log(
-    `  measured: the others running again ${back.toFixed(0)} ms after the loop was stopped`,
-  );
-  await page.screenshot({ path: `${cfg.shots}/stuck-dark.png` });
-  await page.reload();
-  await card(page, "Calm").getByRole("status").getByText("Running").waitFor({ timeout: 30_000 });
-  await page.waitForTimeout(4_000);
-  check(
-    "after a reload, the one that looped waits for Run",
-    (await card(page, "Busy").getByTestId("artifact-frame").count()) === 0 &&
-      (await card(page, "Busy").getByRole("button", { name: "Run" }).count()) === 1,
-  );
-  policy.push(...(await page.evaluate(() => window.__policy)));
-  await context.close();
+  if (canCheckPreviewLoop(browserName)) {
+    // --- one that loops ----------------------------------------------------------------------
+    step("a preview that loops");
+    ({ context, page } = await open("dark", DESK));
+    await chat(page, cfg.chats.stuck);
+    const named = card(page, "Busy").getByTestId("artifact-notes");
+    await named.getByText(/stopped answering/).waitFor({ timeout: 30_000 });
+    const stoppedAt = performance.now();
+    await card(page, "Calm").getByRole("status").getByText("Running").waitFor({ timeout: 30_000 });
+    await card(page, "Calm too")
+      .getByRole("status")
+      .getByText("Running")
+      .waitFor({ timeout: 30_000 });
+    const back = performance.now() - stoppedAt;
+    check(
+      "a preview that loops is named and stopped, and the others run again",
+      (await card(page, "Busy").getByTestId("artifact-frame").count()) === 0 &&
+        (await card(page, "Busy").getByRole("button", { name: "Run" }).count()) === 1 &&
+        (await card(page, "Calm").getByTestId("artifact-frame").count()) === 1 &&
+        (await card(page, "Calm too").getByTestId("artifact-frame").count()) === 1,
+      await notes(page, "Busy"),
+    );
+    console.log(
+      `  measured: the others running again ${back.toFixed(0)} ms after the loop was stopped`,
+    );
+    await page.screenshot({ path: `${cfg.shots}/stuck-dark.png` });
+    await page.reload();
+    await card(page, "Calm").getByRole("status").getByText("Running").waitFor({ timeout: 30_000 });
+    await page.waitForTimeout(4_000);
+    check(
+      "after a reload, the one that looped waits for Run",
+      (await card(page, "Busy").getByTestId("artifact-frame").count()) === 0 &&
+        (await card(page, "Busy").getByRole("button", { name: "Run" }).count()) === 1,
+    );
+    policy.push(...(await page.evaluate(() => window.__policy)));
+    await context.close();
+  }
 
   // --- the person's switch --------------------------------------------------------------
   step("the switch");

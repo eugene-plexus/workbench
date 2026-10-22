@@ -1,5 +1,5 @@
 /* global process, console, URL, document, getComputedStyle, window, Worker, requestAnimationFrame, performance, navigator */
-// Mermaid diagrams in Chrome (workbench-rich-content-roadmap.md RC2), under
+// Mermaid diagrams in the selected browser (workbench-rich-content-roadmap.md RC2), under
 // the headers Workbench really sends: what a chat with no diagram loads,
 // every diagram drawn or kept as its source with its reason, one that takes
 // 20 s stopped while the page keeps drawing, a diagram that tries to run,
@@ -9,14 +9,25 @@
 // is one PASS or FAIL line.
 import { mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import {
+  contextOptions,
+  fillComposer,
+  keepScheme,
+  ignorablePageError,
+  launchBrowser,
+  readOptions,
+  watchClipboardWrites,
+  watchPolicy,
+  screenshotConsoleRefusal,
+} from "./browser-options.mjs";
 
-const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
+const { configPath, browserName } = readOptions();
+const cfg = JSON.parse(readFileSync(configPath, "utf8"));
 const require = createRequire(import.meta.url);
-const { chromium } = require(cfg.playwright);
 mkdirSync(cfg.shots, { recursive: true });
 const shot = (name) => ({ path: `${cfg.shots}/${name}.png`, fullPage: false });
 const origin = new URL(cfg.url).origin;
-const browser = await chromium.launch({ executablePath: cfg.chrome, headless: true });
+const browser = await launchBrowser(require(cfg.playwright), cfg, browserName);
 const DESK = { width: 1440, height: 900 };
 const PHONE = { width: 390, height: 844 };
 
@@ -34,21 +45,20 @@ const DIAGRAM_CODE = /diagramWorker|diagramMarkup|diagramDom|mermaid/i;
 const REFUSED = /Content Security Policy|Refused to/i;
 
 async function open(scheme, viewport, extra = {}) {
-  const context = await browser.newContext({ colorScheme: scheme, viewport, ...extra });
+  const context = await browser.newContext(
+    contextOptions(browserName, { colorScheme: scheme, viewport, ...extra }),
+  );
+  if (browserName !== "chromium") await context.addInitScript(watchClipboardWrites);
   await context.addCookies(cfg.cookies);
   // What the page itself sees: refusals by its policy, the diagrams sent to
   // the worker, and how long the page went between two frames.
   await context.addInitScript(() => {
-    window.__policy = [];
-    document.addEventListener("securitypolicyviolation", (e) =>
-      window.__policy.push(
-        `${e.violatedDirective} ${e.blockedURI} ${e.sourceFile}:${e.lineNumber}`,
-      ),
-    );
     window.__posts = [];
+    window.__palettes = [];
     const post = Worker.prototype.postMessage;
     Worker.prototype.postMessage = function (message, ...rest) {
       if (message && typeof message.source === "string") window.__posts.push(message.source);
+      if (message?.palette) window.__palettes.push(message.palette);
       return post.call(this, message, ...rest);
     };
     window.__gap = 0;
@@ -60,10 +70,17 @@ async function open(scheme, viewport, extra = {}) {
     };
     requestAnimationFrame(frame);
   });
+  await context.exposeBinding("__reportPolicy", ({ frame }, message) => {
+    if (!frame.parentFrame()) policy.push(message);
+  });
+  await context.addInitScript(watchPolicy, browserName);
   const page = await context.newPage();
-  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("pageerror", (error) => {
+    if (!ignorablePageError(browserName, error.message)) errors.push(error.message);
+  });
   page.on("console", (message) => {
-    if (REFUSED.test(message.text())) policy.push(message.text());
+    if (REFUSED.test(message.text()) && !screenshotConsoleRefusal(browserName, message.text()))
+      policy.push(message.text());
   });
   // The worker's own console: a refusal inside it is reported there.
   page.on("worker", (worker) =>
@@ -77,7 +94,19 @@ async function open(scheme, viewport, extra = {}) {
   });
   page.on("request", (request) => requests.push(request.url()));
   await page.goto(`${cfg.url}/#signin=${cfg.secret}`);
+  await keepScheme(page, browserName, scheme);
   await page.getByTestId("new-chat").waitFor({ state: "attached" });
+  const close = context.close.bind(context);
+  context.close = async () => {
+    const snapshot = await page.evaluate(() => ({
+      screenshots: window.__screenshotRefusals,
+    }));
+    if (snapshot.screenshots)
+      console.log(
+        `SKIP  WebKit: ${snapshot.screenshots} Playwright screenshot body {} stylesheet refusals; app CSP remains checked.`,
+      );
+    await close();
+  };
   return { context, page };
 }
 
@@ -238,7 +267,9 @@ try {
 
   for (const scheme of ["dark", "light"]) {
     const { context, page } = await open(scheme, DESK, { acceptDownloads: true });
-    await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin });
+    if (browserName === "chromium") {
+      await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin });
+    }
     await chat(page, cfg.chats.diagrams);
     await page.evaluate(() => (window.__gap = 0));
     // While the diagrams are drawn (one of them for 4 s, until it is stopped),
@@ -396,7 +427,13 @@ try {
       (await block.locator(".diagram-view img").count()) === 1,
     );
     await block.getByRole("button", { name: "Copy the diagram's source" }).click();
-    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    if (browserName !== "chromium") {
+      await page.waitForFunction(() => typeof window.__copied === "string");
+    }
+    const copied = await page.evaluate(
+      (name) => (name === "chromium" ? navigator.clipboard.readText() : window.__copied),
+      browserName,
+    );
     // Windows' clipboard ends its lines in \r\n.
     check(
       `${scheme}: Copy copies the source`,
@@ -500,11 +537,16 @@ try {
       ...sections,
       ...slices,
     ]);
+    const palette = await page.evaluate(() => window.__palettes[0]);
     const pairs = [
       ["a box's text", c["--foreground-strong"], c["--tint"]],
       ["a line's label", c["--foreground"], c["--panel"]],
       ["a note's text", c["--foreground-strong"], c["--panel-soft"]],
-      ...sections.map((s) => [`a section's text on ${s}`, c["--foreground-strong"], c[s]]),
+      ...sections.map((s, i) => [
+        `a section's text on ${s}`,
+        palette[`cScaleLabel${i}`],
+        palette[`cScale${i}`],
+      ]),
       ...slices.map((s) => [`a pie slice's text on ${s}`, c["--on-accent-left"], c[s]]),
     ];
     const low = pairs
@@ -667,9 +709,7 @@ try {
   {
     const { context, page } = await open("dark", DESK);
     await page.getByTestId("new-chat").click();
-    const composer = page.getByTestId("composer");
-    await composer.waitFor();
-    await composer.fill(cfg.live.ask);
+    await fillComposer(page, cfg.live.ask);
     await page.evaluate(() => (window.__posts = []));
     await page.getByTestId("send").click();
     const running = page.locator('[data-testid=answer][data-status="running"]');

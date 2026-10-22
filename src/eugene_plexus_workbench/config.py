@@ -55,6 +55,7 @@ from ._generated.models import (
     ConfigUpdateRequest,
     ConfigUpdateResult,
     ConfigValueType,
+    ModelRole,
 )
 from .store import Store
 
@@ -968,6 +969,29 @@ async def _fields(request: Request) -> list[ConfigField]:
                 else f
                 for f in shown
             ]
+    # Suggestions are choices, never a change to the saved value or its default.
+    # Keep roles available even before their models are running or assigned.
+    role_fields = {
+        DOCUMENTS_EMBEDDING_MODEL: (ModelRole.embeddings, [AUTO]),
+        DOCUMENTS_SORT_MODEL: (ModelRole.rerank, [AUTO, OFF]),
+    }
+    shown = [
+        f.model_copy(
+            update={
+                "suggestions": list(
+                    dict.fromkeys(
+                        [
+                            f"role:{role_fields[f.key][0].value}",
+                            *(f.suggestions or role_fields[f.key][1]),
+                        ]
+                    )
+                )
+            }
+        )
+        if f.key in role_fields
+        else f
+        for f in shown
+    ]
     return shown
 
 
