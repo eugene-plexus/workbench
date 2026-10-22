@@ -81,6 +81,8 @@ describe("your groups", () => {
     const shared = within(box).getByTestId("group-server-g-night");
     expect(shared).toHaveTextContent("Hindsight");
     expect(shared).toHaveTextContent("Set by your group: Night shift");
+    // Nothing sends a member's chats to it yet (row 27): the page does not say otherwise.
+    expect(shared).toHaveTextContent("Chats go to it once group delivery is built.");
     expect(within(box).queryByRole("button")).not.toBeInTheDocument();
     expect(within(box).queryByRole("textbox")).not.toBeInTheDocument();
   });
@@ -113,7 +115,10 @@ describe("the owner's group servers", () => {
     const desk = await screen.findByTestId("group-servers-g-desk");
     expect(desk).toHaveTextContent("No memory server");
     fireEvent.click(within(desk).getByRole("button", { name: "Add a memory server" }));
-    expect(within(desk).getByTestId("group-server-warning")).toHaveTextContent("Everyone in Desk");
+    const warning = within(desk).getByTestId("group-server-warning");
+    expect(warning).toHaveTextContent("Everyone in Desk");
+    expect(warning).toHaveTextContent("Chats go to it once group delivery is built.");
+    expect(warning).not.toHaveTextContent("are to go to it");
     fireEvent.change(within(desk).getByLabelText("Address"), {
       target: { value: " https://memory.example.com/desk/ " },
     });
@@ -124,8 +129,10 @@ describe("the owner's group servers", () => {
         token: "",
       }),
     );
-    expect(await screen.findByTestId("group-servers-g-desk")).toHaveTextContent(
-      "memory.example.com/desk/",
+    const saved = await screen.findByTestId("group-servers-g-desk");
+    expect(saved).toHaveTextContent("memory.example.com/desk/");
+    expect(within(saved).getByTestId("group-server-saved")).toHaveTextContent(
+      "Saved. Chats go to it once group delivery is built.",
     );
   });
 

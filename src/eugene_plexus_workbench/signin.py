@@ -49,6 +49,9 @@ log = logging.getLogger(__name__)
 #: `OidcGroup` and `PoliciesInEffect`): at most 64 groups, an id of 1-64 characters a path can
 #: carry, a name of 1-80; a queue band of three; a percent of 50-95.
 MAX_GROUPS = 64
+#: The install's own list (`/oidc/groups`) has no fixed length (row 70c review): this is only
+#: a bound on what Workbench will hold in memory from one answer.
+MAX_CATALOG = 10_000
 GROUP_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")
 QUEUE_BANDS = ("interactive", "background", "sheddable")
 POLICIES = ("queueBand", "summaryContextPercent")
@@ -326,7 +329,7 @@ class Provider:
         memory server, which they cannot turn off, to a list cut short: if every group cannot
         be read, the sign-in stops with the cause rather than go on with some of them."""
         if claims.get("eugene_groups_truncated") is not True:
-            identity.groups, identity.policies = group_claims(claims)
+            identity.groups, identity.policies = group_claims(claims, where="sign-in")
             return identity
         reason = "Eugene's sign-in listed only some of your groups, and the rest"
         endpoint = meta.get("userinfo_endpoint")
@@ -349,9 +352,12 @@ class Provider:
             raise SignInUnavailable(
                 f"{reason} could not be read (Eugene answered {response.status_code})."
             )
-        groups, policies = group_claims(told)
+        if told.get("eugene_groups_truncated", False) is not False:
+            # Userinfo is never cut: one that says it is cannot be the whole list.
+            raise SignInUnavailable(f"{reason} came back cut short as well.")
+        groups, policies = group_claims(told, where="userinfo")
         if groups is None:
-            raise SignInUnavailable(f"{reason} came back in a shape Workbench cannot read.")
+            raise SignInUnavailable(f"{reason} came back without any groups.")
         identity.groups, identity.policies = groups, policies
         return identity
 
@@ -379,7 +385,7 @@ class Provider:
             body = response.json()
         except ValueError:
             body = None
-        found = _groups_of(body.get("groups") if isinstance(body, dict) else None)
+        found = _groups_of(body.get("groups") if isinstance(body, dict) else None, MAX_CATALOG)
         if found is None:
             raise SignInUnavailable("Eugene's list of groups could not be read")
         return found
@@ -494,9 +500,10 @@ class Provider:
         raise SignInRefused("Eugene's ID token did not verify.")  # pragma: no cover
 
 
-def _groups_of(value: Any) -> list[dict[str, str]] | None:
-    """`[{id, name}]` as the contract gives it, or None for anything else."""
-    if not isinstance(value, list) or len(value) > MAX_GROUPS:
+def _groups_of(value: Any, limit: int = MAX_GROUPS) -> list[dict[str, str]] | None:
+    """`[{id, name}]` as the contract gives it, or None for anything else. `limit` is one
+    person's bound (64) for their claims; the install's own list takes `MAX_CATALOG`."""
+    if not isinstance(value, list) or len(value) > limit:
         return None
     groups: list[dict[str, str]] = []
     for item in value:
@@ -535,19 +542,26 @@ def _policies_of(value: Any) -> dict[str, Any] | None:
 
 
 def group_claims(
-    claims: dict[str, Any],
+    claims: dict[str, Any], *, where: str = "sign-in"
 ) -> tuple[list[dict[str, str]] | None, dict[str, Any] | None]:
-    """Row 70c: `(groups, policies)` from a sign-in's claims, or `(None, None)` when Eugene
-    said nothing of groups or said it out of the contract's shape. A signed claim out of
-    shape is a fault at Eugene, not something to half-believe: neither is used, and the log
-    says so."""
+    """Row 70c: `(groups, policies)` from a sign-in's claims, or `(None, None)` when Eugene said
+    nothing of groups (an Eugene from before row 70).
+
+    Claims Eugene sent out of the contract's shape are neither half-believed nor dropped: a
+    member would lose a group's memory server they cannot turn off. `SignInUnavailable` says
+    so, which stops a sign-in with the cause and keeps a signed-in session (a refresh answers
+    503) until Eugene sends them in shape (row 70c review)."""
     if "eugene_groups" not in claims and "eugene_policies" not in claims:
         return None, None
     groups = _groups_of(claims.get("eugene_groups"))
     policies = _policies_of(claims.get("eugene_policies", {}))
     if groups is None or policies is None:
-        log.warning("Eugene's group claims are not in the shape Workbench reads; not used")
-        return None, None
+        log.warning("Eugene's group claims (%s) are not in the shape Workbench reads", where)
+        part = "your groups" if groups is None else "what your groups set"
+        raise SignInUnavailable(
+            f"Eugene's {where} sent {part} in a shape this Workbench cannot read, so it cannot "
+            "tell which of your groups' settings apply. Update Eugene, or ask its owner."
+        )
     return groups, policies
 
 

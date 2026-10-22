@@ -165,3 +165,17 @@ def test_a_group_server_is_not_a_persons_and_survives_a_person_purge(
     assert asked and not any(s.startswith("group:") for s in asked)
     manage = owner.get("/api/groups/manage").json()
     assert next(g for g in manage["groups"] if g["id"] == "g-night")["server"] is not None
+
+
+def test_an_install_with_more_groups_than_one_person_may_hold_lists_them_all(
+    world: World,
+    remote: Callable[..., Remote],  # noqa: F811
+) -> None:
+    """Review blocker 2: 64 is the bound on one person's groups, not on the install's. 65
+    groups that give Workbench are listed, and the 65th takes a server."""
+    world.eugene.groups = [{"id": f"g{n:02d}", "name": f"Team {n:02d}"} for n in range(65)]
+    assert config(world, memoryServers="any").status_code == 200
+    owner = signed_in(world, "operator")
+    manage = owner.get("/api/groups/manage").json()
+    assert manage["problem"] is None and len(manage["groups"]) == 65
+    assert _attach(owner, "g64", remote().url).status_code == 200

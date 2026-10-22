@@ -311,13 +311,43 @@ def test_an_older_eugene_sends_no_group_claims(world: World) -> None:
         {"eugene_groups": [], "eugene_policies": {"queueBand": "urgent"}},
         {"eugene_groups": [], "eugene_policies": {"summaryContextPercent": 99}},
         {"eugene_groups": [], "eugene_policies": {"summaryContextPercent": True}},
+        # Review should-fix 3: one valid group beside a policy out of shape.
+        {
+            "eugene_groups": [{"id": "g1", "name": "Night shift"}],
+            "eugene_policies": {"summaryContextPercent": 99},
+        },
     ],
 )
-def test_a_group_claim_out_of_shape_is_not_believed(world: World, claims: dict[str, Any]) -> None:
-    """Signed by Eugene or not, a claim out of the contract's shape is not used: the person
-    signs in and nothing is said of groups that were not said properly."""
+def test_a_group_claim_out_of_shape_stops_the_sign_in_and_says_why(
+    world: World, claims: dict[str, Any]
+) -> None:
+    """A claim Eugene sent out of the contract's shape is not half-believed, nor dropped: a
+    member must not lose a group's server they cannot turn off. The sign-in stops and says
+    why. An Eugene that sends no group claims at all is an older one, and signs in."""
     world.eugene.claims["p-ada"] = claims
+    done = world.browser().sign_in("p-ada")
+    assert "#signin-error=" in done.headers["location"]
+    assert "groups" in unquote(done.headers["location"])
+
+
+def test_a_group_claim_out_of_shape_at_a_refresh_is_not_a_sign_out(world: World) -> None:
+    world.eugene.claims["p-ada"] = {"eugene_groups": [NIGHT], "eugene_policies": {}}
+    world.eugene.expires_in = 1  # every call is due for a refresh
     ada = world.browser()
     ada.sign_in("p-ada")
-    shown = ada.get("/api/groups").json()
-    assert shown["known"] is False and shown["groups"] == [] and shown["policies"] == []
+    world.eugene.claims["p-ada"] = {"eugene_groups": [NIGHT], "eugene_policies": {"x": 1}}
+    time.sleep(0.05)
+    refused = ada.get("/api/groups")
+    assert refused.status_code == 503, refused.text
+    assert "groups" in refused.json()["detail"]["message"]
+    world.eugene.claims["p-ada"] = {"eugene_groups": [NIGHT], "eugene_policies": {}}
+    assert ada.get("/api/groups").json()["groups"] == [NIGHT]
+
+
+def test_userinfo_that_says_it_is_cut_is_not_taken_for_every_group(world: World) -> None:
+    """Review should-fix 3: userinfo is never cut; one that says it is cannot be the whole list."""
+    world.eugene.claims["p-ada"] = {**_claims(NIGHT), "eugene_groups_truncated": True}
+    world.eugene.userinfo["p-ada"] = {**_claims(NIGHT, DESK), "eugene_groups_truncated": True}
+    done = world.browser().sign_in("p-ada")
+    assert "#signin-error=" in done.headers["location"]
+    assert "groups" in unquote(done.headers["location"])

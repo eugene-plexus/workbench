@@ -20,6 +20,9 @@ const POLICY_WORDS: Record<string, string> = {
   summaryContextPercent: "Summarise long chats at",
 };
 
+/** Nothing sends a member's chats to a group's server until row 27; the page says so. */
+const NOT_YET = "Chats go to it once group delivery is built.";
+
 const BANDS: Record<string, string> = {
   interactive: "Interactive",
   background: "Background",
@@ -106,6 +109,7 @@ export function YourGroups() {
               <p className="help">
                 {setBy([group])}. It is for everyone in the group, and you cannot turn it off.
               </p>
+              <p className="help">{NOT_YET}</p>
             </div>
           ))}
           {!data.serversAllowed && data.why && (
@@ -178,6 +182,9 @@ function GroupServer({
       {group.server ? (
         <>
           <ServerLine server={group.server} />
+          <p data-testid="group-server-saved" className="help">
+            Saved. {NOT_YET}
+          </p>
           {!asking ? (
             <div>
               <button
@@ -227,8 +234,8 @@ function GroupServer({
         <form className="flex flex-col gap-2" onSubmit={(e) => void connect(e)}>
           <p data-testid="group-server-warning" className="notice">
             <Info size={16} aria-hidden />
-            Everyone in {group.name} gets this server: their chats are to go to it, and they cannot
-            turn it off. Each member sees it in their Settings.
+            Everyone in {group.name} gets this server, and members cannot turn it off. Each member
+            sees it in their Settings. {NOT_YET}
           </p>
           <div className="field">
             <label htmlFor={`${uid}-url`} className="field-label">

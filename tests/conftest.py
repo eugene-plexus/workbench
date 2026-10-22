@@ -658,8 +658,13 @@ class FakeEugene:
             if sub is None or sub in self.disabled:
                 return JSONResponse({"error": "invalid_token"}, status_code=401)
             person = self.people[sub]
-            told = self.userinfo.get(sub, self.claims.get(sub, {}))
-            extra = {k: v for k, v in told.items() if k != "eugene_groups_truncated"}
+            # Eugene's userinfo is never cut: a person's ID token claims, less the flag, unless
+            # a test sets exactly what userinfo says (a cut answer included).
+            if sub in self.userinfo:
+                extra = dict(self.userinfo[sub])
+            else:
+                told = self.claims.get(sub, {})
+                extra = {k: v for k, v in told.items() if k != "eugene_groups_truncated"}
             return {"sub": sub, "name": person["name"], "eugene_role": person["role"], **extra}
 
         @app.get("/oidc/groups")
