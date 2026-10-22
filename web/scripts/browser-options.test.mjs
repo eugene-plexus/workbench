@@ -15,6 +15,7 @@ import {
   ignorablePageError,
   keepScheme,
   newChatLimit,
+  goSignedIn,
 } from "./browser-options.mjs";
 
 const temp = mkdtempSync(join(tmpdir(), "workbench-browsers-"));
@@ -215,4 +216,12 @@ it("limits New chat by its quiet time, so a slow runner passes and a stall does 
   // A page held for 1.5 s adds that to its quiet time.
   expect(700 + 1500 < newChatLimit(700)).toBe(false);
   expect(150 + 1500 < newChatLimit(150)).toBe(false);
+});
+
+it("opens the sign-in page without waiting for every resource to load", async () => {
+  const goto = vi.fn(async () => {});
+  await goSignedIn({ goto }, "http://127.0.0.1:1/#signin=x");
+  expect(goto).toHaveBeenCalledWith("http://127.0.0.1:1/#signin=x", {
+    waitUntil: "domcontentloaded",
+  });
 });

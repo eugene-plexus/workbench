@@ -13,6 +13,7 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import {
   contextOptions,
+  goSignedIn,
   keepScheme,
   ignorablePageError,
   launchBrowser,
@@ -80,7 +81,7 @@ async function open(scheme, viewport, who = cfg, extra = {}) {
       main: response.request().frame() === page.mainFrame(),
     }),
   );
-  await page.goto(`${cfg.url}/#signin=${who.secret}`);
+  await goSignedIn(page, `${cfg.url}/#signin=${who.secret}`);
   await keepScheme(page, browserName, scheme);
   await page.getByTestId("new-chat").waitFor({ state: "attached" });
   return { context, page };
