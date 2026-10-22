@@ -149,3 +149,22 @@ describe("what searching the person's documents came to", () => {
     expect(next.detail.messages[0]!.retrieval?.cited).toEqual([1]);
   });
 });
+
+it("shows the newest read of a chat, even when an older read comes back last", async () => {
+  const running = { ...detail, chat: { ...detail.chat, running: true } };
+  const finished = { ...detail, chat: { ...detail.chat, running: false, title: "finished" } };
+  let answerOld!: (value: ChatDetail) => void;
+  vi.mocked(api)
+    .mockReset()
+    .mockResolvedValueOnce(detail)
+    .mockImplementationOnce(() => new Promise<ChatDetail>((done) => (answerOld = done)))
+    .mockResolvedValueOnce(finished);
+  const { result } = renderHook(() => useChat("c"));
+  await waitFor(() => expect(result.current.detail).toEqual(detail));
+  act(() => watched()({ type: "path" }));
+  act(() => watched()({ type: "reload" }));
+  await waitFor(() => expect(result.current.detail).toEqual(finished));
+  // The first of the two reads lands after the second, with what it saw earlier.
+  await act(async () => answerOld(running));
+  expect(result.current.detail).toEqual(finished);
+});
