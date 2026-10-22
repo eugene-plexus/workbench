@@ -103,6 +103,107 @@ const rgb = (c) =>
     .slice(0, 3)
     .map(Number);
 
+// Extend only this fixture's answer at the browser boundary. The real server,
+// authentication, page headers and chart renderer stay in use; no Python fixture
+// changes are needed for these additional version 1 formats.
+async function withExtraCharts(page) {
+  const pie = {
+    type: "pie",
+    title: "Parts of a whole",
+    series: [{ name: "Parts", points: Array.from({ length: 14 }, (_, i) => [`p${i}`, i + 1]) }],
+  };
+  const stacked = {
+    type: "bar",
+    stacked: true,
+    title: "Stacked totals",
+    series: [
+      {
+        name: "One",
+        points: [
+          ["a", 20],
+          ["b", -3],
+        ],
+      },
+      {
+        name: "Two",
+        points: [
+          ["b", -2],
+          ["a", 21],
+        ],
+      },
+    ],
+  };
+  const scatter = {
+    type: "scatter",
+    title: "Measured points",
+    series: [
+      {
+        name: "One",
+        points: [
+          [1, 2],
+          [2, 4],
+        ],
+      },
+      {
+        name: "Two",
+        points: [
+          [1, 3],
+          [2, 5],
+        ],
+      },
+    ],
+  };
+  const extras = [
+    pie,
+    stacked,
+    scatter,
+    { ...pie, series: [{ points: [["a", -1]] }] },
+    { ...stacked, series: [stacked.series[0], { points: [["a", 1]] }] },
+  ]
+    .map((spec) => `\n\n\`\`\`chart\n${JSON.stringify(spec)}\n\`\`\``)
+    .join("");
+  await page.route(`${origin}/api/chats/${cfg.chats.drawn}`, async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    const answer = body.messages.findLast((message) => message.role === "assistant");
+    answer.content += extras;
+    await route.fulfill({ response, json: body });
+  });
+}
+
+async function checkValues(page, chart, name) {
+  const marks = chart.locator('svg.chart [tabindex="0"]');
+  const first = marks.first();
+  const second = marks.nth(1);
+  const label = await first.getAttribute("aria-label");
+  const next = await second.getAttribute("aria-label");
+  const tooltip = chart.getByRole("tooltip");
+  await first.locator(".chart-marker").hover();
+  await tooltip.waitFor();
+  check(`${name}: hovering a mark shows its value`, (await tooltip.innerText()) === label);
+  await first.focus();
+  await second.locator(".chart-marker").hover();
+  await tooltip.filter({ hasText: next }).waitFor();
+  check(
+    `${name}: hovering another mark shows its own value while the first has focus`,
+    (await tooltip.innerText()) === next &&
+      (await second.getAttribute("aria-describedby")) === (await tooltip.getAttribute("id")),
+    await tooltip.innerText(),
+  );
+  await page.mouse.move(0, 0);
+  await page.keyboard.press("Tab");
+  await tooltip.filter({ hasText: next }).waitFor();
+  check(
+    `${name}: Tab gives the next mark focus and shows its value`,
+    (await second.evaluate((el) => el === document.activeElement)) &&
+      (await tooltip.innerText()) === next,
+  );
+  await page.keyboard.press("Escape");
+  await tooltip.waitFor({ state: "hidden" });
+  check(`${name}: Escape dismisses the value`, (await tooltip.count()) === 0);
+  await chart.getByRole("button", { name: "Data", exact: true }).focus();
+}
+
 try {
   for (const scheme of ["dark", "light"]) {
     const { context, page } = await open(scheme, DESK);
@@ -180,9 +281,10 @@ try {
     );
 
     // --- charts and tables an answer asked for --------------------------------------------
+    await withExtraCharts(page);
     await chat(page, cfg.chats.drawn);
     const drawn = page.locator("[data-testid=answer]").last();
-    const chart = drawn.getByTestId("structured-chart");
+    const chart = drawn.getByTestId("structured-chart").filter({ hasText: "Tokens a second" });
     await chart.waitFor();
     const bars = await chart.locator("svg.chart .chart-bar").count();
     const fills = await chart
@@ -195,6 +297,7 @@ try {
     );
     const named = await chart.locator("svg.chart").getAttribute("aria-labelledby");
     check(`${scheme}: the chart is named for a screen reader`, Boolean(named));
+    await checkValues(page, chart, `${scheme}: bar`);
     const tick = chart.locator("svg.chart .chart-tick").first();
     const panel = await chart.evaluate((el) => getComputedStyle(el).backgroundColor);
     const tickColour = await tick.evaluate((el) => getComputedStyle(el).fill);
@@ -243,6 +346,76 @@ try {
     );
     await chart.screenshot({ path: `${cfg.shots}/chart-${scheme}.png` });
 
+    const pie = drawn.getByTestId("structured-chart").filter({ hasText: "Parts of a whole" });
+    check(
+      `${scheme}: a pie draws at most twelve slices, combining the rest as Other`,
+      (await pie.locator(".chart-pie-slice").count()) === 12 &&
+        (await pie.getByRole("img", { name: "Parts · Other · 39", exact: true }).count()) === 1,
+    );
+    await checkValues(page, pie, `${scheme}: pie`);
+    await pie.getByRole("button", { name: "Data", exact: true }).click();
+    check(
+      `${scheme}: a pie keeps all fourteen original data points`,
+      (await pie.getByRole("row").count()) === 15,
+    );
+    await pie.screenshot({ path: `${cfg.shots}/pie-${scheme}.png` });
+
+    const stacked = drawn.getByTestId("structured-chart").filter({ hasText: "Stacked totals" });
+    const stack = await stacked.evaluate((el) => {
+      const bar = (label) => {
+        const rect = el.querySelector(`[aria-label="${label}"] .chart-bar`);
+        return Object.fromEntries(
+          ["x", "y", "height"].map((key) => [key, Number(rect.getAttribute(key))]),
+        );
+      };
+      return {
+        first: bar("One · a · 20"),
+        second: bar("Two · a · 21"),
+        negativeFirst: bar("One · b · -3"),
+        negativeSecond: bar("Two · b · -2"),
+        top: Math.min(
+          ...[...el.querySelectorAll(".chart-grid")].map((grid) => Number(grid.getAttribute("y1"))),
+        ),
+      };
+    });
+    check(
+      `${scheme}: stacks match categories, separate negative values, and fit the totals`,
+      stack.first.x === stack.second.x &&
+        Math.abs(stack.second.y + stack.second.height - stack.first.y) < 0.01 &&
+        stack.negativeFirst.x === stack.negativeSecond.x &&
+        Math.abs(stack.negativeFirst.y + stack.negativeFirst.height - stack.negativeSecond.y) <
+          0.01 &&
+        stack.second.y >= stack.top,
+      JSON.stringify(stack),
+    );
+    await checkValues(page, stacked, `${scheme}: stacked bar`);
+    await stacked.screenshot({ path: `${cfg.shots}/stacked-${scheme}.png` });
+    const scatter = drawn.getByTestId("structured-chart").filter({ hasText: "Measured points" });
+    await checkValues(page, scatter, `${scheme}: scatter`);
+    for (const example of [chart, pie, stacked, scatter]) {
+      const identities = await example
+        .locator(".chart-legend-mark")
+        .evaluateAll((keys) =>
+          keys.map(
+            (key) =>
+              `${key.querySelector(".chart-marker")?.innerHTML}|${key.querySelector("line")?.getAttribute("stroke-dasharray")}`,
+          ),
+        );
+      check(
+        `${scheme}: ${await example.locator(".structured-title").innerText()} has distinct shapes and dashes`,
+        identities.length > 1 && new Set(identities).size === identities.length,
+      );
+    }
+    for (const reason of [
+      "A pie cannot show negative values.",
+      "A stacked chart needs one value per category in each series.",
+    ]) {
+      check(
+        `${scheme}: refused chart says why: ${reason}`,
+        (await drawn.getByText(`Chart not shown: ${reason}`, { exact: true }).count()) === 1,
+      );
+    }
+
     // --- a tool's chart -----------------------------------------------------------------------
     await chat(page, cfg.chats.plotted);
     const plotted = page.locator("[data-testid=answer]").last().getByTestId("structured-chart");
@@ -252,6 +425,7 @@ try {
       (await plotted.locator("svg.chart polyline").count()) === 1 &&
         (await plotted.innerText()).includes("Load over a day"),
     );
+    await checkValues(page, plotted, `${scheme}: line`);
     const refused = await page.evaluate(() => window.__policy);
     check(`${scheme}: the page's policy refused nothing`, refused.length === 0, refused.join(", "));
     await context.close();
@@ -264,8 +438,9 @@ try {
       hasTouch: true,
       deviceScaleFactor: 3,
     });
+    await withExtraCharts(page);
     await chat(page, cfg.chats.drawn);
-    const chart = page.getByTestId("structured-chart");
+    const chart = page.getByTestId("structured-chart").filter({ hasText: "Tokens a second" });
     await chart.waitFor();
     await chart.scrollIntoViewIfNeeded();
     const fit = await page.evaluate(() => {
@@ -288,6 +463,14 @@ try {
       JSON.stringify(fit.wide),
     );
     await page.screenshot({ path: `${cfg.shots}/chart-light-phone.png` });
+    await page
+      .getByTestId("structured-chart")
+      .filter({ hasText: "Parts of a whole" })
+      .screenshot({ path: `${cfg.shots}/pie-light-phone.png` });
+    await page
+      .getByTestId("structured-chart")
+      .filter({ hasText: "Stacked totals" })
+      .screenshot({ path: `${cfg.shots}/stacked-light-phone.png` });
     await context.close();
   }
 } finally {
