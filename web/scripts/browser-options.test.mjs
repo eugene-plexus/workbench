@@ -14,6 +14,7 @@ import {
   canCheckPreviewLoop,
   ignorablePageError,
   keepScheme,
+  frameGapLimit,
   goChat,
   goSignedIn,
 } from "./browser-options.mjs";
@@ -263,4 +264,10 @@ it("opens a chat for the document outside Chromium, and as before in Chromium", 
     waitUntil: "domcontentloaded",
     timeout: 10_000,
   });
+});
+
+it("allows a frame gap of 250 ms in Chromium and 600 ms elsewhere, far under any stall", () => {
+  expect(frameGapLimit("chromium")).toBe(250);
+  expect(253 < frameGapLimit("firefox")).toBe(true);
+  expect(1500 < frameGapLimit("webkit")).toBe(false);
 });
