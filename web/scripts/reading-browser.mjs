@@ -14,6 +14,7 @@ import {
   contextOptions,
   ignorablePageError,
   fillComposer,
+  goSignedIn,
   keepScheme,
   launchBrowser,
   readOptions,
@@ -38,7 +39,7 @@ async function open(scheme, viewport, extra = {}) {
   page.on("pageerror", (error) => {
     if (!ignorablePageError(browserName, error.message)) errors.push(error.message);
   });
-  await page.goto(`${cfg.url}/#signin=${cfg.secret}`);
+  await goSignedIn(page, `${cfg.url}/#signin=${cfg.secret}`);
   await keepScheme(page, browserName, scheme);
   await page.getByTestId("new-chat").waitFor({ state: "attached" });
   return { context, page };
