@@ -382,6 +382,171 @@ function judgeFaint(scheme, what, numbers) {
   );
 }
 
+async function displaySettings(page, scheme) {
+  const panel = page.getByRole("navigation", { name: "Chats", exact: true });
+  const summary = panel.locator("summary").filter({ hasText: /^Display$/ });
+  await summary.click();
+  const size = panel.getByLabel("Text size");
+  const width = panel.getByLabel("Reading width");
+  const theme = panel.getByLabel("Theme");
+  const speakers = panel.getByLabel("Speaker labels");
+  const paragraph = page.locator("[data-testid=answer] > .answer > p").first();
+  const fontSize = () => paragraph.evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+  const originalSize = await fontSize();
+  check(
+    `${scheme}: Display names the effective text size`,
+    (await size.locator("option:checked").textContent()).includes(`${originalSize} px here`),
+    await size.inputValue(),
+  );
+  await size.selectOption("125");
+  check(
+    `${scheme}: text size scales the browser's size`,
+    Math.abs((await fontSize()) - originalSize * 1.25) < 0.01,
+  );
+  // The viewport does not change when the person changes their browser's font.
+  await page.evaluate(() => {
+    document.documentElement.style.fontSize = "20px";
+  });
+  await page.waitForFunction(() =>
+    [...document.querySelectorAll("option")].some(
+      (el) => el.textContent === "100% (21.25 px here)",
+    ),
+  );
+  check(
+    `${scheme}: Display follows a font change without a window resize`,
+    Math.abs((await fontSize()) - 26.5625) < 0.01,
+  );
+  await page.evaluate(() => {
+    document.documentElement.style.removeProperty("font-size");
+  });
+  for (const [choice, cap] of [
+    ["narrow", "544px"],
+    ["comfortable", "576px"],
+    ["full", "100%"],
+  ]) {
+    await width.selectOption(choice);
+    const actual = await paragraph.evaluate((el) => getComputedStyle(el).maxWidth);
+    check(`${scheme}: ${choice} reading width takes effect`, actual === cap, actual);
+  }
+  const override = scheme === "dark" ? "light" : "dark";
+  await theme.selectOption(override);
+  const look = await page.evaluate(() => ({
+    theme: document.documentElement.dataset.theme,
+    background: getComputedStyle(document.documentElement).getPropertyValue("--background").trim(),
+  }));
+  check(
+    `${scheme}: an explicit theme overrides the system`,
+    look.theme === override && look.background === (override === "light" ? "#fafafb" : "#141619"),
+    JSON.stringify(look),
+  );
+  check(
+    `${scheme}: System names the current browser theme`,
+    (await theme.locator('option[value="system"]').textContent()) === `System (${scheme} now)`,
+  );
+  await speakers.selectOption("on");
+  const labels = await page.locator(".speaker-label").allTextContents();
+  check(
+    `${scheme}: speaker labels name you and the model`,
+    labels.some((label) => label.trim() === "You") &&
+      labels.some((label) => label.trim() !== "You"),
+    labels.join(", "),
+  );
+  const font = await page
+    .locator(".speaker-label")
+    .first()
+    .evaluate((el) => getComputedStyle(el).fontFamily);
+  check(`${scheme}: speaker labels use Plex Mono`, font.includes("IBM Plex Mono"), font);
+  await page.reload();
+  await paragraph.waitFor();
+  await summary.click();
+  check(
+    `${scheme}: Display keeps all four choices after reload`,
+    (await size.inputValue()) === "125" &&
+      (await width.inputValue()) === "full" &&
+      (await theme.inputValue()) === override &&
+      (await speakers.inputValue()) === "on" &&
+      Math.abs((await fontSize()) - originalSize * 1.25) < 0.01,
+  );
+  await page.evaluate(() => {
+    const storage = window.Storage.prototype;
+    const get = storage.getItem,
+      set = storage.setItem;
+    window.__restoreDisplayStorage = () => {
+      storage.getItem = get;
+      storage.setItem = set;
+    };
+    storage.getItem = function (key) {
+      if (key === "workbench.display") throw new Error("blocked");
+      return get.call(this, key);
+    };
+    storage.setItem = function (key, value) {
+      if (key === "workbench.display") throw new Error("blocked");
+      return set.call(this, key, value);
+    };
+  });
+  try {
+    await width.selectOption("narrow");
+    await page.evaluate(() =>
+      window.dispatchEvent(new window.StorageEvent("storage", { key: "workbench.display" })),
+    );
+    check(
+      `${scheme}: blocked storage keeps this page's choices and says why`,
+      (await width.inputValue()) === "narrow" &&
+        (await theme.inputValue()) === override &&
+        (await panel
+          .getByText("Not kept: this browser blocks storage.", { exact: true })
+          .isVisible()),
+    );
+  } finally {
+    await page.evaluate(() => {
+      window.__restoreDisplayStorage();
+      delete window.__restoreDisplayStorage;
+    });
+  }
+  await size.selectOption("100");
+  await width.selectOption("comfortable");
+  await theme.selectOption("system");
+  await speakers.selectOption("off");
+  check(
+    `${scheme}: System restores the browser theme`,
+    (await page.evaluate(() => document.documentElement.dataset.theme)) === scheme,
+  );
+  await summary.click();
+}
+
+async function phoneDisplaySettings(page, scheme) {
+  await page.setViewportSize({ width: 390, height: 568 });
+  await page.locator('[aria-controls="chat-navigation"]').click();
+  const panel = page.getByRole("navigation", { name: "Chats", exact: true });
+  const summary = panel.locator("summary").filter({ hasText: /^Display$/ });
+  await summary.click();
+  for (const name of ["Text size", "Reading width", "Theme", "Speaker labels"]) {
+    const control = panel.getByLabel(name);
+    await control.scrollIntoViewIfNeeded();
+    const reachable = await control.evaluate((el) => {
+      const box = el.getBoundingClientRect();
+      return (
+        box.top >= 0 &&
+        box.bottom <= window.innerHeight &&
+        box.left >= 0 &&
+        box.right <= window.innerWidth
+      );
+    });
+    check(`${scheme} phone: ${name} is reachable`, reachable);
+  }
+  await panel.getByLabel("Speaker labels").selectOption("on");
+  await panel.getByRole("button", { name: "Back to chat" }).click();
+  check(
+    `${scheme} phone: Display changes take effect in the chat`,
+    await page.locator(".speaker-label").first().isVisible(),
+  );
+  await page.locator('[aria-controls="chat-navigation"]').click();
+  await panel.getByLabel("Speaker labels").selectOption("off");
+  await summary.click();
+  await panel.getByRole("button", { name: "Back to chat" }).click();
+  await page.setViewportSize(PHONE);
+}
+
 try {
   for (const scheme of ["dark", "light"]) {
     {
@@ -397,6 +562,7 @@ try {
       const numbers = await page.evaluate(probe);
       writeFileSync(`${cfg.shots}/styles-${scheme}.json`, JSON.stringify(numbers, null, 2));
       judge(scheme, numbers, await page.evaluate(structure));
+      await displaySettings(page, scheme);
       const css = await page.evaluate(() => {
         const answer = document.querySelector(".answer");
         const text = getComputedStyle(answer);
@@ -552,6 +718,7 @@ try {
       );
       const wide = (await page.evaluate(structure)).overflow;
       check(`${scheme} phone: nothing is wider than the screen`, wide <= 1, `${wide}px too wide`);
+      await phoneDisplaySettings(page, scheme);
       await chat(page, cfg.chats.story);
       await toTop(page);
       await page.screenshot(shot(`story-${scheme}-phone`));

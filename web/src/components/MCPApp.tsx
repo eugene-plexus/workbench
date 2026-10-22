@@ -189,6 +189,9 @@ function AppFrame({
           lastPong = performance.now();
           clearTimeout(timer);
           setStatus("App open. Requested actions need your review below.");
+          // The choice can change after initialize's reply but before the
+          // app is ready to receive notifications.
+          notify("ui/notifications/host-context-changed", context(themeRef.current));
           notify("ui/notifications/tool-input", object(view.toolInput));
           notify("ui/notifications/tool-result", object(view.toolResult));
         }
