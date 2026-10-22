@@ -124,6 +124,7 @@ export interface Message {
   /** Its place among its versions, from 1: the edits of a message, or the
    * tries of an answer, oldest first (workbench-answer-versions.md). */
   versions?: Versions;
+  branchName?: string | null;
   /** What the blocks the person changed keep (rich content RC5), found again by
    * each block's words (lib/artifacts.ts `digest`). */
   artifacts?: ArtifactSummary[];
@@ -144,6 +145,7 @@ export interface Versions {
   index: number;
   count: number;
   ids: string[];
+  names?: (string | null)[];
 }
 
 export interface ToolCall {
@@ -356,6 +358,13 @@ export interface ChatDetail {
   chat: Chat;
   messages: Message[];
   ownerName: string | null;
+  deletedBranches?: {
+    id: string;
+    deleteAt: number;
+    state: "hidden" | "purging" | "restoring" | "preparing";
+    problem: string | null;
+    message?: string;
+  }[];
 }
 
 export interface Me {

@@ -112,6 +112,10 @@ class NotesIndex:
         self.dirty: set[str] = set()
         self._task: asyncio.Task[None] | None = None
         self._retrying: asyncio.Task[None] | None = None
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    def lock(self, owner: str) -> asyncio.Lock:
+        return self._locks.setdefault(owner, asyncio.Lock())
 
     def _index(self, owner: str) -> Any:
         return self.saved.index(owner, create=True)
@@ -122,6 +126,10 @@ class NotesIndex:
             meaning.wake(owner)
 
     async def put(self, owner: str, note_ids: Sequence[str]) -> None:
+        async with self.lock(owner):
+            await self._put(owner, note_ids)
+
+    async def _put(self, owner: str, note_ids: Sequence[str]) -> None:
         """Make the index hold these notes as they are now: a current note is put, any
         other (gone, superseded, pending) is taken out. Never raises: a failure is logged,
         and the person's notes are reconciled later."""
@@ -163,6 +171,10 @@ class NotesIndex:
         await index.delete_notes(list(note_ids))
 
     async def reconcile(self, owner: str) -> tuple[int, int]:
+        async with self.lock(owner):
+            return await self._reconcile(owner)
+
+    async def _reconcile(self, owner: str) -> tuple[int, int]:
         """Make the person's index hold exactly their current notes, each at its digest:
         `(put, removed)`. Raises what the index raises."""
         listed = [n.id for n in await self.store.memory_notes(owner)]

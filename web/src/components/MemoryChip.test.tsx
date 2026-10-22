@@ -10,6 +10,23 @@ vi.mock("../lib/api", () => ({ api: vi.fn(), del: vi.fn(), patch: vi.fn(), post:
 vi.mock("./Tools", () => ({ ToolSelection: () => null }));
 vi.mock("./Folders", () => ({ FolderSelection: () => null }));
 
+it("lets the person remove an old recall when memory is now off", async () => {
+  drawer(
+    held("chat_off", "Memory is off in this chat.", {
+      turn: turn({
+        memoryServer: { name: "Memory", why: null, memories: [{ text: "Old recall", date: null }] },
+      }),
+    }),
+  );
+  vi.mocked(post).mockResolvedValue({ removed: true });
+  fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith("/api/chats/c1/messages/a1/recalls/remove", {
+      recall: { text: "Old recall", date: null },
+    }),
+  );
+});
+
 const chat: Chat = {
   id: "c1",
   title: "Build a birdhouse",

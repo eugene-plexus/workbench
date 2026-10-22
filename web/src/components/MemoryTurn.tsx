@@ -8,7 +8,7 @@
 import { CircleAlert } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 
-import { api } from "../lib/api";
+import { api, post } from "../lib/api";
 import { failureWords, kindLabel, plural, tokenWords } from "../lib/memory";
 import type { ChatMemory, ChatMemoryReadOnly, MemoryServerTurn, MemoryTurn } from "../lib/types";
 
@@ -44,13 +44,22 @@ export function ReadOnlyTurn({ view }: { view: ChatMemoryReadOnly }) {
   );
 }
 
-export function ThisTurn({ chatId, view }: { chatId: string; view: ChatMemory }) {
+export function ThisTurn({
+  chatId,
+  view,
+  onChanged,
+}: {
+  chatId: string;
+  view: ChatMemory;
+  onChanged?: () => void | Promise<void>;
+}) {
   const uid = useId();
   const turns = view.turns ?? [];
   const latest = view.turn ?? null;
   // The turn picked from the list, read from the server; the latest answer's comes with the view.
   const [picked, setPicked] = useState<MemoryTurn | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  const [removing, setRemoving] = useState(false);
 
   // A new answer is a new latest turn: the one that was picked is let go.
   useEffect(() => {
@@ -74,6 +83,31 @@ export function ThisTurn({ chatId, view }: { chatId: string; view: ChatMemory })
   }
 
   const chosen = picked ?? latest;
+
+  async function removeRecall(index: number) {
+    if (!chosen?.memoryServer) return;
+    const recall = chosen.memoryServer.memories[index];
+    setRemoving(true);
+    setProblem(null);
+    try {
+      await post(
+        `/api/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(chosen.messageId)}/recalls/remove`,
+        { recall },
+      );
+      setPicked({
+        ...chosen,
+        memoryServer: {
+          ...chosen.memoryServer,
+          memories: chosen.memoryServer.memories.filter((_, i) => i !== index),
+        },
+      });
+      await onChanged?.();
+    } catch (failure) {
+      setProblem(failureWords(failure));
+    } finally {
+      setRemoving(false);
+    }
+  }
   // A turn sent past chats and no notes keeps no notes' record (MV2).
   const turn = chosen && Array.isArray(chosen.notes) ? chosen : null;
   // A person with no notes may still have been sent their memory server's results (MV5).
@@ -105,6 +139,7 @@ export function ThisTurn({ chatId, view }: { chatId: string; view: ChatMemory })
             id={`${uid}-pick`}
             data-testid="memory-turn-pick"
             value={chosen?.messageId ?? ""}
+            disabled={removing}
             onChange={(event) => void pick(event.target.value)}
             className="control w-56 max-w-full"
           >
@@ -167,13 +202,23 @@ export function ThisTurn({ chatId, view }: { chatId: string; view: ChatMemory })
       ) : (
         <p className="help">No answer in this chat has been sent notes yet.</p>
       )}
-      {chosen?.memoryServer && <ServerTurn server={chosen.memoryServer} />}
+      {chosen?.memoryServer && (
+        <ServerTurn server={chosen.memoryServer} busy={removing} onRemove={removeRecall} />
+      )}
     </section>
   );
 }
 
 /** What the person's own memory server gave the turn (MV5), or why it gave nothing. */
-function ServerTurn({ server }: { server: MemoryServerTurn }) {
+function ServerTurn({
+  server,
+  busy,
+  onRemove,
+}: {
+  server: MemoryServerTurn;
+  busy: boolean;
+  onRemove: (index: number) => Promise<void>;
+}) {
   const name = server.name || "Your memory server";
   return (
     <div data-testid="memory-turn-server" className="flex flex-col gap-1">
@@ -197,6 +242,14 @@ function ServerTurn({ server }: { server: MemoryServerTurn }) {
             <li key={index} dir="auto" className="py-2 wrap-anywhere">
               {one.text}
               {one.date && <span className="text-xs text-muted"> ({one.date})</span>}
+              <button
+                type="button"
+                className="btn btn-quiet"
+                disabled={busy}
+                onClick={() => void onRemove(index)}
+              >
+                Remove
+              </button>
             </li>
           ))}
         </ul>

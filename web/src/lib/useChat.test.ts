@@ -1,12 +1,12 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 
-import { api } from "./api";
+import { api, ApiError } from "./api";
 import { watch } from "./events";
 import type { ChatDetail, ChatEvent, Message } from "./types";
 import { record } from "../test-saved";
 import { applyEvent, useChat } from "./useChat";
 
-vi.mock("./api", () => ({ api: vi.fn() }));
+vi.mock("./api", async (actual) => ({ ...(await actual<typeof import("./api")>()), api: vi.fn() }));
 vi.mock("./events", () => ({ watch: vi.fn() }));
 
 const detail: ChatDetail = {
@@ -35,6 +35,17 @@ beforeEach(() => {
   vi.mocked(watch)
     .mockReset()
     .mockReturnValue({ close: () => undefined });
+});
+
+it("returns an owner's view to the current path when the viewed branch is deleted", async () => {
+  const { result } = renderHook(() => useChat("c"));
+  await waitFor(() => expect(result.current.detail).not.toBeNull());
+  vi.mocked(api)
+    .mockRejectedValueOnce(new ApiError("Gone", 404, {}))
+    .mockResolvedValue(detail);
+  act(() => result.current.look("gone"));
+  await waitFor(() => expect(api).toHaveBeenLastCalledWith("/api/chats/c"));
+  expect(result.current.error).toBeNull();
 });
 
 it("reloads every tab when another version is shown", async () => {

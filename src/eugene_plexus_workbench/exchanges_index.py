@@ -211,6 +211,10 @@ class ExchangesIndex:
         self._worker: asyncio.Task[None] | None = None
         self._backfill: asyncio.Task[None] | None = None
         self._refills: set[asyncio.Task[None]] = set()
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    def lock(self, chat_id: str) -> asyncio.Lock:
+        return self._locks.setdefault(chat_id, asyncio.Lock())
 
     def _meaning(self, owner: str) -> None:
         meaning = getattr(self.saved, "meaning", None)
@@ -233,6 +237,12 @@ class ExchangesIndex:
                 )
 
     async def sync_chat(
+        self, owner: str, chat_id: str, signature: str | None = None
+    ) -> tuple[int, int]:
+        async with self.lock(chat_id):
+            return await self._sync_chat(owner, chat_id, signature)
+
+    async def _sync_chat(
         self, owner: str, chat_id: str, signature: str | None = None
     ) -> tuple[int, int]:
         """Make the person's index hold exactly this chat's exchanges as the store has them:
@@ -279,6 +289,13 @@ class ExchangesIndex:
         if index is None:
             return 0
         return int(await index.delete_exchanges(chat_id=chat_id))
+
+    async def remove_exchanges(self, owner: str, chat_id: str, ids: list[str]) -> int:
+        """Remove only this branch's exchanges; caller holds the chat's sync lock."""
+        index = self.saved.index(owner, create=False)
+        if index is None:
+            return 0
+        return int(await index.delete_exchanges(ids=ids))
 
     async def _work(self) -> None:
         """Sync each touched chat once; retry the ones that failed every `RETRY_SECONDS`."""

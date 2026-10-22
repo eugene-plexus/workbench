@@ -196,7 +196,8 @@ async def delete_project(request: Request, project_id: str, keep: bool = False) 
         }
     gone_chats = gone_notes = 0
     for chat in [c for c in await store.chats(person.sub) if c.project_id == project.id]:
-        await remove_chat(request, person, chat)
+        async with _state(request).branches.lock(chat.id):
+            await remove_chat(request, person, chat)
         gone_chats += 1
     for note in [n for n in await store.memory_notes(person.sub) if n.project_id == project.id]:
         try:

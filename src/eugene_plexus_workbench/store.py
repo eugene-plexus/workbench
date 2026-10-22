@@ -95,12 +95,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import branch_store
 from .agui_store import SCHEMA as AGUI_SCHEMA
 from .agui_store import AGUIStore, allow_chat_write
 from .interaction_store import SCHEMA as INTERACTION_SCHEMA
 from .interaction_store import InteractionStore
 
-SCHEMA_VERSION = 28
+SCHEMA_VERSION = 29
 
 #: The oldest schema this migrates from: what Workbench v0.1.0 wrote. Schema 1 predates
 #: it, and nobody holds one.
@@ -843,6 +844,7 @@ _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
     27: [_projects],
     # A removed person (row 7, 2026-10-21): two new tables and one new column.
     28: [_removal],
+    29: [branch_store.migration],
 }
 
 
@@ -979,6 +981,7 @@ def _initialize_schema(
         _provenance(db)
         _projects(db)
         _removal(db)
+        branch_store.migration(db)
         db.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?)",
             (str(SCHEMA_VERSION),),
@@ -1007,6 +1010,7 @@ _HIDDEN = (
 #: columns it has. `memory_measurements.owner` is who measured a model for the whole install:
 #: the measurement stays and the name goes (`_NULLED`).
 PERSON_TABLES: tuple[tuple[str, str], ...] = (
+    ("deleted_branches", "owner"),
     ("artifact_revisions", "artifact_id"),
     ("agui_events", "chat_id"),
     ("agui_runs", "chat_id"),
@@ -1047,9 +1051,13 @@ _NULLED: tuple[tuple[str, str], ...] = (("memory_measurements", "owner"),)
 _PERSON_SETTINGS = ("installModeSeen", "runPreviews")
 
 
-def _purge_rows(db: sqlite3.Connection, sub: str) -> dict[str, int]:
+def _purge_rows(
+    db: sqlite3.Connection, sub: str, *, branch: dict[str, Any] | None = None
+) -> dict[str, int]:
     """Delete every row of `sub`'s that `PERSON_TABLES` names, in an open transaction, from the
     tables this store (or copy) has. How many rows went from each table."""
+    if branch is not None:
+        return branch_store.purge_rows(db, branch)
     have: dict[str, set[str]] = {}
     for (name,) in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'"):
         have[name] = {row[1] for row in db.execute(f"PRAGMA table_info({name})")}
@@ -1092,18 +1100,25 @@ def _purge_rows(db: sqlite3.Connection, sub: str) -> dict[str, int]:
     return gone
 
 
+def _checkpoint(db: sqlite3.Connection) -> None:
+    result = db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    if result is not None and result[0]:
+        raise sqlite3.OperationalError("a reader still has the store's write-ahead log open")
+
+
 def _rewrite(db: sqlite3.Connection) -> None:
     """Leave nothing deleted anywhere in the file: the full-text index's segments merged (a
     deleted word is otherwise kept in them), every page written again (`VACUUM`), and the
     write-ahead log folded in and emptied. `secure_delete` is on, so the pages a delete freed
     held zeros already; this takes them out of the file."""
-    if db.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_notes_fts'"
-    ).fetchone():
-        db.execute("INSERT INTO memory_notes_fts (memory_notes_fts) VALUES ('optimize')")
-    db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    for table in ("memory_notes_fts", "chunks_fts"):
+        if db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+        ).fetchone():
+            db.execute(f"INSERT INTO {table} ({table}) VALUES ('optimize')")
+    _checkpoint(db)
     db.execute("VACUUM")
-    db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    _checkpoint(db)
 
 
 def _all_copies(path: Path) -> list[Path]:
@@ -1114,17 +1129,18 @@ def _all_copies(path: Path) -> list[Path]:
     return sorted(p for p in path.parent.iterdir() if named.fullmatch(p.name) and p.is_file())
 
 
-def _purge_copy(copy: Path, sub: str) -> None:
+def _purge_copy(copy: Path, sub: str, *, branch: dict[str, Any] | None = None) -> None:
     """The purge, on one kept copy: its own tables, then the file written again. The copy stays
     for everyone else in it; a copy is one file in rollback-journal mode, as `_keep_backup` makes
     it, and is left that way."""
     db = sqlite3.connect(copy, isolation_level=None)
+    db.row_factory = sqlite3.Row
     try:
         db.execute("PRAGMA journal_mode=DELETE")
         db.execute("PRAGMA secure_delete=ON")
         db.execute("BEGIN IMMEDIATE")
         try:
-            _purge_rows(db, sub)
+            _purge_rows(db, sub, branch=branch)
             db.execute("COMMIT")
         except BaseException:
             with contextlib.suppress(sqlite3.Error):
@@ -1364,6 +1380,7 @@ class Message:
 
     reasoning_tokens: int | None = None
     reasoning_seconds: float | None = None
+    branch_name: str | None = None
 
 
 @dataclass
@@ -1645,6 +1662,7 @@ def _message(row: sqlite3.Row) -> Message:
         memory_used=_snapshot(row["memory_used"]),
         reasoning_tokens=row["reasoning_tokens"],
         reasoning_seconds=row["reasoning_seconds"],
+        branch_name=row["branch_name"],
     )
 
 
@@ -1954,8 +1972,9 @@ def versions(tree: list[Message]) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for group in _groups(tree).values():
         ids = [m.id for m in group]
+        names = [m.branch_name for m in group]
         for index, message in enumerate(group, start=1):
-            out[message.id] = {"index": index, "count": len(ids), "ids": ids}
+            out[message.id] = {"index": index, "count": len(ids), "ids": ids, "names": names}
     return out
 
 
@@ -2042,6 +2061,7 @@ class Store:
         self._path = path
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="workbench-store")
         self._db: sqlite3.Connection | None = None
+        self._branch_forget: list[tuple[str, str, str, float]] = []
         self.interactions = InteractionStore(self)
         self.agui = AGUIStore(self)
         #: The copy that holds this store as it was before it was migrated, if it was: a
@@ -2090,6 +2110,11 @@ class Store:
                 db.close()
                 raise
             self._db = db
+            self._branch_forget = [
+                (r["id"], r["owner"], r["chat_id"], r["deleted_at"])
+                for r in branch_store.rows(db, "deleted_branches")
+                if r["state"] != "preparing"
+            ]
         return self._db
 
     async def open(self) -> None:
@@ -2564,6 +2589,11 @@ class Store:
         was sent (`memory_used.pastChats`) and a kept `search_chats` result that quoted it.
         Its exchanges in the person's index go first, by the route (`exchanges_index`)."""
 
+        now = time.time()
+        await self.expire_chat_branches(chat_id, now=now)
+        for archive in await self.deleted_branches(chat_id):
+            await self.purge_branch(archive["id"], now=now, queue_forget=True)
+
         def go() -> None:
             db = self._conn()
             db.execute("BEGIN")
@@ -2608,6 +2638,390 @@ class Store:
 
     # --- messages -------------------------------------------------------
 
+    async def branch_payload(self, chat_id: str, message_id: str) -> dict[str, Any]:
+        return await self._run(lambda: branch_store.capture(self._conn(), chat_id, message_id))
+
+    async def branch_summary(self, chat_id: str, message_id: str) -> dict[str, Any]:
+        payload = await self.branch_payload(chat_id, message_id)
+        summary = branch_store.summary(
+            await self._run(lambda: branch_store.resolve(self._conn(), payload))
+        )
+        summary["token"] = branch_store.fingerprint(payload)
+        summary["legacyRecalls"] = bool(
+            await self._run(lambda: self._branch_legacy_recalls(payload, overlapping=False))
+        )
+        return summary
+
+    async def prepare_branch(
+        self, chat_id: str, message_id: str, index: dict[str, Any], *, now: float
+    ) -> None:
+        def go() -> None:
+            db = self._conn()
+            payload = branch_store.capture(db, chat_id, message_id)
+            payload["index"] = index
+            db.execute(
+                "INSERT INTO deleted_branches "
+                "(id,chat_id,owner,deleted_at,delete_at,state,payload) "
+                "VALUES (?,?,?,?,?,'preparing',?)",
+                (
+                    message_id,
+                    chat_id,
+                    payload["owner"],
+                    now,
+                    now + 30 * branch_store.DAY,
+                    json.dumps(payload),
+                ),
+            )
+
+        await self._run(go)
+
+    async def cancel_branch_preparation(self, message_id: str) -> None:
+        await self._run(
+            lambda: self._conn().execute(
+                "DELETE FROM deleted_branches WHERE id=? AND state='preparing'", (message_id,)
+            )
+        )
+
+    async def branch_forgets_owed(self, owner: str) -> list[dict[str, Any]]:
+        return [
+            r
+            for archive in await self.deleted_branches()
+            if archive["owner"] == owner
+            for r in json.loads(archive["payload"])["tables"].get("memory_server_sent", [])
+            if r["state"] != "send"
+        ]
+
+    async def deleted_branches(self, chat_id: str | None = None) -> list[dict[str, Any]]:
+        def go() -> list[dict[str, Any]]:
+            return [
+                r
+                for r in branch_store.rows(self._conn(), "deleted_branches")
+                if chat_id is None or r["chat_id"] == chat_id
+            ]
+
+        return await self._run(go)
+
+    async def delete_branch(
+        self,
+        chat_id: str,
+        message_id: str,
+        *,
+        now: float | None = None,
+        index: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Hide a branch transactionally in this store, keeping its exact rows for Undo."""
+        now = time.time() if now is None else now
+
+        def go() -> dict[str, Any]:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                payload = branch_store.capture(db, chat_id, message_id)
+                payload["index"] = index or {}
+                root = next(r for r in payload["tables"]["messages"] if r["id"] == message_id)
+                siblings = [
+                    r
+                    for r in branch_store.rows(db, "messages")
+                    if r["chat_id"] == chat_id and r["parent_id"] == root["parent_id"]
+                ]
+                before = [r for r in siblings if r["seq"] < root["seq"]]
+                after = [r for r in siblings if r["seq"] > root["seq"]]
+                replacement = (
+                    max(before, key=lambda r: r["seq"])
+                    if before
+                    else (min(after, key=lambda r: r["seq"]) if after else None)
+                )
+                branch_store.purge_rows(db, payload, hiding=True)
+                if root["chosen"] and replacement:
+                    _choose(db, chat_id, replacement["id"])
+                db.execute(
+                    "INSERT INTO deleted_branches (id,chat_id,owner,deleted_at,delete_at,payload) "
+                    "VALUES (?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+                    "state='hidden',payload=excluded.payload,problem=NULL",
+                    (
+                        message_id,
+                        chat_id,
+                        payload["owner"],
+                        now,
+                        now + 30 * branch_store.DAY,
+                        json.dumps(payload),
+                    ),
+                )
+                db.execute("UPDATE chats SET updated_at=? WHERE id=?", (now, chat_id))
+                db.execute("COMMIT")
+                self._branch_forget.append((message_id, payload["owner"], chat_id, now))
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return {"id": message_id, "deleteAt": now + 30 * branch_store.DAY}
+
+        return await self._run(go)
+
+    async def undo_branch(self, chat_id: str, message_id: str, *, now: float | None = None) -> bool:
+        now = time.time() if now is None else now
+
+        def go() -> bool:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute(
+                    "SELECT * FROM deleted_branches WHERE id=? AND chat_id=? "
+                    "AND ((state='hidden' AND delete_at>?) OR state='restoring')",
+                    (message_id, chat_id, now),
+                ).fetchone()
+                if row is None:
+                    db.execute("COMMIT")
+                    return False
+                if not db.execute("SELECT 1 FROM chats WHERE id=?", (chat_id,)).fetchone():
+                    db.execute("COMMIT")
+                    return False
+                allow_chat_write(db, chat_id)
+                if db.execute(
+                    "SELECT 1 FROM messages WHERE chat_id=? AND status='running'", (chat_id,)
+                ).fetchone():
+                    from .interaction_store import InteractionError
+
+                    raise InteractionError("Wait for the answer, or stop it.")
+                payload = json.loads(row["payload"])
+                root = next(r for r in payload["tables"]["messages"] if r["id"] == message_id)
+                if (
+                    root["parent_id"] is not None
+                    and not db.execute(
+                        "SELECT 1 FROM messages WHERE id=? AND chat_id=?",
+                        (root["parent_id"], chat_id),
+                    ).fetchone()
+                ):
+                    from .interaction_store import InteractionError
+
+                    raise InteractionError("Restore the deleted version before this one first.")
+                db.execute("DELETE FROM deleted_branches WHERE id=?", (message_id,))
+                db.execute(
+                    "UPDATE messages SET chosen=0 WHERE chat_id=? AND parent_id IS ?",
+                    (chat_id, root["parent_id"]),
+                )
+                payload["tables"]["files"] = payload.get("shared_files", payload["tables"]["files"])
+                branch_store.restore_rows(db, payload["tables"])
+                branch_store.restore_projections(db, payload)
+                for mid, chosen in payload["chosen"].items():
+                    db.execute(
+                        "UPDATE messages SET chosen=? WHERE id=? AND chat_id=?",
+                        (chosen, mid, chat_id),
+                    )
+                db.execute("UPDATE chats SET updated_at=? WHERE id=?", (now, chat_id))
+                db.execute("COMMIT")
+                self._branch_forget = [r for r in self._branch_forget if r[0] != message_id]
+                return True
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+
+        return await self._run(go)
+
+    async def put_branch(self, message_id: str, **values: Any) -> None:
+        if set(values) - {"state", "payload", "problem", "steps"}:
+            raise ValueError("not branch deletion fields")
+        await self._run(
+            lambda: self._conn().execute(
+                f"UPDATE deleted_branches SET {', '.join(f'{k}=?' for k in values)} WHERE id=?",
+                (*values.values(), message_id),
+            )
+        )
+
+    async def expire_chat_branches(self, chat_id: str, *, now: float) -> None:
+        def go() -> None:
+            db = self._conn()
+            # Check every branch before changing any Undo deadline or purging a sibling.
+            for row in db.execute(
+                "SELECT payload FROM deleted_branches WHERE chat_id=?", (chat_id,)
+            ):
+                payload = branch_store.resolve(db, json.loads(row[0]))
+                payload["deleting_chat"] = True
+                if recalls := self._branch_legacy_recalls(payload):
+                    from .interaction_store import InteractionError
+
+                    recall = recalls[0]
+                    raise InteractionError(
+                        "This chat cannot be deleted while an older memory recall may quote "
+                        f"one of its deleted answers: {recall['title']} "
+                        f"(answer {recall['id']}), {recall['text']!r}. "
+                        "Remove that recall to finish.",
+                        503,
+                    )
+            db.execute(
+                "UPDATE deleted_branches SET delete_at=?,state='purging' WHERE chat_id=?",
+                (now, chat_id),
+            )
+
+        await self._run(go)
+
+    def _branch_legacy_recalls(
+        self, payload: dict[str, Any], *, overlapping: bool = True
+    ) -> list[dict[str, str]]:
+        found = branch_store.legacy_recalls(self._conn(), payload, overlapping=overlapping)
+        backup_payload = branch_store.backup_scope(self._conn(), payload)
+        for path in _all_copies(self._path):
+            copy = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+            try:
+                found.extend(
+                    branch_store.legacy_recalls(copy, backup_payload, overlapping=overlapping)
+                )
+            finally:
+                copy.close()
+        return sorted(
+            {tuple(r.items()): r for r in found}.values(),
+            key=lambda r: (r["id"], r["signature"]),
+        )
+
+    async def branch_legacy_recalls(
+        self, message_id: str, *, deleting_chat: bool = False
+    ) -> list[dict[str, str]]:
+        def go() -> list[dict[str, str]]:
+            row = (
+                self._conn()
+                .execute("SELECT payload FROM deleted_branches WHERE id=?", (message_id,))
+                .fetchone()
+            )
+            if row is None:
+                return []
+            payload = branch_store.resolve(self._conn(), json.loads(row[0]))
+            payload["deleting_chat"] = deleting_chat
+            return self._branch_legacy_recalls(payload)
+
+        return await self._run(go)
+
+    async def remove_answer_recall(
+        self, chat_id: str, message_id: str, recall: dict[str, Any]
+    ) -> bool:
+        """Remove the exact recall reviewed by the owner, without trusting a stale list index."""
+
+        def go() -> bool:
+            db = self._conn()
+            row = db.execute(
+                "SELECT memory_used FROM messages WHERE id=? AND chat_id=?", (message_id, chat_id)
+            ).fetchone()
+            used = json.loads(row[0] or "null") if row else None
+            server = (used or {}).get("memoryServer") or {}
+            memories = server.get("memories") or []
+            if recall not in memories:
+                return False
+            for path in _all_copies(self._path):
+                copy = sqlite3.connect(path, isolation_level=None)
+                try:
+                    copy.execute("PRAGMA secure_delete=ON")
+                    if branch_store.remove_recall(copy, chat_id, message_id, recall):
+                        _rewrite(copy)
+                finally:
+                    copy.close()
+            branch_store.remove_recall(db, chat_id, message_id, recall)
+            _rewrite(db)
+            return True
+
+        return await self._run(go)
+
+    async def purge_branch(
+        self, message_id: str, *, now: float | None = None, queue_forget: bool = False
+    ) -> bool:
+        """Use row 7's scoped purge, VACUUM/checkpoints and every-backup cleanup."""
+        now = time.time() if now is None else now
+        row = next((r for r in await self.deleted_branches() if r["id"] == message_id), None)
+        if row is None or row["delete_at"] > now:
+            return False
+        payload = await self._run(
+            lambda: branch_store.resolve(self._conn(), json.loads(row["payload"]))
+        )
+        payload["deleting_chat"] = queue_forget
+        await self.put_branch(message_id, state="purging")
+        # Copies first: the durable recovery record survives any failed copy or rewrite.
+        await self.purge_copies(row["owner"], branch=payload)
+
+        def go() -> None:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                _purge_rows(db, row["owner"], branch=payload)
+                if queue_forget:
+                    # Chat deletion uses the same durable courier queue as its live answers.
+                    for sent in payload["tables"].get("memory_server_sent", []):
+                        if sent["state"] != "send":
+                            record = {
+                                **sent,
+                                "state": "forget",
+                                "attempts": 0,
+                                "created_at": now,
+                                "next_at": now,
+                            }
+                            branch_store.restore_rows(db, {"memory_server_sent": [record]})
+                # This recovery flag carries no person's words or branch identifiers.
+                # It survives a failed rewrite after the deletion transaction commits.
+                db.execute("INSERT OR REPLACE INTO settings VALUES ('branchRewrite', 'true')")
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            _rewrite(db)
+            db.execute("DELETE FROM settings WHERE key='branchRewrite'")
+            db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+        await self._run(go)
+        return True
+
+    async def finish_branch_rewrite(self) -> None:
+        def go() -> None:
+            db = self._conn()
+            if db.execute("SELECT 1 FROM settings WHERE key='branchRewrite'").fetchone():
+                _rewrite(db)
+                db.execute("DELETE FROM settings WHERE key='branchRewrite'")
+                db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+        await self._run(go)
+
+    async def branch_purge_payload(self, message_id: str) -> dict[str, Any]:
+        def go() -> dict[str, Any]:
+            row = (
+                self._conn()
+                .execute("SELECT payload FROM deleted_branches WHERE id=?", (message_id,))
+                .fetchone()
+            )
+            if row is None:
+                return {}
+            payload = branch_store.resolve(self._conn(), json.loads(row[0]))
+            payload["tables"]["files"] = branch_store.purge_files(self._conn(), payload)
+            return payload
+
+        return await self._run(go)
+
+    async def branch_undo_payload(self, message_id: str) -> dict[str, Any]:
+        def go() -> dict[str, Any]:
+            row = (
+                self._conn()
+                .execute("SELECT payload FROM deleted_branches WHERE id=?", (message_id,))
+                .fetchone()
+            )
+            payload = json.loads(row[0])
+            payload["index"] = branch_store.undo_index(self._conn(), payload)
+            return dict(payload)
+
+        return await self._run(go)
+
+    async def name_version(self, chat_id: str, message_id: str, name: str | None) -> bool:
+        if name is not None and (
+            not 1 <= len(name) <= 60 or any(unicodedata.category(c).startswith("C") for c in name)
+        ):
+            raise ValueError("Use 1 to 60 characters, with no control characters.")
+
+        def go() -> bool:
+            return (
+                self._conn()
+                .execute(
+                    "UPDATE messages SET branch_name=? WHERE chat_id=? AND id=?",
+                    (name, chat_id, message_id),
+                )
+                .rowcount
+                > 0
+            )
+
+        return await self._run(go)
+
     async def add_message(
         self, message: Message, *, parent_id: str | None, agui_run_id: str | None = None
     ) -> Message:
@@ -2626,6 +3040,18 @@ class Store:
             db.execute("BEGIN IMMEDIATE")
             try:
                 allow_chat_write(db, message.chat_id, agui_run_id)
+                if (
+                    parent_id is not None
+                    and not db.execute(
+                        "SELECT 1 FROM messages WHERE id=? AND chat_id=?",
+                        (parent_id, message.chat_id),
+                    ).fetchone()
+                ):
+                    from .interaction_store import InteractionError
+
+                    raise InteractionError(
+                        "This version was deleted. Reload the chat and try again."
+                    )
                 if message.attachments:
                     marks = ", ".join("?" for _ in message.attachments)
                     found = {
@@ -2642,6 +3068,12 @@ class Store:
                     (message.chat_id,),
                 ).fetchone()
                 message.seq = int(row["last"]) + 1
+                for archive in branch_store.rows(db, "deleted_branches"):
+                    if archive["chat_id"] == message.chat_id:
+                        archived = json.loads(archive["payload"])["tables"].get("messages", [])
+                        message.seq = max(
+                            message.seq, max((r["seq"] + 1 for r in archived), default=1)
+                        )
                 message.parent_id, message.chosen = parent_id, True
                 db.execute(
                     "INSERT INTO messages (id, chat_id, seq, role, content, reasoning, "
@@ -2831,13 +3263,28 @@ class Store:
             return
 
         def go() -> None:
-            columns = ", ".join(f"{k} = ?" for k in values)
-            params = [_encode(k, v) for k, v in values.items()]
+            db = self._conn()
+            clean = (
+                branch_store.filter_retained(db, message_id, values, self._branch_forget)
+                if self._branch_forget
+                else values
+            )
+            columns = ", ".join(f"{k} = ?" for k in clean)
+            params = [_encode(k, v) for k, v in clean.items()]
             self._conn().execute(
                 f"UPDATE messages SET {columns} WHERE id = ?", (*params, message_id)
             )
 
         await self._run(go)
+
+    async def filter_retained(self, message_id: str, **values: Any) -> dict[str, Any]:
+        if not self._branch_forget:
+            return values
+        return await self._run(
+            lambda: branch_store.filter_retained(
+                self._conn(), message_id, values, self._branch_forget
+            )
+        )
 
     async def mark_interrupted(self) -> int:
         """Boot: an answer still `running` was cut off by a restart (W1)."""
@@ -6030,7 +6477,7 @@ class Store:
 
         return await self._run(go)
 
-    async def purge_copies(self, sub: str) -> list[Path]:
+    async def purge_copies(self, sub: str, *, branch: dict[str, Any] | None = None) -> list[Path]:
         """The purge, on every copy kept beside the store before a migration. The copies stay,
         for everyone else in them. A half-written copy (`.bak.part`, left by a stop) is removed.
         The copies purged."""
@@ -6040,8 +6487,11 @@ class Store:
             for partial in self._path.parent.glob(f"{self._path.name}.schema-*.bak.part"):
                 partial.unlink(missing_ok=True)
             copies = _all_copies(self._path)
+            backup_payload = (
+                branch_store.backup_scope(self._conn(), branch) if branch is not None else None
+            )
             for copy in copies:
-                _purge_copy(copy, sub)
+                _purge_copy(copy, sub, branch=backup_payload)
             return copies
 
         return await self._run(go)

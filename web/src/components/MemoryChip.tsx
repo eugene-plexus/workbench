@@ -446,7 +446,9 @@ export function MemoryDrawer({
                   </ul>
                 </section>
               )}
-              {own.sending && <ThisTurn chatId={chatId} view={own} />}
+              {(own.sending || own.turn) && (
+                <ThisTurn chatId={chatId} view={own} onChanged={onReload} />
+              )}
               {own.pastChats && (
                 <PastChatsSection
                   state={own.pastChats}
