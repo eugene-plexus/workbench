@@ -80,6 +80,16 @@ export async function goSignedIn(page, address) {
   await page.goto(address, { waitUntil: "domcontentloaded" });
 }
 
+// A chat with pictures, formulas and running previews fires "load" only when
+// every one of its frames has loaded; Firefox under load took over 15 s for
+// that (a goto timeout on CI) while the page was already usable. Outside
+// Chromium, whose "load" has not failed, the checks' own waits (an answer, a
+// card, a frame) say when the page is ready.
+export async function goChat(page, browserName, address) {
+  if (browserName === "chromium") await page.goto(address);
+  else await page.goto(address, { waitUntil: "domcontentloaded" });
+}
+
 export function contextOptions(browserName, options) {
   const result = { ...options };
   // Firefox supports a phone-sized viewport and touch, but Playwright rejects

@@ -13,6 +13,7 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import {
   contextOptions,
+  goChat,
   goSignedIn,
   keepScheme,
   ignorablePageError,
@@ -88,7 +89,7 @@ async function open(scheme, viewport, who = cfg, extra = {}) {
 }
 
 async function chat(page, id) {
-  await page.goto(`${cfg.url}/chats/${id}`);
+  await goChat(page, browserName, `${cfg.url}/chats/${id}`);
   await page.locator('[data-testid=answer]:not([data-status="running"])').first().waitFor();
 }
 
