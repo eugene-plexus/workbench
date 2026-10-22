@@ -55,7 +55,11 @@ export function SettingsPage({
         <MemorySettings onOpenMemory={onOpenMemory} />
         <DocumentsSettings onOpenDocuments={onOpenDocuments} />
         <YourGroups />
-        {owner && <GroupServers />}
+        {owner && (
+          <div id="groups" className="scroll-mt-4">
+            <GroupServers />
+          </div>
+        )}
         <div id="connections" className="scroll-mt-4">
           <Connections />
         </div>

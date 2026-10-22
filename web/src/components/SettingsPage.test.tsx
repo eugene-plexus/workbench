@@ -117,6 +117,16 @@ describe("the Settings page", () => {
     expect(names()).not.toContain("Group memory servers");
   });
 
+  it("puts the owner's group memory servers where the console links to (#groups)", async () => {
+    render(
+      <SettingsPage owner onClose={vi.fn()} onOpenMemory={vi.fn()} onOpenDocuments={vi.fn()} />,
+    );
+    await waitFor(() => expect(screen.queryByText("Loading your memory settings…")).toBeNull());
+    const target = document.getElementById("groups");
+    expect(target).not.toBeNull();
+    expect(target).toHaveTextContent("Group memory servers");
+  });
+
   it("holds the controls of both settings", async () => {
     await opened();
     expect(screen.getByTestId("memory-use-switch")).toBeInTheDocument();
