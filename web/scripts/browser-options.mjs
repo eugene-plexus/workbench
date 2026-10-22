@@ -56,6 +56,14 @@ export async function fillComposer(page, text) {
   );
 }
 
+// The sign-in page is only a way in: the next step waits for the app's own
+// button. Firefox under load sometimes did not fire "load" for 30 s (once in
+// about sixty runs on a busy machine; once on CI), which says nothing about
+// what the checks measure. Wait for the document, not for every resource.
+export async function goSignedIn(page, address) {
+  await page.goto(address, { waitUntil: "domcontentloaded" });
+}
+
 export function contextOptions(browserName, options) {
   const result = { ...options };
   // Firefox supports a phone-sized viewport and touch, but Playwright rejects

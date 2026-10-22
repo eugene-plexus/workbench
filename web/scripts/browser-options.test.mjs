@@ -14,6 +14,7 @@ import {
   canCheckPreviewLoop,
   ignorablePageError,
   keepScheme,
+  goSignedIn,
 } from "./browser-options.mjs";
 
 const temp = mkdtempSync(join(tmpdir(), "workbench-browsers-"));
@@ -205,4 +206,12 @@ it("ignores only WebKit's report of an abandoned request to the app's own API", 
     ignorablePageError("webkit", "https://example.com/api/x due to access control checks."),
   ).toBe(false);
   expect(ignorablePageError("webkit", "TypeError: undefined is not an object")).toBe(false);
+});
+
+it("opens the sign-in page without waiting for every resource to load", async () => {
+  const goto = vi.fn(async () => {});
+  await goSignedIn({ goto }, "http://127.0.0.1:1/#signin=x");
+  expect(goto).toHaveBeenCalledWith("http://127.0.0.1:1/#signin=x", {
+    waitUntil: "domcontentloaded",
+  });
 });
