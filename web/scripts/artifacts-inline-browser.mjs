@@ -6,13 +6,15 @@
 // every way out of its frame, started by itself and refused each; nothing run
 // before it is on screen; at most four at once; a preview that loops named and
 // stopped, the others started again, and not run by itself after a reload; the
-// person's switch kept and obeyed; the owner's view of a chat waiting for Run;
+// person's and per-chat switches kept and obeyed; the owner's view waiting for Run;
 // footnotes, in an answer and in a Markdown artifact, that never lengthen the
 // page; a phone. Each check is one PASS or FAIL line.
 import { mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import {
   contextOptions,
+  goChat,
+  goSignedIn,
   keepScheme,
   ignorablePageError,
   launchBrowser,
@@ -80,14 +82,14 @@ async function open(scheme, viewport, who = cfg, extra = {}) {
       main: response.request().frame() === page.mainFrame(),
     }),
   );
-  await page.goto(`${cfg.url}/#signin=${who.secret}`);
+  await goSignedIn(page, `${cfg.url}/#signin=${who.secret}`);
   await keepScheme(page, browserName, scheme);
   await page.getByTestId("new-chat").waitFor({ state: "attached" });
   return { context, page };
 }
 
 async function chat(page, id) {
-  await page.goto(`${cfg.url}/chats/${id}`);
+  await goChat(page, browserName, `${cfg.url}/chats/${id}`);
   await page.locator('[data-testid=answer]:not([data-status="running"])').first().waitFor();
 }
 
@@ -97,11 +99,11 @@ function card(page, title) {
     .filter({ has: page.locator(".artifact-card-title", { hasText: new RegExp(`^${title}$`) }) });
 }
 
-/** The card's own frame, once it runs by itself. */
+/** Follow the card's current frame if the ready rule replaces its first one. */
 async function runsBy(page, title, timeout = 15_000) {
   const frame = card(page, title).getByTestId("artifact-frame");
   await frame.waitFor({ timeout });
-  return (await frame.elementHandle()).contentFrame();
+  return frame.contentFrame();
 }
 
 /**
@@ -124,9 +126,129 @@ const notes = async (page, title) =>
     : "";
 
 try {
+  // --- the chat's switch -------------------------------------------------------------------
+  step("the chat's switch");
+  let { context, page } = await open("light", DESK);
+  await chat(page, cfg.chats.shown);
+  await shownRuns(page, "Counter");
+  await page.getByRole("button", { name: "This chat's settings" }).click();
+  const chatSwitch = (where, state) =>
+    where.getByRole("checkbox", { name: `Run pages and components by themselves: ${state}` });
+  check("the chat's switch defaults to On", await chatSwitch(page, "On").isChecked());
+  // Like the person's switch above, this changes only after the server keeps it.
+  await chatSwitch(page, "On").click();
+  await page.waitForFunction(() => {
+    const input = [...document.querySelectorAll("label")]
+      .find((label) => label.textContent.includes("Run pages and components by themselves: Off"))
+      ?.querySelector("input");
+    return input && !input.checked && !input.disabled;
+  });
+  await page.getByRole("button", { name: "Close settings" }).click();
+  await card(page, "Counter").scrollIntoViewIfNeeded();
+  await card(page, "Counter").getByRole("button", { name: "Run" }).waitFor();
+  check("turning the chat's switch off stops its running previews", (await frames(page)) === 0);
+  policy.push(...(await page.evaluate(() => window.__policy)));
+  await context.close();
+
+  // A new context has no page storage from the first one: this is the server's choice.
+  ({ context, page } = await open("light", DESK));
+  await chat(page, cfg.chats.shown);
+  await card(page, "Counter").scrollIntoViewIfNeeded();
+  await card(page, "Counter").getByRole("button", { name: "Run" }).waitFor();
+  await page.waitForTimeout(3_000);
+  check("the chat's Off choice follows it to another browser", (await frames(page)) === 0);
+  for (const title of ["Counter", "Short"]) {
+    await card(page, title).scrollIntoViewIfNeeded();
+    await card(page, title).getByRole("button", { name: "Run" }).click();
+    await card(page, title).getByRole("status").getByText("Running").waitFor();
+    check(`the chat's switch off still permits Run for ${title}`, true);
+  }
+  await chat(page, cfg.chats.far);
+  await shownRuns(page, "Far");
+  check("turning one chat off leaves other chats running by themselves", true);
+  await chat(page, cfg.chats.shown);
+  await page.getByRole("button", { name: "This chat's settings" }).click();
+  check("the menu shows the chat's saved Off choice", !(await chatSwitch(page, "Off").isChecked()));
+  await chatSwitch(page, "Off").click();
+  await chatSwitch(page, "On").waitFor();
+  await page.getByRole("button", { name: "Close settings" }).click();
+  await shownRuns(page, "Counter");
+  check("turning the chat's switch on starts the previews on screen", true);
+  policy.push(...(await page.evaluate(() => window.__policy)));
+  await context.close();
+
+  // --- tool results use the same inline preview and saved revisions ------------------------
+  step("artifacts from tool text and resources");
+  const toolView = await open("dark", DESK);
+  const toolPage = toolView.page;
+  await chat(toolPage, cfg.chats.tool);
+  await card(toolPage, "Document").getByText("Notes from the tool.").waitFor();
+  await card(toolPage, "Picture").getByRole("img", { name: "Logo" }).waitFor();
+  check(
+    "tool text uses its Markdown MIME type and an SVG resource is shown inline",
+    (await toolPage.getByRole("button", { name: /Open this .* as an artifact/ }).count()) === 3,
+  );
+  const sinceTool = answered.length;
+  const toolPreview = await shownRuns(toolPage, "Page");
+  for (const name of ["api", "network", "worker"]) {
+    await toolPreview.locator(`li[data-name="${name}"]`).waitFor();
+  }
+  const blocked = await toolPreview.locator("#out li").allTextContents();
+  const toolFrame = card(toolPage, "Page").getByTestId("artifact-frame");
+  check(
+    "a tool page runs by itself in the isolated frame and cannot reach the chat or network",
+    (await toolFrame.getAttribute("sandbox")) === "allow-scripts allow-forms" &&
+      ["parent-dom", "top-dom", "cookie", "storage", "api", "network", "form-button"].every(
+        (name) => blocked.some((line) => line.startsWith(`${name}: blocked`)),
+      ) &&
+      answered
+        .slice(sinceTool)
+        .every(
+          (r) => r.main || r.url.startsWith(FRAME) || r.url === `${origin}/preview/runtime.js`,
+        ) &&
+      toolPage.url().endsWith(cfg.chats.tool),
+    blocked.join(" | "),
+  );
+  await card(toolPage, "Page")
+    .getByRole("button", { name: "Open this HTML as an artifact" })
+    .click();
+  const toolDialog = toolPage.getByTestId("artifact-dialog");
+  await toolDialog.getByRole("tab", { name: "Source", exact: true }).click();
+  const toolSource = toolDialog.getByRole("textbox", { name: "Source of Page" });
+  check(
+    "a tool artifact keeps its original source exactly",
+    (await toolSource.inputValue()) === cfg.toolOriginal,
+  );
+  const toolEdit = "<!doctype html><p>Edited tool page</p>\n";
+  await toolSource.fill(toolEdit);
+  await toolDialog.getByRole("button", { name: "Save as revision 2" }).click();
+  await toolDialog
+    .getByRole("option", { name: /^Revision 2 of 2, edited/ })
+    .waitFor({ state: "attached" });
+  await toolDialog.getByRole("combobox", { name: "Revision", exact: true }).selectOption("1");
+  check(
+    "a saved tool artifact names its origin and keeps revision one unchanged",
+    (
+      await toolDialog
+        .getByRole("combobox", { name: "Revision", exact: true })
+        .locator('option[value="1"]')
+        .innerText()
+    ).includes("from fetch_page's result") && (await toolSource.inputValue()) === cfg.toolOriginal,
+  );
+  await toolPage.reload();
+  await shownRuns(toolPage, "Page");
+  // Reading the saved edit can replace the initial frame during startup.
+  await card(toolPage, "Page")
+    .frameLocator('[data-testid="artifact-frame"]')
+    .getByText("Edited tool page", { exact: true })
+    .waitFor();
+  check("a tool artifact's saved edit runs inline after reload", true);
+  policy.push(...(await toolPage.evaluate(() => window.__policy)));
+  await toolView.context.close();
+
   // --- an answer's artifacts, where they stand --------------------------------------------
   step("an answer's artifacts");
-  let { context, page } = await open("dark", DESK);
+  ({ context, page } = await open("dark", DESK));
   await chat(page, cfg.chats.shown);
   await card(page, "Notes").getByRole("heading", { name: "Shopping" }).waitFor();
   check(
@@ -193,7 +315,9 @@ try {
       .locator("#out li")
       .evaluateAll((items) => items.map((li) => [li.dataset.name, li.textContent])),
   );
-  const serviceWorkers = await escapes.evaluate(() => Promise.all(window.__serviceWorkers));
+  const serviceWorkers = await escapes
+    .locator("body")
+    .evaluate(() => Promise.all(window.__serviceWorkers));
   const refused = [
     "parent-dom",
     "top-dom",

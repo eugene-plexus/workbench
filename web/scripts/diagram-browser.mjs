@@ -12,6 +12,9 @@ import { createRequire } from "node:module";
 import {
   contextOptions,
   fillComposer,
+  frameGapLimit,
+  goChat,
+  goSignedIn,
   keepScheme,
   ignorablePageError,
   launchBrowser,
@@ -93,7 +96,7 @@ async function open(scheme, viewport, extra = {}) {
     await dialog.dismiss();
   });
   page.on("request", (request) => requests.push(request.url()));
-  await page.goto(`${cfg.url}/#signin=${cfg.secret}`);
+  await goSignedIn(page, `${cfg.url}/#signin=${cfg.secret}`);
   await keepScheme(page, browserName, scheme);
   await page.getByTestId("new-chat").waitFor({ state: "attached" });
   const close = context.close.bind(context);
@@ -111,7 +114,7 @@ async function open(scheme, viewport, extra = {}) {
 }
 
 async function chat(page, id) {
-  await page.goto(`${cfg.url}/chats/${id}`);
+  await goChat(page, browserName, `${cfg.url}/chats/${id}`);
   await page.locator('[data-testid=answer]:not([data-status="running"])').first().waitFor();
 }
 
@@ -379,7 +382,7 @@ try {
     );
     check(
       `${scheme}: the page kept drawing while a diagram was stopped`,
-      gap < 250,
+      gap < frameGapLimit(browserName),
       `${Math.round(gap)} ms between frames`,
     );
     check(`${scheme}: no id is used twice on the page`, (await duplicateIds(page)).length === 0);

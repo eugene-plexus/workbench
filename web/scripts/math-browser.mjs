@@ -11,7 +11,12 @@ import { createRequire } from "node:module";
 import {
   contextOptions,
   fillComposer,
+  frameGapLimit,
+  goChat,
+  goSignedIn,
   keepScheme,
+  newChatLimit,
+  newChatMs,
   ignorablePageError,
   launchBrowser,
   readOptions,
@@ -81,7 +86,7 @@ async function open(scheme, viewport, extra = {}) {
       policy.push(message.text());
   });
   page.on("request", (request) => requests.push(request.url()));
-  await page.goto(`${cfg.url}/#signin=${cfg.secret}`);
+  await goSignedIn(page, `${cfg.url}/#signin=${cfg.secret}`);
   await keepScheme(page, browserName, scheme);
   await page.getByTestId("new-chat").waitFor({ state: "attached" });
   const close = context.close.bind(context);
@@ -99,7 +104,7 @@ async function open(scheme, viewport, extra = {}) {
 }
 
 async function chat(page, id) {
-  await page.goto(`${cfg.url}/chats/${id}`);
+  await goChat(page, browserName, `${cfg.url}/chats/${id}`);
   await page.locator('[data-testid=answer]:not([data-status="running"])').first().waitFor();
 }
 
@@ -251,18 +256,17 @@ try {
           (await response.text()),
       });
     });
+    await chat(page, cfg.chats.plain);
+    const quietMs = await newChatMs(page);
     await chat(page, cfg.chats.math);
     await page.evaluate(() => (window.__gap = 0));
     // While the formulas are laid out (one of them for 1.5 s, until it is
     // stopped), the page's own controls answer at once.
-    const nav = performance.now();
-    await page.getByTestId("new-chat").click();
-    await page.getByTestId("composer").waitFor();
-    const navMs = performance.now() - nav;
+    const navMs = await newChatMs(page);
     check(
       `${scheme}: New chat opens at once while formulas are laid out`,
-      navMs < 1000,
-      `${Math.round(navMs)} ms`,
+      navMs < newChatLimit(quietMs),
+      `${Math.round(navMs)} ms, ${Math.round(quietMs)} ms on a quiet page`,
     );
     await chat(page, cfg.chats.math);
     const answers = page.locator("[data-testid=answer]");
@@ -345,7 +349,7 @@ try {
     );
     check(
       `${scheme}: the page kept drawing while a formula was stopped`,
-      gap < 250,
+      gap < frameGapLimit(browserName),
       `${Math.round(gap)} ms between frames`,
     );
 

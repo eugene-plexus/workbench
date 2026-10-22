@@ -39,6 +39,52 @@ beforeEach(() => {
   vi.mocked(post).mockReset();
 });
 
+it("theme override reaches a preview that is still opening", async () => {
+  vi.mocked(post).mockResolvedValue({ protocolVersion: "2026-01-26" });
+  setDisplay({ theme: "light" });
+  render(
+    <MCPApp
+      chat="c"
+      surface={{ ...surface, protocol: "mcp-apps", view: { resourceUri: "ui://app" } }}
+      actions={[]}
+      onAction={vi.fn()}
+    />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Open app" }));
+  const frame = screen.getByTitle("Isolated MCP app") as HTMLIFrameElement;
+  const channel = new URL(frame.src).hash.slice(1);
+  const output = vi.spyOn(frame.contentWindow!, "postMessage");
+  const emit = async (method: string, id?: number) => {
+    await act(async () =>
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          source: frame.contentWindow,
+          origin: "null",
+          data: { channel, message: { jsonrpc: "2.0", method, id } },
+        }),
+      ),
+    );
+  };
+  await emit("ui/initialize", 1);
+  output.mockClear();
+  act(() => setDisplay({ theme: "dark" }));
+  await emit("ui/notifications/initialized");
+  expect(output).toHaveBeenCalledWith(
+    {
+      channel,
+      message: {
+        jsonrpc: "2.0",
+        method: "ui/notifications/host-context-changed",
+        params: expect.objectContaining({ theme: "dark" }),
+      },
+    },
+    "*",
+  );
+  expect(screen.getByTitle("Isolated MCP app")).toBe(frame);
+  fireEvent.click(screen.getByRole("button", { name: "Stop app" }));
+  setDisplay({ theme: "system" });
+});
+
 it("resolves escaped pointers and pure checks without inherited properties", () => {
   expect(resolve({ path: "/a~1b/~0key" }, { "a/b": { "~key": "value" } })).toBe("value");
   expect(resolve({ path: "/constructor" }, {})).toBeNull();

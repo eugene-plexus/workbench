@@ -41,6 +41,75 @@ it("shows each mark's value on hover and focus, and dismisses it on Escape", () 
   expect(screen.queryByRole("tooltip")).toBeNull();
 });
 
+it("shows the value for the latest hover or focus, restoring focus after hover leaves", () => {
+  render(<Chart spec={spec("bar")} />);
+  const first = screen.getByLabelText("One · a · 2");
+  const second = screen.getByLabelText("Two · b · -2");
+  const third = screen.getByLabelText("Two · a · 4");
+  fireEvent.focus(first);
+  fireEvent.mouseEnter(second);
+  expect(screen.getByRole("tooltip")).toHaveTextContent("Two · b · -2");
+  expect(second).toHaveAttribute("aria-describedby", screen.getByRole("tooltip").id);
+  expect(first).not.toHaveAttribute("aria-describedby");
+  fireEvent.mouseLeave(second);
+  expect(screen.getByRole("tooltip")).toHaveTextContent("One · a · 2");
+  fireEvent.mouseEnter(second);
+  fireEvent.blur(first);
+  fireEvent.focus(third);
+  expect(screen.getByRole("tooltip")).toHaveTextContent("Two · a · 4");
+  fireEvent.blur(third);
+  expect(screen.queryByRole("tooltip")).toBeNull();
+});
+
+it("does not keep a value when the chart changes", () => {
+  const original = spec("bar");
+  const { rerender } = render(<Chart spec={original} />);
+  fireEvent.mouseEnter(screen.getByLabelText("One · a · 2"));
+  const changed: ChartSpec = {
+    ...original,
+    series: [{ name: "New", points: [{ x: "a", y: 20 }] }],
+  };
+  rerender(<Chart spec={changed} />);
+  expect(screen.queryByRole("tooltip")).toBeNull();
+  fireEvent.mouseEnter(screen.getByLabelText("New · a · 20"));
+  expect(screen.getByRole("tooltip")).toHaveTextContent("New · a · 20");
+});
+
+it("keeps every stacked total within the plot", () => {
+  const stacked = readSpec({
+    workbench: "chart",
+    version: 1,
+    type: "bar",
+    stacked: true,
+    series: [
+      { name: "One", points: [["a", 20]] },
+      { name: "Two", points: [["a", 21]] },
+    ],
+  }) as ChartSpec;
+  const { container } = render(<Chart spec={stacked} />);
+  const top = Math.min(
+    ...[...container.querySelectorAll(".chart-grid")].map((grid) =>
+      Number(grid.getAttribute("y1")),
+    ),
+  );
+  const last = screen.getByLabelText("Two · a · 21").querySelector("rect")!;
+  expect(Number(last.getAttribute("y"))).toBeGreaterThanOrEqual(top);
+});
+
+it("keeps stacked markers inside their own segments", () => {
+  render(<Chart spec={spec("bar", true)} />);
+  for (const label of ["One · a · 2", "One · b · -3"]) {
+    const mark = screen.getByLabelText(label);
+    const bar = mark.querySelector(".chart-bar")!;
+    const marker = mark.querySelector(".chart-marker")!;
+    const y = Number(bar.getAttribute("y"));
+    const bottom = y + Number(bar.getAttribute("height"));
+    const markerY = Number(marker.getAttribute("transform")!.split(" ")[1]?.replace(")", ""));
+    expect(markerY).toBeGreaterThan(y);
+    expect(markerY).toBeLessThan(bottom);
+  }
+});
+
 it("stacks positives and negatives from zero, matching categories rather than point order", () => {
   render(<Chart spec={spec("bar", true)} />);
   const first = screen.getByLabelText("One · a · 2").querySelector("rect")!;
