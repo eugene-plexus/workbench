@@ -87,7 +87,7 @@ def test_a_schema_10_file_gains_reading_and_every_source_a_kind_and_keeps_every_
         assert db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone() == (
             str(SCHEMA_VERSION),
         )
-        assert SCHEMA_VERSION == 30
+        assert SCHEMA_VERSION == 33
         assert "reading" in {r[1] for r in db.execute("PRAGMA table_info(files)")}
     expected = [{"kind": "web", **s} for s in WEB]
     assert json.loads(sources_of(path, "web")) == expected

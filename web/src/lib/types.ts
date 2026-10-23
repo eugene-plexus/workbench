@@ -134,6 +134,58 @@ export interface Message {
   /** What searching the person's saved documents came to for this answer, or
    * null when nothing was searched (MR4). */
   retrieval?: SearchRecord | null;
+  /** Row 26: what the answer's last request used and could hold, as the backend and the
+   * gateway said; null where they did not. */
+  promptTokens?: number | null;
+  completionTokens?: number | null;
+  cachedTokens?: number | null;
+  contextLength?: number | null;
+  /** The backend dropped part of the prompt to fit its window. */
+  promptTruncated?: boolean | null;
+  /** The summaries of earlier messages this answer was sent; null for an answer from before
+   * row 26, or one that never reached the model. */
+  summaries?: SummaryRecord[] | null;
+}
+
+/** What an answer was sent of one summary (row 26). */
+export interface SummaryRecord {
+  id: string;
+  firstId: string;
+  lastId: string;
+  /** Positions of its run on the path, from 1. */
+  from: number;
+  to: number;
+  messages: number;
+  tokens: number;
+  made?: boolean;
+}
+
+/** A summary as Read the summary shows it (`GET /api/chats/{id}/summaries/{summary}`). */
+export interface SummaryDetail extends SummaryRecord {
+  sourceTokens: number;
+  model: string;
+  madeAt: number;
+  cut: boolean;
+  how: "auto" | "overflow" | "merge";
+  /** Null where the owner may not read it (`hidden` says why). */
+  text: string | null;
+  hidden: string | null;
+}
+
+/** How full a chat is for its model (`GET /api/chats/{id}/long`, row 26). */
+export interface LongChatView {
+  model: string | null;
+  on: boolean;
+  installOn: boolean;
+  chatOn: boolean;
+  percent: number;
+  percentSetBy: "group" | "install";
+  window: number | null;
+  trigger: number | null;
+  ceiling: number | null;
+  about: number | null;
+  measured: boolean;
+  summaries: number;
 }
 
 export interface OutputCap {
@@ -291,6 +343,8 @@ export interface ChatSettings {
   documentsExternal?: true | null;
   /** MV2: Use past chats in this chat; unset is off. */
   pastChats?: true | null;
+  /** Row 26: summarise earlier messages when the chat outgrows its model; unset is on. */
+  summarise?: boolean | null;
 }
 
 export interface FolderGrant {
@@ -357,6 +411,8 @@ export interface ProjectDetail extends Project {
 export interface ChatDetail {
   chat: Chat;
   messages: Message[];
+  /** Row 26: the runs the newest answer was sent as summaries, with their text. */
+  summaries?: SummaryDetail[];
   ownerName: string | null;
   deletedBranches?: {
     id: string;
@@ -610,7 +666,10 @@ export interface Models {
 }
 
 export interface Progress {
-  stage: "prompt" | "working" | "tool" | "generating" | "documents";
+  stage: "prompt" | "working" | "tool" | "generating" | "documents" | "summarising";
+  /** On `summarising` (row 26): how many earlier messages, and the model writing it. */
+  messages?: number;
+  model?: string;
   tool?: string;
   /** On `tool`: whether the call started, finished or waits for approval. On
    * `documents`: `reading`, while the answer waits for its files to be read, or
@@ -641,6 +700,9 @@ export type ChatEvent =
       sources?: Source[];
       searchSuggestions?: string[];
       retrieval?: SearchRecord | null;
+      /** Row 26: the summaries the answer carries, once a refusal made new ones. */
+      summaries?: SummaryRecord[] | null;
+      promptTruncated?: boolean;
     }
   | {
       type: "progress";

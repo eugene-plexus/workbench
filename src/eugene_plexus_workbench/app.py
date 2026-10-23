@@ -32,6 +32,7 @@ from . import (
     memory_api,
     memory_models_api,
     saved_api,
+    summaries,
     tools_api,
     web,
 )
@@ -438,6 +439,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(removal_router)
     app.include_router(exports_router)
     app.include_router(documents_api.router)
+    app.include_router(summaries.router)
     # Before `saved_api`: `/api/documents/folders` is not a document's id.
     app.include_router(folder_docs_api.router)
     app.include_router(saved_api.router)

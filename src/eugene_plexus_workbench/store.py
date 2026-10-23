@@ -75,6 +75,13 @@ purge deletes every row `PERSON_TABLES` names, from the store and from every cop
 (`*.schema-N.bak`), and rewrites each file so no free page or log still holds their words.
 `exports` is the log of every download of a person's data, and where each file is while it is
 kept.
+
+**Long chats** (schema 33, row 26): an answer keeps what its last request used and could hold
+(`prompt_tokens`, `completion_tokens`, `cached_tokens`, `context_length`), whether the backend
+said it dropped part of the prompt (`prompt_truncated`), and which summaries it was sent
+(`summaries`, JSON). `chat_summaries` holds each summary of a run of a chat's messages: a new copy
+of chat text, deleted with its chat, and with any branch delete that removes a message of its
+run. The messages themselves are never changed.
 """
 
 from __future__ import annotations
@@ -101,7 +108,7 @@ from .agui_store import AGUIStore, allow_chat_write
 from .interaction_store import SCHEMA as INTERACTION_SCHEMA
 from .interaction_store import InteractionStore
 
-SCHEMA_VERSION = 30
+SCHEMA_VERSION = 33
 
 #: The oldest schema this migrates from: what Workbench v0.1.0 wrote. Schema 1 predates
 #: it, and nobody holds one.
@@ -706,6 +713,40 @@ def _group_claims(db: sqlite3.Connection) -> None:
             db.execute(f"ALTER TABLE people ADD COLUMN {column} TEXT")
 
 
+#: Row 26's one migration. Rows built at the same time hold 31 and 32; whichever merges later
+#: takes the next number, and this is the one place it is said.
+LONG_CHATS_SCHEMA = 33
+
+
+def _long_chats(db: sqlite3.Connection) -> None:
+    """Schema 33 (row 26): what an answer's last request used and could hold, whether the backend
+    dropped part of it, which summaries it was sent; and the summaries of a chat's earlier messages.
+    New columns and one new table; no message changes."""
+    present = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
+    for column, declaration in (
+        ("prompt_tokens", "INTEGER"),
+        ("completion_tokens", "INTEGER"),
+        ("cached_tokens", "INTEGER"),
+        ("context_length", "INTEGER"),
+        ("prompt_truncated", "INTEGER"),
+        ("summaries", "TEXT"),
+    ):
+        if column not in present:
+            db.execute(f"ALTER TABLE messages ADD COLUMN {column} {declaration}")
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS chat_summaries ("
+        "id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, owner TEXT NOT NULL, "
+        "first_id TEXT NOT NULL, last_id TEXT NOT NULL, digest TEXT NOT NULL, "
+        "text TEXT NOT NULL, nonce TEXT NOT NULL, tokens INTEGER NOT NULL, "
+        "source_tokens INTEGER NOT NULL, model TEXT NOT NULL, made_at REAL NOT NULL, "
+        "carries TEXT NOT NULL DEFAULT '{}', "
+        "cut INTEGER NOT NULL DEFAULT 0 CHECK (cut IN (0, 1)), "
+        "how TEXT NOT NULL CHECK (how IN ('auto', 'overflow', 'merge')), "
+        "instruction INTEGER NOT NULL DEFAULT 1)"
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS chat_summaries_by_chat ON chat_summaries (chat_id)")
+
+
 #: What brings a store written at version N-1 to N, for N above `OLDEST_SCHEMA`.
 #: `_SCHEMA` already holds the result, for a store made new. A step is a statement,
 #: or a function of the connection for what SQL alone cannot say.
@@ -857,6 +898,12 @@ _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
     28: [_removal],
     29: [branch_store.migration],
     30: [_group_claims],
+    # Held for the rows built beside row 26 (rows 27 and 72); each brings its own when it merges,
+    # and the later of them and row 26 renumbers, so `main` has no gap.
+    31: [],
+    32: [],
+    # Long chats (row 26, 2026-10-23): new columns and one new table; nothing moves.
+    LONG_CHATS_SCHEMA: [_long_chats],
 }
 
 
@@ -995,6 +1042,7 @@ def _initialize_schema(
         _removal(db)
         branch_store.migration(db)
         _group_claims(db)
+        _long_chats(db)
         db.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?)",
             (str(SCHEMA_VERSION),),
@@ -1032,6 +1080,8 @@ PERSON_TABLES: tuple[tuple[str, str], ...] = (
     ("interaction_surfaces", "chat_id"),
     ("interaction_surfaces", "owner"),
     ("interaction_cursors", "chat_id"),
+    ("chat_summaries", "chat_id"),
+    ("chat_summaries", "owner"),
     ("messages", "chat_id"),
     ("files", "chat_id"),
     ("files", "owner"),
@@ -1412,6 +1462,47 @@ class Message:
     reasoning_tokens: int | None = None
     reasoning_seconds: float | None = None
     branch_name: str | None = None
+    #: Row 26: what this answer's last request used, as the backend counted it (`usage`), and
+    #: the window the gateway said applied to it; None where it did not say.
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    cached_tokens: int | None = None
+    context_length: int | None = None
+    #: The gateway said the backend dropped part of the prompt (`prompt_truncated`).
+    prompt_truncated: bool | None = None
+    #: The summaries of earlier messages this answer was sent (`summaries.record`); None for
+    #: an answer from before row 26, or one that never reached the model.
+    summaries: list[dict[str, Any]] | None = None
+
+
+@dataclass
+class SummaryRow:
+    """One summary of a run of a chat's messages (row 26, `summaries.py`): a new copy of chat
+    text, kept with the chat and deleted with it. The messages it stands for never change."""
+
+    id: str
+    chat_id: str
+    owner: str
+    #: The first and last message of the run, on the path it was made from.
+    first_id: str
+    last_id: str
+    #: SHA-256 of the run as it was sent (`long_chats.digest`).
+    digest: str
+    text: str
+    #: The suffix of the block's tags, chosen when it was made.
+    nonce: str
+    #: The block as sent, and the run it stands for, in tokens.
+    tokens: int
+    source_tokens: int
+    model: str
+    made_at: float
+    #: What the run carried when it was summarised: `{"notes": bool, "chats": bool}`.
+    carries: dict[str, bool] = field(default_factory=dict)
+    #: The summary stopped at its limit.
+    cut: bool = False
+    #: `auto`, `overflow` (after a backend refused the chat as too long) or `merge`.
+    how: str = "auto"
+    instruction: int = 1
 
 
 @dataclass
@@ -1694,6 +1785,34 @@ def _message(row: sqlite3.Row) -> Message:
         reasoning_tokens=row["reasoning_tokens"],
         reasoning_seconds=row["reasoning_seconds"],
         branch_name=row["branch_name"],
+        prompt_tokens=row["prompt_tokens"],
+        completion_tokens=row["completion_tokens"],
+        cached_tokens=row["cached_tokens"],
+        context_length=row["context_length"],
+        prompt_truncated=None if row["prompt_truncated"] is None else bool(row["prompt_truncated"]),
+        summaries=_json_or_none(row["summaries"]),
+    )
+
+
+def _summary(row: sqlite3.Row) -> SummaryRow:
+    carries = _json_or_none(row["carries"])
+    return SummaryRow(
+        id=row["id"],
+        chat_id=row["chat_id"],
+        owner=row["owner"],
+        first_id=row["first_id"],
+        last_id=row["last_id"],
+        digest=row["digest"],
+        text=row["text"],
+        nonce=row["nonce"],
+        tokens=row["tokens"],
+        source_tokens=row["source_tokens"],
+        model=row["model"],
+        made_at=row["made_at"],
+        carries={k: bool(v) for k, v in carries.items()} if isinstance(carries, dict) else {},
+        cut=bool(row["cut"]),
+        how=row["how"],
+        instruction=row["instruction"],
     )
 
 
@@ -1861,6 +1980,12 @@ _MESSAGE_FIELDS = {
     "memory_used",
     "reasoning_tokens",
     "reasoning_seconds",
+    "prompt_tokens",
+    "completion_tokens",
+    "cached_tokens",
+    "context_length",
+    "prompt_truncated",
+    "summaries",
 }
 _CHAT_FIELDS = {"title", "model", "settings", "search", "updated_at", "project_id"}
 _JSON_FIELDS = {
@@ -1872,6 +1997,7 @@ _JSON_FIELDS = {
     "output_cap",
     "retrieval",
     "memory_used",
+    "summaries",
 }
 
 
@@ -2678,6 +2804,8 @@ class Store:
                     (chat_id,),
                 )
                 db.execute("DELETE FROM artifacts WHERE chat_id = ?", (chat_id,))
+                # Row 26: a summary is a copy of the chat's words, and goes with it.
+                db.execute("DELETE FROM chat_summaries WHERE chat_id = ?", (chat_id,))
                 db.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
                 db.execute("DELETE FROM files WHERE chat_id = ?", (chat_id,))
                 # Suggestions waiting from it go with it (their quotes are its words); notes
@@ -3334,6 +3462,69 @@ class Store:
             )
 
         await self._run(go)
+
+    # --- long chats (row 26) ---------------------------------------------
+
+    async def chat_summaries(self, chat_id: str) -> list[SummaryRow]:
+        """Every summary of the chat's messages, oldest first."""
+
+        def go() -> list[SummaryRow]:
+            rows = self._conn().execute(
+                "SELECT * FROM chat_summaries WHERE chat_id = ? ORDER BY made_at, id", (chat_id,)
+            )
+            return [_summary(r) for r in rows]
+
+        return await self._run(go)
+
+    async def add_summary(self, row: SummaryRow) -> bool:
+        """Keep a summary, in one transaction with the check that its chat is still its owner's
+        and both ends of its run are still messages of that chat. False when not (a delete won):
+        nothing is kept."""
+
+        def go() -> bool:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                chat = db.execute(
+                    "SELECT 1 FROM chats WHERE id = ? AND owner = ?", (row.chat_id, row.owner)
+                ).fetchone()
+                ends = db.execute(
+                    "SELECT COUNT(*) FROM messages WHERE chat_id = ? AND id IN (?, ?)",
+                    (row.chat_id, row.first_id, row.last_id),
+                ).fetchone()[0]
+                if chat is None or ends != len({row.first_id, row.last_id}):
+                    db.execute("ROLLBACK")
+                    return False
+                db.execute(
+                    "INSERT INTO chat_summaries (id, chat_id, owner, first_id, last_id, digest, "
+                    "text, nonce, tokens, source_tokens, model, made_at, carries, cut, how, "
+                    "instruction) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        row.id,
+                        row.chat_id,
+                        row.owner,
+                        row.first_id,
+                        row.last_id,
+                        row.digest,
+                        row.text,
+                        row.nonce,
+                        row.tokens,
+                        row.source_tokens,
+                        row.model,
+                        row.made_at,
+                        json.dumps(row.carries),
+                        int(row.cut),
+                        row.how,
+                        row.instruction,
+                    ),
+                )
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return True
+
+        return await self._run(go)
 
     async def filter_retained(self, message_id: str, **values: Any) -> dict[str, Any]:
         if not self._branch_forget:

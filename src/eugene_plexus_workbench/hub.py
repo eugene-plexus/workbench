@@ -27,6 +27,7 @@ from typing import Any
 
 import httpx
 
+from . import long_chats
 from ._http import ssl_context
 
 #: The longest a gateway's `Retry-After` is believed: a person waits minutes, not days.
@@ -291,8 +292,12 @@ def refusal(
             retry_after=retry_after,
             words=words,
         )
+    # Row 26: the backend refused the request as longer than the model's window. The gateway's
+    # chat door gives no code for it yet (gateway#18), so its words are read, as the gateway
+    # itself reads them.
+    kind = "context" if status == 400 and long_chats.is_overflow(words) else "gateway"
     return HubError(
-        words, status=status, kind="gateway", param=param, retry_after=retry_after, words=words
+        words, status=status, kind=kind, param=param, retry_after=retry_after, words=words
     )
 
 
