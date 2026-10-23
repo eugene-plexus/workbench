@@ -156,9 +156,10 @@ def test_turns_after_a_summary_only_append(world: World) -> None:
     assert pairs >= 3, "several turns went between summaries"
 
 
-def test_overflow_refusal_summarises_and_sends_again_once(world: World) -> None:
+@pytest.mark.parametrize("overflow_as", ["status", "frame"])
+def test_overflow_refusal_summarises_and_sends_again_once(world: World, overflow_as: str) -> None:
     # The window is not known: nothing is planned, and only the backend's refusal summarises.
-    ada, chat = _start(world, window=None, refuse_over=12_000)
+    ada, chat = _start(world, window=None, refuse_over=12_000, overflow_as=overflow_as)
     number = 0
     while True:
         number += 1

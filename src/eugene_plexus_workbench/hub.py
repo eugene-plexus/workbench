@@ -639,11 +639,18 @@ class Hub:
                         continue
                     if isinstance(chunk, dict) and isinstance(chunk.get("error"), dict):
                         error = chunk["error"]
+                        words = str(error.get("message") or "the answer stopped part-way")
+                        # Row 26: a streamed request the backend refused as longer than the
+                        # model's window comes as an `upstream_error` frame with no code, the
+                        # backend's words inside (gateway#18), before any token.
                         raise HubError(
-                            str(error.get("message") or "the answer stopped part-way"),
+                            words,
                             kind="repetition"
                             if error.get("code") == "repetition_detected"
+                            else "context"
+                            if long_chats.is_overflow(words)
                             else "stream",
+                            words=words,
                         )
                     if isinstance(chunk, dict):
                         yield chunk

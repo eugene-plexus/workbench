@@ -856,6 +856,9 @@ class FakeGateway:
     #: Refuse a prompt past this many tokens, with llama-server's words as the gateway passes
     #: them on (a 400 `invalid_request_error`, no code).
     refuse_over: int | None = None
+    #: How a refusal past `refuse_over` comes: a 400 (`status`), or a 200 whose stream is an
+    #: error frame (`frame`), as the gateway's streamed chat door sends it.
+    overflow_as: str = "status"
     #: Say on the final frame that the backend dropped part of the prompt.
     truncated: bool = False
     #: Summary requests (not streamed, no response format): each body, and what they get.
@@ -1351,6 +1354,40 @@ class FakeGateway:
             self.requests.append(body)
             if self.refuse_over is not None:
                 prompt = context.count_messages(body["messages"])
+                if prompt > self.refuse_over and self.overflow_as == "frame":
+                    # The streamed chat door: a 200, then the driver's failure in an error frame
+                    # with no code, llama-server's body inside it (gateway#18).
+                    words = (
+                        "driver 'local' (http://127.0.0.1:1) returned 400 — Backend rejected "
+                        "the request — openai_compat_http returned 400: "
+                        + json.dumps(
+                            {
+                                "error": {
+                                    "code": 400,
+                                    "message": f"request ({prompt} tokens) exceeds the "
+                                    f"available context size ({self.refuse_over} tokens), "
+                                    "try increasing it",
+                                    "type": "exceed_context_size_error",
+                                    "n_prompt_tokens": prompt,
+                                    "n_ctx": self.refuse_over,
+                                }
+                            }
+                        )
+                    )
+
+                    async def failed() -> AsyncIterator[str]:
+                        frame = {
+                            "error": {
+                                "message": words,
+                                "type": "upstream_error",
+                                "param": None,
+                                "code": None,
+                            }
+                        }
+                        yield "data: " + json.dumps(frame) + "\n\n"
+                        yield "data: [DONE]\n\n"
+
+                    return StreamingResponse(failed(), media_type="text/event-stream")
                 if prompt > self.refuse_over:
                     return JSONResponse(
                         {
