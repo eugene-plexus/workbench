@@ -239,13 +239,24 @@ def test_reasoning_metrics_in_chrome(world: World, tmp_path: Path) -> None:
     assert "PASS:" in result.stdout
 
 
+def _first_words(person: Any, chat: str, seconds: float = 15) -> str:
+    """Wait until part of the answer has arrived, not a fixed time (workbench#20)."""
+    deadline = time.perf_counter() + seconds
+    while time.perf_counter() < deadline:
+        content = person.get(f"/api/chats/{chat}").json()["messages"][-1].get("content") or ""
+        if content:
+            return str(content)
+        time.sleep(0.02)
+    raise AssertionError("no part of the answer arrived")
+
+
 def test_a_tab_opened_mid_answer_gets_what_has_arrived_then_the_rest(world: World) -> None:
     world.gateway.delay = 0.15
     ada = world.browser()
     ada.sign_in("p-ada")
     chat = ada.new_chat()
     ada.post(f"/api/chats/{chat}/messages", json={"content": "Hi"})
-    time.sleep(0.4)
+    _first_words(ada, chat)
     late: list[dict[str, Any]] = []
     _events(world, ada, chat, late).join(timeout=15)
     assert late[0]["type"] == "answer", "a snapshot first"
@@ -260,7 +271,7 @@ def test_stop_ends_an_answer_and_keeps_what_arrived(world: World) -> None:
     ada.sign_in("p-ada")
     chat = ada.new_chat()
     ada.post(f"/api/chats/{chat}/messages", json={"content": "Hi"})
-    time.sleep(0.5)
+    _first_words(ada, chat)
     assert ada.post(f"/api/chats/{chat}/stop").status_code == 204
     answer = ada.get(f"/api/chats/{chat}").json()["messages"][-1]
     assert answer["status"] == "stopped"
