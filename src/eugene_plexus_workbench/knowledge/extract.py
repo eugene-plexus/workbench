@@ -28,11 +28,14 @@ for what PDFium refuses. Never PyMuPDF: it is AGPL, and Eugene is Apache-2.0.
 
 from __future__ import annotations
 
+import base64
 import codecs
 import contextlib
 import html
 import re
+import struct
 import zipfile
+import zlib
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
@@ -52,7 +55,7 @@ MAX_HEADINGS = 2_000
 #: A PDF with fewer characters than this per page, on average, has no text layer.
 MIN_CHARS_PER_PAGE = 5
 
-KINDS = ("pdf", "docx", "markdown", "csv", "html", "code", "text")
+KINDS = ("pdf", "docx", "markdown", "csv", "html", "code", "text", "image")
 LABELS = {
     "pdf": "PDF",
     "docx": "Word",
@@ -61,6 +64,7 @@ LABELS = {
     "html": "HTML",
     "code": "code",
     "text": "text",
+    "image": "picture",
 }
 #: Kinds whose text is the file's own, so a position in it is a line of the file.
 LINE_KINDS = ("markdown", "csv", "code", "text")
@@ -101,6 +105,7 @@ class Extracted:
     notes: list[str] = field(default_factory=list)
     #: The reader stopped at its own cap (`MAX_TEXT_CHARS`, `MAX_PAGES`).
     truncated: bool = False
+    read_by: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -111,6 +116,7 @@ class Extracted:
             "headings": [[h.level, h.text, h.line] for h in self.headings],
             "notes": self.notes,
             "truncated": self.truncated,
+            "readBy": self.read_by,
             "parts": [[p.page, p.text] for p in self.parts],
         }
 
@@ -133,6 +139,7 @@ class Extracted:
                 headings=[Heading(int(a), str(b), int(c)) for a, b, c in data["headings"]],
                 notes=[str(n) for n in data["notes"]],
                 truncated=bool(data["truncated"]),
+                read_by=data.get("readBy"),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"not a saved reading: {exc}") from exc
@@ -177,6 +184,92 @@ def say(text: object, limit: int = 240) -> str:
     """An observed cause as one short line: whitespace collapsed, cut with a mark."""
     one = " ".join(str(text).split())
     return one if len(one) <= limit else one[: limit - 1].rstrip() + "…"
+
+
+def render_page(path: Path, number: int, words: str = "") -> dict[str, Any]:
+    """PDFium runs only in the restricted reader child. Return a bounded PNG and boxes."""
+    import pypdfium2 as pdfium
+
+    from .. import files
+
+    with path.open("rb") as source:
+        head = source.read(files.HEAD_BYTES)
+    detected = files.detect(head, None, path.name)
+    if detected.kind == "image":
+        if number != 1:
+            raise Unreadable("page_missing", "This picture has only one page.")
+        if path.stat().st_size > files.LIMITS["image"]:
+            raise Unreadable(
+                "image_too_large", "This picture exceeds the gateway's 5 MiB image limit."
+            )
+        return {
+            "image": f"data:{detected.media_type};base64,"
+            + base64.b64encode(path.read_bytes()).decode("ascii"),
+            "pageCount": 1,
+            "width": 0,
+            "height": 0,
+            "boxes": [],
+        }
+
+    with pdfium.PdfDocument(path) as pdf:
+        if not 1 <= number <= len(pdf):
+            raise Unreadable("page_missing", f"This PDF has {len(pdf)} pages, not page {number}.")
+        with contextlib.closing(pdf[number - 1]) as page:
+            pw, ph = page.get_size()
+            scale = min(150 / 72, 2000 / max(pw, ph))
+            with contextlib.closing(page.render(scale=scale, rev_byteorder=True)) as bitmap:
+                array = bitmap.to_numpy()
+                height, width = array.shape[:2]
+                # PDFium's RGB output; encode PNG using the standard library.
+                rgb = array[:, :, :3].copy()
+                rows = b"".join(b"\0" + row.tobytes() for row in rgb)
+
+                def block(kind: bytes, body: bytes) -> bytes:
+                    return (
+                        struct.pack(">I", len(body))
+                        + kind
+                        + body
+                        + struct.pack(">I", zlib.crc32(kind + body))
+                    )
+
+                png = (
+                    b"\x89PNG\r\n\x1a\n"
+                    + block(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+                    + block(b"IDAT", zlib.compress(rows))
+                    + block(b"IEND", b"")
+                )
+            boxes: list[list[float]] = []
+            if words.strip():
+                with contextlib.closing(page.get_textpage()) as textpage:
+                    # Search each normalised line as PDFium represents it. A chunk may
+                    # cross pages; only words actually on this page receive boxes.
+                    for line in words.splitlines():
+                        phrase = " ".join(line.split())
+                        if not phrase:
+                            continue
+                        search = textpage.search(phrase)
+                        try:
+                            while match := search.get_next():
+                                start, count = match
+                                for i in range(textpage.count_rects(start, count)):
+                                    left, bottom, right, top = textpage.get_rect(i)
+                                    boxes.append(
+                                        [
+                                            left * scale,
+                                            (ph - top) * scale,
+                                            (right - left) * scale,
+                                            (top - bottom) * scale,
+                                        ]
+                                    )
+                        finally:
+                            search.close()
+            return {
+                "image": "data:image/png;base64," + base64.b64encode(png).decode("ascii"),
+                "width": width,
+                "height": height,
+                "boxes": boxes,
+                "pageCount": len(pdf),
+            }
 
 
 # --------------------------------------------------------------------------- #
@@ -740,8 +833,7 @@ def read_pdf(path: Path) -> Extracted:
     if letters == 0 or letters < MIN_CHARS_PER_PAGE * pages_read:
         raise Unreadable(
             "no_text",
-            "this PDF has no text, only pictures of pages. "
-            "Workbench cannot read scanned pages yet.",
+            "this PDF has no text, only pictures of pages.",
             state="skipped",
             pages=count,
         )

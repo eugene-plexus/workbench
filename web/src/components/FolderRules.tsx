@@ -24,6 +24,7 @@ import {
 } from "../lib/documentFolders";
 import { failureWords } from "../lib/memory";
 import type { DocumentFolder, FolderLimits } from "../lib/types";
+import { ScannedPages } from "./ScannedPages";
 import { useKeepFocus } from "../lib/useKeepFocus";
 
 /** The rules as they are typed: the list is the text of the box, which is cut into patterns when
@@ -234,6 +235,7 @@ export function FolderRules({
       data-testid="folder-rules"
       className="flex flex-col gap-3 rounded-plexus border border-line p-3"
     >
+      <ScannedPages scope={`folder:${folder.id}`} onChanged={onSaved} />
       <RulesFields
         prefix="folder-rules"
         draft={draft}

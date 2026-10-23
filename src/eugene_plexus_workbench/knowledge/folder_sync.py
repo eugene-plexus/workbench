@@ -859,6 +859,11 @@ class _Work:
         part = self.index.part_path(new_id())
         verdict: dict[str, files.Detected] = {}
         room = self.settings.max_bytes - self.used
+        from .page_reader import enabled
+
+        read_pictures = bool(self.install.page_reader) and await enabled(
+            self.index, f"folder:{self.grant_id}"
+        )
 
         def check(head: bytes, size: int) -> folder_io.Declined | None:
             try:
@@ -867,7 +872,7 @@ class _Work:
                 return folder_io.Declined(
                     "unsupported", unsupported_words(exc.message), exc.message
                 )
-            if not got.is_document:
+            if not got.is_document and not (got.kind == "image" and read_pictures):
                 return folder_io.Declined("not_document", not_a_document_words(got.kind))
             if size > room:
                 return folder_io.Declined(

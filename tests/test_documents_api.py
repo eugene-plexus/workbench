@@ -595,6 +595,9 @@ def test_a_text_files_source_names_its_lines(world: World) -> None:
 def test_a_document_too_long_for_the_window_is_read_in_part_only_when_the_person_chooses(
     world: World,
 ) -> None:
+    from .saved import settings
+
+    settings(world, documentsWholeByParts="never")
     world.gateway.context_length = 8192
     ada, chat = start(world)
     file_id = attach(ada, chat, "long.pdf", docs.long_pdf(30), "application/pdf")
@@ -1007,9 +1010,7 @@ def test_a_scanned_pdf_and_a_locked_one_are_skipped_in_the_words_a_person_reads(
     )
     first, second = ada.wait_read(chat, scan)["reading"], ada.wait_read(chat, locked)["reading"]
     assert first["state"] == "skipped" and first["pages"] == 3
-    assert first["message"] == (
-        "Skipped: this PDF has no text, only pictures of pages. Workbench cannot read scanned pages yet."
-    )
+    assert first["message"] == ("Skipped: this PDF has no text, only pictures of pages.")
     assert (
         second["state"] == "skipped"
         and second["message"] == "Skipped: this file is password-protected."
@@ -1416,6 +1417,9 @@ def test_the_decision_for_an_upload_follows_the_model_named_with_it(world: World
 
 
 def test_a_send_that_is_refused_freezes_no_notes_and_counts_none_as_used(world: World) -> None:
+    from .saved import settings
+
+    settings(world, documentsWholeByParts="never")
     world.gateway.context_length = 8192
     ada, chat = start(world)
     note = ada.post("/api/memory/notes", json={"text": "I keep bees", "kind": "fact"}).json()[

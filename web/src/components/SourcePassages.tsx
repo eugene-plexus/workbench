@@ -12,6 +12,10 @@
  */
 
 import { ChevronRight, CircleCheck, FileSearch, FileText, Info, TriangleAlert } from "lucide-react";
+import { useState } from "react";
+
+import { post } from "../lib/api";
+import { failureWords } from "../lib/memory";
 
 import { isMeaningNote, searchedByWords, viaTag, viaWords } from "../lib/documentMeaning";
 import type { HiddenPassage, PassageSource, SearchRecord } from "../lib/types";
@@ -28,8 +32,10 @@ import {
   sentWords,
 } from "../lib/savedDocuments";
 import { Marked } from "./Marked";
+import { PageView } from "./PageView";
 
 function Passage({ source }: { source: PassageSource }) {
+  const [pageOpen, setPageOpen] = useState(false);
   const matched = matchedWords(source.terms, source.phrases);
   const cited = source.cited === true;
   return (
@@ -81,6 +87,15 @@ function Passage({ source }: { source: PassageSource }) {
           )}
         </summary>
         <div className="ml-6 mt-1 flex flex-col gap-1">
+          {source.wholeParts && <p>Read whole, in {source.wholeParts} parts</p>}
+          {source.readBy && (
+            <p>
+              {source.page_end != null && source.page_end !== source.page_start
+                ? `pages ${source.page_start} to ${source.page_end} (includes pages read from pictures)`
+                : `page ${source.page_start} (read from a picture)`}{" "}
+              · {source.readBy}
+            </p>
+          )}
           <p dir="auto" data-testid="passage-snippet" className="text-muted wrap-anywhere">
             <Marked text={source.snippet} words={[...source.terms, ...source.phrases]} />
           </p>
@@ -94,9 +109,70 @@ function Passage({ source }: { source: PassageSource }) {
               Matched: {matched}
             </p>
           )}
+          {source.type === "pdf" && source.page_start != null && (
+            <button
+              type="button"
+              data-testid="passage-show-page"
+              className="btn self-start"
+              onClick={() => setPageOpen(true)}
+            >
+              Show page {source.page_start}
+            </button>
+          )}
+          {pageOpen && (
+            <PageView
+              document={source.doc_id}
+              name={source.name}
+              initialPage={source.page_start ?? 1}
+              passage={source.chunk_ids[0]}
+              onClose={() => setPageOpen(false)}
+            />
+          )}
         </div>
       </details>
     </li>
+  );
+}
+
+function WholeNotice({ record, documents }: { record: SearchRecord; documents: string[] }) {
+  const [busy, setBusy] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+  const offer = record.whole;
+  if (!offer) return null;
+  async function read() {
+    if (!offer?.action) return;
+    setBusy(true);
+    setProblem(null);
+    try {
+      await post(offer.action, {
+        documents: offer.selectByQuestion ? [] : [...new Set(documents)],
+        cost: offer.cost,
+      });
+    } catch (failure) {
+      setProblem(failureWords(failure));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="my-2 flex flex-col items-start gap-2" data-testid="whole-document-notice">
+      <p>{offer.line}</p>
+      {offer.state === "offered" && (
+        <>
+          <p>{offer.cost}</p>
+          <button
+            type="button"
+            data-testid="whole-document-read"
+            className="btn"
+            disabled={busy}
+            onClick={() => void read()}
+          >
+            Read all of it
+          </button>
+        </>
+      )}
+      {problem && <p role="alert">{problem}</p>}
+    </div>
   );
 }
 
@@ -116,11 +192,16 @@ export function PassageList({
   const left = record ? leftOutWords(record.didNotFit) : null;
   return (
     <div data-testid="passage-sources">
+      {record && shown.length > 0 && (
+        <WholeNotice record={record} documents={shown.map((p) => p.doc_id)} />
+      )}
       {shown.length > 0 && (
         <>
-          <p className="text-muted" data-testid="passage-sent">
-            {sentWords(shown.length, documents)}
-          </p>
+          {record?.whole?.state !== "read" && (
+            <p className="text-muted" data-testid="passage-sent">
+              {sentWords(shown.length, documents)}
+            </p>
+          )}
           <ol className="mt-1 flex flex-col gap-1">
             {shown.map((source) => (
               <Passage key={`${source.doc_id}:${source.rank}`} source={source} />
@@ -213,7 +294,11 @@ export function SearchNotice({
     >
       {failed ? <TriangleAlert size={16} aria-hidden /> : <Info size={16} aria-hidden />}
       <div>
-        <span className="wrap-anywhere">{ranWords(record)}</span>
+        {record.whole ? (
+          <WholeNotice record={record} documents={[]} />
+        ) : (
+          <span className="wrap-anywhere">{ranWords(record)}</span>
+        )}
         {hint && <span className="mt-1 block text-muted">{hint}</span>}
         {record.notes
           .filter((note) => isMeaningNote(note.code))

@@ -630,6 +630,9 @@ def test_settings_are_changed_only_with_the_agents_admin_token(world: World) -> 
         "memoryPolicyKeepAuto",
         "memoryPolicyConnections",
         "memoryPolicyUnseenLocal",
+        "documentsWholeByParts",
+        "documentsPageReader",
+        "documentsPageReaderMaxPages",
     ]
     assert schema["fields"][0]["default"] is False
     assert httpx.get(f"{world.workbench}/v1/config", headers=good, trust_env=False).json() == {
@@ -667,6 +670,9 @@ def test_settings_are_changed_only_with_the_agents_admin_token(world: World) -> 
         "documentsFolderMaxFiles": 10000,
         "documentsFolderMaxMB": 2048,
         "documentsFolderMaxDepth": 12,
+        "documentsWholeByParts": "always",
+        "documentsPageReader": "",
+        "documentsPageReaderMaxPages": 200,
     }
     result = httpx.patch(
         f"{world.workbench}/v1/config",
