@@ -223,6 +223,28 @@ def test_a_version_switch_inside_the_range_leaves_the_summary_unused(world: Worl
     assert nonces & {r["nonce"] for r in rows}
 
 
+def test_summaries_past_a_quarter_of_the_window_merge(world: World) -> None:
+    # Each summary about 700 tokens: the third passes a quarter of 8,192, and the oldest two,
+    # next to each other, become one.
+    ada, chat = _start(world, summary_answer=("Kept: " + FILLER) * 4)
+    for number in range(1, 60):
+        _turn(ada, chat, number)
+        if any(r["how"] == "merge" for r in _summary_rows(world, chat)):
+            break
+    rows = {r["id"]: r for r in _summary_rows(world, chat)}
+    merged = [r for r in rows.values() if r["how"] == "merge"]
+    assert merged, "two summaries merged"
+    asked = [a["body"] for a in world.gateway.summary_requests]
+    merge = next(
+        b for b in asked if "The two blocks above summarise" in b["messages"][-1]["content"]
+    )
+    assert len(BLOCK.findall(merge["messages"][-1]["content"])) == 2
+    last = world.gateway.requests[-1]
+    nonces = {n for n, _, _ in _blocks(last)}
+    assert merged[0]["nonce"] in nonces, "the merge is sent in their place"
+    assert last["messages"][:3] == world.gateway.requests[2]["messages"][:3], "the head stays"
+
+
 def test_off_refuses_before_anything_is_kept(world: World) -> None:
     ada, chat = _start(world)
     _talk(ada, chat, range(1, 26))
