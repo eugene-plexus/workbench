@@ -262,6 +262,7 @@ def test_a_schema_26_store_gains_projects(tmp_path: Path, monkeypatch: pytest.Mo
     with monkeypatch.context() as m:
         m.setattr(storage, "SCHEMA_VERSION", 26)
         m.setattr(storage, "_projects", lambda db: None)
+        m.setattr(storage, "_memory_extras", lambda db: None)
         m.setattr(storage, "_NOTE_LIST", storage._NOTE_LIST.replace(", project_id", ""))
         insert = storage.Store._insert_note
 

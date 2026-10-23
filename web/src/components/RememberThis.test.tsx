@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
-import { ApiError, post } from "../lib/api";
+import { ApiError, api, post } from "../lib/api";
 import type { Message } from "../lib/types";
 import { note } from "../test-memory";
 import { MessageView } from "./MessageView";
@@ -9,6 +9,7 @@ import type { RememberProps } from "./RememberThis";
 vi.mock("../lib/api", async (actual) => ({
   ...(await actual<typeof import("../lib/api")>()),
   post: vi.fn(),
+  api: vi.fn(),
 }));
 
 const message = (over: Partial<Message> = {}): Message => ({
@@ -59,6 +60,28 @@ const button = (name = "Remember this message") => screen.queryByRole("button", 
 
 beforeEach(() => {
   vi.mocked(post).mockReset();
+});
+
+it("ticks cited pages and leaves tool results for the person's choice", async () => {
+  vi.mocked(api).mockResolvedValue({
+    items: [
+      { key: "web:0", name: "Example", selected: true },
+      { key: "tool:t", name: "Weather result", selected: false },
+    ],
+  });
+  vi.mocked(post).mockResolvedValue({ note: note(), created: true });
+  show(answer({ sources: [{ kind: "web", url: "https://example.com", title: "Example" }] }));
+  fireEvent.click(screen.getByRole("button", { name: "Remember this answer" }));
+  expect(await screen.findByLabelText("Example")).toBeChecked();
+  expect(screen.getByLabelText("Weather result")).not.toBeChecked();
+  fireEvent.click(screen.getByLabelText("Weather result"));
+  fireEvent.click(screen.getByRole("button", { name: "Keep note" }));
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith(
+      "/api/memory/notes",
+      expect.objectContaining({ basedOn: ["web:0", "tool:t"] }),
+    ),
+  );
 });
 
 describe("the button", () => {

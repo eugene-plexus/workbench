@@ -24,6 +24,7 @@ import type { MemoryNote, NotesFound, ProjectDetail } from "../lib/types";
 import { useSavedDocuments } from "../lib/useSavedDocuments";
 import { AddDocuments } from "./AddDocuments";
 import { DocumentRow } from "./DocumentRow";
+import { ProjectFolders } from "./ProjectFolders";
 
 export function ProjectPage({
   projectId,
@@ -310,6 +311,53 @@ export function ProjectPage({
         </form>
 
         <section aria-labelledby={`${uid}-chats`} className="section" data-testid="project-chats">
+          <div className="field">
+            <label className="field-label" htmlFor={`${uid}-model`}>
+              Model for new chats
+            </label>
+            <select
+              id={`${uid}-model`}
+              data-testid="project-model"
+              className="control"
+              value={project.model ?? ""}
+              disabled={saving}
+              onChange={async (event) => {
+                setSaving(true);
+                setProblem(null);
+                try {
+                  const next = await patch<ProjectDetail>(
+                    `/api/projects/${encodeURIComponent(projectId)}`,
+                    { model: event.target.value || null },
+                  );
+                  setProject((old) => (old ? { ...old, ...next } : next));
+                } catch (error) {
+                  setProblem(problemWords(error));
+                } finally {
+                  setSaving(false);
+                }
+              }}
+            >
+              <option value="">
+                Workbench&apos;s default (
+                {project.models?.[0] ?? project.modelInEffect ?? "no model served"})
+              </option>
+              {project.model && !project.models?.includes(project.model) && (
+                <option value={project.model}>{project.model}</option>
+              )}
+              {project.models?.map((model) => (
+                <option key={model} value={model}>
+                  {model}
+                </option>
+              ))}
+            </select>
+            {project.model && project.model !== project.modelInEffect && (
+              <p className="help">
+                {project.model} is not served now. New chats use{" "}
+                {project.modelInEffect ?? "no model until one is served"}.
+              </p>
+            )}
+            {project.modelProblem && <p role="alert">{project.modelProblem}</p>}
+          </div>
           <h2 id={`${uid}-chats`} className="title-section">
             Chats
           </h2>
@@ -466,6 +514,7 @@ export function ProjectPage({
               }}
             />
           )}
+          <ProjectFolders projectId={projectId} />
           <label className="flex min-h-7 items-center gap-2">
             <input
               type="checkbox"
@@ -540,8 +589,14 @@ export function ProjectPage({
             >
               <p className="flex items-center gap-2">
                 <TriangleAlert size={16} aria-hidden />
-                {`This project has ${counts}. What should happen to them?`}
+                {`This project has ${counts}${project.folders ? ` and ${plural(project.folders, "folder")}` : ""}. What should happen to them?`}
               </p>
+              {Boolean(project.folders) && (
+                <p>
+                  Delete removes the folders from Documents. Keep moves them to My documents. Files
+                  on disk stay as they are.
+                </p>
+              )}
               <div className="flex flex-col items-start gap-2">
                 <div>
                   <button

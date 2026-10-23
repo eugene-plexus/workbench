@@ -352,6 +352,11 @@ export interface Project {
 /** One project with its chats, newest first (`GET /api/projects/{id}`). */
 export interface ProjectDetail extends Project {
   chatList: Chat[];
+  model?: string | null;
+  modelInEffect?: string | null;
+  models?: string[];
+  modelProblem?: string | null;
+  folders?: number;
 }
 
 export interface ChatDetail {
@@ -879,6 +884,8 @@ export interface TidyProposal {
   id: string;
   kind: "duplicate" | "past";
   notes: MemoryNote[];
+  model?: string | null;
+  merged?: { title: string; body: string } | null;
 }
 
 /** Where in a document an answer found what a note says. */
@@ -895,7 +902,9 @@ export interface DocumentPlace {
 export interface NoteDocument {
   docId: string;
   name: string;
-  scope: "library" | "chat";
+  scope: "library" | "chat" | "web" | "tool";
+  source?: string | null;
+  canCompare?: boolean;
   how: "answer" | "person";
   place: DocumentPlace[];
   linkedAt: number;
@@ -905,6 +914,7 @@ export interface NoteDocument {
 export interface NoteWhole {
   note: MemoryNote;
   earlier: MemoryNote[];
+  mergeHistory?: string[];
   /** The documents the note is based on. */
   documents?: NoteDocument[];
 }
@@ -1866,6 +1876,7 @@ export interface FolderProblem {
 /** One of the person's folders (`folder_docs_api.folder_view`). A person never gets a path. */
 export interface DocumentFolder {
   id: string;
+  projectId?: string | null;
   name: string;
   state: FolderState;
   headline: string;

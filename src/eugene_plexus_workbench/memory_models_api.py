@@ -245,6 +245,7 @@ async def list_models(request: Request) -> dict[str, Any]:
         )
     run = measurer(request)
     out = []
+    merges = await store.setting(f"memoryMerges:{person.sub}") or {}
     for model in listed:
         # The recommendation shows the newest run, anyone's; the default follows Eugene's or
         # the owner's alone (section 30).
@@ -268,6 +269,10 @@ async def list_models(request: Request) -> dict[str, Any]:
                 "mode": mode,
                 "by": by,
                 "chosen": choices.get(model["id"]),
+                "proposeMerges": memory_models.proposes_merges(
+                    choices.get(model["id"]), mode, merges.get("overrides", {}).get(model["id"])
+                ),
+                "mergeProblem": merges.get("problems", {}).get(model["id"]),
                 # What "the default" comes to for this model, if they forget their choice.
                 "defaultMode": default,
                 "recommendation": memory_models.recommendation(measured),
@@ -292,7 +297,8 @@ async def list_models(request: Request) -> dict[str, Any]:
 class ModelChoice(BaseModel):
     model_config = ConfigDict(extra="forbid")
     #: `null` forgets the choice: the model then does what the person's default says.
-    mode: Literal["off", "suggest", "auto"] | None
+    mode: Literal["off", "suggest", "auto"] | None = None
+    proposeMerges: StrictBool | None = None
 
 
 @router.put("/api/memory/models/{model:path}")
@@ -312,7 +318,16 @@ async def choose(request: Request, model: str, body: ModelChoice) -> dict[str, A
                 404 if problem is None else 502,
                 problem or "Eugene does not list this model, so there is nothing to choose.",
             )
-    await state.store.put_memory_model_choice(person.sub, model, body.mode)
+    if "mode" in body.model_fields_set:
+        await state.store.put_memory_model_choice(person.sub, model, body.mode)
+    if "proposeMerges" in body.model_fields_set:
+        merges = await state.store.setting(f"memoryMerges:{person.sub}") or {}
+        overrides = merges.setdefault("overrides", {})
+        if body.proposeMerges is None:
+            overrides.pop(model, None)
+        else:
+            overrides[model] = body.proposeMerges
+        await state.store.put_setting(f"memoryMerges:{person.sub}", merges)
     return await list_models(request)
 
 

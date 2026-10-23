@@ -52,6 +52,7 @@ import { useKeepFocus } from "../lib/useKeepFocus";
 import { FolderFiles } from "./FolderFiles";
 import { FolderLeftOut } from "./FolderLeftOut";
 import { FolderRules } from "./FolderRules";
+import { FolderPlace } from "./FolderPlace";
 
 const BADGE_CLASS: Record<BadgeTone, string> = {
   quiet: "badge",
@@ -471,6 +472,7 @@ export function FolderCard({
           <FolderLeftOut folder={folder} again={checked} />
         </div>
       )}
+      {!locked && !missing && <FolderPlace folder={folder} onChanged={onChanged} />}
       {rules && !locked && !missing && (
         <div id={`${uid}-rules`}>
           <FolderRules folder={folder} limits={limits} onSaved={onChanged} />

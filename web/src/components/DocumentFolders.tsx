@@ -34,6 +34,7 @@ export function DocumentFolders({
   askHere,
   onAsk,
   onTools,
+  projectId,
 }: {
   /** What `useDocumentFolders` gives. */
   folders: {
@@ -52,6 +53,7 @@ export function DocumentFolders({
   onAsk: () => void;
   /** Opens Toolbox · Tools, where the owner gives folders to people. */
   onTools?: () => void;
+  projectId?: string;
 }) {
   const uid = useId();
   const { data, problem, reload } = folders;
@@ -188,6 +190,7 @@ export function DocumentFolders({
       )}
       {!locked && data.available && (
         <AddFolder
+          projectId={projectId}
           choices={data.grants}
           limits={data.limits}
           owner={owner}

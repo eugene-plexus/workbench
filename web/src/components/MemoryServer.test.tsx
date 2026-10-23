@@ -11,6 +11,7 @@ vi.mock("../lib/api", async (importOriginal) => ({
   put: vi.fn(),
   post: vi.fn(),
 }));
+vi.mock("./MemoryBackfill", () => ({ MemoryBackfill: () => null }));
 
 type Connected = NonNullable<MemoryServerPage["server"]>;
 

@@ -14,7 +14,7 @@
 import { BookmarkPlus, CircleAlert, Info } from "lucide-react";
 import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 
-import { post } from "../lib/api";
+import { api, post } from "../lib/api";
 import { characters, cutNote, failureWords, NOTE_LIMIT, noteFrom, YOU_OFF } from "../lib/memory";
 import type { MemoryNote, Message } from "../lib/types";
 
@@ -46,6 +46,10 @@ export function useRemember({
   const [problem, setProblem] = useState<string | null>(null);
   const [off, setOff] = useState(false);
   const returnFocus = useRef(false);
+  const [evidence, setEvidence] = useState<
+    { key: string; name: string; selected: boolean }[] | null
+  >(null);
+  const [loadingEvidence, setLoadingEvidence] = useState(false);
 
   // Closing the box puts focus back on the button that opened it, once the
   // button can take it (it is disabled while a note is being kept, which takes
@@ -76,6 +80,7 @@ export function useRemember({
         source: "button",
         chatId,
         messageId: message.id,
+        ...(evidence ? { basedOn: evidence.filter((e) => e.selected).map((e) => e.key) } : {}),
       });
       if (fromEditor) back();
       memory?.onSaved(kept.note, kept.created);
@@ -94,8 +99,24 @@ export function useRemember({
     }
     setOff(false);
     const note = noteFrom(text);
-    if (note.over) {
+    const hasEvidence =
+      message.role === "assistant" &&
+      (message.sources.some((s) => s.kind === "web") ||
+        message.toolRounds?.some((t) => t.calls.some((c) => c.status === "done")));
+    if (note.over || hasEvidence) {
       setEditing({ draft: cutNote(text), length: note.length });
+      if (hasEvidence) {
+        setEvidence(null);
+        setLoadingEvidence(true);
+        api<{ items: { key: string; name: string; selected: boolean }[] }>(
+          `/api/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(message.id)}/provenance`,
+        )
+          .then(
+            (found) => setEvidence(found.items),
+            (error: unknown) => setProblem(failureWords(error)),
+          )
+          .finally(() => setLoadingEvidence(false));
+      }
       return;
     }
     void keep(note.text, false);
@@ -177,6 +198,31 @@ export function useRemember({
               what you want kept.
             </p>
           </div>
+          {evidence && evidence.length > 0 && (
+            <fieldset className="flex flex-col gap-1">
+              <legend>Based on</legend>
+              {evidence.map((item) => (
+                <label key={item.key} className="flex gap-2">
+                  <input
+                    type="checkbox"
+                    checked={item.selected}
+                    data-testid="remember-evidence"
+                    disabled={saving}
+                    onChange={(event) =>
+                      setEvidence(
+                        (held) =>
+                          held?.map((e) =>
+                            e.key === item.key ? { ...e, selected: event.target.checked } : e,
+                          ) ?? null,
+                      )
+                    }
+                  />
+                  {item.name}
+                </label>
+              ))}
+            </fieldset>
+          )}
+          {loadingEvidence && <p role="status">Reading what this answer was based on…</p>}
           <div className="flex flex-wrap items-center gap-2">
             <span
               data-testid="remember-count"
@@ -197,7 +243,7 @@ export function useRemember({
               <button
                 type="submit"
                 data-testid="remember-save"
-                disabled={saving || tooLong || !editing.draft.trim()}
+                disabled={saving || loadingEvidence || tooLong || !editing.draft.trim()}
                 className="btn btn-primary"
               >
                 Keep note

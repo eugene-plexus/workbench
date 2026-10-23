@@ -101,7 +101,7 @@ from .agui_store import AGUIStore, allow_chat_write
 from .interaction_store import SCHEMA as INTERACTION_SCHEMA
 from .interaction_store import InteractionStore
 
-SCHEMA_VERSION = 30
+SCHEMA_VERSION = 31
 
 #: The oldest schema this migrates from: what Workbench v0.1.0 wrote. Schema 1 predates
 #: it, and nobody holds one.
@@ -706,6 +706,24 @@ def _group_claims(db: sqlite3.Connection) -> None:
             db.execute(f"ALTER TABLE people ADD COLUMN {column} TEXT")
 
 
+def _memory_extras(db: sqlite3.Connection) -> None:
+    """Schema 31 (row 27a-e): nullable additions only. All four tables are in PERSON_TABLES."""
+    for table, columns in {
+        "memory_servers": ("backfill",),
+        "projects": ("model",),
+        "memory_tidy": ("model", "merged"),
+        "document_folders": ("project_id",),
+    }.items():
+        present = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
+        for column in columns:
+            if column not in present:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS document_folders_by_project "
+        "ON document_folders (owner, project_id)"
+    )
+
+
 #: What brings a store written at version N-1 to N, for N above `OLDEST_SCHEMA`.
 #: `_SCHEMA` already holds the result, for a store made new. A step is a statement,
 #: or a function of the connection for what SQL alone cannot say.
@@ -857,6 +875,7 @@ _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
     28: [_removal],
     29: [branch_store.migration],
     30: [_group_claims],
+    31: [_memory_extras],
 }
 
 
@@ -995,6 +1014,7 @@ def _initialize_schema(
         _removal(db)
         branch_store.migration(db)
         _group_claims(db)
+        _memory_extras(db)
         db.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?)",
             (str(SCHEMA_VERSION),),
@@ -1061,7 +1081,7 @@ PERSON_TABLES: tuple[tuple[str, str], ...] = (
 )
 _NULLED: tuple[tuple[str, str], ...] = (("memory_measurements", "owner"),)
 #: The settings kept per person, as `<name>:<sub>` (`api.py`).
-_PERSON_SETTINGS = ("installModeSeen", "runPreviews")
+_PERSON_SETTINGS = ("installModeSeen", "runPreviews", "memoryMerges")
 
 
 def _purge_rows(
@@ -1241,6 +1261,7 @@ class Project:
     general_memory: bool = True
     #: Whether its chats search My documents too (MV7b).
     general_documents: bool = True
+    model: str | None = None
 
 
 @dataclass
@@ -1315,6 +1336,7 @@ class FolderRecord:
     report: dict[str, Any] | None = None
     synced_at: float | None = None
     checked_at: float | None = None
+    project_id: str | None = None
 
 
 class MemoryFull(Exception):
@@ -1908,6 +1930,7 @@ _FOLDER_FIELDS = frozenset(
         "report",
         "synced_at",
         "checked_at",
+        "project_id",
     }
 )
 
@@ -1937,6 +1960,7 @@ def _folder_record(row: sqlite3.Row) -> FolderRecord:
         report=report if isinstance(report, dict) else None,
         synced_at=row["synced_at"],
         checked_at=row["checked_at"],
+        project_id=row["project_id"],
     )
 
 
@@ -2396,6 +2420,7 @@ class Store:
             updated_at=row["updated_at"],
             general_memory=bool(row["general_memory"]),
             general_documents=bool(row["general_documents"]),
+            model=row["model"],
         )
 
     async def projects(self, owner: str) -> list[Project]:
@@ -6064,6 +6089,411 @@ class Store:
             server = dict(row)
             server["verbs"] = json.loads(server["verbs"] or "{}")
             return server
+
+        return await self._run(go)
+
+    async def backfill_owners(self) -> list[str]:
+        return await self._run(
+            lambda: [
+                r[0]
+                for r in self._conn().execute(
+                    "SELECT owner FROM memory_servers WHERE backfill IS NOT NULL"
+                )
+            ]
+        )
+
+    async def memory_server_live_due(self, now: float) -> list[dict[str, Any]]:
+        """Due live work, including forgetting, ahead of any past-chat send."""
+        return await self._run(
+            lambda: [
+                dict(r)
+                for r in self._conn().execute(
+                    "SELECT q.* FROM memory_server_sent q "
+                    "LEFT JOIN memory_servers s ON s.owner = q.owner "
+                    "WHERE q.state IN ('send', 'forget') AND q.next_at <= ? AND "
+                    "(q.state = 'forget' OR NOT EXISTS "
+                    "(SELECT 1 FROM json_each(s.backfill, '$.pending') "
+                    "WHERE value = q.document_id)) ORDER BY q.next_at, q.document_id LIMIT 20",
+                    (now,),
+                )
+            ]
+        )
+
+    async def memory_server_pending(self, owner: str) -> set[str]:
+        return await self._run(
+            lambda: {
+                r[0]
+                for r in self._conn().execute(
+                    "SELECT document_id FROM memory_server_sent WHERE owner = ? AND state = 'send'",
+                    (owner,),
+                )
+            }
+        )
+
+    async def put_backfill(
+        self,
+        owner: str,
+        url: str,
+        state: dict[str, Any],
+        queue: Sequence[tuple[str, str]] = (),
+        *,
+        expected: str | None = None,
+    ) -> bool:
+        """Commit a cursor and its queue together, only for the server the person confirmed.
+        Compare the previous JSON too: Stop or a completed send wins over a stale scan."""
+
+        def go() -> bool:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute(
+                    "SELECT url, backfill FROM memory_servers WHERE owner = ?", (owner,)
+                ).fetchone()
+                if row is None or row["url"] != url or row["backfill"] != expected:
+                    db.execute("COMMIT")
+                    return False
+                pending = list(state.get("pending", []))
+                for chat_id, message_id in queue:
+                    doc_id = f"{chat_id}:{message_id}"
+                    now = time.time()
+                    inserted = db.execute(
+                        "INSERT OR IGNORE INTO memory_server_sent "
+                        "(document_id, owner, chat_id, message_id, state, created_at, next_at) "
+                        "VALUES (?, ?, ?, ?, 'send', ?, ?)",
+                        (doc_id, owner, chat_id, message_id, now, now),
+                    ).rowcount
+                    if inserted:
+                        pending.append(doc_id)
+                    else:
+                        state["sent"] += 1
+                state["pending"] = pending
+                if state.get("exhausted") and not pending and state["state"] == "running":
+                    state["state"] = "done"
+                db.execute(
+                    "UPDATE memory_servers SET backfill = ? WHERE owner = ?",
+                    (json.dumps(state), owner),
+                )
+                db.execute("COMMIT")
+                return True
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+
+        return await self._run(go)
+
+    async def backfill_result(
+        self,
+        owner: str,
+        url: str,
+        document_id: str,
+        outcome: str,
+        ms: float = 0,
+        reason: str | None = None,
+    ) -> bool:
+        """Record a send and its progress in one transaction; stable document ids replace
+        an uncertain remote write after a crash. No exchange words are kept here."""
+
+        def go() -> bool:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute(
+                    "SELECT url, backfill FROM memory_servers WHERE owner = ?", (owner,)
+                ).fetchone()
+                if row is None or row["url"] != url or not row["backfill"]:
+                    db.execute("COMMIT")
+                    return False
+                state = json.loads(row["backfill"])
+                if document_id not in state.get("pending", []):
+                    db.execute("COMMIT")
+                    return False
+                if outcome == "failed":
+                    state["failures"] = state.get("failures", 0) + 1
+                    state["error"] = reason
+                    state["errorAt"] = time.time()
+                    if state["failures"] >= 3:
+                        state["state"] = "stopped"
+                else:
+                    state["pending"].remove(document_id)
+                    state["failures"] = 0
+                    state["error"] = None
+                    if outcome == "sent":
+                        changed = db.execute(
+                            "UPDATE memory_server_sent SET state = 'sent', attempts = 0 "
+                            "WHERE owner = ? AND document_id = ? AND state = 'send'",
+                            (owner, document_id),
+                        ).rowcount
+                        state["sent"] += bool(changed)
+                        samples = [*state.get("samples", []), ms][-20:]
+                        state["samples"] = samples
+                        state["msPerExchange"] = sum(samples) / len(samples)
+                    else:
+                        state["skipped"] += 1
+                        db.execute(
+                            "DELETE FROM memory_server_sent WHERE owner = ? "
+                            "AND document_id = ? AND state = 'send'",
+                            (owner, document_id),
+                        )
+                    if (
+                        not state["pending"]
+                        and state.get("exhausted")
+                        and state["state"] == "running"
+                    ):
+                        state["state"] = "done"
+                db.execute(
+                    "UPDATE memory_servers SET backfill = ? WHERE owner = ?",
+                    (json.dumps(state), owner),
+                )
+                db.execute("COMMIT")
+                return outcome != "sent" or bool(changed)
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+
+        return await self._run(go)
+
+    async def set_project_model(self, owner: str, project_id: str, model: str | None) -> None:
+        await self._run(
+            lambda: self._conn().execute(
+                "UPDATE projects SET model = ? WHERE owner = ? AND id = ?",
+                (model, owner, project_id),
+            )
+        )
+
+    async def add_scoped_folder_record(self, record: FolderRecord) -> bool:
+        """Keep a new folder and its place in the same insert, before any sync can start."""
+
+        def go() -> bool:
+            values = {
+                "owner": record.owner,
+                "grant_id": record.grant_id,
+                "name": record.name,
+                "added_at": record.added_at,
+                "ignore": json.dumps(record.ignore),
+                "include_hidden": int(record.include_hidden),
+                "use_gitignore": int(record.use_gitignore),
+                "project_id": record.project_id,
+            }
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                if (
+                    record.project_id is not None
+                    and db.execute(
+                        "SELECT 1 FROM projects WHERE owner = ? AND id = ?",
+                        (record.owner, record.project_id),
+                    ).fetchone()
+                    is None
+                ):
+                    raise ValueError("This project was deleted before the folder could be added.")
+                inserted = db.execute(
+                    f"INSERT OR IGNORE INTO document_folders ({', '.join(values)}) "
+                    f"VALUES ({', '.join('?' for _ in values)})",
+                    tuple(values.values()),
+                ).rowcount
+                db.execute("COMMIT")
+                return bool(inserted)
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+
+        return await self._run(go)
+
+    async def accept_web_hash(self, owner: str, note_id: str, doc_id: str, sha256: str) -> bool:
+        """The person's Still true: accept the explicitly checked page's hash, never its words."""
+        return await self._run(
+            lambda: bool(
+                self._conn()
+                .execute(
+                    "UPDATE memory_note_documents SET sha256 = ?, linked_at = ? "
+                    "WHERE owner = ? AND note_id = ? AND doc_id = ? AND scope = 'web'",
+                    (sha256, time.time(), owner, note_id, doc_id),
+                )
+                .rowcount
+            )
+        )
+
+    async def note_merge_history(self, owner: str, note_id: str) -> list[str]:
+        return await self._run(
+            lambda: [
+                r[0]
+                for r in self._conn().execute(
+                    "SELECT old_text FROM memory_events WHERE owner = ? AND note_id = ? "
+                    "AND event = 'merge' AND old_text LIKE 'merged as %' ORDER BY ts",
+                    (owner, note_id),
+                )
+            ]
+        )
+
+    async def connect_memory_server(
+        self, owner: str, url: str, token: str, name: str, verbs: dict[str, Any]
+    ) -> None:
+        """An address change ends consent. A new token at the same address keeps progress."""
+
+        def go() -> None:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                old = db.execute(
+                    "SELECT url FROM memory_servers WHERE owner = ?", (owner,)
+                ).fetchone()
+                if old is not None and old["url"] != url:
+                    db.execute("DELETE FROM memory_server_sent WHERE owner = ?", (owner,))
+                db.execute(
+                    "INSERT INTO memory_servers (owner, url, token, name, verbs, connected_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(owner) DO UPDATE SET "
+                    "backfill = CASE WHEN memory_servers.url = excluded.url "
+                    "THEN backfill ELSE NULL END, "
+                    "url = excluded.url, token = excluded.token, name = excluded.name, "
+                    "verbs = excluded.verbs, connected_at = excluded.connected_at",
+                    (owner, url, token, name, json.dumps(verbs), time.time()),
+                )
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+
+        await self._run(go)
+
+    async def add_model_tidy(
+        self,
+        owner: str,
+        ids: Sequence[str],
+        model: str,
+        merged: dict[str, str],
+        *,
+        inputs: dict[str, str] | None = None,
+    ) -> bool:
+        """A model's wording is a waiting duplicate proposal, never a note."""
+
+        def go() -> bool:
+            fingerprints = inputs
+            if fingerprints is None:
+                held = self._notes(
+                    self._conn(), owner, " AND id IN (?, ?)", list(ids), with_body=True
+                )
+                fingerprints = {note.id: self.tidy_fingerprint(note) for note in held}
+            return bool(
+                self._conn()
+                .execute(
+                    "INSERT OR IGNORE INTO memory_tidy "
+                    "(id, owner, kind, pair, created_at, model, merged) "
+                    "SELECT ?, ?, 'duplicate', ?, ?, ?, ? WHERE "
+                    "(SELECT COUNT(*) FROM memory_tidy WHERE owner = ? AND settled IS NULL) < 20",
+                    (
+                        secrets.token_hex(8),
+                        owner,
+                        json.dumps(sorted(ids)),
+                        time.time(),
+                        model,
+                        json.dumps({**merged, "inputs": fingerprints}),
+                        owner,
+                    ),
+                )
+                .rowcount
+            )
+
+        return await self._run(go)
+
+    @staticmethod
+    def tidy_fingerprint(note: MemoryNote) -> str:
+        content = json.dumps([note.text, note.body or "", note.kind, note.project_id])
+        return hashlib.sha256(content.encode()).hexdigest()
+
+    async def model_tidy_wording(self, owner: str) -> dict[str, dict[str, Any]]:
+        return await self._run(
+            lambda: {
+                r["id"]: {"model": r["model"], "merged": json.loads(r["merged"])}
+                for r in self._conn().execute(
+                    "SELECT id, model, merged FROM memory_tidy "
+                    "WHERE owner = ? AND model IS NOT NULL",
+                    (owner,),
+                )
+            }
+        )
+
+    async def keep_model_merge(
+        self, owner: str, tidy_id: str, new: MemoryNote, limit: int
+    ) -> MemoryNote | None:
+        """The person's Keep: new wording supersedes both notes in one transaction."""
+
+        def go() -> MemoryNote | None:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                proposal = db.execute(
+                    "SELECT * FROM memory_tidy WHERE owner = ? AND id = ? "
+                    "AND settled IS NULL AND model IS NOT NULL",
+                    (owner, tidy_id),
+                ).fetchone()
+                if proposal is None:
+                    db.execute("COMMIT")
+                    return None
+                ids = json.loads(proposal["pair"])
+                notes = self._notes(
+                    db, owner, " AND id IN (?, ?) AND status = 'active'", ids, with_body=True
+                )
+                if (
+                    len(notes) != 2
+                    or notes[0].project_id != notes[1].project_id
+                    or notes[0].kind != notes[1].kind
+                    or any(
+                        json.loads(proposal["merged"]).get("inputs", {}).get(n.id)
+                        != self.tidy_fingerprint(n)
+                        for n in notes
+                    )
+                ):
+                    db.execute("COMMIT")
+                    return None
+                count = db.execute(
+                    "SELECT COUNT(*) FROM memory_notes WHERE owner = ?", (owner,)
+                ).fetchone()[0]
+                if count >= limit:
+                    raise MemoryFull(limit)
+                new.project_id = notes[0].project_id
+                new.kind = notes[0].kind
+                new.pinned = any(n.pinned for n in notes)
+                self._insert_note(db, new)
+                self._link_tags(
+                    db,
+                    owner,
+                    new.id,
+                    list(dict.fromkeys(t for n in notes for t in n.tags)),
+                    new.created_at,
+                )
+                tail, seen = notes[0].id, {notes[0].id}
+                while True:
+                    previous = db.execute(
+                        "SELECT id FROM memory_notes WHERE owner = ? AND superseded_by = ?",
+                        (owner, tail),
+                    ).fetchone()
+                    if previous is None or previous["id"] in seen:
+                        break
+                    tail = previous["id"]
+                    seen.add(tail)
+                for i, note in enumerate(notes):
+                    self._supersede(
+                        db, owner, note.id, new.id if i == 0 else tail, new.created_at, "person"
+                    )
+                    self._carry_documents(db, owner, note.id, new.id)
+                self._event(
+                    db,
+                    owner,
+                    new.id,
+                    "merge",
+                    "person",
+                    f"merged as {proposal['model']} proposed; you kept it",
+                    None,
+                )
+                db.execute(
+                    "UPDATE memory_tidy SET settled = 'merged', settled_at = ? WHERE id = ?",
+                    (new.created_at, tidy_id),
+                )
+                db.execute("COMMIT")
+                return new
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
 
         return await self._run(go)
 

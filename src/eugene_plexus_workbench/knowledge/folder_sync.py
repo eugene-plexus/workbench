@@ -323,6 +323,7 @@ class FolderSync:
         ignore: list[str] | None = None,
         include_hidden: bool = False,
         use_gitignore: bool = True,
+        project_id: str | None = None,
     ) -> FolderRecord:
         """Point a person's Documents at a folder that was granted them. `NoSuchGrant` when it is
         not theirs (the same answer as one that does not exist); `AlreadyAdded` when it is there;
@@ -346,8 +347,9 @@ class FolderSync:
             ignore=folder_rules.validate_list(ignore or []),
             include_hidden=include_hidden,
             use_gitignore=use_gitignore,
+            project_id=project_id,
         )
-        if not await self.store.add_folder_record(record):
+        if not await self.store.add_scoped_folder_record(record):
             raise AlreadyAdded
         self.request(person.sub, grant_id, manual=False)
         return record
@@ -419,6 +421,32 @@ class FolderSync:
         self._states.pop((sub, grant_id), None)
         self._rest.pop((sub, grant_id), None)
         return removed
+
+    async def move(self, sub: str, grant_id: str, project_id: str | None) -> FolderRecord | None:
+        """Move the indexed words and sidecars, without reading the folder again.
+        Close and drain the old sync first so it cannot put a file back in the old scope."""
+        record = await self.store.folder_record(sub, grant_id)
+        if record is None:
+            return None
+        held = self.state(sub, grant_id)
+        held.closed = True
+        if held.task is not None:
+            held.task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await held.task
+        async with held.lock:
+            try:
+                index = self.saved.index(sub, create=False)
+                if index is not None:
+                    old = f"project:{record.project_id}" if record.project_id else LIBRARY
+                    new = f"project:{project_id}" if project_id else LIBRARY
+                    await self.saved._cancel(
+                        sub, [h.doc_id for h in await index.folder_files(grant_id)]
+                    )
+                    await index.rescope(old, new, source_prefix=f"folder:{grant_id}/")
+                return await self.store.update_folder_record(sub, grant_id, project_id=project_id)
+            finally:
+                held.closed = False
 
     async def grant_withdrawn(self, grant_id: str) -> int:
         """The owner took this grant away: the folder's documents leave the index before the
@@ -832,7 +860,9 @@ class _Work:
             FolderSkip(
                 NewDocument(
                     id=new_id(),
-                    scope=LIBRARY,
+                    scope=f"project:{self.record.project_id}"
+                    if self.record.project_id
+                    else LIBRARY,
                     name=self._named(found),
                     media_type="application/octet-stream",
                     bytes=found.size,
@@ -987,7 +1017,7 @@ class _Work:
             await owner.saved.add(
                 self.sub,
                 doc_id=part.name.removesuffix(".part"),
-                scope=LIBRARY,
+                scope=f"project:{self.record.project_id}" if self.record.project_id else LIBRARY,
                 name=name,
                 detected=detected,
                 size=taken.size,

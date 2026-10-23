@@ -65,6 +65,8 @@ jobs:
         run: mypy src/
       - name: Pytest
         run: pytest -n auto
+      - name: Row 27a migration and past-chat sending acceptance (fakes)
+        run: python -m pytest -q tests/test_memory_backfill.py tests/test_memory_backfill_api.py
       - name: Durable interaction acceptance detects broken guards
         run: python scripts/check-interactions-sabotage.py
       - name: MCP Apps acceptance detects broken guards
