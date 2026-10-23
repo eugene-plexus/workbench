@@ -53,7 +53,8 @@ it("compares saved revisions and reads the chosen revision through the existing 
   show();
   await screen.findByText("new", { exact: false });
   fireEvent.change(screen.getByLabelText("Compare with revision"), { target: { value: "2" } });
-  const diff = await screen.findByRole("region", { name: "Changes from revision 2 to revision 3" });
+  const diff = await screen.findByRole("tabpanel", { name: "Changes" });
+  expect(diff).toHaveTextContent("Revision 2 → Revision 3");
   await waitFor(() => expect(diff.querySelector("del")).toHaveTextContent("older"));
   expect(diff.querySelector("ins")).toHaveTextContent("new");
   expect(
@@ -63,7 +64,20 @@ it("compares saved revisions and reads the chosen revision through the existing 
   fireEvent.change(screen.getByLabelText("Compare with revision"), { target: { value: "1" } });
   await waitFor(() => expect(diff.querySelector("del")).toHaveTextContent("old"));
   fireEvent.change(screen.getByLabelText("Revision"), { target: { value: "2" } });
-  expect(screen.queryByRole("region", { name: /Changes from/ })).toBeNull();
+  expect(screen.queryByRole("tabpanel", { name: "Changes" })).toBeNull();
+});
+
+it("selects the Changes tab while comparing and lets the keyboard return to source", async () => {
+  show();
+  await waitFor(() => expect(screen.getByLabelText("Compare with revision")).not.toBeDisabled());
+  fireEvent.change(screen.getByLabelText("Compare with revision"), { target: { value: "1" } });
+  const changes = screen.getByRole("tab", { name: "Changes", selected: true });
+  expect(screen.getByRole("tabpanel", { name: "Changes" })).toHaveTextContent("old");
+  expect(screen.getByRole("tab", { name: "Preview" })).toHaveAttribute("aria-selected", "false");
+  fireEvent.keyDown(changes, { key: "ArrowLeft" });
+  expect(screen.getByRole("tab", { name: "Source", selected: true })).toHaveFocus();
+  expect(screen.getByRole("tabpanel", { name: "Source" })).toBeVisible();
+  expect(screen.getByLabelText("Compare with revision")).toHaveValue("");
 });
 
 it("saved_tool_artifact_names_the_result_and_keeps_person_edits_separate", async () => {

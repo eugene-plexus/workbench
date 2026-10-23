@@ -728,8 +728,170 @@ async def test_identical_words_in_another_persons_memory_stay(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("hidden", [False, True])
+async def test_an_old_recall_is_removed_not_held(tmp_path: Path, hidden: bool) -> None:
+    store = Store(tmp_path / "workbench.sqlite3")
+    await store.open()
+    try:
+        await seed(store)
+        secret = "sk-test-7f3a"
+        await store.update_message("a2", content=secret)
+        await store._run(
+            lambda: store._conn().execute(
+                "UPDATE messages SET created_at=CASE id WHEN 'a2' THEN 10 ELSE 12 END "
+                "WHERE id IN ('a2','u2','a4')"
+            )
+        )
+        await store.create_chat(Chat("recalls", "p", "Recalls", None, 0, 0))
+        for mid, at, recall in (
+            ("before", 9, {"text": "An earlier recall"}),
+            ("at-start", 10, {"text": "A recall at the cutoff"}),
+            ("after", 11, {"text": secret}),
+            ("sourced", 11, {"text": "A sourced recall", "documentId": "known"}),
+        ):
+            await store.add_message(
+                Message(mid, "recalls", 0, "assistant", "done", at), parent_id=None
+            )
+            await store.update_message(mid, memory_used={"memoryServer": {"memories": [recall]}})
+        backup_path = Path(str(store.path) + ".schema-28.bak")
+
+        def backup() -> None:
+            with sqlite3.connect(backup_path) as copy:
+                store._conn().backup(copy)
+
+        await store._run(backup)
+        if hidden:
+            await store.add_message(
+                Message("recall-root", "recalls", 0, "user", "done", 0), parent_id=None
+            )
+            await store._run(
+                lambda: store._conn().execute(
+                    "UPDATE messages SET parent_id='recall-root' WHERE id='after'"
+                )
+            )
+            await store.delete_branch("recalls", "after", now=1)
+        await store.delete_branch("c", "a2", now=0)
+        removed = await store.purge_branch("a2", now=30 * DAY)
+        assert removed is not None and len(removed.keys) == 1
+        if hidden:
+            assert await store.undo_branch("recalls", "after", now=2)
+        assert (await store.message("after")).memory_used["memoryServer"] == {
+            "memories": [],
+            "forgotten": 1,
+        }
+        assert (await store.message("before")).memory_used["memoryServer"]["memories"] == [
+            {"text": "An earlier recall"}
+        ]
+        assert (await store.message("at-start")).memory_used["memoryServer"]["memories"] == [
+            {"text": "A recall at the cutoff"}
+        ]
+        assert (await store.message("sourced")).memory_used["memoryServer"]["memories"] == [
+            {"text": "A sourced recall", "documentId": "known"}
+        ]
+        with sqlite3.connect(backup_path) as copy:
+            for mid in ("before", "at-start", "after", "sourced"):
+                used = json.loads(
+                    copy.execute("SELECT memory_used FROM messages WHERE id=?", (mid,)).fetchone()[
+                        0
+                    ]
+                )
+                assert used == (await store.message(mid)).memory_used
+        assert _holding(tmp_path, secret) == []
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backup", [False, True])
+async def test_recall_removal_rolls_back_with_the_purge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backup: bool
+) -> None:
+    store = Store(tmp_path / "workbench.sqlite3")
+    await store.open()
+    try:
+        await seed(store)
+        recall = {"text": "sk-test-7f3a"}
+        await store.create_chat(Chat("later", "p", "Later", None, 0, 0))
+        await store.add_message(
+            Message("legacy", "later", 0, "assistant", "done", 1), parent_id=None
+        )
+        await store.update_message("legacy", memory_used={"memoryServer": {"memories": [recall]}})
+        path = Path(str(store.path) + ".schema-28.bak") if backup else store.path
+        if backup:
+
+            def copy_store() -> None:
+                with sqlite3.connect(path) as copy:
+                    store._conn().backup(copy)
+
+            await store._run(copy_store)
+        await store.delete_branch("c", "a2", now=0)
+        original = storage._purge_rows
+
+        def failed(db: sqlite3.Connection, sub: str, **kwargs: Any) -> dict[str, int]:
+            original(db, sub, **kwargs)
+            raise sqlite3.OperationalError("purge transaction failed")
+
+        monkeypatch.setattr(storage, "_purge_rows", failed)
+        with pytest.raises(sqlite3.OperationalError, match="purge transaction failed"):
+            await store.purge_branch("a2", now=30 * DAY)
+        with sqlite3.connect(path) as db:
+            used = json.loads(
+                db.execute("SELECT memory_used FROM messages WHERE id='legacy'").fetchone()[0]
+            )
+            assert used == {"memoryServer": {"memories": [recall]}}
+        assert await store.deleted_branches("c")
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hidden", [False, True])
+async def test_whole_chat_delete_removes_later_recalls_in_store_and_backup(
+    tmp_path: Path, hidden: bool
+) -> None:
+    store = Store(tmp_path / "workbench.sqlite3")
+    await store.open()
+    try:
+        await seed(store)
+        await store.create_chat(Chat("recalls", "p", "Recalls", None, 0, 0))
+        for mid, at in (("before", -1), ("after", 1)):
+            await store.add_message(
+                Message(mid, "recalls", 0, "assistant", "done", at), parent_id=None
+            )
+            await store.update_message(
+                mid, memory_used={"memoryServer": {"memories": [{"text": mid}]}}
+            )
+        path = Path(str(store.path) + ".schema-28.bak")
+
+        def copy_store() -> None:
+            with sqlite3.connect(path) as copy:
+                store._conn().backup(copy)
+
+        await store._run(copy_store)
+        if hidden:
+            await store.delete_branch("c", "a2", now=0)
+        removed = await store.delete_chat("c")
+        assert len(removed.keys) == 1
+        assert (await store.message("before")).memory_used["memoryServer"]["memories"] == [
+            {"text": "before"}
+        ]
+        assert (await store.message("after")).memory_used["memoryServer"] == {
+            "memories": [],
+            "forgotten": 1,
+        }
+        with sqlite3.connect(path) as db:
+            for mid in ("before", "after"):
+                used = json.loads(
+                    db.execute("SELECT memory_used FROM messages WHERE id=?", (mid,)).fetchone()[0]
+                )
+                assert used == (await store.message(mid)).memory_used
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("overlap", [False, True])
-async def test_only_overlapping_legacy_server_excerpts_pause_purge(
+async def test_legacy_server_excerpts_are_removed_regardless_of_overlap(
     tmp_path: Path, overlap: bool
 ) -> None:
     store = Store(tmp_path / "workbench.sqlite3")
@@ -739,7 +901,7 @@ async def test_only_overlapping_legacy_server_excerpts_pause_purge(
         await store.update_message("a2", content="one two three four five six seven eight nine")
         await store.create_chat(Chat("later", "p", "Later", None, 0, 0))
         await store.add_message(
-            Message("legacy", "later", 0, "assistant", "done", 0), parent_id=None
+            Message("legacy", "later", 0, "assistant", "done", 1), parent_id=None
         )
         await store.update_message(
             "legacy",
@@ -755,31 +917,26 @@ async def test_only_overlapping_legacy_server_excerpts_pause_purge(
                 }
             },
         )
-        before = asdict(await store.message("legacy"))
         await store._run(
             lambda: store._conn().execute(
                 "INSERT INTO memory_server_sent (document_id,owner,chat_id,message_id,state,created_at,next_at) VALUES ('c:a2','p','c','a2','sent',0,0)"
             )
         )
         await store.delete_branch("c", "a2", now=0)
-        if overlap:
-            with pytest.raises(InteractionError) as caught:
-                await store.purge_branch("a2", now=30 * DAY)
-            assert (
-                str(caught.value)
-                == "This answer cannot be deleted for good while an older memory recall may quote it: Later. Remove that recall to finish."
-            )
-            assert await store.deleted_branches()
-        else:
-            assert await store.purge_branch("a2", now=30 * DAY)
-            assert await store.deleted_branches() == []
-        assert asdict(await store.message("legacy")) == before
+        removed = await store.purge_branch("a2", now=30 * DAY)
+        assert removed is not None
+        assert removed.notice == "Also removed 1 older memory recall that could quote this answer."
+        assert await store.deleted_branches() == []
+        assert (await store.message("legacy")).memory_used["memoryServer"] == {
+            "memories": [],
+            "forgotten": 1,
+        }
     finally:
         await store.close()
 
 
 @pytest.mark.asyncio
-async def test_removing_an_old_recall_also_unblocks_schema_backups(tmp_path: Path) -> None:
+async def test_removing_an_old_recall_also_cleans_schema_backups(tmp_path: Path) -> None:
     store = Store(tmp_path / "workbench.sqlite3")
     await store.open()
     try:
@@ -797,8 +954,6 @@ async def test_removing_an_old_recall_also_unblocks_schema_backups(tmp_path: Pat
 
         await store._run(backup)
         await store.delete_branch("c", "a2", now=0)
-        with pytest.raises(InteractionError):
-            await store.purge_branch("a2", now=30 * DAY)
         assert await store.remove_answer_recall("c", "a3", recall)
         assert await store.purge_branch("a2", now=30 * DAY)
         assert (await store.message("a3")).memory_used["memoryServer"]["memories"] == [
@@ -809,7 +964,7 @@ async def test_removing_an_old_recall_also_unblocks_schema_backups(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_refused_chat_delete_preserves_every_hidden_branch(tmp_path: Path) -> None:
+async def test_chat_delete_removes_recalls_and_every_hidden_branch(tmp_path: Path) -> None:
     store = Store(tmp_path / "workbench.sqlite3")
     await store.open()
     try:
@@ -818,7 +973,7 @@ async def test_refused_chat_delete_preserves_every_hidden_branch(tmp_path: Path)
         await store.update_message("a2", content=words)
         await store.create_chat(Chat("later", "p", "Later recall", None, 0, 0))
         await store.add_message(
-            Message("legacy", "later", 0, "assistant", "done", 0), parent_id=None
+            Message("legacy", "later", 0, "assistant", "done", 1), parent_id=None
         )
         await store.update_message(
             "legacy", memory_used={"memoryServer": {"memories": [{"text": words}]}}
@@ -826,37 +981,35 @@ async def test_refused_chat_delete_preserves_every_hidden_branch(tmp_path: Path)
         now = time.time()
         await store.delete_branch("c", "a1", now=now)
         await store.delete_branch("c", "a2", now=now + 1)
-        before = await store.deleted_branches("c")
-        with pytest.raises(InteractionError) as caught:
-            await store.delete_chat("c")
-        assert caught.value.status == 503
-        assert "Later recall" in str(caught.value) and "legacy" in str(caught.value)
-        assert await store.chat("c") is not None
-        assert await store.deleted_branches("c") == before
-        for row in before:
-            assert await store.undo_branch("c", row["id"], now=now + 2)
+        removed = await store.delete_chat("c")
+        assert removed.notice == "Also removed 1 older memory recall that could quote this answer."
+        assert await store.chat("c") is None
+        assert await store.deleted_branches("c") == []
+        assert (await store.message("legacy")).memory_used["memoryServer"]["memories"] == []
     finally:
         await store.close()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("missing", ["chat", "message"])
-async def test_backup_only_legacy_recall_is_scrubbed_without_blocking(
-    tmp_path: Path, missing: str
-) -> None:
+async def test_backup_only_legacy_recall_is_removed(tmp_path: Path, missing: str) -> None:
     store = Store(tmp_path / "workbench.sqlite3")
     await store.open()
     try:
         await seed(store)
-        words = MARK + " one two three four five six seven eight nine"
+        words = MARK
         await store.update_message("a2", content=words)
         await store.create_chat(Chat("later", "p", "Later", None, 0, 0))
         await store.add_message(
-            Message("legacy", "later", 0, "assistant", "done", 0), parent_id=None
+            Message("legacy", "later", 0, "assistant", "done", 1), parent_id=None
         )
         await store.update_message(
             "legacy",
-            memory_used={"memoryServer": {"memories": [{"text": words}, {"text": "Keep"}]}},
+            memory_used={
+                "memoryServer": {
+                    "memories": [{"text": words}, {"text": "Keep", "documentId": "known"}]
+                }
+            },
         )
         backup_path = Path(str(store.path) + ".schema-28.bak")
 
@@ -872,14 +1025,15 @@ async def test_backup_only_legacy_recall_is_scrubbed_without_blocking(
                 lambda: store._conn().execute("DELETE FROM messages WHERE id='legacy'")
             )
         await store.delete_branch("c", "a2", now=0)
-        assert await store.branch_legacy_recalls("a2") == []
-        assert await store.purge_branch("a2", now=30 * DAY)
+        assert len(await store.branch_legacy_recalls("a2")) == 1
+        removed = await store.purge_branch("a2", now=30 * DAY)
+        assert removed is not None and len(removed.keys) == 1
         assert _holding(tmp_path, MARK) == []
         with sqlite3.connect(backup_path) as copy:
             used = json.loads(
                 copy.execute("SELECT memory_used FROM messages WHERE id='legacy'").fetchone()[0]
             )
-            assert used["memoryServer"]["memories"] == [{"text": "Keep"}]
+            assert used["memoryServer"]["memories"] == [{"text": "Keep", "documentId": "known"}]
             assert copy.execute("SELECT title FROM chats WHERE id='later'").fetchone() == ("Later",)
     finally:
         await store.close()

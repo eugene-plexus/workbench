@@ -56,6 +56,21 @@ it("reloads every tab when another version is shown", async () => {
   expect(api).toHaveBeenLastCalledWith("/api/chats/c");
 });
 
+it("keeps the purge notice while reloading the chat, and clears it on another chat", async () => {
+  const { result, rerender } = renderHook(({ id }) => useChat(id), { initialProps: { id: "c" } });
+  await waitFor(() => expect(result.current.detail).not.toBeNull());
+  expect(result.current.notice).toBeNull();
+  const notice = "Also removed 1 older memory recall that could quote this answer.";
+  act(() => watched()({ type: "path", notice }));
+  await waitFor(() => expect(api).toHaveBeenCalledTimes(2));
+  expect(result.current.notice).toBe(notice);
+  act(() => watched()({ type: "path" }));
+  expect(result.current.notice).toBeNull();
+  act(() => watched()({ type: "path", notice }));
+  rerender({ id: "other" });
+  expect(result.current.notice).toBeNull();
+});
+
 it("looks through another branch, and keeps looking there on a reload", async () => {
   const { result } = renderHook(() => useChat("c"));
   await waitFor(() => expect(api).toHaveBeenCalledTimes(1));
@@ -148,4 +163,23 @@ describe("what searching the person's documents came to", () => {
     );
     expect(next.detail.messages[0]!.retrieval?.cited).toEqual([1]);
   });
+});
+
+it("shows the newest read of a chat, even when an older read comes back last", async () => {
+  const running = { ...detail, chat: { ...detail.chat, running: true } };
+  const finished = { ...detail, chat: { ...detail.chat, running: false, title: "finished" } };
+  let answerOld!: (value: ChatDetail) => void;
+  vi.mocked(api)
+    .mockReset()
+    .mockResolvedValueOnce(detail)
+    .mockImplementationOnce(() => new Promise<ChatDetail>((done) => (answerOld = done)))
+    .mockResolvedValueOnce(finished);
+  const { result } = renderHook(() => useChat("c"));
+  await waitFor(() => expect(result.current.detail).toEqual(detail));
+  act(() => watched()({ type: "path" }));
+  act(() => watched()({ type: "reload" }));
+  await waitFor(() => expect(result.current.detail).toEqual(finished));
+  // The first of the two reads lands after the second, with what it saw earlier.
+  await act(async () => answerOld(running));
+  expect(result.current.detail).toEqual(finished);
 });

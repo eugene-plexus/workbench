@@ -119,6 +119,7 @@ export function useChat(chatId: string | null) {
   const [detail, setDetailState] = useState<ChatDetail | null>(null);
   const [progress, setProgress] = useState<Progress | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   // MV3b: notes the chat's model kept by itself after it went quiet, for their receipts.
   const [learned, setLearned] = useState<LearnedNote[]>([]);
   // The chat as last shown, kept beside the state so an event can be
@@ -143,8 +144,13 @@ export function useChat(chatId: string | null) {
     [setDetail],
   );
 
+  // The newest read is the one shown. Reads can come back out of order (an
+  // answer's first events each ask for one), and an older read that lands last
+  // would put back an answer that had already finished.
+  const reads = useRef(0);
   const reload = useCallback(async () => {
     if (!chatId) return;
+    const mine = ++reads.current;
     try {
       const through = via.current ? `?via=${encodeURIComponent(via.current)}` : "";
       let next: ChatDetail;
@@ -155,6 +161,7 @@ export function useChat(chatId: string | null) {
         via.current = null;
         next = await api<ChatDetail>(`/api/chats/${encodeURIComponent(chatId)}`);
       }
+      if (mine !== reads.current) return;
       for (const event of held.current) next = applyEvent(next, event).detail;
       held.current = [];
       setDetail(next);
@@ -177,6 +184,7 @@ export function useChat(chatId: string | null) {
     setDetail(null);
     setProgress(null);
     setError(null);
+    setNotice(null);
     setLearned([]);
     held.current = [];
     via.current = null;
@@ -186,6 +194,7 @@ export function useChat(chatId: string | null) {
       (event) => {
         // Another version is shown in some tab: every tab follows.
         if (event.type === "reload" || event.type === "path") {
+          if (event.type === "path") setNotice(event.notice ?? null);
           void reload();
           return;
         }
@@ -212,5 +221,5 @@ export function useChat(chatId: string | null) {
     return () => watching.close();
   }, [chatId, reload, setDetail]);
 
-  return { detail, update, progress, error, reload, look, learned };
+  return { detail, update, progress, error, reload, look, learned, notice };
 }

@@ -265,7 +265,10 @@ async def normalize(
         if kind == "text":
             text = block.get("text")
             text = text if isinstance(text, str) else ""
-            out.append({"id": block_id, "type": "text", "text": stored(text)})
+            made = {"id": block_id, "type": "text", "text": stored(text)}
+            if isinstance(block.get("mimeType"), str):
+                made["mimeType"] = _short(block["mimeType"], 100)
+            out.append(made)
             lines.append(text)
         elif kind in {"image", "audio"}:
             made, line = await _asset(
@@ -290,14 +293,16 @@ async def normalize(
             resource = block["resource"]
             uri = _short(resource.get("uri"), MAX_URI)
             if isinstance(resource.get("text"), str):
-                out.append(
-                    {
-                        "id": block_id,
-                        "type": "text",
-                        "text": stored(resource["text"]),
-                        "source": uri,
-                    }
-                )
+                made = {
+                    "id": block_id,
+                    "type": "text",
+                    "text": stored(resource["text"]),
+                    "source": uri,
+                }
+                # A resource's words may have no syntax or extension to identify them.
+                if isinstance(resource.get("mimeType"), str):
+                    made["mimeType"] = _short(resource["mimeType"], 100)
+                out.append(made)
                 lines.append(resource["text"])
             else:
                 made, line = await _asset(

@@ -30,8 +30,9 @@ export function ticks(low: number, high: number, count = 5): number[] {
   const power = 10 ** Math.floor(Math.log10(raw));
   const step = [1, 2, 2.5, 5, 10].map((m) => m * power).find((s) => s >= raw) ?? raw;
   const first = Math.floor(low / step) * step;
+  const last = Math.ceil(high / step) * step;
   const out: number[] = [];
-  for (let v = first; v <= high + step * 0.5 && out.length < 50; v += step) {
+  for (let v = first; v <= last + step * 0.5 && out.length < 50; v += step) {
     out.push(Number(v.toPrecision(12)));
   }
   return out;
@@ -105,14 +106,17 @@ function piePoints(spec: ChartSpec): Point[] {
 }
 
 type MarkProps = (series: string, point: Point) => SVGProps<SVGGElement>;
+type ActiveMark = { spec: ChartSpec; label: string };
 
 /** Each mark has the same value for hover, focus and its accessible name. */
 export function Chart({ spec }: { spec: ChartSpec }) {
   const id = useId();
   const theme = useTheme();
-  const [hovered, setHovered] = useState<string | null>(null);
-  const [focused, setFocused] = useState<string | null>(null);
-  const active = focused ?? hovered;
+  const [hovered, setHovered] = useState<ActiveMark | null>(null);
+  const [focused, setFocused] = useState<ActiveMark | null>(null);
+  const active =
+    (hovered?.spec === spec ? hovered.label : null) ??
+    (focused?.spec === spec ? focused.label : null);
   const mark: MarkProps = (series, p) => {
     const label = `${series} · ${p.x} · ${p.y}`;
     return {
@@ -120,9 +124,12 @@ export function Chart({ spec }: { spec: ChartSpec }) {
       role: "img",
       "aria-label": label,
       "aria-describedby": active === label ? `${id}-value` : undefined,
-      onMouseEnter: () => setHovered(label),
+      onMouseEnter: () => setHovered({ spec, label }),
       onMouseLeave: () => setHovered(null),
-      onFocus: () => setFocused(label),
+      onFocus: () => {
+        setHovered(null);
+        setFocused({ spec, label });
+      },
       onBlur: () => setFocused(null),
       onKeyDown: (event) => {
         if (event.key === "Escape") {
@@ -330,7 +337,12 @@ function Cartesian({ spec, mark, id }: { spec: ChartSpec; mark: MarkProps; id: s
                     fill={`url(#${id}-pattern-${i})`}
                   />
                   <g className="chart-bar-marker">
-                    <Marker index={i} x={x + Math.max(1, barW - 1) / 2} y={y} size={3} />
+                    <Marker
+                      index={i}
+                      x={x + Math.max(1, barW - 1) / 2}
+                      y={spec.stacked ? (y + zero) / 2 : y}
+                      size={3}
+                    />
                   </g>
                 </g>
               );

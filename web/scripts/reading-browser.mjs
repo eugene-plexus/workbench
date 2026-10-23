@@ -1,4 +1,4 @@
-/* global process, console, document, getComputedStyle, window, NodeFilter, CSS */
+/* global process, console, document, getComputedStyle, window, navigator, NodeFilter, CSS */
 // Reading Workbench in the selected browser (workbench-reading.md): what each kind of text
 // looks like, in pictures and in numbers. Screenshots of a rich answer, a
 // story, a length stop, the settings, a chat's Memory drawer, the Memory page,
@@ -14,6 +14,8 @@ import {
   contextOptions,
   ignorablePageError,
   fillComposer,
+  goChat,
+  goSignedIn,
   keepScheme,
   launchBrowser,
   readOptions,
@@ -38,7 +40,7 @@ async function open(scheme, viewport, extra = {}) {
   page.on("pageerror", (error) => {
     if (!ignorablePageError(browserName, error.message)) errors.push(error.message);
   });
-  await page.goto(`${cfg.url}/#signin=${cfg.secret}`);
+  await goSignedIn(page, `${cfg.url}/#signin=${cfg.secret}`);
   await keepScheme(page, browserName, scheme);
   await page.getByTestId("new-chat").waitFor({ state: "attached" });
   return { context, page };
@@ -50,7 +52,7 @@ async function settle(page) {
 }
 
 async function chat(page, id) {
-  await page.goto(`${cfg.url}/chats/${id}`);
+  await goChat(page, browserName, `${cfg.url}/chats/${id}`);
   await page.locator('[data-testid=answer]:not([data-status="running"])').first().waitFor();
   await settle(page);
 }
@@ -382,6 +384,283 @@ function judgeFaint(scheme, what, numbers) {
   );
 }
 
+async function displaySettings(page, scheme) {
+  const panel = page.getByRole("navigation", { name: "Chats", exact: true });
+  const summary = panel.locator("summary").filter({ hasText: /^Display$/ });
+  await summary.click();
+  const size = panel.getByLabel("Text size");
+  const width = panel.getByLabel("Reading width");
+  const theme = panel.getByLabel("Theme");
+  const speakers = panel.getByLabel("Speaker labels");
+  const paragraph = page.locator("[data-testid=answer] > .answer > p").first();
+  const fontSize = () => paragraph.evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+  const originalSize = await fontSize();
+  check(
+    `${scheme}: Display names the effective text size`,
+    (await size.locator("option:checked").textContent()).includes(`${originalSize} px here`),
+    await size.inputValue(),
+  );
+  await size.selectOption("125");
+  check(
+    `${scheme}: text size scales the browser's size`,
+    Math.abs((await fontSize()) - originalSize * 1.25) < 0.01,
+  );
+  // The viewport does not change when the person changes their browser's font.
+  await page.evaluate(() => {
+    document.documentElement.style.fontSize = "20px";
+  });
+  await page.waitForFunction(() =>
+    [...document.querySelectorAll("option")].some(
+      (el) => el.textContent === "100% (21.25 px here)",
+    ),
+  );
+  check(
+    `${scheme}: Display follows a font change without a window resize`,
+    Math.abs((await fontSize()) - 26.5625) < 0.01,
+  );
+  await page.evaluate(() => {
+    document.documentElement.style.removeProperty("font-size");
+  });
+  for (const [choice, cap] of [
+    ["narrow", "544px"],
+    ["comfortable", "576px"],
+    ["full", "100%"],
+  ]) {
+    await width.selectOption(choice);
+    const actual = await paragraph.evaluate((el) => getComputedStyle(el).maxWidth);
+    check(`${scheme}: ${choice} reading width takes effect`, actual === cap, actual);
+  }
+  const override = scheme === "dark" ? "light" : "dark";
+  await theme.selectOption(override);
+  const look = await page.evaluate(() => ({
+    theme: document.documentElement.dataset.theme,
+    background: getComputedStyle(document.documentElement).getPropertyValue("--background").trim(),
+  }));
+  check(
+    `${scheme}: an explicit theme overrides the system`,
+    look.theme === override && look.background === (override === "light" ? "#fafafb" : "#141619"),
+    JSON.stringify(look),
+  );
+  check(
+    `${scheme}: System names the current browser theme`,
+    (await theme.locator('option[value="system"]').textContent()) === `System (${scheme} now)`,
+  );
+  await speakers.selectOption("on");
+  const labels = await page.locator(".speaker-label").allTextContents();
+  check(
+    `${scheme}: speaker labels name you and the model`,
+    labels.some((label) => label.trim() === "You") &&
+      labels.some((label) => label.trim() !== "You"),
+    labels.join(", "),
+  );
+  const font = await page
+    .locator(".speaker-label")
+    .first()
+    .evaluate((el) => getComputedStyle(el).fontFamily);
+  check(`${scheme}: speaker labels use Plex Mono`, font.includes("IBM Plex Mono"), font);
+  await page.reload();
+  await paragraph.waitFor();
+  await summary.click();
+  check(
+    `${scheme}: Display keeps all four choices after reload`,
+    (await size.inputValue()) === "125" &&
+      (await width.inputValue()) === "full" &&
+      (await theme.inputValue()) === override &&
+      (await speakers.inputValue()) === "on" &&
+      Math.abs((await fontSize()) - originalSize * 1.25) < 0.01,
+  );
+  await page.evaluate(() => {
+    const storage = window.Storage.prototype;
+    const get = storage.getItem,
+      set = storage.setItem;
+    window.__restoreDisplayStorage = () => {
+      storage.getItem = get;
+      storage.setItem = set;
+    };
+    storage.getItem = function (key) {
+      if (key === "workbench.display") throw new Error("blocked");
+      return get.call(this, key);
+    };
+    storage.setItem = function (key, value) {
+      if (key === "workbench.display") throw new Error("blocked");
+      return set.call(this, key, value);
+    };
+  });
+  try {
+    await width.selectOption("narrow");
+    await page.evaluate(() =>
+      window.dispatchEvent(new window.StorageEvent("storage", { key: "workbench.display" })),
+    );
+    check(
+      `${scheme}: blocked storage keeps this page's choices and says why`,
+      (await width.inputValue()) === "narrow" &&
+        (await theme.inputValue()) === override &&
+        (await panel
+          .getByText("Not kept: this browser blocks storage.", { exact: true })
+          .isVisible()),
+    );
+  } finally {
+    await page.evaluate(() => {
+      window.__restoreDisplayStorage();
+      delete window.__restoreDisplayStorage;
+    });
+  }
+  await size.selectOption("100");
+  await width.selectOption("comfortable");
+  await theme.selectOption("system");
+  await speakers.selectOption("off");
+  check(
+    `${scheme}: System restores the browser theme`,
+    (await page.evaluate(() => document.documentElement.dataset.theme)) === scheme,
+  );
+  await summary.click();
+}
+
+async function phoneDisplaySettings(page, scheme) {
+  await page.setViewportSize({ width: 390, height: 568 });
+  await page.locator('[aria-controls="chat-navigation"]').click();
+  const panel = page.getByRole("navigation", { name: "Chats", exact: true });
+  const summary = panel.locator("summary").filter({ hasText: /^Display$/ });
+  await summary.click();
+  for (const name of ["Text size", "Reading width", "Theme", "Speaker labels"]) {
+    const control = panel.getByLabel(name);
+    await control.scrollIntoViewIfNeeded();
+    const reachable = await control.evaluate((el) => {
+      const box = el.getBoundingClientRect();
+      return (
+        box.top >= 0 &&
+        box.bottom <= window.innerHeight &&
+        box.left >= 0 &&
+        box.right <= window.innerWidth
+      );
+    });
+    check(`${scheme} phone: ${name} is reachable`, reachable);
+  }
+  await panel.getByLabel("Speaker labels").selectOption("on");
+  await panel.getByRole("button", { name: "Back to chat" }).click();
+  check(
+    `${scheme} phone: Display changes take effect in the chat`,
+    await page.locator(".speaker-label").first().isVisible(),
+  );
+  await page.locator('[aria-controls="chat-navigation"]').click();
+  await panel.getByLabel("Speaker labels").selectOption("off");
+  await summary.click();
+  await panel.getByRole("button", { name: "Back to chat" }).click();
+  await page.setViewportSize(PHONE);
+}
+
+// Read a fixture through the real message and Markdown components. Keep it in
+// the browser response so these checks do not change any saved conversation.
+async function checkOutlineAndLanguages(page, scheme) {
+  const path = `${cfg.url}/api/chats/${cfg.chats.story}`;
+  const fixture = [
+    "# First",
+    "## Second",
+    "### Third",
+    "#### Fourth",
+    "##### Fifth",
+    "###### Sixth",
+    "かなと漢字",
+    "한국어。",
+    "漢字。",
+    "ー",
+    "![日本の猫](https://example.org/cat.png)",
+    "- **カナ**",
+    "> 日本語です",
+    "| 日本の名前 |\n| --- |\n| **かな** |",
+    "```text\n한국어\n```",
+  ].join("\n\n");
+  const respond = async (route) => {
+    const response = await route.fetch();
+    const data = await response.json();
+    for (const message of data.messages) {
+      if (message.role === "assistant") {
+        message.content = fixture;
+        message.model = "qwen3-8b";
+      }
+    }
+    await route.fulfill({ response, json: data });
+  };
+  await page.route(path, respond);
+  try {
+    await chat(page, cfg.chats.story);
+    const answer = page.getByTestId("answer").first();
+    const user = page.getByTestId("user-message").first();
+    check(
+      `${scheme}: each message has a level two heading for screen readers`,
+      (await answer.getByRole("heading", { level: 2, name: "Answer from qwen3-8b" }).count()) ===
+        1 && (await user.getByRole("heading", { level: 2, name: "You" }).count()) === 1,
+    );
+    const reading = await answer.evaluate((el) => {
+      const body = el.querySelector(":scope > .answer");
+      const title = el.querySelector(":scope > h2");
+      const hidden = getComputedStyle(title);
+      const headings = [...body.querySelectorAll("[data-md]")];
+      const paragraphs = [...body.querySelectorAll(":scope > p")];
+      return {
+        hidden:
+          hidden.position === "absolute" &&
+          parseFloat(hidden.width) <= 1 &&
+          parseFloat(hidden.height) <= 1 &&
+          hidden.display !== "none" &&
+          hidden.visibility === "visible",
+        levels: headings.map((heading) => [heading.tagName, heading.dataset.md]),
+        sizes: headings.map((heading) => parseFloat(getComputedStyle(heading).fontSize)),
+        weights: headings.map((heading) => getComputedStyle(heading).fontWeight),
+        textSize: parseFloat(getComputedStyle(body).fontSize),
+        languages: paragraphs.map((p) => [p.textContent, p.lang]),
+        han: navigator.languages.find((lang) => /^(zh|ja)(-|$)/i.test(lang)) ?? "zh",
+        nested: ["ul", "li", "blockquote", "table", "thead", "tbody", "tr", "th", "td"].map(
+          (tag) => [tag, body.querySelector(tag)?.lang],
+        ),
+        code: body.querySelector("pre")?.closest("[lang]")?.lang,
+      };
+    });
+    check(`${scheme}: the message heading takes no room on screen`, reading.hidden);
+    check(
+      `${scheme}: answer headings nest under the message and stop at level six`,
+      JSON.stringify(reading.levels) ===
+        JSON.stringify([
+          ["H3", "h1"],
+          ["H4", "h2"],
+          ["H5", "h3"],
+          ["H6", "h4"],
+          ["H6", "h5"],
+          ["H6", "h6"],
+        ]),
+      JSON.stringify(reading.levels),
+    );
+    check(
+      `${scheme}: all six Markdown heading sizes and weights keep their look`,
+      [1.5, 1.25, 1.1, 1, 0.8125, 0.8125].every(
+        (scale, i) => Math.abs(reading.sizes[i] - scale * reading.textSize) < 0.05,
+      ) &&
+        JSON.stringify(reading.weights) ===
+          JSON.stringify(["600", "600", "600", "600", "600", "500"]),
+      JSON.stringify({ sizes: reading.sizes, weights: reading.weights }),
+    );
+    check(
+      `${scheme}: CJK paragraphs use the language of their visible text`,
+      JSON.stringify(reading.languages) ===
+        JSON.stringify([
+          ["かなと漢字", "ja"],
+          ["한국어。", "ko"],
+          ["漢字。", reading.han],
+          ["ー", "ja"],
+          ["[Image: 日本の猫]", "ja"],
+        ]),
+      JSON.stringify(reading.languages),
+    );
+    check(
+      `${scheme}: lists, quotes, tables and code keep their CJK language`,
+      reading.nested.every(([, lang]) => lang === "ja") && reading.code === "ko",
+      JSON.stringify({ nested: reading.nested, code: reading.code }),
+    );
+  } finally {
+    await page.unroute(path, respond);
+  }
+}
+
 try {
   for (const scheme of ["dark", "light"]) {
     {
@@ -397,6 +676,7 @@ try {
       const numbers = await page.evaluate(probe);
       writeFileSync(`${cfg.shots}/styles-${scheme}.json`, JSON.stringify(numbers, null, 2));
       judge(scheme, numbers, await page.evaluate(structure));
+      await displaySettings(page, scheme);
       const css = await page.evaluate(() => {
         const answer = document.querySelector(".answer");
         const text = getComputedStyle(answer);
@@ -416,10 +696,34 @@ try {
         .locator("[data-testid=answer] summary")
         .filter({ hasText: /^Reasoning/ })
         .first();
-      await reasoning.click();
       check(
-        `${scheme}: reasoning opens by its summary`,
+        `${scheme}: reasoning starts collapsed`,
+        !(await reasoning.evaluate((el) => el.parentElement.open)),
+      );
+      await reasoning.focus();
+      await reasoning.press("Enter");
+      check(
+        `${scheme}: reasoning opens by keyboard from its summary`,
         await reasoning.evaluate((el) => el.parentElement.open),
+      );
+      const reasoningStyle = await reasoning.evaluate((el) => {
+        const fold = el.parentElement;
+        const thought = fold.querySelector(".answer > p");
+        const answer = fold.closest("article").querySelector(":scope > .answer > p");
+        const properties = ["fontFamily", "fontSize", "lineHeight", "color"];
+        return {
+          paragraphs: fold.querySelectorAll(".answer > p").length,
+          thought: thought && properties.map((key) => getComputedStyle(thought)[key]),
+          answer: answer && properties.map((key) => getComputedStyle(answer)[key]),
+        };
+      });
+      check(
+        `${scheme}: reasoning is Markdown in the answer's style`,
+        reasoningStyle.paragraphs >= 2 &&
+          reasoningStyle.thought !== null &&
+          reasoningStyle.answer !== null &&
+          JSON.stringify(reasoningStyle.thought) === JSON.stringify(reasoningStyle.answer),
+        JSON.stringify(reasoningStyle),
       );
       await settle(page);
       await page.screenshot(shot(`rich-reasoning-${scheme}-desk`));
@@ -430,6 +734,7 @@ try {
       await chat(page, cfg.chats.story);
       await tall(page);
       await page.screenshot(shot(`story-all-${scheme}-desk`));
+      await checkOutlineAndLanguages(page, scheme);
 
       await page.setViewportSize(DESK);
       await chat(page, cfg.chats.cut);
@@ -552,6 +857,7 @@ try {
       );
       const wide = (await page.evaluate(structure)).overflow;
       check(`${scheme} phone: nothing is wider than the screen`, wide <= 1, `${wide}px too wide`);
+      await phoneDisplaySettings(page, scheme);
       await chat(page, cfg.chats.story);
       await toTop(page);
       await page.screenshot(shot(`story-${scheme}-phone`));

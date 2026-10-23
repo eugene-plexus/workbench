@@ -1,4 +1,4 @@
-/* global process, console, navigator, window, document, MutationObserver */
+/* global process, console, navigator, window, document, MutationObserver, performance, URL, fetch, AbortSignal */
 import { parseArgs } from "node:util";
 
 // Usage: node <check>-browser.mjs config.json [--browser chromium|firefox|webkit].
@@ -54,6 +54,137 @@ export async function fillComposer(page, text) {
   throw new Error(
     `the composer kept ${value.length} of ${text.length} characters and Send stayed ${(await send.isEnabled()) ? "enabled" : "disabled"}`,
   );
+}
+
+// "New chat opens at once while a stall runs" is measured against how long New
+// chat takes on a quiet page in the same run: a slow runner moved a quiet open
+// to over a second (1311 ms), which no stall caused. A real stall of the page
+// adds its own length (1.5 s and more) to the quiet time, so the limit is the
+// quiet time plus 800 ms, never below the 1 s of a fast machine.
+export function newChatLimit(quietMs) {
+  return Math.max(1000, quietMs + 800);
+}
+
+export async function newChatMs(page) {
+  const start = performance.now();
+  await page.getByTestId("new-chat").click();
+  await page.getByTestId("composer").waitFor();
+  return performance.now() - start;
+}
+
+// The sign-in page is only a way in: the next step waits for the app's own
+// button. Firefox under load sometimes did not fire "load" for 30 s (once in
+// about sixty runs on a busy machine; once on CI), which says nothing about
+// what the checks measure. Wait for the document, not for every resource.
+//
+// On CI, Firefox also let a navigation stand for the full 30 s without the
+// page committing (reading and math scripts, four runs of about twenty) while
+// the same run's server was fine. Try for 10 s, ask the server whether it
+// answers, and try again twice if it does; if it does not, say so. Each retry
+// is printed, never silent.
+async function visit(page, address, waitUntil, timeout = 10_000) {
+  // What the page was still waiting for when it did not open: named in the
+  // retry line, so a stall has its observed cause.
+  const pending = new Set();
+  const started = (request) => pending.add(request.url());
+  const ended = (request) => pending.delete(request.url());
+  page.on("request", started);
+  page.on("requestfinished", ended);
+  page.on("requestfailed", ended);
+  try {
+    return await tryVisit(page, address, waitUntil, timeout, pending);
+  } finally {
+    page.off("request", started);
+    page.off("requestfinished", ended);
+    page.off("requestfailed", ended);
+  }
+}
+
+async function tryVisit(page, address, waitUntil, timeout, pending) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await page.goto(address, { waitUntil, timeout });
+      return;
+    } catch (error) {
+      const origin = new URL(address).origin;
+      const answered = await fetch(`${origin}/`, { signal: AbortSignal.timeout(5_000) }).then(
+        (response) => response.status,
+        () => null,
+      );
+      if (answered === null) {
+        throw new Error(`the server at ${origin} did not answer in 5 s: ${error.message}`);
+      }
+      if (attempt === 3) throw error;
+      console.log(
+        `RETRY  the page did not open in ${timeout / 1000} s though the server answered ${answered} (try ${attempt} of 3); still waiting for: ${[...pending].map((u) => u.slice(-60)).join(", ") || "nothing"}`,
+      );
+    }
+  }
+}
+
+export async function goSignedIn(page, address) {
+  // What the page said while it opened, kept for the failure message.
+  const seen = [];
+  const remember = (line) => seen.push(line.slice(0, 160));
+  const onConsole = (message) => remember(`${message.type()}: ${message.text()}`);
+  const onError = (error) => remember(`error: ${error.message}`);
+  const onFailed = (request) => remember(`failed ${request.url()} ${request.failure()?.errorText}`);
+  const onResponse = (response) => {
+    if (response.status() >= 400) remember(`${response.status()} ${response.url()}`);
+  };
+  page.on("console", onConsole);
+  page.on("pageerror", onError);
+  page.on("requestfailed", onFailed);
+  page.on("response", onResponse);
+  try {
+    await visit(page, address, "domcontentloaded");
+    // The app shows New chat once it has started. Firefox on CI sometimes left
+    // the page blank for 30 s after a navigation that took over 10 s; load the
+    // page again once, saying so, and then name what the page showed.
+    const button = page.getByTestId("new-chat");
+    const started = await button.waitFor({ state: "attached", timeout: 15_000 }).then(
+      () => true,
+      () => false,
+    );
+    if (started) return;
+    console.log(
+      `RETRY  the app did not start in 15 s; loading it again (seen: ${seen.join(" | ")})`,
+    );
+    await page.reload({ waitUntil: "domcontentloaded", timeout: 15_000 }).catch(() => {});
+    await button.waitFor({ state: "attached", timeout: 15_000 }).catch(async (error) => {
+      const text = await page
+        .evaluate(() => document.body.innerText.slice(0, 200))
+        .catch(() => "?");
+      throw new Error(
+        `the app did not start in 30 s; the page says ${JSON.stringify(text)}; seen: ${seen.join(" | ")}; ${error.message.split("\n")[0]}`,
+      );
+    });
+  } finally {
+    page.off("console", onConsole);
+    page.off("pageerror", onError);
+    page.off("requestfailed", onFailed);
+    page.off("response", onResponse);
+  }
+}
+
+// The longest gap between two frames that still counts as "the page kept
+// drawing" while a formula or diagram is stopped. A stall of the page lasts the
+// whole stop (1.5 s for a formula, 4 s for a diagram); Firefox's frames on a
+// busy CI runner showed 253 ms with no stall. Chromium keeps 250 ms.
+export function frameGapLimit(browserName) {
+  return browserName === "chromium" ? 250 : 600;
+}
+
+// A chat with pictures, formulas and running previews fires "load" only when
+// every one of its frames has loaded; Firefox under load took over 15 s for
+// that (a goto timeout on CI) while the page was already usable. Outside
+// Chromium, whose "load" has not failed, the checks' own waits (an answer, a
+// card, a frame) say when the page is ready.
+export function goChat(page, browserName, address) {
+  // Chromium keeps its full load and a longer try: its pages have not stalled.
+  return browserName === "chromium"
+    ? visit(page, address, "load", 30_000)
+    : visit(page, address, "domcontentloaded");
 }
 
 export function contextOptions(browserName, options) {

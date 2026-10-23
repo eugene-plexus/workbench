@@ -115,8 +115,8 @@ export function DeleteBranchDialog({
           {summary.legacyRecalls && (
             <>
               {" "}
-              An older memory recall shorter than 8 words or differently punctuated may keep a
-              phrase from this answer.
+              Older memory recalls saved after this answer will also be removed when it is deleted
+              permanently.
             </>
           )}
         </p>

@@ -218,38 +218,35 @@ class Branches:
                     continue
                 await self._purge(current)
 
-    async def purge_chat(self, chat: str) -> None:
+    async def purge_chat(self, chat: str) -> branch_store.RemovedRecalls:
         """The chat write lock is already held by the route (or the project delete)."""
+        removed = branch_store.RemovedRecalls()
         await self.store.expire_chat_branches(chat, now=self.clock())
         for row in await self.store.deleted_branches(chat):
-            if not await self._purge(row, deleting_chat=True):
+            if not await self._purge(row, deleting_chat=True, report=removed):
                 current = next(
                     r for r in await self.store.deleted_branches(chat) if r["id"] == row["id"]
                 )
                 raise InteractionError(current["problem"], 503)
+        return removed
 
-    async def _purge(self, row: dict[str, Any], *, deleting_chat: bool = False) -> bool:
+    async def _purge(
+        self,
+        row: dict[str, Any],
+        *,
+        deleting_chat: bool = False,
+        report: branch_store.RemovedRecalls | None = None,
+    ) -> bool:
         async with (
             self._owners.setdefault(row["owner"], asyncio.Lock()),
             self.state.notes_index.lock(row["owner"]),
         ):
             steps = json.loads(row["steps"])
-            paused = steps.get("legacy")
-            if paused and not deleting_chat and self.clock() < paused["retry_at"]:
-                current = await self.store.branch_legacy_recalls(row["id"])
-                if [(r["id"], r["signature"]) for r in current] == [
-                    (r["id"], r["signature"]) for r in paused["recalls"]
-                ]:
-                    return False
             await self.store.put_branch(row["id"], state="purging", problem=None)
             payload = await self.store.branch_purge_payload(row["id"])
             if not payload:
                 return True
             try:
-                if recalls := await self.store.branch_legacy_recalls(
-                    row["id"], deleting_chat=deleting_chat
-                ):
-                    raise branch_store.LegacyRecall(recalls)
                 await self.state.memory_courier.drain(row["owner"])
                 owed = [r for r in payload["tables"]["memory_server_sent"] if r["state"] != "send"]
                 if not deleting_chat and not steps.get("forgotten"):
@@ -283,19 +280,17 @@ class Branches:
                             row["owner"],
                             record["id"],
                         )
-                    await self.store.purge_branch(
+                    removed = await self.store.purge_branch(
                         row["id"], now=self.clock(), queue_forget=deleting_chat
                     )
+                if removed is not None:
+                    if report is not None:
+                        report.keys.update(removed.keys)
+                    else:
+                        self.notify_removed_recalls(row["chat_id"], removed)
                 return True
             except asyncio.CancelledError:
                 raise
-            except branch_store.LegacyRecall as exc:
-                steps["legacy"] = {
-                    "recalls": exc.recalls,
-                    "retry_at": self.clock() + branch_store.DAY,
-                }
-                await self.store.put_branch(row["id"], problem=str(exc), steps=json.dumps(steps))
-                return False
             except Exception as exc:
                 await self.store.put_branch(
                     row["id"],
@@ -310,3 +305,10 @@ class Branches:
                 with contextlib.suppress(Exception):
                     if row["owner"] not in await self.store.hidden_subs():
                         self.state.memory_courier.allow_owner(row["owner"])
+
+    def notify_removed_recalls(self, chat: str, removed: branch_store.RemovedRecalls) -> None:
+        event: dict[str, Any] = {"type": "path"}
+        if removed.notice:
+            event["notice"] = removed.notice
+        for affected in {chat} | {key[0] for key in removed.keys}:
+            self.state.answers.publish(affected, event)

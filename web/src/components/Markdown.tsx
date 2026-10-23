@@ -167,7 +167,15 @@ const BLOCKS = new Set([
 
 /** The browser chooses the CJK glyph family from the language of each block. */
 function blockLanguage(text: string): string | undefined {
-  if (/[\p{Script=Hiragana}\p{Script=Katakana}]/u.test(text)) return "ja";
+  // Script extensions include kana's shared marks (ー, ﾞ, 〱). Punctuation
+  // shared with Han or Hangul must not make a Chinese or Korean block Japanese.
+  if (
+    /(?![\p{Script_Extensions=Han}\p{Script_Extensions=Hangul}])[\p{Script_Extensions=Hiragana}\p{Script_Extensions=Katakana}]/u.test(
+      text,
+    )
+  ) {
+    return "ja";
+  }
   if (/\p{Script=Hangul}/u.test(text)) return "ko";
   if (/\p{Script=Han}/u.test(text)) {
     return (
@@ -182,6 +190,10 @@ function rehypeReading() {
   return (tree: Root) => {
     function visit(node: Root | Element | Root["children"][number]): string {
       if (node.type === "text") return node.value;
+      // Images are rendered as text links, so their labels count as block text.
+      if (node.type === "element" && node.tagName === "img") {
+        return typeof node.properties.alt === "string" ? node.properties.alt : "";
+      }
       if (!("children" in node)) return "";
       const text = node.children.map(visit).join("");
       if (node.type === "element") {
