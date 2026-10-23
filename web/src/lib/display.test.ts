@@ -85,6 +85,31 @@ it("storage blocked keeps the setting for the page", () => {
   expect(document.documentElement).toHaveAttribute("data-theme", "light");
 });
 
+it("a blocked storage event keeps this page's effective settings", () => {
+  render(createElement(DisplaySettings));
+  fireEvent.change(screen.getByLabelText("Theme"), { target: { value: "light" } });
+  fireEvent.change(screen.getByLabelText("Reading width"), { target: { value: "narrow" } });
+  vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+    throw new Error("blocked");
+  });
+  act(() => window.dispatchEvent(new StorageEvent("storage", { key: "workbench.display" })));
+  expect(screen.getByLabelText("Theme")).toHaveValue("light");
+  expect(screen.getByLabelText("Reading width")).toHaveValue("narrow");
+  expect(document.documentElement).toHaveAttribute("data-theme", "light");
+  expect(document.documentElement.style.getPropertyValue("--measure")).toBe("34rem");
+  expect(screen.getByText("Not kept: this browser blocks storage.")).toBeInTheDocument();
+});
+
+it("text size label follows the browser size without a window resize", async () => {
+  document.documentElement.style.fontSize = "16px";
+  render(createElement(DisplaySettings));
+  expect(screen.getByRole("option", { name: "100% (17 px here)" })).toBeInTheDocument();
+  document.documentElement.style.fontSize = "20px";
+  await waitFor(() =>
+    expect(screen.getByRole("option", { name: "100% (21.25 px here)" })).toBeInTheDocument(),
+  );
+});
+
 it("ignores malformed settings without claiming storage is blocked", () => {
   localStorage.setItem("workbench.display", "not JSON");
   expect(readDisplay()).toEqual({

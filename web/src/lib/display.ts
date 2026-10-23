@@ -69,7 +69,9 @@ function subscribe(listener: () => void) {
     const changed = () => emit();
     const storage = (event: StorageEvent) => {
       if (event.key !== KEY && event.key !== null) return;
-      current = readDisplay();
+      const saved = readDisplay();
+      // Losing access to storage must not discard this page's choices.
+      current = saved.stored ? saved : { ...current, stored: false };
       emit();
     };
     query?.addEventListener("change", changed);

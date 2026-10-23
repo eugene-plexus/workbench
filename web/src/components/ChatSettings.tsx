@@ -102,7 +102,10 @@ export function ChatSettings({
   const [saved, setSaved] = useState(false);
   const [toolServers, setToolServers] = useState(settings.toolServers ?? []);
   const [folderGrants, setFolderGrants] = useState(settings.folderGrants ?? []);
-  const [runArtifacts, setRunArtifacts] = useState(settings.runArtifacts !== false);
+  // This switch takes effect at once. Show only what the server has kept,
+  // including while a request is pending or if it fails.
+  const runArtifacts = settings.runArtifacts !== false;
+  const [savingRunArtifacts, setSavingRunArtifacts] = useState(false);
   const [repetitionMode, setRepetitionMode] = useState<
     NonNullable<Settings["repetitionMode"]> | ""
   >(settings.repetitionMode ?? "");
@@ -170,7 +173,6 @@ export function ChatSettings({
       toolServers,
       folderGrants,
       repetitionMode: repetitionMode || null,
-      runArtifacts,
     };
     for (const field of FIELDS) {
       const raw = values[field.key]?.trim() ?? "";
@@ -194,6 +196,20 @@ export function ChatSettings({
       setSaved(true);
     } catch (error) {
       setProblem({ message: error instanceof Error ? error.message : String(error), field: null });
+    }
+  }
+
+  async function changeRunArtifacts() {
+    if (savingRunArtifacts) return;
+    setSavingRunArtifacts(true);
+    setProblem(null);
+    setSaved(false);
+    try {
+      await onSave({ runArtifacts: !runArtifacts });
+    } catch (error) {
+      setProblem({ message: error instanceof Error ? error.message : String(error), field: null });
+    } finally {
+      setSavingRunArtifacts(false);
     }
   }
 
@@ -292,10 +308,8 @@ export function ChatSettings({
               <input
                 type="checkbox"
                 checked={runArtifacts}
-                onChange={(e) => {
-                  setRunArtifacts(e.target.checked);
-                  setSaved(false);
-                }}
+                disabled={savingRunArtifacts}
+                onChange={() => void changeRunArtifacts()}
                 className="accent-accent"
               />
               Run pages and components by themselves: {runArtifacts ? "On" : "Off"}
@@ -394,7 +408,12 @@ export function ChatSettings({
           <button type="button" onClick={onClose} className="btn btn-quiet">
             Close settings
           </button>
-          <button type="button" onClick={() => void save()} className="btn btn-primary">
+          <button
+            type="button"
+            disabled={savingRunArtifacts}
+            onClick={() => void save()}
+            className="btn btn-primary"
+          >
             Save settings
           </button>
         </div>

@@ -8,14 +8,18 @@
  *
  * Version 1:
  *
- *   { "workbench": "chart", "version": 1, "type": "bar" | "line" | "scatter",
+ *   { "workbench": "chart", "version": 1, "type": "bar" | "line" | "scatter" | "pie",
  *     "title"?: string, "x"?: { "label"?: string }, "y"?: { "label"?: string },
+ *     "stacked"?: boolean,
  *     "series": [ { "name": string, "points": [ [x, y], ... ] } ] }
  *
  *   { "workbench": "table", "version": 1, "title"?: string,
  *     "columns": [ string | { "name": string } ], "rows": [ [cell, ...], ... ] }
  *
  * x is a number, or a category (a string) for bar and line; y is a number.
+ * A pie has one series of non-negative values. With more than twelve points,
+ * keep the first eleven slices and combine the rest as Other; keep all data.
+ * A stacked bar has one point per category in each series.
  * In a ```chart block, "workbench" and "version" may be left out.
  */
 

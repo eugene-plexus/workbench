@@ -98,11 +98,18 @@ export function ArtifactCard({
   const scope = useContext(ArtifactScope);
   const runPreviews = useContext(RunPreviews);
   const [opened, setOpened] = useOpened();
-  const original = blockText(source);
-  const kept = useMemo(
-    () => keptFor(scope?.artifacts, kind, original),
-    [scope?.artifacts, kind, original],
-  );
+  const [original, kept] = useMemo(() => {
+    // A tool's text is already the original; only a parsed fence adds a newline.
+    const original = openAs ? source : blockText(source);
+    const kept = keptFor(scope?.artifacts, kind, original);
+    if (!kept && openAs && source.endsWith("\n")) {
+      // Earlier tool cards stripped that newline before saving revision one.
+      const earlier = blockText(source);
+      const saved = keptFor(scope?.artifacts, kind, earlier);
+      if (saved) return [earlier, saved] as const;
+    }
+    return [original, kept] as const;
+  }, [scope?.artifacts, kind, source, openAs]);
   const Icon = ICONS[kind];
   const shownTitle = kept?.title ?? title;
   return (

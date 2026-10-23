@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { setDisplay, useDisplay, useSystemTheme, type Display } from "../lib/display";
 
 export function DisplaySettings() {
   const display = useDisplay();
   const system = useSystemTheme();
+  const sizeProbe = useRef<HTMLSpanElement>(null);
   const [browserPx, setBrowserPx] = useState(
     () => parseFloat(getComputedStyle(document.documentElement).fontSize) || 16,
   );
@@ -12,15 +13,24 @@ export function DisplaySettings() {
       setBrowserPx(parseFloat(getComputedStyle(document.documentElement).fontSize) || 16);
     window.addEventListener("resize", read);
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(read);
-    observer?.observe(document.documentElement);
+    // The root's viewport box can stay the same when the browser's font size
+    // changes. A one-rem box changes with the type even without a resize.
+    if (sizeProbe.current) observer?.observe(sizeProbe.current);
+    const mutation = new MutationObserver(read);
+    mutation.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["style", "class"],
+    });
     return () => {
       window.removeEventListener("resize", read);
       observer?.disconnect();
+      mutation.disconnect();
     };
   }, []);
   return (
     <details className="border-t border-line px-4 py-2 text-sm">
       <summary className="cursor-pointer py-1 font-medium text-accent">Display</summary>
+      <span ref={sizeProbe} aria-hidden="true" className="invisible absolute h-4 w-4" />
       <div className="flex max-h-[45dvh] flex-col gap-3 overflow-y-auto py-2">
         <label className="flex flex-col gap-1">
           Text size
