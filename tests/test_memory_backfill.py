@@ -42,6 +42,7 @@ async def queued(tmp_path: Path):
 
 async def test_stop_resumes_and_new_address_ends_the_send(queued) -> None:
     store, feeder = queued
+
     assert len(await store.memory_server_due(9999999999)) == 20
     remote = Remote()
     courier = ms.Courier(store, remote)
@@ -75,6 +76,68 @@ async def test_live_exchange_preempts_backfill_between_sends(queued) -> None:
     await courier.once()
     await courier.once()
     assert [c["document_id"] for c in remote.calls[:2]] == ["past-00:past-00-a0", "live:live-a2"]
+
+
+@pytest.mark.parametrize("switch", ["servers", "install", "person"])
+async def test_memory_off_mid_send_pauses_without_consuming_backfill(queued, switch) -> None:
+    store, feeder = queued
+
+    async def enabled(value: bool) -> None:
+        if switch == "person":
+            await store.put_memory_prefs("ada", enabled=value)
+        else:
+            await store.put_setting(
+                config.MEMORY_SERVERS if switch == "servers" else config.MEMORY_ENABLED,
+                ("outside" if value else "off") if switch == "servers" else value,
+            )
+
+    class Switching(Remote):
+        async def call(self, *args: Any) -> Any:
+            result = await super().call(*args)
+            if len(self.calls) == 1:
+                await enabled(False)
+            return result
+
+    remote = Switching()
+    courier = ms.Courier(store, remote)
+    await courier.once()
+    paused = json.loads((await store.memory_server("ada"))["backfill"])
+    assert len(remote.calls) == paused["sent"] == 1
+    assert paused["skipped"] == 12  # Only the secrets encountered while filling the queue.
+    assert len(await store.memory_server_pending("ada")) == len(paused["pending"]) == 19
+    assert (await feeder.preview("ada"))["backfill"]["pauseReason"] == "Paused: memory is off"
+    await feeder.top_up("ada")
+    await courier.once()
+    assert json.loads((await store.memory_server("ada"))["backfill"]) == paused
+    # A pause lasting more than the normal give-up day must still resume its queue.
+    await store._run(
+        lambda: store._conn().execute(
+            "UPDATE memory_servers SET backfill = json_set(backfill, '$.pausedAt', "
+            "json_extract(backfill, '$.pausedAt') - 172800) WHERE owner = 'ada'"
+        )
+    )
+    await store._run(
+        lambda: store._conn().execute(
+            "UPDATE memory_server_sent SET created_at = created_at - 172800, "
+            "next_at = next_at - 172800 WHERE state = 'send'"
+        )
+    )
+    await enabled(True)
+    for _ in range(4):
+        await courier.once()
+    done = json.loads((await store.memory_server("ada"))["backfill"])
+    assert done["state"] == "done" and done["sent"] == 24 and done["skipped"] == 12
+    assert not done.get("pauseReason")
+    assert len({c["document_id"] for c in remote.calls}) == len(remote.calls) == 24
+
+
+async def test_legacy_reconnect_at_same_url_keeps_progress(queued) -> None:
+    store, _ = queued
+    before = (await store.memory_server("ada"))["backfill"]
+    await store.put_memory_server(
+        "ada", "https://chosen.example", "new-token", "Chosen", {"retain": "retain"}
+    )
+    assert (await store.memory_server("ada"))["backfill"] == before
 
 
 async def test_deleted_pending_exchanges_do_not_leave_backfill_running(queued) -> None:

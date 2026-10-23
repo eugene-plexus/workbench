@@ -24,6 +24,7 @@ def test_owner_view_exposes_only_project_names_and_chat_membership(world: World)
     ada = signed_in(world)
     garden = project(ada, "Garden")
     made = ada.post("/api/chats", json={"projectId": garden}).json()
+    project(ada, "Private project with no chats")
     owner = signed_in(world, "operator")
     assert owner.get("/api/people/p-ada/chats").status_code == 403
     config(world, ownerReadsChats=True).raise_for_status()
@@ -31,6 +32,8 @@ def test_owner_view_exposes_only_project_names_and_chat_membership(world: World)
     assert found["projects"] == [{"id": garden, "name": "Garden"}]
     assert found["chats"][0]["id"] == made["id"] and found["chats"][0]["projectId"] == garden
     assert owner.get(f"/api/projects/{garden}").status_code == 404
+    ada.delete(f"/api/chats/{made['id']}").raise_for_status()
+    assert owner.get("/api/people/p-ada/chats").json()["projects"] == []
 
 
 async def test_project_fallback_uses_only_chat_models() -> None:

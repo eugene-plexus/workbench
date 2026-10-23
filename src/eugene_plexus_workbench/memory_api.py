@@ -623,6 +623,8 @@ async def check_web_link(
         )
     except Exception as exc:
         raise _problem(502, f"The page could not be checked: {exc}") from None
+    if not await store.check_web_hash(person.sub, note_id, link, result["sha256"]):
+        raise _problem(409, "This page's link changed while it was checked. Check it again.")
     return {**result, "name": link["name"], "linkedAt": link["linked_at"]}
 
 
@@ -637,7 +639,7 @@ async def accept_web_check(
 ) -> dict[str, Any]:
     person = await _person(request)
     if not await _store(request).accept_web_hash(person.sub, note_id, doc_id, body.sha256):
-        raise _problem(404, "There is no such web page on your note.")
+        raise _problem(409, "Check this page again before confirming it.")
     return {"accepted": True}
 
 

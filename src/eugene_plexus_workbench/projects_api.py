@@ -202,9 +202,22 @@ async def delete_project(request: Request, project_id: str, keep: bool = False) 
     store = _store(request)
     saved = getattr(_state(request), "saved", None)
     if keep:
+        failed_folders = []
+        moved_folders = 0
         for folder in await store.folder_records(person.sub):
             if folder.project_id == project.id:
-                await _state(request).folder_sync.move(person.sub, folder.grant_id, None)
+                try:
+                    await _state(request).folder_sync.move(person.sub, folder.grant_id, None)
+                    moved_folders += 1
+                except Exception as exc:
+                    failed_folders.append(f"{folder.name} ({type(exc).__name__}: {exc})")
+        if failed_folders:
+            raise _problem(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                f"Moved {moved_folders} folders to My documents. These folders could not be moved: "
+                + "; ".join(failed_folders)
+                + ". The project and its other contents were kept. Try again in a moment.",
+            )
         # Its documents move to My documents first, as uploads of their names would (MV7b):
         # all or nothing, so a move that fails leaves the project whole to try again.
         moved = replaced = 0

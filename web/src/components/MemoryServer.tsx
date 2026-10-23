@@ -136,7 +136,9 @@ export function MemoryServer() {
               ))}
             </ul>
           )}
-          {data?.allowed && server.verbs.includes("retain") && <MemoryBackfill key={server.url} />}
+          {server.verbs.includes("retain") && (
+            <MemoryBackfill key={server.url} allowed={data?.allowed ?? false} />
+          )}
           {data?.allowed && !editing && !asking && (
             <div className="flex flex-wrap gap-2">
               <button

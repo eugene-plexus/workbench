@@ -6,6 +6,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
 
+import pytest
+from fastapi import HTTPException
+from starlette.requests import Request
+
+from eugene_plexus_workbench import memory_api
 from eugene_plexus_workbench import memory_provenance as provenance
 from eugene_plexus_workbench.store import MemoryNote, Message, Store
 
@@ -96,8 +101,10 @@ async def test_tool_result_is_linked_only_when_ticked_and_errors_are_not_offered
 
 async def test_check_again_fetches_only_on_request_and_person_can_accept_new_hash(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class Session:
+        words = "New page words"
         tools: ClassVar[dict[str, Any]] = {
             "fetch": (
                 {"id": "s", "name": "Web"},
@@ -113,7 +120,7 @@ async def test_check_again_fetches_only_on_request_and_person_can_accept_new_has
             return call
 
         async def execute(self, call: dict[str, Any]) -> None:
-            call.update(status="done", result="New page words")
+            call.update(status="done", result=self.words)
 
     class Tools:
         @asynccontextmanager
@@ -137,11 +144,40 @@ async def test_check_again_fetches_only_on_request_and_person_can_accept_new_has
         }
         await store.link_note_documents("ada", "n", [link], "answer", 20)
         state = SimpleNamespace(store=store, tools=Tools())
+        person = SimpleNamespace(sub="ada")
+
+        async def signed_in(request):
+            return person
+
+        monkeypatch.setattr(memory_api, "_person", signed_in)
+        request = Request({"type": "http", "app": SimpleNamespace(state=state)})
+        forged = "f" * 64
+        with pytest.raises(HTTPException):
+            await memory_api.accept_web_check(
+                request, "n", "web", memory_api.WebHash(sha256=forged)
+            )
         assert await provenance.check(state, "ada", {"n": [link]}) == {} and not Session.fetched
-        result = await provenance.check_web(state, SimpleNamespace(sub="ada"), link, "s", "fetch")
+        result = await memory_api.check_web_link(
+            request, "n", "web", memory_api.CheckWeb(serverId="s", tool="fetch")
+        )
         assert result["changed"] and len(Session.fetched) == 1
         assert (await store.note_documents("ada", ["n"]))["n"][0]["sha256"] == link["sha256"]
-        await store.accept_web_hash("ada", "n", "web", result["sha256"])
-        assert (await store.note_documents("ada", ["n"]))["n"][0]["sha256"] == result["sha256"]
+        assert not await store.accept_web_hash("ada", "n", "web", forged)
+        # Only the last check of this exact person's note and page may be confirmed.
+        assert not await store.accept_web_hash("bo", "n", "web", result["sha256"])
+        assert not await store.accept_web_hash("ada", "other-note", "web", result["sha256"])
+        Session.words = "Newest page words"
+        latest = await memory_api.check_web_link(
+            request, "n", "web", memory_api.CheckWeb(serverId="s", tool="fetch")
+        )
+        assert not await store.accept_web_hash("ada", "n", "web", result["sha256"])
+        await store.close()
+        store = Store(tmp_path / "db")
+        await store.open()
+        state.store = store
+        await memory_api.accept_web_check(
+            request, "n", "web", memory_api.WebHash(sha256=latest["sha256"])
+        )
+        assert (await store.note_documents("ada", ["n"]))["n"][0]["sha256"] == latest["sha256"]
     finally:
         await store.close()

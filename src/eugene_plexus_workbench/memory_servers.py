@@ -643,6 +643,12 @@ class Backfill:
     def __init__(self, store: Store) -> None:
         self.store = store
 
+    async def paused(self, owner: str) -> bool:
+        mode, _ = await mode_for(self.store)
+        paused = mode == "off" or not (await self.store.memory_prefs(owner))["enabled"]
+        await self.store.pause_backfill(owner, paused)
+        return paused
+
     async def exchanges(
         self, owner: str, since: float | None, until: float
     ) -> list[tuple[Chat, list[Message], Message]]:
@@ -665,6 +671,7 @@ class Backfill:
         return sorted(found, key=lambda e: (e[2].created_at, e[0].id, e[2].id))
 
     async def preview(self, owner: str, since: float | None = None) -> dict[str, Any]:
+        await self.paused(owner)
         server = await self.store.memory_server(owner)
         state = json.loads(server["backfill"]) if server and server.get("backfill") else None
         until = time.time()
@@ -700,6 +707,8 @@ class Backfill:
             raise ServerProblem("Your memory server cannot receive chats.")
         if mode == "off":
             raise ServerProblem(why or OWNER_OFF)
+        if not (await self.store.memory_prefs(owner))["enabled"]:
+            raise ServerProblem("Paused: memory is off")
         previous = server.get("backfill")
         state = json.loads(previous) if previous else None
         if state and state["state"] in ("stopped", "running"):
@@ -730,6 +739,8 @@ class Backfill:
                 )
 
     async def top_up(self, owner: str) -> None:
+        if await self.paused(owner):
+            return
         server = await self.store.memory_server(owner)
         if not server or not server.get("backfill"):
             return
@@ -755,11 +766,15 @@ class Backfill:
                 state["exhausted"] = False
                 break
             state["cursor"] = cursor
-            text, _ = await content_for(self.store, owner, chat, path, answer)
+            text, why = await content_for(self.store, owner, chat, path, answer)
+            if why == "memory is off" and await self.paused(owner):
+                return
             if text is None:
                 state["skipped"] += 1
                 continue
             queue.append((chat.id, answer.id))
+        if await self.paused(owner):
+            return
         await self.store.put_backfill(
             owner, server["url"], state, queue, expected=server["backfill"]
         )
@@ -881,6 +896,8 @@ class Courier:
             server = await self.store.memory_server(row["owner"])
             state = json.loads(server["backfill"]) if server and server.get("backfill") else {}
             is_backfill = row["document_id"] in state.get("pending", [])
+            if is_backfill and row["state"] == "send" and await self.backfill.paused(row["owner"]):
+                continue
             if is_backfill and state["state"] != "running" and row["state"] == "send":
                 continue
             if (
@@ -933,6 +950,10 @@ class Courier:
         if server is None:
             await self.store.memory_server_drop(row["document_id"])
             return False
+        progress = json.loads(server["backfill"]) if server.get("backfill") else {}
+        is_backfill = row["document_id"] in progress.get("pending", [])
+        if is_backfill and row["state"] == "send" and await self.backfill.paused(owner):
+            return False
         if row["state"] == "forget":
             if "forget" not in server["verbs"] or mode == "off":
                 await self.store.memory_server_drop(row["document_id"])
@@ -953,6 +974,8 @@ class Courier:
             return False
         text, why = await content_for(self.store, owner, chat, path, answer)
         if text is None:
+            if is_backfill and why == "memory is off" and await self.backfill.paused(owner):
+                return False
             if why == "secret":
                 await self.store.memory_server_skipped(owner)
             await self.store.memory_server_drop(row["document_id"])
@@ -966,6 +989,9 @@ class Courier:
         progress = json.loads(current["backfill"]) if current.get("backfill") else {}
         if row["document_id"] in progress.get("pending", []) and progress["state"] != "running":
             return False
+        context = await context_for(self.store, owner, chat)
+        if is_backfill and await self.backfill.paused(owner):
+            return False
         await self.servers.call(
             server,
             mode,
@@ -974,7 +1000,7 @@ class Courier:
                 "content": text,
                 "document_id": row["document_id"],
                 "timestamp": _iso(asked_at),
-                "context": await context_for(self.store, owner, chat),
+                "context": context,
             },
             RETAIN_SECONDS,
         )

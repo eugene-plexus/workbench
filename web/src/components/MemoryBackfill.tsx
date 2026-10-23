@@ -12,6 +12,7 @@ interface Progress {
   samples?: number[];
   error?: string | null;
   errorAt?: number;
+  pauseReason?: string | null;
 }
 interface Preview {
   exchanges: number;
@@ -23,7 +24,7 @@ interface Preview {
 const duration = (seconds: number) =>
   `${Math.max(1, Math.ceil(seconds / 60)).toLocaleString()} min`;
 
-export function MemoryBackfill() {
+export function MemoryBackfill({ allowed = true }: { allowed?: boolean }) {
   const [data, setData] = useState<Preview | null>(null);
   const [asking, setAsking] = useState(false);
   const [since, setSince] = useState("");
@@ -108,7 +109,8 @@ export function MemoryBackfill() {
       {progress && (
         <p role="status">
           {progress.state === "running"
-            ? `Sending past chats: ${progress.sent.toLocaleString()} of ${progress.total.toLocaleString()}${left ? ` · about ${left} left` : " · time shown after the first 10 are sent"}`
+            ? progress.pauseReason ||
+              `Sending past chats: ${progress.sent.toLocaleString()} of ${progress.total.toLocaleString()}${left ? ` · about ${left} left` : " · time shown after the first 10 are sent"}`
             : progress.state === "stopped"
               ? `Stopped: ${progress.sent.toLocaleString()} of ${progress.total.toLocaleString()} sent. What was sent stays on your server.`
               : `Past chats sent: ${progress.sent.toLocaleString()} of ${progress.total.toLocaleString()}. ${progress.skipped.toLocaleString()} were not sent.`}
@@ -127,6 +129,7 @@ export function MemoryBackfill() {
           Stop
         </button>
       ) : (
+        allowed &&
         !asking && (
           <button
             type="button"

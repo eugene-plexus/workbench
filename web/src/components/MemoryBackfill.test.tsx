@@ -4,6 +4,25 @@ import { MemoryBackfill } from "./MemoryBackfill";
 
 vi.mock("../lib/api", () => ({ api: vi.fn(), post: vi.fn() }));
 
+it("names a memory-off pause while keeping Stop available", async () => {
+  vi.mocked(api).mockResolvedValue({
+    exchanges: 3,
+    chats: 1,
+    tokens: 40,
+    estimateSeconds: null,
+    backfill: {
+      state: "running",
+      sent: 1,
+      total: 3,
+      skipped: 0,
+      pauseReason: "Paused: memory is off",
+    },
+  });
+  render(<MemoryBackfill />);
+  expect(await screen.findByRole("status")).toHaveTextContent("Paused: memory is off");
+  expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
+});
+
 it("shows the count and time before Send, and can stop sending", async () => {
   const preview = {
     exchanges: 1240,

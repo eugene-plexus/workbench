@@ -2111,6 +2111,19 @@ class Index:
 
         return await self._run(go)
 
+    async def folder_scopes(self, grant_id: str) -> set[str]:
+        """The actual scopes of a folder, to reconcile an interrupted move from its record."""
+        low, high = _bounds(grant_id)
+        return await self._run(
+            lambda db: {
+                r[0]
+                for r in db.execute(
+                    "SELECT DISTINCT scope FROM documents WHERE source >= ? AND source < ?",
+                    (low, high),
+                )
+            }
+        )
+
     async def folder_grants(self) -> set[str]:
         """The ids of the grants any document was read from: what the boot reconcile checks against
         the folders people have."""

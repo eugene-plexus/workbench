@@ -5,6 +5,8 @@ The specs acceptance must additionally cover a process kill on Windows and Linux
 """
 
 import asyncio
+import json
+import sqlite3
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
@@ -19,6 +21,47 @@ from .test_memory_mv7 import chat_in, project
 from .test_memory_servers import Remote, connected, until
 from .test_memory_servers import remote as remote
 from .test_memory_v2 import ask, signed_in
+
+
+@pytest.mark.parametrize("new_address", [True, False])
+def test_connect_route_resets_only_for_a_new_address(
+    world: World, remote: Callable[..., Remote], new_address: bool
+) -> None:
+    ada = signed_in(world)
+    chat = ada.new_chat()
+    ask(world, ada, chat, "I grow beans.")
+    first = remote()
+    connected(world, first, ada)
+    state = {
+        "state": "stopped",
+        "sent": 1,
+        "skipped": 0,
+        "cursor": [1, chat, "answer"],
+        "pending": [],
+    }
+    with sqlite3.connect(world.data / "workbench.sqlite3") as db:
+        db.execute(
+            "UPDATE memory_servers SET backfill = ? WHERE owner = 'p-ada'", (json.dumps(state),)
+        )
+        db.execute(
+            "INSERT INTO memory_server_sent (document_id, owner, chat_id, message_id, state, created_at, next_at) "
+            "VALUES ('sent', 'p-ada', ?, 'answer', 'sent', 1, 1)",
+            (chat,),
+        )
+    target = remote() if new_address else first
+    ada.put("/api/memory/server", json={"url": target.url, "token": "new-token"}).raise_for_status()
+    with sqlite3.connect(world.data / "workbench.sqlite3") as db:
+        saved = db.execute(
+            "SELECT backfill, token FROM memory_servers WHERE owner = 'p-ada'"
+        ).fetchone()
+        rows = db.execute(
+            "SELECT document_id FROM memory_server_sent WHERE owner = 'p-ada'"
+        ).fetchall()
+    assert saved[1] == "new-token"
+    if new_address:
+        assert saved[0] is None and rows == []
+    else:
+        assert json.loads(saved[0]) == state and rows == [("sent",)]
 
 
 def test_backfill_count_consent_restart_live_and_forget(

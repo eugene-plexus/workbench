@@ -436,17 +436,27 @@ class FolderSync:
                 await held.task
         async with held.lock:
             try:
+                # Commit the destination first. A stopped process or a failed index move is
+                # repaired from this record before the next sync can write any documents.
+                record = await self.store.update_folder_record(sub, grant_id, project_id=project_id)
+                if record is None:
+                    return None
                 index = self.saved.index(sub, create=False)
                 if index is not None:
-                    old = f"project:{record.project_id}" if record.project_id else LIBRARY
-                    new = f"project:{project_id}" if project_id else LIBRARY
-                    await self.saved._cancel(
-                        sub, [h.doc_id for h in await index.folder_files(grant_id)]
-                    )
-                    await index.rescope(old, new, source_prefix=f"folder:{grant_id}/")
-                return await self.store.update_folder_record(sub, grant_id, project_id=project_id)
+                    await self._rescope(record, index)
+                return record
             finally:
                 held.closed = False
+
+    async def _rescope(self, record: FolderRecord, index: Index) -> None:
+        new = f"project:{record.project_id}" if record.project_id else LIBRARY
+        old_scopes = await index.folder_scopes(record.grant_id) - {new}
+        if old_scopes:
+            await self.saved._cancel(
+                record.owner, [h.doc_id for h in await index.folder_files(record.grant_id)]
+            )
+            for old in sorted(old_scopes):
+                await index.rescope(old, new, source_prefix=f"folder:{record.grant_id}/")
 
     async def grant_withdrawn(self, grant_id: str) -> int:
         """The owner took this grant away: the folder's documents leave the index before the
@@ -646,6 +656,10 @@ class FolderSync:
         settings = await self._settings()
         index = self.saved.index(sub)
         assert index is not None
+        async with state.lock:
+            if state.closed:
+                raise _Stopped
+            await self._rescope(record, index)
         rules = folder_rules.Rules(
             record.ignore, include_hidden=record.include_hidden, use_gitignore=record.use_gitignore
         )

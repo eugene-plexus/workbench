@@ -7,13 +7,86 @@ from pathlib import Path
 import pytest
 
 from eugene_plexus_workbench.files import person_key
+from eugene_plexus_workbench.knowledge.index import Index
 
 from .conftest import World
-from .folderdocs import grant, owner_and_ada, settle_folder, write
+from .folderdocs import grant, owner_and_ada, settle_folder, sync_and_settle, write
 from .saved import ask
 from .test_memory_api import config
 from .test_memory_mv7 import project
 from .test_memory_mv7b import chat_in, sent
+
+
+@pytest.mark.usefixtures("quiet_loop")
+def test_interrupted_folder_move_recovers_from_record_on_next_sync(
+    world: World, notes: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner, ada = owner_and_ada(world)
+    garden = project(ada, "Garden")
+    write(notes, "beans.md", "The garden code is haricot.")
+    granted = grant(world, owner, notes)
+    ada.post("/api/documents/folders", json={"grantId": granted}).raise_for_status()
+    settle_folder(ada, granted)
+    original = Index.rescope
+
+    async def interrupted(self, *args, **kwargs):
+        raise OSError("disk unavailable before rescope")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Index, "rescope", interrupted)
+        changed = ada.patch(f"/api/documents/folders/{granted}", json={"projectId": garden})
+        assert changed.status_code == 503
+        assert ada.get(f"/api/documents/folders/{granted}").json()["projectId"] == garden
+    assert Index.rescope == original
+    world.restart_workbench()
+    sync_and_settle(ada, granted)
+    directory = world.data / "knowledge" / person_key("p-ada")
+    with sqlite3.connect(directory / "index.sqlite3") as db:
+        [(doc_id, scope)] = db.execute(
+            "SELECT id, scope FROM documents WHERE source LIKE 'folder:%'"
+        ).fetchall()
+    assert scope == f"project:{garden}"
+    assert (
+        json.loads((directory / f"{doc_id}.meta.json").read_text(encoding="utf-8"))["scope"]
+        == scope
+    )
+    write(notes, "more.md", "Another garden fact.")
+    sync_and_settle(ada, granted)
+    with sqlite3.connect(directory / "index.sqlite3") as db:
+        assert db.execute(
+            "SELECT DISTINCT scope FROM documents WHERE source LIKE 'folder:%'"
+        ).fetchall() == [(scope,)]
+
+
+def test_delete_keep_reports_failed_folders_and_moves_the_rest(
+    world: World, notes: Path, more_notes: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner, ada = owner_and_ada(world)
+    garden = project(ada, "Garden")
+    ids = []
+    for path, name in [(notes, "Blocked notes"), (more_notes, "Movable notes")]:
+        write(path, "beans.md", "The garden code is haricot.")
+        granted = grant(world, owner, path, name=name)
+        ada.post(
+            "/api/documents/folders", json={"grantId": granted, "projectId": garden}
+        ).raise_for_status()
+        settle_folder(ada, granted)
+        ids.append(granted)
+    sync = world.server.server.config.app.state.folder_sync
+    original = sync.move
+
+    async def partly(sub, grant_id, project_id):
+        if grant_id == ids[0]:
+            raise OSError("the file is held open")
+        return await original(sub, grant_id, project_id)
+
+    monkeypatch.setattr(sync, "move", partly)
+    result = ada.delete(f"/api/projects/{garden}?keep=true")
+    assert result.status_code == 503, result.text
+    assert "Blocked notes" in result.text and "the file is held open" in result.text
+    assert ada.get(f"/api/documents/folders/{ids[1]}").json()["projectId"] is None
+    assert ada.get(f"/api/documents/folders/{ids[0]}").json()["projectId"] == garden
+    assert ada.get(f"/api/projects/{garden}").status_code == 200
 
 
 @pytest.mark.parametrize("refusal", ["documents-off", "withdrawn"])

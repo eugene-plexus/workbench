@@ -6299,15 +6299,36 @@ class Store:
 
         return await self._run(go)
 
+    async def check_web_hash(
+        self, owner: str, note_id: str, link: dict[str, Any], sha256: str
+    ) -> bool:
+        """Keep only Workbench's last check of this version of this page, never its words.
+        Web links do not snooze: their existing snoozed_sha slot holds the checked hash.
+        Relinking the page clears it, as it clears a document's snooze."""
+        return await self._run(
+            lambda: bool(
+                self._conn()
+                .execute(
+                    "UPDATE memory_note_documents SET snoozed_sha = ? "
+                    "WHERE owner = ? AND note_id = ? AND doc_id = ? AND scope = 'web' "
+                    "AND source = ? AND sha256 = ?",
+                    (sha256, owner, note_id, link["doc_id"], link["source"], link["sha256"]),
+                )
+                .rowcount
+            )
+        )
+
     async def accept_web_hash(self, owner: str, note_id: str, doc_id: str, sha256: str) -> bool:
         """The person's Still true: accept the explicitly checked page's hash, never its words."""
         return await self._run(
             lambda: bool(
                 self._conn()
                 .execute(
-                    "UPDATE memory_note_documents SET sha256 = ?, linked_at = ? "
-                    "WHERE owner = ? AND note_id = ? AND doc_id = ? AND scope = 'web'",
-                    (sha256, time.time(), owner, note_id, doc_id),
+                    "UPDATE memory_note_documents SET sha256 = snoozed_sha, "
+                    "linked_at = ?, snoozed_sha = NULL "
+                    "WHERE owner = ? AND note_id = ? AND doc_id = ? AND scope = 'web' "
+                    "AND snoozed_sha = ?",
+                    (time.time(), owner, note_id, doc_id, sha256),
                 )
                 .rowcount
             )
@@ -6500,24 +6521,40 @@ class Store:
     async def put_memory_server(
         self, owner: str, url: str, token: str, name: str, verbs: dict[str, str]
     ) -> None:
-        """Connect a person's server, replacing any they had. At another address, what was
-        recorded of the old one goes (it can no longer be asked to forget anything); at the same
-        address (a new token), what it is still to forget stays."""
+        """Legacy entry point, with the same address-change consent as the connect route."""
+        await self.connect_memory_server(owner, url, token, name, verbs)
+
+    async def pause_backfill(self, owner: str, paused: bool) -> None:
+        """A memory-off pause consumes neither exchanges nor their day for retrying."""
 
         def go() -> None:
             db = self._conn()
-            db.execute("BEGIN")
+            db.execute("BEGIN IMMEDIATE")
             try:
-                old = db.execute(
-                    "SELECT url FROM memory_servers WHERE owner = ?", (owner,)
+                row = db.execute(
+                    "SELECT backfill FROM memory_servers WHERE owner = ?", (owner,)
                 ).fetchone()
-                if old is None or old["url"] != url:
-                    db.execute("DELETE FROM memory_server_sent WHERE owner = ?", (owner,))
-                db.execute(
-                    "INSERT OR REPLACE INTO memory_servers (owner, url, token, name, verbs, "
-                    "connected_at) VALUES (?, ?, ?, ?, ?, ?)",
-                    (owner, url, token, name, json.dumps(verbs), time.time()),
-                )
+                state = json.loads(row[0]) if row and row[0] else {}
+                if state.get("state") == "running":
+                    now = time.time()
+                    if paused and state.get("pausedAt") is None:
+                        state.update(pausedAt=now, pauseReason="Paused: memory is off")
+                    elif not paused and state.get("pausedAt") is not None:
+                        seconds = max(0, now - state.pop("pausedAt"))
+                        state.pop("pauseReason", None)
+                        db.execute(
+                            "UPDATE memory_server_sent SET created_at = created_at + ?, "
+                            "next_at = next_at + ? WHERE owner = ? AND state = 'send' "
+                            "AND document_id IN (SELECT value FROM json_each(?, '$.pending'))",
+                            (seconds, seconds, owner, row[0]),
+                        )
+                    else:
+                        db.execute("COMMIT")
+                        return
+                    db.execute(
+                        "UPDATE memory_servers SET backfill = ? WHERE owner = ?",
+                        (json.dumps(state), owner),
+                    )
                 db.execute("COMMIT")
             except BaseException:
                 db.execute("ROLLBACK")

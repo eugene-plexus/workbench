@@ -984,15 +984,19 @@ async def person_chats(request: Request, sub: str) -> dict[str, Any]:
     await people(request)  # the same checks
     store: Store = _state(request).store
     answers = _answers(request)
+    chats = await store.chats(sub)
+    project_ids = {c.project_id for c in chats if c.project_id is not None}
     return {
-        "projects": [{"id": p.id, "name": p.name} for p in await store.projects(sub)],
+        "projects": [
+            {"id": p.id, "name": p.name} for p in await store.projects(sub) if p.id in project_ids
+        ],
         "chats": [
             chat_view(
                 c,
                 running=answers.running(c.id) is not None or _state(request).agui.busy(c.id),
                 read_only=True,
             )
-            for c in await store.chats(sub)
+            for c in chats
         ],
     }
 
