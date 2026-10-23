@@ -803,6 +803,14 @@ class Courier:
         that ends after its row was deleted leaves a row to forget (`_one`), which the purge
         then forgets with the rest."""
         self.stop_owner(owner)
+        await self.wait_idle(owner)
+
+    async def wait_idle(self, owner: str) -> None:
+        """Wait for this person's active call to settle, without disabling live work.
+
+        Backfill Stop saves its stopped state first, preventing further past-chat
+        sends, then waits here so none can arrive after its response.
+        """
         async with self._calm:
             await self._calm.wait_for(lambda: not self._busy.get(owner))
 
@@ -1269,8 +1277,10 @@ async def stop_backfill(request: Request) -> dict[str, Any]:
     from .api import _person, _state
 
     person = await _person(request)
-    feeder = Backfill(_state(request).store)
+    state = _state(request)
+    feeder = Backfill(state.store)
     await feeder.stop(person.sub)
+    await state.memory_courier.wait_idle(person.sub)
     return await feeder.preview(person.sub)
 
 

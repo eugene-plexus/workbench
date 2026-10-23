@@ -5,7 +5,9 @@ The specs acceptance must additionally cover a process kill on Windows and Linux
 """
 
 import asyncio
+import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from typing import Any
 
 import pytest
@@ -76,3 +78,48 @@ def test_backfill_requires_the_persons_own_server_and_retain(
     bo = signed_in(world, "p-bo")
     assert bo.get("/api/memory/server/backfill").json()["backfill"] is None
     assert bo.post("/api/memory/server/backfill", json={}).status_code == 400
+
+
+def test_stop_waits_for_an_active_retain_before_returning(
+    world: World, remote: Callable[..., Remote], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stop's response is the boundary after which no backfill may arrive."""
+    ada = signed_in(world)
+    chat = ada.new_chat()
+    for i in range(3):
+        ask(world, ada, chat, f"I grow beans in bed {i}.")
+    server = remote()
+    connected(world, server, ada)
+    began, release = threading.Event(), threading.Event()
+    original = ms.Servers.call
+
+    async def held(self: ms.Servers, *args: Any, **kwargs: Any) -> Any:
+        if args[2] == "retain":
+            began.set()
+            await asyncio.to_thread(release.wait)
+        return await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(ms.Servers, "call", held)
+    ada.post("/api/memory/server/backfill", json={}).raise_for_status()
+    assert began.wait(timeout=5), "backfill did not start a retain"
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        stopping = pool.submit(ada.delete, "/api/memory/server/backfill")
+        try:
+            until(
+                lambda: (
+                    ada.get("/api/memory/server/backfill").json()["backfill"]["state"] == "stopped"
+                )
+            )
+            try:
+                stopping.result(timeout=0.2)
+                returned_while_held = True
+            except TimeoutError:
+                returned_while_held = False
+        finally:
+            release.set()
+        response = stopping.result(timeout=5)
+    response.raise_for_status()
+    assert not returned_while_held, "DELETE returned while a retain could still arrive"
+    assert len(server.retained) == 1
+    assert response.json()["backfill"]["state"] == "stopped"
+    assert response.json()["backfill"]["sent"] == 1
