@@ -135,11 +135,17 @@ jobs:
         working-directory: web
       - run: npm run build
         working-directory: web
-      - name: Install Playwright and its browsers
+      - name: Install Playwright and this job's browser
         working-directory: web
+        # The runner's Ubuntu mirror once stalled for 30 minutes on these
+        # packages (run 39950260395): a stalled download now fails in 30 s
+        # and is retried, and the step names itself when it runs too long.
+        timeout-minutes: 12
         run: |
+          printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' \
+            | sudo tee /etc/apt/apt.conf.d/99-ci-retries > /dev/null
           npm install --no-save --package-lock=false playwright@1.63.0
-          npx playwright install --with-deps firefox webkit
+          npx playwright install --with-deps ${{ matrix.browser }}
       - name: Run the six browser checks
         env:
           WORKBENCH_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
