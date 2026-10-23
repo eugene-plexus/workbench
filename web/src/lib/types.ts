@@ -1018,6 +1018,42 @@ export interface MemoryServerPage {
   } | null;
 }
 
+/** A memory server as Workbench shows it: never the token (`memory_servers.view`). */
+export type MemoryServerView = NonNullable<MemoryServerPage["server"]>;
+
+/** Row 70c: a permission group, as Eugene names it. */
+export interface GroupRef {
+  id: string;
+  name: string;
+}
+
+/** Row 70c: `GET /api/groups`, the signed-in person's groups and what those set. */
+export interface GroupsPage {
+  /** False when Eugene said nothing of groups (an Eugene from before row 70). */
+  known: boolean;
+  groups: GroupRef[];
+  policies: {
+    policy: "queueBand" | "summaryContextPercent";
+    value: string | number;
+    setBy: GroupRef[];
+  }[];
+  servers: { group: GroupRef; server: MemoryServerView }[];
+  serversAllowed: boolean;
+  why: string | null;
+}
+
+/** Row 70c: `GET /api/groups/manage`, the owner's: a memory server per group. */
+export interface GroupServersPage {
+  allowed: boolean;
+  mode: "off" | "outside" | "any";
+  why: string | null;
+  /** Why Eugene could not be asked for its groups, if it could not. */
+  problem: string | null;
+  groups: (GroupRef & { server: MemoryServerView | null })[];
+  /** Servers of groups Eugene does not list now, for the owner to remove. */
+  gone: { id: string; server: MemoryServerView }[];
+}
+
 /** `GET /api/chats/{id}/memory`, for a chat that is the asker's. */
 export interface ChatMemory {
   chatId: string;

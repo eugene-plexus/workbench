@@ -204,6 +204,8 @@ class Sessions:
                     role=identity.role,
                     username=identity.username,
                     email=identity.email,
+                    groups=identity.groups,
+                    policies=identity.policies,
                 )
             )
             await self._store.refreshed(
