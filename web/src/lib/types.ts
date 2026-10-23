@@ -994,6 +994,8 @@ export interface MemoryServerTurn {
 
 /** `GET /api/memory/server`: a person's own memory server (MV5). */
 export interface MemoryServerPage {
+  linkedAvailable?: boolean;
+  linkedWhy?: string | null;
   allowed: boolean;
   mode: "off" | "outside" | "any";
   why: string | null;
@@ -1001,6 +1003,7 @@ export interface MemoryServerPage {
     url: string;
     name: string;
     hasToken: boolean;
+    linked?: boolean;
     verbs: string[];
     missing: string[];
     connectedAt: number;

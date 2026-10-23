@@ -101,7 +101,7 @@ from .agui_store import AGUIStore, allow_chat_write
 from .interaction_store import SCHEMA as INTERACTION_SCHEMA
 from .interaction_store import InteractionStore
 
-SCHEMA_VERSION = 29
+SCHEMA_VERSION = 34
 
 #: The oldest schema this migrates from: what Workbench v0.1.0 wrote. Schema 1 predates
 #: it, and nobody holds one.
@@ -698,6 +698,11 @@ def _removal(db: sqlite3.Connection) -> None:
 #: What brings a store written at version N-1 to N, for N above `OLDEST_SCHEMA`.
 #: `_SCHEMA` already holds the result, for a store made new. A step is a statement,
 #: or a function of the connection for what SQL alone cannot say.
+def _linked_memory_server(db: sqlite3.Connection) -> None:
+    if "linked" not in {r[1] for r in db.execute("PRAGMA table_info(memory_servers)")}:
+        db.execute("ALTER TABLE memory_servers ADD COLUMN linked INTEGER NOT NULL DEFAULT 0")
+
+
 _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
     3: [
         "ALTER TABLE messages ADD COLUMN tool_rounds TEXT NOT NULL DEFAULT '[]'",
@@ -845,6 +850,7 @@ _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
     # A removed person (row 7, 2026-10-21): two new tables and one new column.
     28: [_removal],
     29: [branch_store.migration],
+    34: [_linked_memory_server],
 }
 
 
@@ -961,7 +967,7 @@ def _initialize_schema(
                 f"unsupported schema {version}{origin}; {known}",
             )
         if version is not None:
-            for target in range(version + 1, SCHEMA_VERSION + 1):
+            for target in sorted(t for t in _MIGRATIONS if version < t <= SCHEMA_VERSION):
                 for statement in _MIGRATIONS[target]:
                     if callable(statement):
                         statement(db)
@@ -978,6 +984,7 @@ def _initialize_schema(
         _past_chats(db)
         _learning(db)
         _memory_servers(db)
+        _linked_memory_server(db)
         _provenance(db)
         _projects(db)
         _removal(db)
@@ -6040,7 +6047,14 @@ class Store:
         return await self._run(go)
 
     async def put_memory_server(
-        self, owner: str, url: str, token: str, name: str, verbs: dict[str, str]
+        self,
+        owner: str,
+        url: str,
+        token: str,
+        name: str,
+        verbs: dict[str, Any],
+        *,
+        linked: bool = False,
     ) -> None:
         """Connect a person's server, replacing any they had. At another address, what was
         recorded of the old one goes (it can no longer be asked to forget anything); at the same
@@ -6057,8 +6071,16 @@ class Store:
                     db.execute("DELETE FROM memory_server_sent WHERE owner = ?", (owner,))
                 db.execute(
                     "INSERT OR REPLACE INTO memory_servers (owner, url, token, name, verbs, "
-                    "connected_at) VALUES (?, ?, ?, ?, ?, ?)",
-                    (owner, url, token, name, json.dumps(verbs), time.time()),
+                    "connected_at, linked) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        owner,
+                        url,
+                        "" if linked else token,
+                        name,
+                        json.dumps(verbs),
+                        time.time(),
+                        int(linked),
+                    ),
                 )
                 db.execute("COMMIT")
             except BaseException:

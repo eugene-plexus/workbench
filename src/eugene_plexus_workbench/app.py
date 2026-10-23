@@ -297,7 +297,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # background and asked every turn.
         from .memory_servers import Courier, Servers
 
-        app.state.memory_servers = Servers(store, settings)
+        app.state.memory_servers = Servers(store, settings, hub=app.state.hub)
         courier = app.state.memory_courier = Courier(store, app.state.memory_servers)
         courier.start()
         # Row 7: downloads of people's data, and what happens to a removed person's.

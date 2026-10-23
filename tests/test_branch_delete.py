@@ -355,8 +355,8 @@ def test_name_round_trips_and_hidden_name_hidden(world: World) -> None:
 
 
 def test_migration_adds_branch_name(tmp_path: Path) -> None:
-    assert storage.SCHEMA_VERSION == 29
-    assert set(storage._MIGRATIONS) == set(range(storage.OLDEST_SCHEMA + 1, 30))
+    assert storage.SCHEMA_VERSION == 34
+    assert set(storage._MIGRATIONS) == set(range(storage.OLDEST_SCHEMA + 1, 30)) | {34}
 
     async def go() -> None:
         store = Store(tmp_path / "wb.sqlite3")
