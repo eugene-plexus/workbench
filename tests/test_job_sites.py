@@ -15,7 +15,7 @@ from typing import Any
 import httpx
 import pytest
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from . import fake_sites
 from .conftest import ADMIN_TOKEN, CLIENT_ID, CLIENT_SECRET, FakeEugene, World
@@ -74,7 +74,7 @@ def site_world(
             refusal = state.get("link_refusal")
             if refusal:
                 return JSONResponse({"detail": {"detail": refusal[1]}}, status_code=refusal[0])
-            return JSONResponse(None, status_code=204)
+            return Response(status_code=204)
 
         @server.post("/oidc/job-sites/{site}/{what}/{ident}/{action}")
         async def relayed(site: str, what: str, ident: str, action: str, request: Request) -> Any:
@@ -90,7 +90,7 @@ def site_world(
         async def site_action(site: str, action: str, request: Request) -> Any:
             body = await request.json()
             if action == "leave":
-                return JSONResponse(None, status_code=204)
+                return Response(status_code=204)
             if fake.refresh_tokens.get(body["refreshToken"]) != "p-ada":
                 return JSONResponse({"detail": {"detail": "No such job site."}}, status_code=404)
             state["managed"].append((action, body))

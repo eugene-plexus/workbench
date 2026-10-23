@@ -903,8 +903,9 @@ async def remove_chat(request: Request, person: Person, chat: Chat) -> None:
                 f"nothing was deleted ({type(exc).__name__}). Try again in a moment.",
             ) from None
     try:
-        await _state(request).branches.purge_chat(chat.id)
-        await store.delete_chat(chat.id)
+        removed = await _state(request).branches.purge_chat(chat.id)
+        removed.keys.update((await store.delete_chat(chat.id)).keys)
+        _state(request).branches.notify_removed_recalls(chat.id, removed)
     except BaseException:
         # The chat is still there with no exchanges in the index: put them back.
         _touch_exchanges(request, person.sub, chat.id)

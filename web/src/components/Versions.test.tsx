@@ -99,7 +99,7 @@ it("lets the owner compare but has no write actions", () => {
 });
 
 it.each([false, true])(
-  "shows the legacy recall caveat only when needed (%s)",
+  "explains removal of older recalls only when needed (%s)",
   async (legacyRecalls) => {
     vi.mocked(api).mockResolvedValue({
       messages: 1,
@@ -124,7 +124,7 @@ it.each([false, true])(
     fireEvent.click(screen.getByRole("button", { name: "Delete this version" }));
     await screen.findByRole("button", { name: "Delete version" });
     const caveat =
-      "An older memory recall shorter than 8 words or differently punctuated may keep a phrase from this answer.";
+      "Older memory recalls saved after this answer will also be removed when it is deleted permanently.";
     if (legacyRecalls) expect(screen.getByRole("dialog")).toHaveTextContent(caveat);
     else expect(screen.getByRole("dialog")).not.toHaveTextContent(caveat);
   },

@@ -657,7 +657,7 @@ export type ChatEvent =
   | { type: "done"; message: Message }
   | { type: "reload" }
   /** Another version is shown: Try again, an edit, or a choice. */
-  | { type: "path" }
+  | { type: "path"; notice?: string }
   /** MV3b: notes this chat's model kept by itself after it went quiet. */
   | { type: "memory"; learned: LearnedNote[] }
   | { type: "signed-out"; reason: string; message: string };
