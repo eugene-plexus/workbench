@@ -238,8 +238,7 @@ async def test_a_word_file_is_read_with_its_headings_kept_as_the_path(rig: Rig) 
             lambda: docs.pdf_pictures(3),
             "skipped",
             "no_text",
-            "Skipped: this PDF has no text, only pictures of pages. "
-            "Workbench cannot read scanned pages yet.",
+            "Skipped: this PDF has no text, only pictures of pages.",
         ),
         (docs.pdf_encrypted, "skipped", "password", "Skipped: this file is password-protected."),
         (docs.pdf_damaged, "failed", "damaged", "Failed: Workbench could not read this file ("),

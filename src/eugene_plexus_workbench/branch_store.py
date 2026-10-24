@@ -654,6 +654,17 @@ def purge_rows(
         "deleted_branches",
     )
     gone = {table: _delete(db, table, actual.get(table, [])) for table in order}
+    if not hiding and rows_exist(db, "chat_summaries"):
+        # Row 26: a summary whose run held a deleted message is a copy of its words, so it goes
+        # too. A run is a stretch of one path, and a branch is a message and everything after
+        # it, so a run that held one ends in the branch. While a branch is hidden its summaries
+        # stay, unused (their run is off every path), so Undo brings them back.
+        marks = ", ".join("?" for _ in ids)
+        cursor = db.execute(
+            f"DELETE FROM chat_summaries WHERE chat_id = ? AND owner = ? AND last_id IN ({marks})",
+            (chat, owner, *ids),
+        )
+        gone["chat_summaries"] = max(cursor.rowcount, 0)
     for archive in rows(db, "deleted_branches"):
         if hiding or archive["owner"] != owner:
             continue

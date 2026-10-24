@@ -30,8 +30,11 @@ is used only when it is named and the setting above allows the text to go there)
 seconds a sort may add to an answer, over which passages are left in the order they were found.
 Four are the folders people point their documents at (MR7, `knowledge/folder_sync.py`): how
 often Workbench looks at them, and how many files, how many megabytes and how many folders deep
-it takes of one. Saved documents are not covered by `ownerReadsChats` either. Every one takes
-effect at once, and `null` puts one back to its default.
+it takes of one. Saved documents are not covered by `ownerReadsChats` either. Four are long
+chats' (row 26, `long_chats.py`): whether a chat that outgrows its model's window is summarised,
+at what share of the window (a person's permission group may set its own), the ceiling for a model
+outside the machines, and which model writes the summaries. Every one takes effect at once, and
+`null` puts one back to its default.
 """
 
 from __future__ import annotations
@@ -43,7 +46,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
-from . import memory_policy
+from . import long_chats, memory_policy
 from ._generated.models import (
     ConfigDocument,
     ConfigField,
@@ -102,10 +105,18 @@ DOCUMENTS_EXTERNAL_EMBEDDING = "documentsExternalEmbedding"
 DOCUMENTS_EMBED_PER_MINUTE = "documentsEmbedRequestsPerMinute"
 DOCUMENTS_SORT_MODEL = "documentsSortModel"
 DOCUMENTS_SORT_SECONDS = "documentsSortSeconds"
+DOCUMENTS_WHOLE_BY_PARTS = "documentsWholeByParts"
+DOCUMENTS_PAGE_READER = "documentsPageReader"
+DOCUMENTS_PAGE_READER_MAX_PAGES = "documentsPageReaderMaxPages"
 DOCUMENTS_FOLDER_SYNC_MINUTES = "documentsFolderSyncMinutes"
 DOCUMENTS_FOLDER_MAX_FILES = "documentsFolderMaxFiles"
 DOCUMENTS_FOLDER_MAX_MB = "documentsFolderMaxMB"
 DOCUMENTS_FOLDER_MAX_DEPTH = "documentsFolderMaxDepth"
+#: Row 26: long chats.
+LONG_CHATS_SUMMARISE = "longChatsSummarise"
+LONG_CHATS_PERCENT = "longChatsSummariseAtPercent"
+LONG_CHATS_CEILING = "longChatsOutsideCeilingTokens"
+LONG_CHATS_MODEL = "longChatsSummaryModel"
 
 #: How far a note, or a passage of a saved document, may travel to a model outside
 #: the machines (`memory_api`'s `resolve_external` says how the owner's and a person's
@@ -533,6 +544,63 @@ FIELDS = [
         minimum=MIN_FOLDER_DEPTH,
         maximum=MAX_FOLDER_DEPTH,
     ),
+    ConfigField(
+        key=LONG_CHATS_SUMMARISE,
+        label="Summarise chats that outgrow their model's window",
+        description=(
+            "Lets a long chat go on by summarising its earlier messages for the model.\n\n"
+            "The chat's own model writes the summary, and every message stays in the chat. Off, "
+            "a chat too long for its model is refused before it is sent. Each person can turn it "
+            "off for one chat."
+        ),
+        category="chats",
+        valueType=ConfigValueType.boolean,
+        default=True,
+    ),
+    ConfigField(
+        key=LONG_CHATS_PERCENT,
+        label="Summarise at this share of the window (percent)",
+        description=(
+            "How full a chat's model window may get before earlier messages are summarised.\n\n"
+            "A person's permission group may set its own share, and then that applies to them. "
+            "Summarising leaves the chat at about half the window, so several turns go before "
+            "the next summary."
+        ),
+        category="chats",
+        valueType=ConfigValueType.integer,
+        default=long_chats.SUMMARISE_AT_PERCENT,
+        minimum=long_chats.MIN_PERCENT,
+        maximum=long_chats.MAX_PERCENT,
+    ),
+    ConfigField(
+        key=LONG_CHATS_CEILING,
+        label="Summarise at this many tokens for models outside your machines",
+        description=(
+            "A chat with a model outside this install's machines is also summarised at this "
+            "many tokens.\n\n"
+            "Every turn sends the whole chat, and an outside model bills for it. 0 means no "
+            "ceiling: only the share of the window applies."
+        ),
+        category="chats",
+        valueType=ConfigValueType.integer,
+        default=long_chats.OUTSIDE_CEILING_TOKENS,
+        minimum=0,
+        maximum=long_chats.MAX_CEILING,
+    ),
+    ConfigField(
+        key=LONG_CHATS_MODEL,
+        label="Model that writes summaries",
+        description=(
+            "Which model summarises a long chat's earlier messages.\n\n"
+            "Empty is the chat's own model, which has the messages in its cache already. "
+            "Otherwise name a model on this install's machines: a chat's words never go to "
+            "a model outside them for a summary. If it does not answer, the chat's own model "
+            "writes the summary."
+        ),
+        category="chats",
+        valueType=ConfigValueType.string,
+        default="",
+    ),
 ]
 
 _ROW_LABELS: dict[str, tuple[str, str, list[str]]] = {
@@ -649,6 +717,48 @@ POLICY_FIELDS = [
     ],
 ]
 FIELDS += POLICY_FIELDS
+FIELDS += [
+    ConfigField(
+        key=DOCUMENTS_WHOLE_BY_PARTS,
+        label="Read whole documents in parts",
+        description=(
+            "Reads all parts for a whole-document question.\n\n"
+            "Always starts automatically. Ask offers Read all of it first. "
+            "Never uses passages only. At most 3 documents and 40 parts; Stop ends the reading."
+        ),
+        category="documents",
+        valueType=ConfigValueType.enum,
+        default="always",
+        enumValues=["ask", "always", "never"],
+    ),
+    ConfigField(
+        key=DOCUMENTS_PAGE_READER,
+        label="Model that reads scanned pages",
+        description=(
+            "Off: scanned pages are skipped.\n\n"
+            "Choose a gateway vision model, or role:reads-pages. Each person chooses "
+            "Read scanned pages before images are sent. The passages' outside-model rule applies."
+        ),
+        category="documents",
+        valueType=ConfigValueType.string,
+        default="",
+        suggestions=["", "role:reads-pages"],
+    ),
+    ConfigField(
+        key=DOCUMENTS_PAGE_READER_MAX_PAGES,
+        label="Most scanned pages read per document",
+        description=(
+            "Limits the scanned pages read from one document.\n\n"
+            "The page count and model are shown before a person starts reading. "
+            "Documents over this limit are left unread with their count."
+        ),
+        category="documents",
+        valueType=ConfigValueType.integer,
+        default=200,
+        minimum=1,
+        maximum=5000,
+    ),
+]
 
 DEFAULTS: dict[str, Any] = {
     OWNER_READS_CHATS: False,
@@ -677,10 +787,17 @@ DEFAULTS: dict[str, Any] = {
     DOCUMENTS_EMBED_PER_MINUTE: 30,
     DOCUMENTS_SORT_MODEL: AUTO,
     DOCUMENTS_SORT_SECONDS: 3.0,
+    DOCUMENTS_WHOLE_BY_PARTS: "always",
+    DOCUMENTS_PAGE_READER: "",
+    DOCUMENTS_PAGE_READER_MAX_PAGES: 200,
     DOCUMENTS_FOLDER_SYNC_MINUTES: 10,
     DOCUMENTS_FOLDER_MAX_FILES: 10_000,
     DOCUMENTS_FOLDER_MAX_MB: 2_048,
     DOCUMENTS_FOLDER_MAX_DEPTH: 12,
+    LONG_CHATS_SUMMARISE: True,
+    LONG_CHATS_PERCENT: long_chats.SUMMARISE_AT_PERCENT,
+    LONG_CHATS_CEILING: long_chats.OUTSIDE_CEILING_TOKENS,
+    LONG_CHATS_MODEL: "",
 }
 
 
@@ -789,6 +906,9 @@ class DocumentSettings:
     #: may add to an answer. A sorter outside the machines needs `external_embedding` too.
     sort_model: str = AUTO
     sort_seconds: float = 3.0
+    whole_by_parts: str = "always"
+    page_reader: str = ""
+    page_reader_max_pages: int = 200
 
     @property
     def max_bytes(self) -> int:
@@ -818,6 +938,9 @@ async def document_settings(store: Store) -> DocumentSettings:
     rate = await store.setting(DOCUMENTS_EMBED_PER_MINUTE)
     sorter = await store.setting(DOCUMENTS_SORT_MODEL)
     sort_time = await store.setting(DOCUMENTS_SORT_SECONDS)
+    whole_parts = await store.setting(DOCUMENTS_WHOLE_BY_PARTS)
+    page_model = await store.setting(DOCUMENTS_PAGE_READER)
+    page_max = await store.setting(DOCUMENTS_PAGE_READER_MAX_PAGES)
     return DocumentSettings(
         enabled=bool(enabled) if enabled is not None else bool(DEFAULTS[DOCUMENTS_ENABLED]),
         max_file_mb=int(largest) if largest is not None else int(DEFAULTS[DOCUMENTS_MAX_FILE_MB]),
@@ -841,6 +964,11 @@ async def document_settings(store: Store) -> DocumentSettings:
         ),
         sort_model=(sorter.strip() if isinstance(sorter, str) and sorter.strip() else AUTO),
         sort_seconds=_sort_seconds(sort_time),
+        whole_by_parts=whole_parts if whole_parts in EXTERNAL_CHOICES else "always",
+        page_reader=page_model.strip() if isinstance(page_model, str) else "",
+        page_reader_max_pages=page_max
+        if isinstance(page_max, int) and not isinstance(page_max, bool) and 1 <= page_max <= 5000
+        else 200,
     )
 
 
@@ -868,6 +996,44 @@ async def folder_settings(store: Store) -> FolderSettings:
         max_files=await number(DOCUMENTS_FOLDER_MAX_FILES),
         max_mb=await number(DOCUMENTS_FOLDER_MAX_MB),
         max_depth=await number(DOCUMENTS_FOLDER_MAX_DEPTH),
+    )
+
+
+@dataclass(frozen=True)
+class LongChatSettings:
+    """The install's long-chat settings, as they are in effect now (row 26)."""
+
+    summarise: bool = True
+    percent: int = long_chats.SUMMARISE_AT_PERCENT
+    ceiling: int = long_chats.OUTSIDE_CEILING_TOKENS
+    #: The model that writes summaries; empty is the chat's own.
+    model: str = ""
+
+
+def _whole_in(value: Any, low: int, high: int) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and low <= value <= high
+
+
+async def long_chat_settings(store: Store) -> LongChatSettings:
+    """What is saved, where it is a value the setting takes; the default otherwise, so a store
+    edited by hand never stops a chat."""
+    summarise = await store.setting(LONG_CHATS_SUMMARISE)
+    percent = await store.setting(LONG_CHATS_PERCENT)
+    ceiling = await store.setting(LONG_CHATS_CEILING)
+    model = await store.setting(LONG_CHATS_MODEL)
+    return LongChatSettings(
+        summarise=summarise if isinstance(summarise, bool) else True,
+        percent=(
+            percent
+            if _whole_in(percent, long_chats.MIN_PERCENT, long_chats.MAX_PERCENT)
+            else long_chats.SUMMARISE_AT_PERCENT
+        ),
+        ceiling=(
+            ceiling
+            if ceiling == 0 or _whole_in(ceiling, long_chats.MIN_CEILING, long_chats.MAX_CEILING)
+            else long_chats.OUTSIDE_CEILING_TOKENS
+        ),
+        model=model.strip() if isinstance(model, str) else "",
     )
 
 
@@ -900,6 +1066,7 @@ async def get_schema(request: Request) -> ConfigSchema:
             "people": "People and their chats",
             "memory": "Memory",
             "documents": "Documents",
+            "chats": "Long chats",
         },
     )
 
@@ -1001,6 +1168,7 @@ async def get_config(request: Request) -> ConfigDocument:
     memory = await memory_settings(store)
     documents = await document_settings(store)
     folders = await folder_settings(store)
+    chats = await long_chat_settings(store)
     return ConfigDocument.model_validate(
         {
             OWNER_READS_CHATS: await owner_reads_chats(store),
@@ -1026,10 +1194,17 @@ async def get_config(request: Request) -> ConfigDocument:
             DOCUMENTS_EMBED_PER_MINUTE: documents.embed_per_minute,
             DOCUMENTS_SORT_MODEL: documents.sort_model,
             DOCUMENTS_SORT_SECONDS: documents.sort_seconds,
+            DOCUMENTS_WHOLE_BY_PARTS: documents.whole_by_parts,
+            DOCUMENTS_PAGE_READER: documents.page_reader,
+            DOCUMENTS_PAGE_READER_MAX_PAGES: documents.page_reader_max_pages,
             DOCUMENTS_FOLDER_SYNC_MINUTES: folders.sync_minutes,
             DOCUMENTS_FOLDER_MAX_FILES: folders.max_files,
             DOCUMENTS_FOLDER_MAX_MB: folders.max_mb,
             DOCUMENTS_FOLDER_MAX_DEPTH: folders.max_depth,
+            LONG_CHATS_SUMMARISE: chats.summarise,
+            LONG_CHATS_PERCENT: chats.percent,
+            LONG_CHATS_CEILING: chats.ceiling,
+            LONG_CHATS_MODEL: chats.model,
         }
     )
 
@@ -1037,14 +1212,44 @@ async def get_config(request: Request) -> ConfigDocument:
 def _problem_with(key: str, value: Any) -> str | None:
     """Why `value` is not one this setting takes, or None when it is. A
     `bool` is not an integer here, whatever Python says."""
+    if key == DOCUMENTS_WHOLE_BY_PARTS:
+        return None if value in EXTERNAL_CHOICES else "Must be ask, always or never."
+    if key == DOCUMENTS_PAGE_READER:
+        return (
+            None
+            if isinstance(value, str) and len(value.strip()) <= MAX_MODEL_ID
+            else "Use a model name, role:reads-pages, or leave it empty for Off."
+        )
+    if key == DOCUMENTS_PAGE_READER_MAX_PAGES:
+        return (
+            None
+            if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 5000
+            else "Must be a whole number from 1 to 5,000."
+        )
     if key in (
         OWNER_READS_CHATS,
         MEMORY_ENABLED,
         CONNECTIONS,
         DOCUMENTS_ENABLED,
         DOCUMENTS_EXTERNAL_EMBEDDING,
+        LONG_CHATS_SUMMARISE,
     ):
         return None if isinstance(value, bool) else "Must be true or false."
+    if key == LONG_CHATS_PERCENT:
+        if _whole_in(value, long_chats.MIN_PERCENT, long_chats.MAX_PERCENT):
+            return None
+        return f"Must be a whole number from {long_chats.MIN_PERCENT} to {long_chats.MAX_PERCENT}."
+    if key == LONG_CHATS_CEILING:
+        if value == 0 or _whole_in(value, long_chats.MIN_CEILING, long_chats.MAX_CEILING):
+            return None
+        return (
+            f"Must be 0 (no ceiling), or a whole number from {long_chats.MIN_CEILING:,} to "
+            f"{long_chats.MAX_CEILING:,}."
+        )
+    if key == LONG_CHATS_MODEL:
+        if isinstance(value, str) and len(value.strip()) <= MAX_MODEL_ID:
+            return None
+        return f"Must be empty, or the name of a model (at most {MAX_MODEL_ID} characters)."
     if key == DOCUMENTS_EMBEDDING_MODEL:
         if isinstance(value, str) and value.strip() and len(value.strip()) <= MAX_MODEL_ID:
             return None

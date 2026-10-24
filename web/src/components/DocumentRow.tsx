@@ -28,6 +28,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { addedWords, docMeta, stateWords } from "../lib/savedDocuments";
 import type { SavedDocument } from "../lib/types";
 import { useDocumentText } from "./DocumentText";
+import { ReadScannedDocument } from "./ScannedPages";
 
 export function DocumentRow({
   doc,
@@ -37,6 +38,7 @@ export function DocumentRow({
   onOpen,
   onReread,
   onRemove,
+  onReadPages,
 }: {
   doc: SavedDocument;
   /** The owner has turned documents off: a document can be read and removed, not
@@ -48,6 +50,7 @@ export function DocumentRow({
   onOpen: () => void;
   onReread: () => void;
   onRemove: () => void;
+  onReadPages?: () => void;
 }) {
   const uid = useId();
   const [confirming, setConfirming] = useState(false);
@@ -149,6 +152,9 @@ export function DocumentRow({
           <CircleCheck size={16} aria-hidden className="shrink-0 text-ok" />
           {words.label}
         </p>
+      )}
+      {!locked && doc.code === "no_text" && (
+        <ReadScannedDocument id={doc.id} onStarted={() => onReadPages?.()} />
       )}
       {notes.length > 0 && !ended && (
         <ul
