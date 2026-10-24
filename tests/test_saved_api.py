@@ -243,10 +243,7 @@ def test_a_scan_a_locked_file_and_a_damaged_one_are_skipped_or_failed_in_words(
         )["documents"]
     }
     assert got["scan.pdf"]["state"] == "skipped" and got["scan.pdf"]["code"] == "no_text"
-    assert got["scan.pdf"]["message"] == (
-        "Skipped: this PDF has no text, only pictures of pages. "
-        "Workbench cannot read scanned pages yet."
-    )
+    assert got["scan.pdf"]["message"] == ("Skipped: this PDF has no text, only pictures of pages.")
     assert got["scan.pdf"]["pages"] == 3 and got["scan.pdf"]["passages"] == 0
     assert got["locked.pdf"]["message"] == "Skipped: this file is password-protected."
     assert got["bad.pdf"]["state"] == "failed"

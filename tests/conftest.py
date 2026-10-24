@@ -36,7 +36,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response, Streamin
 from joserfc import jwt
 from joserfc.jwk import RSAKey
 
-from eugene_plexus_workbench import token_count
+from eugene_plexus_workbench import context, token_count
 from eugene_plexus_workbench.app import create_app
 from eugene_plexus_workbench.knowledge import sorting
 from eugene_plexus_workbench.settings import Settings
@@ -496,6 +496,15 @@ class FakeEugene:
     token_calls: int = 0
     #: Row 7: each `/oidc/subjects` call's ids; a person deleted from `people` is `unknown`.
     subject_calls: list[list[str]] = field(default_factory=list)
+    #: Row 70c: claims each person's ID token carries beyond the standard ones
+    #: (`eugene_groups`, `eugene_policies`, `eugene_groups_truncated`).
+    claims: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: Row 70c: what `/oidc/userinfo` says of a person beyond `sub`; their `claims` if unset.
+    userinfo: dict[str, dict[str, Any]] = field(default_factory=dict)
+    userinfo_calls: int = 0
+    #: Row 70c: what `/oidc/groups` lists, or None for an Eugene too old to have it (404).
+    groups: list[dict[str, str]] | None = field(default_factory=list)
+    access: dict[str, str] = field(default_factory=dict)
 
     @property
     def issuer(self) -> str:
@@ -525,6 +534,7 @@ class FakeEugene:
         }
         if "email" in person:  # row 7: only when the person has one, as Eugene sends it
             claims["email"] = person["email"]
+        claims.update(self.claims.get(sub, {}))
         if nonce is not None:
             claims["nonce"] = nonce
         return jwt.encode({"alg": "RS256", "typ": typ, "kid": "k1"}, claims, self.key)
@@ -547,6 +557,7 @@ class FakeEugene:
                 "token_endpoint": f"{self.issuer}/token",
                 "jwks_uri": f"{self.issuer}/jwks",
                 "revocation_endpoint": f"{self.issuer}/revoke",
+                "userinfo_endpoint": f"{self.issuer}/userinfo",
             }
 
         @app.get("/oidc/jwks")
@@ -599,8 +610,10 @@ class FakeEugene:
                 sub = found["sub"]
                 refresh = secrets.token_urlsafe(16)
                 self.refresh_tokens[refresh] = sub
+                access = "at-" + secrets.token_urlsafe(8)
+                self.access[access] = sub
                 return {
-                    "access_token": "at",
+                    "access_token": access,
                     "token_type": "Bearer",
                     "expires_in": self.expires_in,
                     "id_token": self.id_token(sub, nonce=found["nonce"]),
@@ -617,8 +630,10 @@ class FakeEugene:
                         },
                         status_code=400,
                     )
+                access = "at-" + secrets.token_urlsafe(8)
+                self.access[access] = sub
                 return {
-                    "access_token": "at",
+                    "access_token": access,
                     "token_type": "Bearer",
                     "expires_in": self.expires_in,
                     "id_token": self.id_token(sub),
@@ -632,6 +647,35 @@ class FakeEugene:
             self.revoked.append(token)
             self.refresh_tokens.pop(token, None)
             return {}
+
+        @app.get("/oidc/userinfo")
+        async def userinfo(request: Request) -> Any:
+            self.userinfo_calls += 1
+            if not self.up:
+                return JSONResponse({}, status_code=503)
+            token = request.headers.get("authorization", "").removeprefix("Bearer ")
+            sub = self.access.get(token)
+            if sub is None or sub in self.disabled:
+                return JSONResponse({"error": "invalid_token"}, status_code=401)
+            person = self.people[sub]
+            # Eugene's userinfo is never cut: a person's ID token claims, less the flag, unless
+            # a test sets exactly what userinfo says (a cut answer included).
+            if sub in self.userinfo:
+                extra = dict(self.userinfo[sub])
+            else:
+                told = self.claims.get(sub, {})
+                extra = {k: v for k, v in told.items() if k != "eugene_groups_truncated"}
+            return {"sub": sub, "name": person["name"], "eugene_role": person["role"], **extra}
+
+        @app.get("/oidc/groups")
+        async def groups(request: Request) -> Any:
+            if not self.up:
+                return JSONResponse({"error": "temporarily_unavailable"}, status_code=503)
+            if self.groups is None:
+                return JSONResponse({"detail": "Not Found"}, status_code=404)
+            if not client_ok(request):
+                return JSONResponse({"error": "invalid_client"}, status_code=401)
+            return {"groups": self.groups}
 
         @app.post("/oidc/subjects")
         async def subjects(request: Request) -> Any:
@@ -806,6 +850,21 @@ class FakeGateway:
     suggest_requests: list[dict[str, Any]] = field(default_factory=list)
     suggest_answer: str = '{"notes": []}'
     suggest_refusal: tuple[int, str] | None = None
+    #: Row 26: report each answer's usage (its prompt counted as Workbench counts it), and the
+    #: window that applied, as the gateway does on its final frame.
+    usage: bool = False
+    #: Refuse a prompt past this many tokens, with llama-server's words as the gateway passes
+    #: them on (a 400 `invalid_request_error`, no code).
+    refuse_over: int | None = None
+    #: How a refusal past `refuse_over` comes: a 400 (`status`), or a 200 whose stream is an
+    #: error frame (`frame`), as the gateway's streamed chat door sends it.
+    overflow_as: str = "status"
+    #: Say on the final frame that the backend dropped part of the prompt.
+    truncated: bool = False
+    #: Summary requests (not streamed, no response format): each body, and what they get.
+    summary_requests: list[dict[str, Any]] = field(default_factory=list)
+    summary_answer: str = "Earlier, the person and the model talked about the plan."
+    summary_refusal: tuple[int, str] | None = None
 
     def rerank_tokens(self, body: dict[str, Any]) -> int:
         """What reading a request is worth, as Workbench counts it: each passage and the question
@@ -1256,7 +1315,92 @@ class FakeGateway:
                         ]
                     }
                 )
+            if body.get("stream") is False:
+                # A summary of earlier messages (row 26): kept apart from a chat's own requests.
+                self.summary_requests.append(
+                    {"body": body, "person": request.headers.get("X-Eugene-Person-Token")}
+                )
+                prompt = context.count_messages(body["messages"])
+                if self.summary_refusal is not None:
+                    status, message = self.summary_refusal
+                    return JSONResponse({"error": {"message": message}}, status_code=status)
+                if self.refuse_over is not None and prompt > self.refuse_over:
+                    return JSONResponse(
+                        {
+                            "error": {
+                                "message": "The backend rejected the request: request "
+                                f"({prompt} tokens) exceeds the available context size "
+                                f"({self.refuse_over} tokens), try increasing it",
+                                "type": "invalid_request_error",
+                                "code": None,
+                            }
+                        },
+                        status_code=400,
+                    )
+                return JSONResponse(
+                    {
+                        "choices": [
+                            {
+                                "message": {"role": "assistant", "content": self.summary_answer},
+                                "finish_reason": "stop",
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": prompt,
+                            "completion_tokens": token_count.estimate(self.summary_answer),
+                        },
+                    }
+                )
             self.requests.append(body)
+            if self.refuse_over is not None:
+                prompt = context.count_messages(body["messages"])
+                if prompt > self.refuse_over and self.overflow_as == "frame":
+                    # The streamed chat door: a 200, then the driver's failure in an error frame
+                    # with no code, llama-server's body inside it (gateway#18).
+                    words = (
+                        "driver 'local' (http://127.0.0.1:1) returned 400 — Backend rejected "
+                        "the request — openai_compat_http returned 400: "
+                        + json.dumps(
+                            {
+                                "error": {
+                                    "code": 400,
+                                    "message": f"request ({prompt} tokens) exceeds the "
+                                    f"available context size ({self.refuse_over} tokens), "
+                                    "try increasing it",
+                                    "type": "exceed_context_size_error",
+                                    "n_prompt_tokens": prompt,
+                                    "n_ctx": self.refuse_over,
+                                }
+                            }
+                        )
+                    )
+
+                    async def failed() -> AsyncIterator[str]:
+                        frame = {
+                            "error": {
+                                "message": words,
+                                "type": "upstream_error",
+                                "param": None,
+                                "code": None,
+                            }
+                        }
+                        yield "data: " + json.dumps(frame) + "\n\n"
+                        yield "data: [DONE]\n\n"
+
+                    return StreamingResponse(failed(), media_type="text/event-stream")
+                if prompt > self.refuse_over:
+                    return JSONResponse(
+                        {
+                            "error": {
+                                "message": "The backend rejected the request: request "
+                                f"({prompt} tokens) exceeds the available context size "
+                                f"({self.refuse_over} tokens), try increasing it",
+                                "type": "invalid_request_error",
+                                "code": None,
+                            }
+                        },
+                        status_code=400,
+                    )
             number = len(self.requests)
             self.repetition_modes.append(request.headers.get("X-Eugene-Repetition-Mode"))
             if (
@@ -1280,6 +1424,10 @@ class FakeGateway:
             def extension(searched: bool | None = None) -> dict[str, Any]:
                 searched = "web_search_options" in body if searched is None else searched
                 found: dict[str, Any] = {"web_searches": 1 if searched else 0}
+                if self.usage and self.context_length is not None:
+                    found["context_length"] = self.context_length
+                if self.truncated:
+                    found["prompt_truncated"] = True
                 if searched and self.suggestions:
                     found["search_suggestions"] = [
                         s.replace("{n}", str(number)) for s in self.suggestions
@@ -1388,6 +1536,26 @@ class FakeGateway:
                     )
                     yield chunk({"annotations": annotations})
                 yield chunk({}, finish=self.finish, extension=extension(bool(annotations)))
+                if self.usage:
+                    written = "".join(self.words)
+                    yield (
+                        "data: "
+                        + json.dumps(
+                            {
+                                "id": "c",
+                                "object": "chat.completion.chunk",
+                                "created": 0,
+                                "model": MODEL,
+                                "choices": [],
+                                "usage": {
+                                    "prompt_tokens": context.count_messages(body["messages"]),
+                                    "completion_tokens": token_count.estimate(written),
+                                    "prompt_tokens_details": {"cached_tokens": 0},
+                                },
+                            }
+                        )
+                        + "\n\n"
+                    )
                 yield "data: [DONE]\n\n"
 
             return StreamingResponse(frames(), media_type="text/event-stream")

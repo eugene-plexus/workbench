@@ -13,7 +13,7 @@ import json
 from typing import Any
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from .conftest import CLIENT_ID, CLIENT_SECRET
 
@@ -128,7 +128,7 @@ def install(server: FastAPI, fake: Any, state: dict[str, Any]) -> None:
 
     @server.post("/oidc/sites/cancel")
     async def cancel(request: Request) -> Any:
-        return JSONResponse(None, status_code=204)
+        return Response(status_code=204)
 
     @server.post("/oidc/sites/mcp")
     async def mcp(request: Request) -> Any:

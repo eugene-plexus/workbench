@@ -74,6 +74,8 @@ export function applyEvent(detail: ChatDetail, event: ChatEvent): Outcome {
           // What searching the person's documents came to arrives with the passages,
           // before the model's first word.
           retrieval: event.retrieval === undefined ? m.retrieval : event.retrieval,
+          summaries: event.summaries === undefined ? m.summaries : event.summaries,
+          promptTruncated: event.promptTruncated ?? m.promptTruncated,
         };
       });
       const known = detail.messages.some((m) => m.id === event.id);

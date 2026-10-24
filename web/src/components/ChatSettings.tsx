@@ -7,7 +7,9 @@
 import { Check, CircleAlert } from "lucide-react";
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 
-import type { ChatSettings as Settings, Project } from "../lib/types";
+import { api } from "../lib/api";
+import { fullnessWords, percentWords } from "../lib/longChats";
+import type { ChatSettings as Settings, LongChatView, Project } from "../lib/types";
 import { ToolSelection } from "./Tools";
 import { FolderSelection } from "./Folders";
 
@@ -76,7 +78,10 @@ export function ChatSettings({
   projects,
   projectId = null,
   onMove,
+  chatId,
 }: {
+  /** The chat, for how full it is (row 26); without it the line is not shown. */
+  chatId?: string;
   settings: Settings;
   onSave: (next: Settings) => Promise<void>;
   onClose: () => void;
@@ -106,6 +111,30 @@ export function ChatSettings({
   // including while a request is pending or if it fails.
   const runArtifacts = settings.runArtifacts !== false;
   const [savingRunArtifacts, setSavingRunArtifacts] = useState(false);
+  // Row 26: how full the chat is for its model, read when the sheet opens and after the
+  // switch below changes. The switch shows what is in effect: off when the owner turned
+  // summarising off for this Workbench, whatever the chat says.
+  const [long, setLong] = useState<LongChatView | null>(null);
+  const [longProblem, setLongProblem] = useState<string | null>(null);
+  const [savingSummarise, setSavingSummarise] = useState(false);
+  const chatSummarises = settings.summarise !== false;
+  useEffect(() => {
+    if (!chatId) return;
+    let live = true;
+    setLongProblem(null);
+    void (async () => {
+      try {
+        const view = await api<LongChatView>(`/api/chats/${chatId}/long`);
+        if (live && view) setLong(view);
+      } catch (error) {
+        if (live) setLongProblem(error instanceof Error ? error.message : String(error));
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [chatId, chatSummarises]);
+  const summarises = chatSummarises && long?.installOn !== false;
   const [repetitionMode, setRepetitionMode] = useState<
     NonNullable<Settings["repetitionMode"]> | ""
   >(settings.repetitionMode ?? "");
@@ -196,6 +225,20 @@ export function ChatSettings({
       setSaved(true);
     } catch (error) {
       setProblem({ message: error instanceof Error ? error.message : String(error), field: null });
+    }
+  }
+
+  async function changeSummarise() {
+    if (savingSummarise) return;
+    setSavingSummarise(true);
+    setProblem(null);
+    setSaved(false);
+    try {
+      await onSave({ summarise: !chatSummarises });
+    } catch (error) {
+      setProblem({ message: error instanceof Error ? error.message : String(error), field: null });
+    } finally {
+      setSavingSummarise(false);
     }
   }
 
@@ -315,6 +358,34 @@ export function ChatSettings({
               Run pages and components by themselves: {runArtifacts ? "On" : "Off"}
             </label>
           </fieldset>
+          {chatId && (
+            <fieldset className="flex min-w-0 flex-col gap-2" data-testid="long-chat">
+              <legend className="eyebrow mb-3 text-muted">Long chats</legend>
+              {long && <p data-testid="long-chat-line">{fullnessWords(long)}</p>}
+              {long && percentWords(long) && <p className="help">{percentWords(long)}</p>}
+              {longProblem && (
+                <p role="alert" className="notice notice--error">
+                  <CircleAlert size={16} aria-hidden />
+                  {longProblem}
+                </p>
+              )}
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={summarises}
+                  disabled={savingSummarise || long?.installOn === false}
+                  onChange={() => void changeSummarise()}
+                  className="accent-accent"
+                />
+                Summarise when this chat is long: {summarises ? "On" : "Off"}
+              </label>
+              <p className="help">
+                {long?.installOn === false
+                  ? "Off for this Workbench: its owner turned summarising off."
+                  : "Earlier messages are sent as a summary when the chat nears its model's window. Every message stays here."}
+              </p>
+            </fieldset>
+          )}
           {onMove && (
             <fieldset className="flex min-w-0 flex-col gap-2" data-testid="chat-project-field">
               <legend className="eyebrow mb-3 text-muted">Project</legend>
@@ -410,7 +481,7 @@ export function ChatSettings({
           </button>
           <button
             type="button"
-            disabled={savingRunArtifacts}
+            disabled={savingRunArtifacts || savingSummarise}
             onClick={() => void save()}
             className="btn btn-primary"
           >
