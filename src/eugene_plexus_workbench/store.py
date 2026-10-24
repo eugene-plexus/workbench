@@ -76,7 +76,7 @@ purge deletes every row `PERSON_TABLES` names, from the store and from every cop
 `exports` is the log of every download of a person's data, and where each file is while it is
 kept.
 
-**Long chats** (schema 33, row 26): an answer keeps what its last request used and could hold
+**Long chats** (schema 31, row 26): an answer keeps what its last request used and could hold
 (`prompt_tokens`, `completion_tokens`, `cached_tokens`, `context_length`), whether the backend
 said it dropped part of the prompt (`prompt_truncated`), and which summaries it was sent
 (`summaries`, JSON). `chat_summaries` holds each summary of a run of a chat's messages: a new copy
@@ -108,7 +108,7 @@ from .agui_store import AGUIStore, allow_chat_write
 from .interaction_store import SCHEMA as INTERACTION_SCHEMA
 from .interaction_store import InteractionStore
 
-SCHEMA_VERSION = 33
+SCHEMA_VERSION = 31
 
 #: The oldest schema this migrates from: what Workbench v0.1.0 wrote. Schema 1 predates
 #: it, and nobody holds one.
@@ -713,13 +713,12 @@ def _group_claims(db: sqlite3.Connection) -> None:
             db.execute(f"ALTER TABLE people ADD COLUMN {column} TEXT")
 
 
-#: Row 26's one migration. Rows built at the same time hold 31 and 32; whichever merges later
-#: takes the next number, and this is the one place it is said.
-LONG_CHATS_SCHEMA = 33
+#: Row 26's one migration, and the one place its number is said.
+LONG_CHATS_SCHEMA = 31
 
 
 def _long_chats(db: sqlite3.Connection) -> None:
-    """Schema 33 (row 26): what an answer's last request used and could hold, whether the backend
+    """Schema 31 (row 26): what an answer's last request used and could hold, whether the backend
     dropped part of it, which summaries it was sent; and the summaries of a chat's earlier messages.
     New columns and one new table; no message changes."""
     present = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
@@ -898,10 +897,6 @@ _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
     28: [_removal],
     29: [branch_store.migration],
     30: [_group_claims],
-    # Held for the rows built beside row 26 (rows 27 and 72); each brings its own when it merges,
-    # and the later of them and row 26 renumbers, so `main` has no gap.
-    31: [],
-    32: [],
     # Long chats (row 26, 2026-10-23): new columns and one new table; nothing moves.
     LONG_CHATS_SCHEMA: [_long_chats],
 }

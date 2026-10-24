@@ -365,7 +365,7 @@ def _row(first: str, last: str, **values: Any) -> SummaryRow:
 
 
 def test_migration_adds_usage_and_summaries(tmp_path: Path) -> None:
-    assert storage.SCHEMA_VERSION == storage.LONG_CHATS_SCHEMA == 33
+    assert storage.SCHEMA_VERSION == storage.LONG_CHATS_SCHEMA == 31
     assert set(storage._MIGRATIONS) == set(
         range(storage.OLDEST_SCHEMA + 1, storage.SCHEMA_VERSION + 1)
     )
@@ -401,7 +401,7 @@ def test_migration_adds_usage_and_summaries(tmp_path: Path) -> None:
         finally:
             await store.close()
         with sqlite3.connect(store.path) as db:
-            assert db.execute("SELECT value FROM meta WHERE key='schema'").fetchone() == ("33",)
+            assert db.execute("SELECT value FROM meta WHERE key='schema'").fetchone() == ("31",)
 
     asyncio.run(go())
 

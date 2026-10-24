@@ -97,7 +97,7 @@ def test_a_new_store_and_a_migrated_one_have_the_same_messages_and_prefs_tables(
         ("reasoning_seconds", "REAL"),
         ("memory_used", "TEXT"),
         ("branch_name", "TEXT"),
-        # Row 26 (schema 33).
+        # Row 26 (schema 31).
         ("prompt_tokens", "INTEGER"),
         ("completion_tokens", "INTEGER"),
         ("cached_tokens", "INTEGER"),
