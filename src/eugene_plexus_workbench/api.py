@@ -25,8 +25,8 @@ from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFil
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field, StrictBool
 
-from . import artifacts, branch_store, config, files, memory_write
-from .answers import Answers, Preparation, Progress, message_view
+from . import artifacts, branch_store, config, files, long_chats, memory_write
+from .answers import Answers, Preparation, Progress, Refused, message_view
 from .context import reading_view
 from .conversation import SAMPLING, request_for
 from .hub import Hub, HubError
@@ -198,6 +198,8 @@ async def sign_in_callback(request: Request) -> Response:
             role=identity.role,
             username=identity.username,
             email=identity.email,
+            groups=identity.groups,
+            policies=identity.policies,
         )
     )
     created = await sessions.create(
@@ -402,6 +404,9 @@ class ChatSettings(BaseModel):
     #: Use past chats (MV2): each turn carries the person's earlier exchanges that match
     #: what they just asked. Unset is off.
     pastChats: bool | None = None
+    #: Row 26: summarise this chat's earlier messages when it outgrows its model's window.
+    #: Unset is on, as the install says.
+    summarise: bool | None = None
 
 
 class ChatUpdate(BaseModel):
@@ -444,6 +449,7 @@ def chat_view(chat: Chat, *, running: bool, read_only: bool = False) -> dict[str
                 "documentsOnly",
                 "documentsExternal",
                 "pastChats",
+                "summarise",
                 *SAMPLING,
             )
         },
@@ -549,6 +555,7 @@ async def _chat_detail(
     if via is not None and all(m.id != via for m in tree):
         raise _problem(status.HTTP_404_NOT_FOUND, "There is no such message in this chat.")
     places = versions(tree)
+    hidden: dict[str, str] = {}
     if read_only:
         hidden = hidden_from_owner(tree, (await install_mode(request))["mode"])
         for place in places.values():
@@ -580,9 +587,12 @@ async def _chat_detail(
         views.append(view)
     owner = await store.person(chat.owner) if read_only else None
     if read_only:
-        views = redact_for_owner(
-            views, hidden_from_owner(tree, (await install_mode(request))["mode"])
-        )
+        views = redact_for_owner(views, hidden)
+    from . import summaries
+
+    folded = summaries.folds(
+        await store.chat_summaries(chat.id), path(tree, via), read_only=read_only, hidden=hidden
+    )
     return {
         "chat": chat_view(
             chat,
@@ -590,6 +600,8 @@ async def _chat_detail(
             read_only=read_only,
         ),
         "messages": views,
+        # Row 26: the runs of earlier messages the newest answer was sent as summaries.
+        "summaries": folded,
         "ownerName": owner.name if owner else None,
         "deletedBranches": []
         if read_only
@@ -1038,7 +1050,7 @@ async def _ask(
     fresh = await store.chat(chat.id) or chat
     # The person's notes, as this chat was first sent them (or as they are now,
     # at its first request that carries any). Never raises; None is none.
-    from . import documents_api, memory_api, past_chats, saved_api
+    from . import documents_api, memory_api, past_chats, saved_api, summaries
 
     notes = await memory_api.block_for(request, person, fresh, model)
     by_id = {r.id: r for r in records}
@@ -1049,10 +1061,22 @@ async def _ask(
     decided: dict[str, Any] = {}
 
     async def prepare(progress: Progress) -> Preparation:
+        # A long chat (row 26): planned first, so the documents and every block after them are
+        # given the room the request has once its earlier messages are summarised; then the
+        # summaries are written, from requests that need the documents' text.
+        inputs = await summaries.inputs_for(request, person, fresh, history, by_id, model, notes)
+        planned = await summaries.plan_request(inputs)
+        if (words := summaries.refusal(inputs, planned)) is not None:
+            raise Refused(words)
+        decided["summaries"] = planned.placed
         prepared = await documents_api.prepare(
-            request, fresh, history, by_id, model, notes, progress
+            request, fresh, history, by_id, model, notes, progress, history=planned.plan.lean
         )
         decided["documents"] = prepared.sent
+        planned = await summaries.make(inputs, planned, documents=prepared.sent, progress=progress)
+        decided["summaries"] = planned.placed
+        decided["planned"] = planned
+        summaries.settled(fresh.id, planned)
         # Past chats that bear on what the person just asked, when they turned them on for
         # this chat (MV2), in up to a third of the relevant budget; then their notes (MV1)
         # in the rest, in the room the chat leaves; then the documents' passages, in what
@@ -1133,7 +1157,28 @@ async def _ask(
             and await memory_write.remember_allowed(
                 _state(request).store, person.sub, fresh.settings, model
             ),
+            summaries=planned.record(),
+            recover=recover,
+            filled=lambda: summaries.mark_filled(fresh.id),
         )
+
+    async def recover(exc: HubError, progress: Progress) -> list[dict[str, Any]]:
+        """The backend refused the request as longer than the model's window (row 26): plan
+        again against what it said, summarise, and give the answer what it now carries."""
+        inputs = await summaries.inputs_for(request, person, fresh, history, by_id, model, notes)
+        before = decided.get("planned")
+        refused = before.about if isinstance(before, summaries.Planned) else 0
+        planned = await summaries.plan_request(
+            inputs, overflow=(refused, long_chats.window_said(exc.words))
+        )
+        if (words := summaries.refusal(inputs, planned)) is not None:
+            raise Refused(words)
+        planned = await summaries.make(
+            inputs, planned, documents=decided.get("documents"), progress=progress, how="overflow"
+        )
+        decided["summaries"] = planned.placed
+        decided["planned"] = planned
+        return planned.record()
 
     def build() -> dict[str, Any]:
         return request_for(
@@ -1151,6 +1196,7 @@ async def _ask(
             memory_allowed=bool(decided.get("memory_allowed", notes is not None)),
             past_turn=decided.get("past_turn"),
             chats_allowed=bool(decided.get("chats_allowed", False)),
+            summaries=decided.get("summaries"),
         )
 
     answers = _answers(request)

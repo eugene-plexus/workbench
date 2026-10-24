@@ -55,6 +55,7 @@ the answer is Workbench's own words saying so, with a way to ask the model anywa
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import errno
 import logging
@@ -69,10 +70,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from . import config, context, files, memory_api
-from .answers import Progress
+from .answers import Progress, Refused
 from .api import _own_chat, _person, _problem, _save_upload, _state
 from .hub import HubError
-from .knowledge import extract
+from .knowledge import extract, page_reader, whole
 from .knowledge import index as index_module
 from .knowledge import reader as reading_module
 from .knowledge.embedders import Identity
@@ -107,6 +108,118 @@ MAX_FILES = 200
 #: The questions a person may test, and the ids one passage lookup may name.
 MAX_QUESTION = 2_000
 MAX_IDS = 20
+
+
+class PageReadingUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    scope: str = Field(default="library", max_length=256)
+    enabled: StrictBool
+    outside: StrictBool = False
+
+
+@router.get("/api/documents/page-reading/settings")
+async def page_reading_settings(request: Request, scope: str = "library") -> dict[str, Any]:
+    person = await _person(request)
+    install = await config.document_settings(_store(request))
+    index = _saved(request).index(person.sub, create=False)
+    prefs = await page_reader.preferences(index) if index else {}
+    active = (
+        prefs.get(scope, {}).get("enabled") is True
+        and install.enabled
+        and bool(install.page_reader)
+    )
+    pages = (
+        sum(
+            (d.pages or 0)
+            for d in await index.documents()
+            if page_reader.scope(d) == scope and d.code == "no_text"
+        )
+        if index
+        else 0
+    )
+    return {
+        "enabled": active,
+        "pages": pages,
+        "outside": prefs.get(scope, {}).get("outside") is True,
+        "model": install.page_reader or None,
+        "maxPages": install.page_reader_max_pages,
+        "wholeByParts": install.whole_by_parts,
+        "message": f"Scanned pages are read with {install.page_reader}"
+        if active
+        else "Off: scanned pages are skipped",
+    }
+
+
+@router.put("/api/documents/page-reading/settings")
+async def put_page_reading(request: Request, body: PageReadingUpdate) -> dict[str, Any]:
+    person = await _person(request)
+    install = await config.document_settings(_store(request))
+    if not install.enabled:
+        raise _problem(403, _OWNER_OFF)
+    if body.scope != LIBRARY:
+        if not body.scope.startswith("folder:"):
+            raise _problem(422, "Choose My documents or one of your folders.")
+        record = await _store(request).folder_record(person.sub, body.scope.removeprefix("folder:"))
+        if record is None:
+            raise _problem(404, "There is no such folder.")
+    if body.enabled and not install.page_reader:
+        raise _problem(
+            409,
+            "Off: scanned pages are skipped. Ask the owner to choose a page reader in the console.",
+        )
+    index = _saved(request).index(person.sub)
+    assert index is not None
+    await page_reader.save_preference(
+        index, body.scope, {"enabled": body.enabled, "outside": body.outside}
+    )
+    # Re-read existing scans only; ordinary text documents need no new work.
+    for doc in await index.documents():
+        if page_reader.scope(doc) == body.scope and doc.code == "no_text" and body.enabled:
+            await _saved(request).reread(person.sub, doc.id)
+    if body.scope.startswith("folder:"):
+        _state(request).folder_sync.request(
+            person.sub, body.scope.removeprefix("folder:"), full=True
+        )
+    return await page_reading_settings(request, body.scope)
+
+
+@router.post("/api/documents/{doc_id}/read-pages/plan")
+async def read_pages_plan(request: Request, doc_id: str) -> dict[str, Any]:
+    person = await _person(request)
+    index, doc = await _own_document(request, person, doc_id)
+    install = await config.document_settings(_store(request))
+    if not install.page_reader:
+        raise _problem(
+            409,
+            "Off: scanned pages are skipped. Ask the owner to choose a page reader in the console.",
+        )
+    page = await _state(request).reader.page(index.original_path(doc.id), 1)
+    return {
+        "pages": page["pageCount"],
+        "model": install.page_reader,
+        "maxPages": install.page_reader_max_pages,
+        "message": f"{page['pageCount']} pages to read with {install.page_reader}",
+        "canRead": page["pageCount"] <= install.page_reader_max_pages,
+    }
+
+
+class ReadPagesUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    outside: StrictBool = False
+
+
+@router.post("/api/documents/{doc_id}/read-pages")
+async def start_read_pages(request: Request, doc_id: str, body: ReadPagesUpdate) -> dict[str, Any]:
+    person = await _person(request)
+    index, doc = await _own_document(request, person, doc_id)
+    plan = await read_pages_plan(request, doc_id)
+    if not plan["canRead"]:
+        raise _problem(422, f"{plan['message']}; Workbench reads at most {plan['maxPages']}.")
+    await page_reader.save_preference(
+        index, f"document:{doc.id}", {"enabled": True, "outside": body.outside}
+    )
+    await _saved(request).reread(person.sub, doc.id)
+    return plan
 
 
 def _saved(request: Request) -> SavedDocuments:
@@ -169,6 +282,7 @@ def document_view(doc: Document, meaning: dict[str, Any] | None = None) -> dict[
         "readAt": doc.read_at,
         "indexedAt": doc.indexed_at,
         "meaning": meaning,
+        "readBy": doc.read_by,
     }
 
 
@@ -420,7 +534,11 @@ async def add_documents(
         except files.Unsupported as exc:
             refused.append(_refusal(name, status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, exc.message))
             continue
-        if not found.is_document:
+        if not found.is_document and not (
+            found.kind == "image"
+            and install.page_reader
+            and await page_reader.enabled(index, where)
+        ):
             refused.append(
                 _refusal(
                     name,
@@ -920,6 +1038,46 @@ async def document_original(request: Request, doc_id: str) -> Response:
     )
 
 
+@router.get("/api/documents/{doc_id}/pages/{number}.png")
+async def document_page_png(request: Request, doc_id: str, number: int) -> Response:
+    page = await document_page(request, doc_id, number)
+    return Response(
+        base64.b64decode(page["image"].split(",", 1)[1]),
+        media_type="image/png",
+        headers={"Cache-Control": "private, no-store", "Content-Security-Policy": "sandbox"},
+    )
+
+
+@router.get("/api/documents/{doc_id}/pages/{number}")
+async def document_page(
+    request: Request, doc_id: str, number: int, passage: int | None = None
+) -> dict[str, Any]:
+    person = await _person(request)
+    index, doc = await _own_document(request, person, doc_id)
+    if doc.kind != "pdf" or number < 1:
+        raise _problem(404, "There is no such PDF page.")
+    words = ""
+    if passage is not None:
+        hits = await index.passages(doc.id, [passage])
+        if not hits:
+            raise _problem(404, "There is no such passage.")
+        words = hits[0].text
+    try:
+        page: dict[str, Any] = await _state(request).reader.page(
+            index.original_path(doc.id), number, words
+        )
+    except FileNotFoundError:
+        raise _problem(404, "That file is no longer on disk.") from None
+    except extract.Unreadable as exc:
+        raise _problem(404 if exc.code == "page_missing" else 422, exc.reason) from None
+    if passage is not None and not page["boxes"]:
+        page = {
+            **page,
+            "message": "The passage's words were not found on this page. It is shown whole.",
+        }
+    return page
+
+
 @router.get("/api/documents/{doc_id}/passages")
 async def document_passages(request: Request, doc_id: str, ids: str) -> dict[str, Any]:
     """Passages of a document by id (`ids=12,13`), as stored: what the Sources panel
@@ -1226,6 +1384,7 @@ def retrieval_view(
         #: Whether the best passages were put in a result sorter's order (`used`), by which
         #: sorter, and if not, why, with the numbers (`sort_block`). The mode says it too.
         "sort": sort,
+        "whole": None,
     }
 
 
@@ -1345,7 +1504,26 @@ async def retrieve(
             return done("no_documents", code="no_documents", message=_NO_DOCUMENTS)
         query = plan_query(last.content, _asked_before(history))
         known["query"] = query
+        candidates = (
+            await whole_candidates(index, scopes, last.content)
+            if whole.asked_for_whole(last.content)
+            else []
+        )
         if query.empty:
+            if candidates:
+                return await apply_whole(
+                    request,
+                    done("skipped", code="no_words"),
+                    index,
+                    candidates,
+                    chat,
+                    last,
+                    model_id,
+                    access,
+                    install,
+                    progress,
+                    select_by_question=True,
+                )
             return done(
                 "skipped",
                 code="no_words",
@@ -1376,6 +1554,20 @@ async def retrieve(
             # Meaning could not run for this answer: searched by words only, and said so.
             notes.append({"code": f"meaning_{gone.code}", "message": str(gone.message)})
         if not result.passages:
+            if candidates:
+                return await apply_whole(
+                    request,
+                    done("nothing_matched"),
+                    index,
+                    candidates,
+                    chat,
+                    last,
+                    model_id,
+                    access,
+                    install,
+                    progress,
+                    select_by_question=True,
+                )
             if result.found:
                 # Found, and not one fits what the window leaves: said, never "nothing matched".
                 return done("skipped", code="chat_full", message=_no_room(used, reserve, budget))
@@ -1383,6 +1575,8 @@ async def retrieve(
                 "nothing_matched",
                 message="Nothing in your documents matched." + _meaning_was_off(known),
             )
+    except Refused:
+        raise
     except IndexUnavailable as exc:
         log.warning("searching a person's documents failed: %s (%s)", exc.code, exc.message)
         return done("failed", code=exc.code, message=exc.message)
@@ -1421,9 +1615,291 @@ async def retrieve(
         result.mode,
         view["ms"],
     )
-    return Found(
-        block=block, sources=[context.passage_entry(p) for p in result.passages], retrieval=view
+    sources = [context.passage_entry(p) for p in result.passages]
+    for source in sources:
+        document = await index.document(source["doc_id"])
+        if (
+            document
+            and document.read_by
+            and any(
+                (source["page_start"] or 1)
+                <= n
+                <= (source["page_end"] or source["page_start"] or 1)
+                for n in page_reader.picture_pages(document)
+            )
+        ):
+            source["readBy"] = document.read_by
+    found = Found(block=block, sources=sources, retrieval=view)
+    if whole.asked_for_whole(last.content):
+        selected = await whole_candidates(index, scopes, last.content)
+        fallback = [
+            await index.document(doc_id)
+            for doc_id in dict.fromkeys(p.doc_id for p in result.passages)
+        ]
+        return await apply_whole(
+            request,
+            found,
+            index,
+            selected or [d for d in fallback if d is not None],
+            chat,
+            last,
+            model_id,
+            access,
+            install,
+            progress,
+            select_by_question=bool(selected),
+        )
+    return found
+
+
+async def whole_plan(
+    index: Index, docs: list[Document], question: str, window: int | None
+) -> list[whole.Part]:
+    if window is None:
+        raise ValueError(
+            "Eugene has not reported this model's window, so Workbench cannot size its parts."
+        )
+    parts: list[whole.Part] = []
+    for doc in docs:
+        text = await asyncio.to_thread(index.text_path(doc.id).read_text, encoding="utf-8")
+        parts.extend(whole.split(doc.id, doc.name, text, question, window))
+    whole.check_limits(parts)
+    return parts
+
+
+async def whole_candidates(index: Index, scopes: list[str], question: str) -> list[Document]:
+    docs = [doc for scope in scopes for doc in await index.documents(scope) if doc.searchable]
+    named = [
+        d
+        for d in docs
+        if d.name.casefold() in question.casefold()
+        or (len(Path(d.name).stem) > 3 and Path(d.name).stem.casefold() in question.casefold())
+    ]
+    attached = [d for d in docs if d.scope.startswith("chat:")]
+    return named or (attached if 0 < len(attached) <= 3 else []) or (docs if len(docs) <= 3 else [])
+
+
+def whole_sources(
+    docs: list[Document], parts: list[whole.Part], failed: bool
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "kind": "document",
+            "passage": True,
+            "doc_id": d.id,
+            "name": d.name,
+            "type": d.kind,
+            "scope": "chat" if d.scope.startswith("chat:") else "library",
+            "rank": i,
+            "via": "words",
+            "page_start": 1 if d.kind == "pdf" else None,
+            "page_end": d.pages,
+            "line_start": None,
+            "line_end": None,
+            "heading": None,
+            "snippet": "",
+            "chunk_ids": [],
+            "tokens": d.tokens_est,
+            "terms": [],
+            "phrases": [],
+            **({"wholeParts": sum(p.doc_id == d.id for p in parts)} if not failed else {}),
+        }
+        for i, d in enumerate(docs, 1)
+    ]
+
+
+def whole_complete(
+    request: Request, person: Person, chat_id: str, model: str, index: Index, docs: list[Document]
+) -> whole.Complete:
+    async def complete(body: dict[str, Any]) -> dict[str, Any]:
+        from .answers import Refused
+
+        chat = await _store(request).chat(chat_id)
+        if chat is None or chat.owner != person.sub:
+            raise Refused("Reading stopped: this chat was removed.")
+        access = await decide_access(request, person, chat, model)
+        if not access.library:
+            raise Refused(
+                access.reason or "The documents' outside-model rule does not allow this reading."
+            )
+        if (await config.document_settings(_store(request))).whole_by_parts == "never":
+            raise Refused("Reading stopped: Read whole documents in parts was set to Never.")
+        for doc in docs:
+            current = await index.document(doc.id)
+            if current is None or current.attempt != doc.attempt or not current.searchable:
+                raise Refused(f"Reading stopped: {doc.name} was removed or read again.")
+        hub_answer: dict[str, Any] = await _state(request).hub.complete(body)
+        return hub_answer
+
+    return complete
+
+
+async def apply_whole(
+    request: Request,
+    found: Found,
+    index: Index,
+    docs: list[Document],
+    chat: Chat,
+    question: Message,
+    model_id: str,
+    access: Access,
+    install: config.DocumentSettings,
+    progress: Progress,
+    *,
+    select_by_question: bool = False,
+) -> Found:
+    if not any(
+        (d.tokens_est or 0) > min(install.whole_up_to_tokens, int((access.window or 24000) * 0.25))
+        for d in docs
+    ):
+        return found
+    view = found.retrieval
+    assert view is not None
+    view["whole"] = {
+        "state": "never" if install.whole_by_parts == "never" else "offered",
+        "line": f"Answered from {view['passages']} passages, not the whole document.",
+        "selectByQuestion": select_by_question,
+    }
+    try:
+        if not access.library:
+            raise ValueError(
+                access.reason or "The documents' outside-model rule does not allow this reading."
+            )
+        parts = await whole_plan(index, docs, question.content, access.window)
+        line = whole.cost(
+            parts, question.content, model_id, _state(request).answers.speed(model_id)
+        )
+        view["whole"].update(
+            cost=line,
+            parts=len(parts),
+            action=f"/api/chats/{chat.id}/documents/whole/{question.id}",
+        )
+        if install.whole_by_parts == "always":
+            failed: list[str] = []
+            progress({"stage": "documents_whole", "message": line, "cost": line})
+            found.reply = await whole.read_all(
+                parts,
+                question.content,
+                model_id,
+                access.window or 24000,
+                whole_complete(request, await _person(request), chat.id, model_id, index, docs),
+                lambda p: progress({**(p or {}), "cost": line}),
+                failed,
+            )
+            view.update(status="used", answeredBy=None)
+            view["whole"].update(
+                state="read",
+                line=f"Read {len(parts) - len(failed)} of {len(parts)} parts"
+                if failed
+                else f"Read whole, in {len(parts)} parts",
+            )
+            found.sources = whole_sources(docs, parts, bool(failed))
+        elif not found.sources:
+            view.update(status="skipped", code="whole_by_parts", message=view["whole"]["line"])
+    except (OSError, ValueError) as exc:
+        view["whole"].update(state="unavailable", line=str(exc))
+        if not found.sources:
+            view.update(status="skipped", code="whole_by_parts", message=str(exc))
+    return found
+
+
+class WholeReadRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    documents: list[str] = Field(default_factory=list, max_length=3)
+    cost: str = Field(max_length=400)
+
+
+@router.post("/api/chats/{chat_id}/documents/whole/{question_id}", status_code=201)
+async def read_whole_version(
+    request: Request, chat_id: str, question_id: str, body: WholeReadRequest
+) -> dict[str, Any]:
+    from .answers import Preparation, message_view
+    from .api import _answers, _new_id, _no_running
+
+    person = await _person(request)
+    chat = await _own_chat(request, person, chat_id)
+    _no_running(request, chat)
+    install = await config.document_settings(_store(request))
+    if install.whole_by_parts == "never":
+        raise _problem(409, "Read whole documents in parts is set to Never.")
+    history = await _store(request).messages(chat.id)
+    question = next((m for m in history if m.id == question_id and m.role == "user"), None)
+    if question is None:
+        raise _problem(404, "There is no such question in this chat.")
+    access = await decide_access(request, person, chat, chat.model)
+    if not access.library:
+        raise _problem(409, access.reason or "Documents cannot be sent to this model.")
+    index = _saved(request).index(person.sub, create=False)
+    if index is None:
+        raise _problem(404, "There is no such document.")
+    scopes = [*await own_scopes(_store(request), person.sub, chat), chat_scope(chat.id)]
+    docs: list[Document] = []
+    if not body.documents:
+        docs = await whole_candidates(index, scopes, question.content)
+    for doc_id in dict.fromkeys(body.documents):
+        doc = await index.document(doc_id)
+        if doc is None or doc.scope not in scopes or not doc.searchable:
+            raise _problem(404, "There is no such document.")
+        docs.append(doc)
+    if not docs:
+        raise _problem(404, "Choose a document that is still available in this chat.")
+    try:
+        parts = await whole_plan(index, docs, question.content, access.window)
+    except (ValueError, OSError) as exc:
+        raise _problem(409, str(exc)) from None
+    line = whole.cost(
+        parts, question.content, chat.model or "", _state(request).answers.speed(chat.model or "")
     )
+    if line.split(".")[0] != body.cost.split(".")[0]:
+        raise _problem(409, f"The document changed. {line} Ask again to see its current cost.")
+    message = await _store(request).add_message(
+        Message(
+            id=_new_id(),
+            chat_id=chat.id,
+            seq=0,
+            role="assistant",
+            status="running",
+            model=chat.model,
+            created_at=time.time(),
+        ),
+        parent_id=question.id,
+    )
+
+    async def prepare(progress: Progress) -> Preparation:
+        # Recheck live policy in the task, immediately before sending any content.
+        check = await decide_access(request, person, chat, chat.model)
+        if not check.library:
+            from .answers import Refused
+
+            raise Refused(check.reason or "Documents cannot be sent to this model.")
+        progress({"stage": "documents_whole", "message": line, "cost": line})
+        failed_parts: list[str] = []
+        reply = await whole.read_all(
+            parts,
+            question.content,
+            chat.model or "",
+            access.window or 24000,
+            whole_complete(request, person, chat.id, chat.model or "", index, docs),
+            lambda p: progress({**(p or {}), "cost": line}),
+            failed_parts,
+        )
+        retrieval = retrieval_view("used")
+        retrieval["whole"] = {
+            "state": "read",
+            "line": f"Read {len(parts) - len(failed_parts)} of {len(parts)} parts"
+            if failed_parts
+            else f"Read whole, in {len(parts)} parts",
+            "parts": len(parts),
+        }
+        sources = whole_sources(docs, parts, bool(failed_parts))
+        return Preparation(
+            reply=reply, retrieval=retrieval, sources=sources, finish="whole_document"
+        )
+
+    answers = _answers(request)
+    answers.publish(chat.id, {"type": "path"})
+    answers.start(chat.id, message, lambda: {}, person=person, prepare=prepare)
+    return message_view(message)
 
 
 def _no_room(used: int, reserve: int, budget: context.RetrievalBudget) -> str:

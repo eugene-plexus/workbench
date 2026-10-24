@@ -154,7 +154,14 @@ def main(argv: list[str]) -> int:
 
     payload: dict[str, object]
     try:
-        payload = {"ok": True, **extract.read(source, kind, language).to_json()}
+        if kind == "page":
+            options = json.loads(language or "{}")
+            payload = {
+                "ok": True,
+                **extract.render_page(source, int(options["page"]), str(options.get("text") or "")),
+            }
+        else:
+            payload = {"ok": True, **extract.read(source, kind, language).to_json()}
     except extract.Unreadable as exc:
         payload = {"ok": False, **exc.to_json()}
     except MemoryError:

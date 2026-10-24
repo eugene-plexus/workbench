@@ -231,8 +231,11 @@ def skip_codes() -> set[str]:
             and isinstance(node.value, ast.Dict)
         ):
             found |= {text_of(key) or "" for key in node.value.keys}
-    for call in called(parsed("knowledge/extract.py"), "Unreadable"):
-        found.add(argument(call, 0) or "")
+    for module in ("knowledge/extract.py", "knowledge/page_reader.py"):
+        for call in called(parsed(module), "Unreadable"):
+            found.add(argument(call, 0) or "")
+    for call in called(parsed("knowledge/page_reader.py"), "failure"):
+        found.add(argument(call, 1) or "")
     for node in ast.walk(parsed("knowledge/worker.py")):
         # `{"ok": False, "code": "memory", ...}`
         if isinstance(node, ast.Dict):

@@ -107,7 +107,7 @@ def test_a_v0_1_store_keeps_its_messages_and_takes_the_marks(tmp_path: Path) -> 
     assert message.answer_from == 4 and message.reasoning_from == 0
     with sqlite3.connect(path) as db:
         (version,) = db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
-    assert int(version) == SCHEMA_VERSION == 29
+    assert int(version) == SCHEMA_VERSION == 31
 
 
 def test_schema_3_http_connections_survive_local_server_migration(tmp_path: Path) -> None:
@@ -188,7 +188,7 @@ def test_a_schema_6_store_keeps_its_attachments_and_gains_media(tmp_path: Path) 
     assert [(f.id, f.chat_id, f.width) for f in made] == [("f2", None, 512)]
     with sqlite3.connect(path) as db:
         (version,) = db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
-    assert int(version) == SCHEMA_VERSION == 29
+    assert int(version) == SCHEMA_VERSION == 31
 
 
 def test_a_new_store_starts_at_the_current_schema(tmp_path: Path) -> None:
@@ -378,3 +378,43 @@ def test_a_mark_is_given_to_the_page_in_its_own_string_length() -> None:
     )
     view = message_view(message)
     assert view["answerFrom"] == 5 and view["reasoningFrom"] == 3
+
+
+def test_schema_30_keeps_people_and_knows_none_of_their_groups_yet(tmp_path: Path) -> None:
+    """Row 70c: a store from before keeps everyone, and says nothing of groups until each
+    person's next sign-in or refresh brings Eugene's claims."""
+    from eugene_plexus_workbench.store import Person
+
+    path = tmp_path / "workbench.sqlite3"
+
+    async def made() -> None:
+        store = Store(path)
+        await store.open()
+        await store.upsert_person(Person(sub="p-ada", name="Ada", role="member"))
+        await store.close()
+
+    asyncio.run(made())
+    with sqlite3.connect(path) as db:
+        db.execute("ALTER TABLE people DROP COLUMN groups_json")
+        db.execute("ALTER TABLE people DROP COLUMN policies_json")
+        db.execute("UPDATE meta SET value = '29' WHERE key = 'schema'")
+
+    async def reopened() -> None:
+        store = Store(path)
+        await store.open()
+        ada = await store.person("p-ada")
+        assert ada is not None and ada.name == "Ada"
+        assert ada.groups is None and ada.policies is None
+        group = {"id": "g1", "name": "Night shift"}
+        await store.upsert_person(
+            Person(sub="p-ada", name="Ada", role="member", groups=[group], policies={})
+        )
+        again = await store.person("p-ada")
+        assert again is not None and again.groups == [group] and again.policies == {}
+        await store.close()
+
+    asyncio.run(reopened())
+    with sqlite3.connect(path) as db:
+        (version,) = db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
+    assert int(version) == SCHEMA_VERSION == 31
+    assert list(tmp_path.glob("workbench.sqlite3.schema-29*.bak")), "a copy was kept first"

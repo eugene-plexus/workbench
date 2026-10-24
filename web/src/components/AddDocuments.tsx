@@ -59,10 +59,12 @@ function foldersIn(items: DataTransferItemList | undefined): Set<string> {
 export function AddDocuments({
   onChanged,
   projectId,
+  readPictures = false,
 }: {
   onChanged: () => void;
   /** Keeps the files to this project (MV7b) instead of My documents. */
   projectId?: string;
+  readPictures?: boolean;
 }) {
   const uid = useId();
   const input = useRef<HTMLInputElement>(null);
@@ -214,7 +216,7 @@ export function AddDocuments({
           ref={input}
           type="file"
           multiple
-          accept={DOCUMENT_ACCEPT}
+          accept={readPictures ? `${DOCUMENT_ACCEPT},image/png,image/jpeg` : DOCUMENT_ACCEPT}
           className="hidden"
           aria-label={`Choose files to add to ${projectId ? "this project" : "your documents"}`}
           data-testid="documents-input"

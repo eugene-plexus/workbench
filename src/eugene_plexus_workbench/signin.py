@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +42,19 @@ _METADATA_TTL = 300.0
 PENDING_SECONDS = 600.0
 #: The ID token's clock tolerance, as every component here allows (300 s).
 _LEEWAY = 300
+
+log = logging.getLogger(__name__)
+
+#: Row 70c: what `eugene_groups` and `eugene_policies` may hold (the control contract's
+#: `OidcGroup` and `PoliciesInEffect`): at most 64 groups, an id of 1-64 characters a path can
+#: carry, a name of 1-80; a queue band of three; a percent of 50-95.
+MAX_GROUPS = 64
+#: The install's own list (`/oidc/groups`) has no fixed length (row 70c review): this is only
+#: a bound on what Workbench will hold in memory from one answer.
+MAX_CATALOG = 10_000
+GROUP_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")
+QUEUE_BANDS = ("interactive", "background", "sheddable")
+POLICIES = ("queueBand", "summaryContextPercent")
 
 
 class SignInUnavailable(Exception):
@@ -75,6 +90,10 @@ class Identity:
     access_token: str | None = None
     #: The person's email, when Eugene has one and sent it (the `email` scope).
     email: str | None = None
+    #: Row 70c: the permission groups they are in and the policies those set, from
+    #: `eugene_groups` and `eugene_policies`; None when Eugene said nothing of groups.
+    groups: list[dict[str, str]] | None = None
+    policies: dict[str, Any] | None = None
 
 
 def _secret(path: Path | None) -> str | None:
@@ -280,7 +299,7 @@ class Provider:
         if not isinstance(id_token, str):
             raise SignInRefused("Eugene's answer had no ID token.")
         claims = await self._claims(id_token, nonce=pending.nonce)
-        return _identity(claims, token)
+        return await self._with_groups(_identity(claims, token), claims, meta)
 
     async def refresh(self, refresh_token: str) -> Identity:
         """A new sign-in from a refresh token, or `SignInRefused` saying why.
@@ -296,10 +315,80 @@ class Provider:
         claims = await self._claims(id_token) if isinstance(id_token, str) else None
         if claims is None:
             raise SignInRefused("Eugene's refresh had no ID token.")
-        identity = _identity(claims, token)
+        identity = await self._with_groups(_identity(claims, token), claims, meta)
         if identity.refresh_token is None:
             identity.refresh_token = refresh_token
         return identity
+
+    async def _with_groups(
+        self, identity: Identity, claims: dict[str, Any], meta: dict[str, Any]
+    ) -> Identity:
+        """Row 70c: the person's groups and policies. An ID token cut at Eugene's size cap
+        (`eugene_groups_truncated`) lists only some groups, so every group is read from
+        `/oidc/userinfo` with the access token just issued. A member must not lose a group's
+        memory server, which they cannot turn off, to a list cut short: if every group cannot
+        be read, the sign-in stops with the cause rather than go on with some of them."""
+        if claims.get("eugene_groups_truncated") is not True:
+            identity.groups, identity.policies = group_claims(claims, where="sign-in")
+            return identity
+        reason = "Eugene's sign-in listed only some of your groups, and the rest"
+        endpoint = meta.get("userinfo_endpoint")
+        if not isinstance(endpoint, str) or not identity.access_token:
+            raise SignInUnavailable(f"{reason} could not be asked for.")
+        try:
+            response = await self._http.get(
+                self.transport_url(endpoint),
+                headers={"Authorization": f"Bearer {identity.access_token}"},
+            )
+        except httpx.HTTPError as exc:
+            raise SignInUnavailable(
+                f"{reason} could not be read: {str(exc) or type(exc).__name__}"
+            ) from exc
+        try:
+            told = response.json() if response.status_code == 200 else None
+        except ValueError:
+            told = None
+        if not isinstance(told, dict) or told.get("sub") != identity.sub:
+            raise SignInUnavailable(
+                f"{reason} could not be read (Eugene answered {response.status_code})."
+            )
+        if told.get("eugene_groups_truncated", False) is not False:
+            # Userinfo is never cut: one that says it is cannot be the whole list.
+            raise SignInUnavailable(f"{reason} came back cut short as well.")
+        groups, policies = group_claims(told, where="userinfo")
+        if groups is None:
+            raise SignInUnavailable(f"{reason} came back without any groups.")
+        identity.groups, identity.policies = groups, policies
+        return identity
+
+    async def groups(self) -> list[dict[str, str]]:
+        """Row 70c: the permission groups that give this Workbench, from Eugene's
+        `/oidc/groups` with this client's secret, as `{id, name}`; `SignInUnavailable` with
+        the cause when Eugene cannot say."""
+        if not self.issuer:
+            raise SignInUnavailable(self.why_not() or "sign-in is not set up")
+        try:
+            response = await self._http.get(
+                self.transport_url(f"{self.issuer}/groups"), auth=self._auth()
+            )
+        except httpx.HTTPError as exc:
+            raise SignInUnavailable(
+                f"Eugene did not answer ({str(exc) or type(exc).__name__})"
+            ) from exc
+        if response.status_code == 404:
+            raise SignInUnavailable(
+                "this Eugene cannot list its permission groups (it answered 404). Update Eugene"
+            )
+        if response.status_code != 200:
+            raise SignInUnavailable(f"Eugene answered {response.status_code}")
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        found = _groups_of(body.get("groups") if isinstance(body, dict) else None, MAX_CATALOG)
+        if found is None:
+            raise SignInUnavailable("Eugene's list of groups could not be read")
+        return found
 
     async def revoke(self, refresh_token: str) -> None:
         """RFC 7009. Best effort: a sign-out ends Workbench's session whatever
@@ -409,6 +498,71 @@ class Provider:
                 raise SignInRefused("Eugene's ID token answers a different sign-in.")
             return claims
         raise SignInRefused("Eugene's ID token did not verify.")  # pragma: no cover
+
+
+def _groups_of(value: Any, limit: int = MAX_GROUPS) -> list[dict[str, str]] | None:
+    """`[{id, name}]` as the contract gives it, or None for anything else. `limit` is one
+    person's bound (64) for their claims; the install's own list takes `MAX_CATALOG`."""
+    if not isinstance(value, list) or len(value) > limit:
+        return None
+    groups: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"id", "name"}:
+            return None
+        group_id, name = item["id"], item["name"]
+        if not (isinstance(group_id, str) and GROUP_ID.fullmatch(group_id)):
+            return None
+        if not (isinstance(name, str) and 1 <= len(name) <= 80):
+            return None
+        groups.append({"id": group_id, "name": name})
+    if len({g["id"] for g in groups}) != len(groups):
+        return None
+    return groups
+
+
+def _policies_of(value: Any) -> dict[str, Any] | None:
+    """`PoliciesInEffect` as the contract gives it, or None for anything else."""
+    if not isinstance(value, dict) or set(value) - {*POLICIES, "setBy"}:
+        return None
+    band = value.get("queueBand")
+    if band is not None and band not in QUEUE_BANDS:
+        return None
+    percent = value.get("summaryContextPercent")
+    if percent is not None and (type(percent) is not int or not 50 <= percent <= 95):
+        return None
+    set_by = value.get("setBy", {})
+    if not isinstance(set_by, dict) or set(set_by) - set(POLICIES):
+        return None
+    for ids in set_by.values():
+        if not isinstance(ids, list) or not all(
+            isinstance(i, str) and GROUP_ID.fullmatch(i) for i in ids
+        ):
+            return None
+    return dict(value)
+
+
+def group_claims(
+    claims: dict[str, Any], *, where: str = "sign-in"
+) -> tuple[list[dict[str, str]] | None, dict[str, Any] | None]:
+    """Row 70c: `(groups, policies)` from a sign-in's claims, or `(None, None)` when Eugene said
+    nothing of groups (an Eugene from before row 70).
+
+    Claims Eugene sent out of the contract's shape are neither half-believed nor dropped: a
+    member would lose a group's memory server they cannot turn off. `SignInUnavailable` says
+    so, which stops a sign-in with the cause and keeps a signed-in session (a refresh answers
+    503) until Eugene sends them in shape (row 70c review)."""
+    if "eugene_groups" not in claims and "eugene_policies" not in claims:
+        return None, None
+    groups = _groups_of(claims.get("eugene_groups"))
+    policies = _policies_of(claims.get("eugene_policies", {}))
+    if groups is None or policies is None:
+        log.warning("Eugene's group claims (%s) are not in the shape Workbench reads", where)
+        part = "your groups" if groups is None else "what your groups set"
+        raise SignInUnavailable(
+            f"Eugene's {where} sent {part} in a shape this Workbench cannot read, so it cannot "
+            "tell which of your groups' settings apply. Update Eugene, or ask its owner."
+        )
+    return groups, policies
 
 
 def _identity(claims: dict[str, Any], token: dict[str, Any]) -> Identity:
