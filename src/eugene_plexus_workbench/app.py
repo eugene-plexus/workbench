@@ -203,6 +203,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         saved = SavedDocuments(
             settings.data_dir, reader, passage_limit, gateway=hub, settings=document_settings
         )
+        from functools import partial
+
+        from .knowledge import page_reader
+
+        saved.ingest.page_reader = partial(page_reader.ingest, store=store, hub=hub, reader=reader)
         # Row 7: a person removed from Eugene keeps no index that any job opens or makes again,
         # from before the first job runs.
         for sub in await store.hidden_subs():

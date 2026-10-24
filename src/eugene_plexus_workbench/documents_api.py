@@ -41,7 +41,7 @@ from . import config, context, conversation, files, memory_api, token_count
 from .answers import Progress, Refused
 from .api import _may_read_file, _own_chat, _person, _problem, _state
 from .hub import HubError
-from .knowledge import extract
+from .knowledge import extract, whole
 from .knowledge import index as index_module
 from .knowledge import reader as reading_module
 from .knowledge.index import Document, IndexUnavailable, chat_scope
@@ -316,6 +316,34 @@ async def plan_for(
             render=render,
             ceiling=settings.whole_up_to_tokens,
         )
+
+    if (
+        wait
+        and settings.whole_by_parts != "never"
+        and path
+        and whole.asked_for_whole(path[-1].content)
+    ):
+        # This question searches the large attachments in their chat's own scope.
+        # The person's saved first-part/whole choice is left intact.
+        large = {
+            item.id
+            for item in attached
+            if item.state == "ready"
+            and (item.reading or {}).get("tokens", 0)
+            > min(settings.whole_up_to_tokens, int((model.window or 24000) * 0.25))
+            and not (item.is_pdf and model.file_input and item.size <= files.LIMITS["file"])
+        }
+        if large:
+            records = {
+                key: replace(
+                    record, reading={**(record.reading or {}), "choice": {"mode": "search"}}
+                )
+                if key in large
+                else record
+                for key, record in records.items()
+            }
+            searches = await _await_searches(request, chat, records, progress)
+            attached = _attached(path, records, searches)
 
     plan = await decide(records, attached)
     if lost := [d.id for d in plan.decisions if d.repair]:

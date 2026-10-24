@@ -105,6 +105,9 @@ DOCUMENTS_EXTERNAL_EMBEDDING = "documentsExternalEmbedding"
 DOCUMENTS_EMBED_PER_MINUTE = "documentsEmbedRequestsPerMinute"
 DOCUMENTS_SORT_MODEL = "documentsSortModel"
 DOCUMENTS_SORT_SECONDS = "documentsSortSeconds"
+DOCUMENTS_WHOLE_BY_PARTS = "documentsWholeByParts"
+DOCUMENTS_PAGE_READER = "documentsPageReader"
+DOCUMENTS_PAGE_READER_MAX_PAGES = "documentsPageReaderMaxPages"
 DOCUMENTS_FOLDER_SYNC_MINUTES = "documentsFolderSyncMinutes"
 DOCUMENTS_FOLDER_MAX_FILES = "documentsFolderMaxFiles"
 DOCUMENTS_FOLDER_MAX_MB = "documentsFolderMaxMB"
@@ -714,6 +717,48 @@ POLICY_FIELDS = [
     ],
 ]
 FIELDS += POLICY_FIELDS
+FIELDS += [
+    ConfigField(
+        key=DOCUMENTS_WHOLE_BY_PARTS,
+        label="Read whole documents in parts",
+        description=(
+            "Reads all parts for a whole-document question.\n\n"
+            "Always starts automatically. Ask offers Read all of it first. "
+            "Never uses passages only. At most 3 documents and 40 parts; Stop ends the reading."
+        ),
+        category="documents",
+        valueType=ConfigValueType.enum,
+        default="always",
+        enumValues=["ask", "always", "never"],
+    ),
+    ConfigField(
+        key=DOCUMENTS_PAGE_READER,
+        label="Model that reads scanned pages",
+        description=(
+            "Off: scanned pages are skipped.\n\n"
+            "Choose a gateway vision model, or role:reads-pages. Each person chooses "
+            "Read scanned pages before images are sent. The passages' outside-model rule applies."
+        ),
+        category="documents",
+        valueType=ConfigValueType.string,
+        default="",
+        suggestions=["", "role:reads-pages"],
+    ),
+    ConfigField(
+        key=DOCUMENTS_PAGE_READER_MAX_PAGES,
+        label="Most scanned pages read per document",
+        description=(
+            "Limits the scanned pages read from one document.\n\n"
+            "The page count and model are shown before a person starts reading. "
+            "Documents over this limit are left unread with their count."
+        ),
+        category="documents",
+        valueType=ConfigValueType.integer,
+        default=200,
+        minimum=1,
+        maximum=5000,
+    ),
+]
 
 DEFAULTS: dict[str, Any] = {
     OWNER_READS_CHATS: False,
@@ -742,6 +787,9 @@ DEFAULTS: dict[str, Any] = {
     DOCUMENTS_EMBED_PER_MINUTE: 30,
     DOCUMENTS_SORT_MODEL: AUTO,
     DOCUMENTS_SORT_SECONDS: 3.0,
+    DOCUMENTS_WHOLE_BY_PARTS: "always",
+    DOCUMENTS_PAGE_READER: "",
+    DOCUMENTS_PAGE_READER_MAX_PAGES: 200,
     DOCUMENTS_FOLDER_SYNC_MINUTES: 10,
     DOCUMENTS_FOLDER_MAX_FILES: 10_000,
     DOCUMENTS_FOLDER_MAX_MB: 2_048,
@@ -858,6 +906,9 @@ class DocumentSettings:
     #: may add to an answer. A sorter outside the machines needs `external_embedding` too.
     sort_model: str = AUTO
     sort_seconds: float = 3.0
+    whole_by_parts: str = "always"
+    page_reader: str = ""
+    page_reader_max_pages: int = 200
 
     @property
     def max_bytes(self) -> int:
@@ -887,6 +938,9 @@ async def document_settings(store: Store) -> DocumentSettings:
     rate = await store.setting(DOCUMENTS_EMBED_PER_MINUTE)
     sorter = await store.setting(DOCUMENTS_SORT_MODEL)
     sort_time = await store.setting(DOCUMENTS_SORT_SECONDS)
+    whole_parts = await store.setting(DOCUMENTS_WHOLE_BY_PARTS)
+    page_model = await store.setting(DOCUMENTS_PAGE_READER)
+    page_max = await store.setting(DOCUMENTS_PAGE_READER_MAX_PAGES)
     return DocumentSettings(
         enabled=bool(enabled) if enabled is not None else bool(DEFAULTS[DOCUMENTS_ENABLED]),
         max_file_mb=int(largest) if largest is not None else int(DEFAULTS[DOCUMENTS_MAX_FILE_MB]),
@@ -910,6 +964,11 @@ async def document_settings(store: Store) -> DocumentSettings:
         ),
         sort_model=(sorter.strip() if isinstance(sorter, str) and sorter.strip() else AUTO),
         sort_seconds=_sort_seconds(sort_time),
+        whole_by_parts=whole_parts if whole_parts in EXTERNAL_CHOICES else "always",
+        page_reader=page_model.strip() if isinstance(page_model, str) else "",
+        page_reader_max_pages=page_max
+        if isinstance(page_max, int) and not isinstance(page_max, bool) and 1 <= page_max <= 5000
+        else 200,
     )
 
 
@@ -1135,6 +1194,9 @@ async def get_config(request: Request) -> ConfigDocument:
             DOCUMENTS_EMBED_PER_MINUTE: documents.embed_per_minute,
             DOCUMENTS_SORT_MODEL: documents.sort_model,
             DOCUMENTS_SORT_SECONDS: documents.sort_seconds,
+            DOCUMENTS_WHOLE_BY_PARTS: documents.whole_by_parts,
+            DOCUMENTS_PAGE_READER: documents.page_reader,
+            DOCUMENTS_PAGE_READER_MAX_PAGES: documents.page_reader_max_pages,
             DOCUMENTS_FOLDER_SYNC_MINUTES: folders.sync_minutes,
             DOCUMENTS_FOLDER_MAX_FILES: folders.max_files,
             DOCUMENTS_FOLDER_MAX_MB: folders.max_mb,
@@ -1150,6 +1212,20 @@ async def get_config(request: Request) -> ConfigDocument:
 def _problem_with(key: str, value: Any) -> str | None:
     """Why `value` is not one this setting takes, or None when it is. A
     `bool` is not an integer here, whatever Python says."""
+    if key == DOCUMENTS_WHOLE_BY_PARTS:
+        return None if value in EXTERNAL_CHOICES else "Must be ask, always or never."
+    if key == DOCUMENTS_PAGE_READER:
+        return (
+            None
+            if isinstance(value, str) and len(value.strip()) <= MAX_MODEL_ID
+            else "Use a model name, role:reads-pages, or leave it empty for Off."
+        )
+    if key == DOCUMENTS_PAGE_READER_MAX_PAGES:
+        return (
+            None
+            if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 5000
+            else "Must be a whole number from 1 to 5,000."
+        )
     if key in (
         OWNER_READS_CHATS,
         MEMORY_ENABLED,

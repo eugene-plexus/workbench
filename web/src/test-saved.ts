@@ -37,6 +37,7 @@ export const ADDED = Date.UTC(2026, 9, 11, 15, 0, 0) / 1000;
 
 export function saved(over: Partial<SavedDocument> = {}): SavedDocument {
   return {
+    readBy: null,
     id: "d1",
     name: "harbour-survey.pdf",
     mediaType: "application/pdf",

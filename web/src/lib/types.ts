@@ -46,6 +46,8 @@ export interface DocumentSource {
  * number in it, like [2], and is absent until the answer is done. `snippet` is at
  * most 240 characters, around the words that were searched for. */
 export interface PassageSource {
+  wholeParts?: number;
+  readBy?: string | null;
   kind: "document";
   passage: true;
   doc_id: string;
@@ -666,7 +668,10 @@ export interface Models {
 }
 
 export interface Progress {
-  stage: "prompt" | "working" | "tool" | "generating" | "documents" | "summarising";
+  stage:
+    "prompt" | "working" | "tool" | "generating" | "documents" | "documents_whole" | "summarising";
+  message?: string;
+  cost?: string;
   /** On `summarising` (row 26): how many earlier messages, and the model writing it. */
   messages?: number;
   model?: string;
@@ -1375,6 +1380,7 @@ export interface DocumentMeaning {
  * sentence for a document that was skipped or could not be read, as it came. `meaning`
  * is null until the document is read, and for one that could not be. */
 export interface SavedDocument {
+  readBy: string | null;
   id: string;
   name: string;
   mediaType: string;
@@ -1817,6 +1823,14 @@ export type SearchStatus = "used" | "nothing_matched" | "skipped" | "failed" | "
 
 /** `Message.retrieval`, as `saved_api.retrieval_view` makes it. */
 export interface SearchRecord {
+  whole?: {
+    state: "offered" | "never" | "unavailable" | "read";
+    line: string;
+    cost?: string;
+    parts?: number;
+    action?: string;
+    selectByQuestion?: boolean;
+  } | null;
   status: SearchStatus;
   code: string | null;
   message: string | null;

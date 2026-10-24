@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -348,12 +349,17 @@ class Answers:
         self._tools = tools
         self._running: dict[str, Running] = {}
         self._watchers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
+        self._speeds: dict[str, tuple[float, float]] = {}
         #: Told the chat's id when an answer ends, whatever its outcome (MV2: its
         #: exchange goes in the person's index). Never in an answer's way.
         self.on_finished: Callable[[str], None] | None = None
 
     def running(self, chat_id: str) -> Running | None:
         return self._running.get(chat_id)
+
+    def speed(self, model: str) -> float | None:
+        measured = self._speeds.get(model)
+        return measured[1] if measured and time.perf_counter() - measured[0] < 600 else None
 
     # --- watching -------------------------------------------------------
 
@@ -547,7 +553,11 @@ class Answers:
                 if prepared.reply is not None:
                     # Nothing to answer from, and the chat answers only from the
                     # person's documents: these are Workbench's words, not a model's.
-                    m.model, m.finish = None, prepared.finish
+                    whole_read = bool(
+                        ((prepared.retrieval or {}).get("whole") or {}).get("state") == "read"
+                    )
+                    m.model = m.model if whole_read else None
+                    m.finish = "whole_document" if whole_read else prepared.finish
                     told["contentAt"] = 0
                     told["content"] = m.content = prepared.reply
                 if told:
@@ -946,6 +956,15 @@ class Answers:
         if not choices:
             progress = extension.get("progress")
             if isinstance(progress, dict):
+                speed = progress.get("tokens_per_second")
+                if (
+                    m.model
+                    and isinstance(speed, int | float)
+                    and not isinstance(speed, bool)
+                    and math.isfinite(speed)
+                    and speed > 0
+                ):
+                    self._speeds[m.model] = (time.perf_counter(), float(speed))
                 if progress.get("stage") in ("tool", "prompt"):
                     self._reasoning_tick(running, end=True)
                 running.progress = progress

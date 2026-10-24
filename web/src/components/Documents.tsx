@@ -41,6 +41,7 @@ import {
   meaningTotalsWords,
 } from "../lib/documentMeaning";
 import { failureWords, saveFile } from "../lib/memory";
+import { ScannedPages } from "./ScannedPages";
 import {
   capsWords,
   OWNER_OFF,
@@ -89,6 +90,7 @@ export function Documents({
   // The words about what happened to one document, by its id.
   const [rowProblems, setRowProblems] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
+  const [readPictures, setReadPictures] = useState(false);
   // Buttons are held while a change is made, which takes the keyboard's place from the
   // one that was pressed: it is given back when the change is done.
   const keepFocus = useKeepFocus(busy);
@@ -305,6 +307,7 @@ export function Documents({
         <DocumentRow
           key={doc.id}
           doc={doc}
+          onReadPages={() => void reload()}
           locked={off}
           busy={busy}
           problem={rowProblems[doc.id] ?? null}
@@ -389,7 +392,8 @@ export function Documents({
             <h2 id={`${uid}-list`} tabIndex={-1} className="title-section">
               Your documents
             </h2>
-            {!off && <AddDocuments onChanged={() => void reload()} />}
+            {!off && <ScannedPages onChanged={() => void reload()} onEnabled={setReadPictures} />}
+            {!off && <AddDocuments readPictures={readPictures} onChanged={() => void reload()} />}
             {data.documents.length === 0 ? (
               <div data-testid="documents-empty" className="card">
                 <h3 className="title-card">No documents yet</h3>

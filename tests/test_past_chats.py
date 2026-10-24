@@ -520,7 +520,12 @@ def test_the_backfill_indexes_chats_made_before_and_resumes_by_signature(world: 
     held = settle(world, "p-ada", lambda h: len(h) == 2)
     assert len(held) == 2, "the chat whose signature had not moved was skipped"
     assert all("basil" not in w for w in held.values())
+    # The index can hold the chats a moment before the backfill reports it has finished.
+    deadline = time.perf_counter() + 15
     status = ada.get("/api/past-chats/status").json()
+    while status["backfill"].get("running") and time.perf_counter() < deadline:
+        time.sleep(0.05)
+        status = ada.get("/api/past-chats/status").json()
     assert status["exchanges"] == 2 and status["backfill"] == {"running": False}
 
 

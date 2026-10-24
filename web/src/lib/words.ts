@@ -32,6 +32,10 @@ export function takes(model: Model): string[] {
 
 /** What an answer that has not started is waiting on, said plainly. */
 export function progressWords(progress: Progress | null | undefined): string {
+  if (progress?.stage === "documents_whole")
+    return [progress.cost, progress.message !== progress.cost ? progress.message : null]
+      .filter(Boolean)
+      .join(" ");
   if (!progress) return "Waiting for the model…";
   // The answer is held for its files to be read (MR2), or for the person's
   // documents to be searched (MR4): not the model's wait.
