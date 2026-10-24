@@ -32,6 +32,8 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
+from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -172,6 +174,7 @@ def summarize(extracted: extract.Extracted) -> dict[str, Any]:
         "partTokens": per_part if extracted.pages is not None else None,
         "notes": extracted.notes,
         "truncated": extracted.truncated,
+        "readBy": extracted.read_by,
         "code": None,
         "reason": None,
         "message": None,
@@ -231,6 +234,7 @@ class Reader:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._children: dict[str, subprocess.Popen[bytes]] = {}
         self._cancelled: set[str] = set()
+        self._pages: dict[Path, OrderedDict[tuple[Path, int], tuple[int, str, dict[str, Any]]]] = {}
 
     # --- starting and waiting -------------------------------------------
 
@@ -271,7 +275,13 @@ class Reader:
 
     async def cancel(self, file_ids: Iterable[str]) -> None:
         """These files were removed: end their readers, and forget them."""
-        ids = [i for i in file_ids if i in self._tasks or i in self._children]
+        named = list(file_ids)
+        documents = {i.removeprefix("doc:") for i in named}
+        for pages in self._pages.values():
+            for key in list(pages):
+                if key[0].name in documents:
+                    del pages[key]
+        ids = [i for i in named if i in self._tasks or i in self._children]
         self._cancelled.update(ids)
         for file_id in ids:
             child = self._children.get(file_id)
@@ -399,6 +409,52 @@ class Reader:
             return Extraction(failure=outcome.changes)
         return Extraction(extracted=outcome.extracted, summary=outcome.changes)
 
+    async def page(self, source: Path, number: int, text: str = "") -> dict[str, Any]:
+        stamp = (await asyncio.to_thread(source.stat)).st_mtime_ns
+        pages = self._pages.setdefault(source.parent, OrderedDict())
+        page_key = (source, number)
+        cached = pages.get(page_key)
+        if cached is not None and cached[:2] == (stamp, text):
+            pages.move_to_end(page_key)
+            return dict(cached[2])
+        key = "page-" + uuid.uuid4().hex
+        async with self._slots:
+            task = asyncio.create_task(
+                asyncio.to_thread(
+                    self._run_file,
+                    key,
+                    source,
+                    "page",
+                    json.dumps({"page": number, "text": text}),
+                    None,
+                )
+            )
+            try:
+                outcome = await asyncio.shield(task)
+            except asyncio.CancelledError:
+                self._cancelled.add(key)
+                if child := self._children.get(key):
+                    kill_tree(child)
+                await task
+                self._cancelled.discard(key)
+                raise
+        if "image" not in outcome.changes:
+            raise extract.Unreadable(
+                str(outcome.changes.get("code")), str(outcome.changes.get("reason"))
+            )
+        pages[page_key] = (stamp, text, outcome.changes)
+        pages.move_to_end(page_key)
+        while len(pages) > 20:
+            pages.popitem(last=False)
+        return dict(outcome.changes)
+
+    def forget_pages(self, source: Path) -> None:
+        pages = self._pages.get(source.parent)
+        if pages is not None:
+            for key in list(pages):
+                if key[0] == source:
+                    del pages[key]
+
     def _read_in_child(
         self,
         key: str,
@@ -516,6 +572,8 @@ class Reader:
                     detail=data.get("detail"),
                 )
             )
+        if "image" in data:
+            return Outcome(data)
         try:
             extracted = extract.Extracted.from_json(data)
         except ValueError as exc:

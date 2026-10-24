@@ -51,7 +51,7 @@ from pathlib import Path
 from . import chunk, extract
 from . import index as index_module
 from .index import CHAT, FOUND, PENDING, PROJECT, Document, Index, IndexUnavailable
-from .reader import Reader, summarize
+from .reader import Extraction, Reader, summarize
 
 log = logging.getLogger(__name__)
 
@@ -101,6 +101,9 @@ class Ingest:
         self._reader = reader
         self._cap = cap
         self._owed = owed
+        self.page_reader: (
+            Callable[[str, Index, Document, Extraction], Awaitable[Extraction]] | None
+        ) = None
         #: People who may have a document waiting, in the order they are served.
         self._pending: dict[str, None] = {}
         self._wake = asyncio.Event()
@@ -236,6 +239,8 @@ class Ingest:
         extraction = await self._reader.extract(
             key_of(doc.id), index.original_path(doc.id), doc.kind, doc.language
         )
+        if self.page_reader is not None and not extraction.cancelled:
+            extraction = await self.page_reader(sub, index, doc, extraction)
         if extraction.cancelled:
             return
         if extraction.failure is not None:

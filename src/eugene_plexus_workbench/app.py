@@ -32,6 +32,7 @@ from . import (
     memory_api,
     memory_models_api,
     saved_api,
+    summaries,
     tools_api,
     web,
 )
@@ -202,6 +203,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         saved = SavedDocuments(
             settings.data_dir, reader, passage_limit, gateway=hub, settings=document_settings
         )
+        from functools import partial
+
+        from .knowledge import page_reader
+
+        saved.ingest.page_reader = partial(page_reader.ingest, store=store, hub=hub, reader=reader)
         # Row 7: a person removed from Eugene keeps no index that any job opens or makes again,
         # from before the first job runs.
         for sub in await store.hidden_subs():
@@ -298,7 +304,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # background and asked every turn.
         from .memory_servers import Courier, Servers
 
-        app.state.memory_servers = Servers(store, settings)
+        app.state.memory_servers = Servers(store, settings, hub=app.state.hub)
         courier = app.state.memory_courier = Courier(store, app.state.memory_servers)
         courier.start()
         # Row 7: downloads of people's data, and what happens to a removed person's.
@@ -438,6 +444,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(removal_router)
     app.include_router(exports_router)
     app.include_router(documents_api.router)
+    app.include_router(summaries.router)
     # Before `saved_api`: `/api/documents/folders` is not a document's id.
     app.include_router(folder_docs_api.router)
     app.include_router(saved_api.router)

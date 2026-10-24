@@ -61,7 +61,7 @@ from . import chunk, vectors
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 INDEX_FILE = "index.sqlite3"
 #: Where files wait, beside the index, while documents are removed (`Index._stage_files`).
 TRASH = "trash"
@@ -263,6 +263,7 @@ _SCHEMA: list[str] = [
 _MIGRATIONS: dict[int, list[str]] = {
     2: ["ALTER TABLE documents ADD COLUMN refused TEXT"],
     3: ["CREATE INDEX IF NOT EXISTS documents_by_source ON documents (source)"],
+    4: ["ALTER TABLE documents ADD COLUMN read_by TEXT"],
 }
 
 #: The `meta` key that holds the search model an index was built with.
@@ -313,6 +314,7 @@ class Document:
     source_mtime: str | None = None
     #: Passages the search model refused (too long for it): each `{ord, page, chars, why}`.
     refused: list[dict[str, Any]] = field(default_factory=list)
+    read_by: str | None = None
 
     @property
     def searchable(self) -> bool:
@@ -513,6 +515,7 @@ def _document(row: sqlite3.Row) -> Document:
         read_at=row["read_at"],
         indexed_at=row["indexed_at"],
         source_mtime=row["source_mtime"],
+        read_by=row["read_by"],
         refused=[r for r in refused if isinstance(r, dict)] if isinstance(refused, list) else [],
     )
 
@@ -1169,7 +1172,8 @@ class Index:
                 db.execute(
                     "UPDATE documents SET status = 'searchable', reason = NULL, code = NULL, "
                     "detail = NULL, kind = ?, language = ?, pages = ?, lines = ?, tokens_est = ?, "
-                    "chunks = ?, embedded = 0, refused = NULL, notes = ?, indexed_at = ? "
+                    "chunks = ?, embedded = 0, refused = NULL, notes = ?, "
+                    "indexed_at = ?, read_by = ? "
                     "WHERE id = ?",
                     (
                         summary["kind"],
@@ -1180,6 +1184,7 @@ class Index:
                         len(passages),
                         json.dumps(list(summary.get("notes") or [])),
                         now,
+                        summary.get("readBy"),
                         doc_id,
                     ),
                 )

@@ -24,9 +24,11 @@ failure is a reason in words. Logs carry counts and causes, never a chat's words
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import logging
+import re
 import socket
 import ssl
 import time
@@ -35,6 +37,7 @@ from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -218,7 +221,10 @@ class _CheckedBackend(httpcore2.AsyncNetworkBackend):
         if not addresses:
             raise ServerProblem("The memory server's name has no address.")
         for address in addresses:
-            if (reason := refused_address(address, self._mode, self._own, port)) is not None:
+            if self._mode == "linked" and (host != "127.0.0.1" or address != "127.0.0.1"):
+                raise ServerProblem("The linked memory server must stay on loopback.")
+            checked_mode = "any" if self._mode == "linked" else self._mode
+            if (reason := refused_address(address, checked_mode, self._own, port)) is not None:
                 raise ServerProblem(reason)
             if self._plain_http and self._mode != "any":
                 ip = _plain(ipaddress.ip_address(address.split("%", 1)[0]))
@@ -416,14 +422,98 @@ def _arguments(verb: dict[str, Any], wanted: dict[str, Any]) -> dict[str, Any]:
 class Servers:
     """Connections to people's memory servers, with the address rule of the install."""
 
-    def __init__(self, store: Store, settings: Any = None) -> None:
+    def __init__(self, store: Store, settings: Any = None, *, hub: Any = None) -> None:
         self.store = store
         self.settings = settings
+        self.hub = hub
         self.tls = ssl.create_default_context()
         self._own: list[str] = []
         self._own_at = -OWN_SECONDS
         #: Calls past their time, cancelled and left to close.
         self._closing: set[asyncio.Task[list[Item]]] = set()
+
+    def linked_url(self, owner: str) -> str | None:
+        base = getattr(self.settings, "memory_server_url", None)
+        if not base:
+            return None
+        parts = urlsplit(base)
+        if (
+            parts.scheme != "http"
+            or parts.hostname != "127.0.0.1"
+            or not parts.port
+            or parts.username
+            or parts.password
+            or parts.query
+            or parts.fragment
+            or not re.fullmatch(r"/(?:[A-Za-z0-9_~-]+/)*", parts.path)
+        ):
+            return None
+        bank = "wb-" + hashlib.sha256(owner.encode("utf-8")).hexdigest()[:16]
+        return str(base) + bank + "/"
+
+    def is_linked_url(self, url: str) -> bool:
+        sample = self.linked_url("")
+        if sample is None:
+            return False
+        base = sample.rsplit("wb-", 1)[0]
+        return re.fullmatch(re.escape(base) + r"wb-[0-9a-f]{16}/", url) is not None
+
+    def link_token(self) -> str:
+        path = getattr(self.settings, "memory_server_token_file", None)
+        try:
+            token = Path(path).read_text(encoding="utf-8").strip() if path else ""
+        except OSError as exc:
+            raise ServerProblem(f"The Hindsight link token could not be read: {exc}") from None
+        if not token:
+            raise ServerProblem("The Hindsight link token is missing or empty.")
+        return token
+
+    async def link_locality(self, hub: Any = None) -> tuple[str, str | None]:
+        path = getattr(self.settings, "memory_server_model_file", None)
+        try:
+            text = await asyncio.to_thread(Path(path).read_text, encoding="utf-8") if path else "{}"
+            data = json.loads(text)
+            model = data.get("memoryModel")
+            if not isinstance(model, str) or not model:
+                return "external", "Choose the model Hindsight reads your chats with"
+        except (OSError, ValueError, TypeError) as exc:
+            return "external", f"Hindsight's effective model could not be read: {exc}"
+        try:
+            facts = await memory_api.model_facts(hub or self.hub, model)
+        except Exception as exc:
+            return (
+                "external",
+                f"The locality of Hindsight's model {model} could not be checked: "
+                f"{why_failed(exc)}",
+            )
+        if facts.locality == "local":
+            return "local", None
+        return "external", f"Hindsight's model {model} has {facts.locality} locality."
+
+    async def mode(self, server: dict[str, Any] | None) -> tuple[str, str | None]:
+        local = False
+        why = None
+        if server and server.get("linked"):
+            locality, why = await self.link_locality()
+            local = locality == "local"
+        mode, refusal = await mode_for(self.store, local_link=local)
+        return mode, (f"{refusal} {why}" if refusal and why else refusal)
+
+    async def linked_chat_refusal(self, server: dict[str, Any], chat: Chat) -> str | None:
+        if not server.get("linked"):
+            return None
+        locality, why = await self.link_locality()
+        if locality == "local":
+            return None
+        install = await config.memory_settings(self.store)
+        prefs = await self.store.memory_prefs(chat.owner)
+        choice, _ = memory_api.resolve_external(install.external, prefs["external"])
+        if choice == "always" or (choice == "ask" and chat.settings.get("memoryExternal") is True):
+            return None
+        return (
+            "Hindsight was not sent this chat: its model is outside your machines or "
+            f"its locality is unknown, and your memory setting does not allow it. {why or ''}"
+        )
 
     async def own_addresses(self) -> list[str]:
         """This machine's addresses: its names', the address each IP family leaves by, and
@@ -462,6 +552,8 @@ class Servers:
             raise ServerProblem(problem)
         if mode == "off":
             raise ServerProblem(OWNER_OFF)
+        if mode == "linked" and not self.is_linked_url(url):
+            raise ServerProblem("The memory server does not match this machine's Hindsight link.")
         own = await self.own_addresses()
         transport = httpx2.AsyncHTTPTransport(verify=self.tls, trust_env=False)
         transport._pool = httpcore2.AsyncConnectionPool(
@@ -552,8 +644,16 @@ class Servers:
     ) -> list[Item]:
         owner = server["owner"]
         try:
+            token = server["token"]
+            if server.get("linked"):
+                if server["url"] != self.linked_url(owner):
+                    raise ServerProblem(
+                        "The saved memory server does not match this person's Hindsight link."
+                    )
+                token = self.link_token()
+                mode = "linked" if mode != "off" else mode
             async with asyncio.timeout(seconds):
-                async with self.session(server["url"], server["token"], mode, seconds) as client:
+                async with self.session(server["url"], token, mode, seconds) as client:
                     result = await client.session.call_tool(
                         found["tool"], _arguments(found, wanted), read_timeout_seconds=seconds
                     )
@@ -570,13 +670,13 @@ class Servers:
         return items_of(result.structured_content, texts)
 
 
-async def mode_for(store: Store) -> tuple[str, str | None]:
+async def mode_for(store: Store, *, local_link: bool = False) -> tuple[str, str | None]:
     """The install's rule for memory servers in effect, and why none may be used, if so. A
     server is a service outside the machines: the owner's "never" for memory forbids it."""
     install = await config.memory_settings(store)
     if install.servers == "off":
         return "off", OWNER_OFF
-    if install.external == "never":
+    if install.external == "never" and not local_link:
         return "off", OWNER_NEVER
     if not install.enabled:
         return "off", memory_api._OWNER_OFF
@@ -946,7 +1046,11 @@ class Courier:
     async def _one(self, row: dict[str, Any]) -> bool:
         owner = row["owner"]
         server = await self.store.memory_server(owner)
-        mode, _ = await mode_for(self.store)
+        mode, _ = (
+            await self.servers.mode(server)
+            if server and server.get("linked")
+            else await mode_for(self.store)
+        )
         if server is None:
             await self.store.memory_server_drop(row["document_id"])
             return False
@@ -963,6 +1067,12 @@ class Courier:
             return True
         chat = await self.store.chat(row["chat_id"])
         if "retain" not in server["verbs"] or mode == "off" or chat is None:
+            await self.store.memory_server_drop(row["document_id"])
+            return False
+        if server.get("linked") and (
+            refusal := await self.servers.linked_chat_refusal(server, chat)
+        ):
+            await self.store.memory_server_reached(owner, refusal)
             await self.store.memory_server_drop(row["document_id"])
             return False
         path = await self.store.messages(row["chat_id"], via=row["message_id"])
@@ -1093,7 +1203,7 @@ async def _turn_for(
     server = await store.memory_server(person.sub)
     if server is None:
         return ServerTurn()
-    mode, _ = await mode_for(store)
+    mode, _ = await state.memory_servers.mode(server)
     if mode == "off":
         return ServerTurn()
     decision = await memory_api.decide(state, person, chat, model_id)
@@ -1103,6 +1213,8 @@ async def _turn_for(
         return ServerTurn()  # MV7: a project kept to itself is given no general memory
     facts = decision.facts
     name = server["name"] or "Your memory server"
+    if refusal := await state.memory_servers.linked_chat_refusal(server, chat):
+        return ServerTurn(record={"name": name, "why": refusal, "memories": []})
     if facts.locality != "local":
         install = await config.memory_settings(store)
         prefs = await store.memory_prefs(person.sub)
@@ -1161,7 +1273,7 @@ async def clear(state: Any, owner: str) -> dict[str, Any] | None:
     server = await store.memory_server(owner)
     if server is None:
         return None
-    mode, why_not = await mode_for(store)
+    mode, why_not = await state.memory_servers.mode(server)
     name = server["name"] or "Your memory server"
     if mode == "off":
         return {"cleared": False, "left": None, "message": f"{name} was not cleared: {why_not}"}
@@ -1212,7 +1324,7 @@ async def export_items(state: Any, owner: str) -> dict[str, Any] | None:
     if server is None:
         return None
     out: dict[str, Any] = {"server": server["name"] or "", "url": server["url"]}
-    mode, why_not = await mode_for(store)
+    mode, why_not = await state.memory_servers.mode(server)
     if mode == "off":
         return {**out, "memories": None, "note": why_not}
     if "list" not in server["verbs"]:
@@ -1245,7 +1357,8 @@ def view(server: dict[str, Any] | None, counts: dict[str, int]) -> dict[str, Any
     return {
         "url": server["url"],
         "name": server["name"],
-        "hasToken": bool(server["token"]),
+        "hasToken": bool(server["token"]) or bool(server.get("linked")),
+        "linked": bool(server.get("linked")),
         "verbs": sorted(verbs),
         "missing": [MISSING_WORDS[v] for v in MISSING_WORDS if v not in verbs],
         "connectedAt": server["connected_at"],
@@ -1317,15 +1430,27 @@ class ServerConnect(BaseModel):
     token: str | None = Field(default=None, max_length=4096)
 
 
-async def _page(store: Store, owner: str) -> dict[str, Any]:
+async def _page(store: Store, owner: str, servers: Servers) -> dict[str, Any]:
     mode, why_not = await mode_for(store)
     server = await store.memory_server(owner)
     counts = await store.memory_server_counts(owner) if server is not None else {}
+    link_mode, link_why = (
+        await servers.mode({"linked": True}) if servers.linked_url(owner) else ("off", None)
+    )
+    available = False
+    if servers.linked_url(owner) and link_mode != "off":
+        try:
+            servers.link_token()
+            available = True
+        except ServerProblem as exc:
+            link_why = exc.message
     return {
         "allowed": mode != "off",
         "mode": mode,
         "why": why_not,
         "server": view(server, counts),
+        "linkedAvailable": available,
+        "linkedWhy": link_why,
     }
 
 
@@ -1335,7 +1460,8 @@ async def get_server(request: Request) -> dict[str, Any]:
     from .api import _person, _state
 
     person = await _person(request)
-    return await _page(_state(request).store, person.sub)
+    state = _state(request)
+    return await _page(state.store, person.sub, state.memory_servers)
 
 
 @router.put("/api/memory/server")
@@ -1366,7 +1492,7 @@ async def put_server(request: Request, body: ServerConnect) -> dict[str, Any]:
     await store.connect_memory_server(person.sub, url, token, name, verbs)
     await store.memory_server_reached(person.sub, None)
     log.info("a person connected a memory server (%d verbs)", len(verbs))
-    return await _page(store, person.sub)
+    return await _page(store, person.sub, state.memory_servers)
 
 
 @router.delete("/api/memory/server")
@@ -1375,6 +1501,39 @@ async def delete_server(request: Request) -> dict[str, Any]:
     from .api import _person, _state
 
     person = await _person(request)
-    store: Store = _state(request).store
+    state = _state(request)
+    store: Store = state.store
     await store.delete_memory_server(person.sub)
-    return await _page(store, person.sub)
+    return await _page(store, person.sub, state.memory_servers)
+
+
+class LinkedConnect(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool
+
+
+@router.put("/api/memory/server/linked")
+async def put_linked_server(request: Request, body: LinkedConnect) -> dict[str, Any]:
+    from .api import _person, _problem, _state
+
+    person = await _person(request)
+    state = _state(request)
+    servers: Servers = state.memory_servers
+    if not body.enabled:
+        old = await state.store.memory_server(person.sub)
+        if old and old.get("linked"):
+            await state.store.delete_memory_server(person.sub)
+        return await _page(state.store, person.sub, servers)
+    mode, why = await servers.mode({"linked": True})
+    if mode == "off":
+        raise _problem(403, why or OWNER_OFF)
+    url = servers.linked_url(person.sub)
+    if url is None:
+        raise _problem(409, "Hindsight on this machine is not linked to Workbench.")
+    try:
+        name, verbs = await servers.discover(url, servers.link_token(), "linked")
+    except ServerProblem as exc:
+        raise _problem(400, exc.message) from None
+    await state.store.put_memory_server(person.sub, url, "", name, verbs, linked=True)
+    await state.store.memory_server_reached(person.sub, None)
+    return await _page(state.store, person.sub, servers)

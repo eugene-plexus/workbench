@@ -112,6 +112,14 @@ jobs:
   browsers:
     name: Rich content — ${{ matrix.browser }}
     runs-on: ubuntu-latest
+    # Playwright's own image holds the browsers and every system library they
+    # need, so nothing comes from the runner's Ubuntu mirror. That mirror once
+    # stalled for 30 minutes and once served 40 KB/s (runs 39950260395 and
+    # 39957304950). Its version matches the playwright package installed below.
+    # User 1001 is the runner's, who owns the workspace; Firefox refuses root.
+    container:
+      image: mcr.microsoft.com/playwright:v1.63.0-noble
+      options: --user 1001
     timeout-minutes: 30
     defaults:
       run:
@@ -122,35 +130,35 @@ jobs:
         browser: [firefox, webkit]
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      # Not setup-python: its toolcache Python is mounted from the host and its
+      # scripts name the host's path, which does not exist in the container
+      # (run 39962600116: `spawn /__t/Python/3.12.15/x64/bin/pip ENOENT`).
+      # uv's Python is self-contained and installs as user 1001.
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
-          cache: pip
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: web/package-lock.json
+          activate-environment: true
+          enable-cache: true
       - name: Install package + dev deps
-        run: pip install -e ".[dev]"
+        run: uv pip install -e ".[dev]"
       - run: npm ci
         working-directory: web
       - run: npm run build
         working-directory: web
-      - name: Install Playwright and its browsers
+      - name: Install the Playwright package (the image holds its browsers)
         working-directory: web
-        run: |
-          npm install --no-save --package-lock=false playwright@1.63.0
-          npx playwright install --with-deps firefox webkit
+        run: npm install --no-save --package-lock=false playwright@1.63.0
       - name: Run the six browser checks
         env:
-          WORKBENCH_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
           WORKBENCH_BROWSER: ${{ matrix.browser }}
         # The same World fixture as the server job starts Workbench and fake
         # Eugene on random loopback ports, seeds each chat and runs its script.
         # Nothing here starts an agent or uses the live install's ports.
+        # In a container job `github.workspace` is the host's path; the
+        # variable is the container's.
         run: |
           for variable in ${!EUGENE_PLEXUS_@}; do unset "$variable"; done
+          export WORKBENCH_PLAYWRIGHT="$GITHUB_WORKSPACE/web/node_modules/playwright"
           python -m pytest -q -s --basetemp=browser-results \
             tests/test_reading_browser.py \
             tests/test_rich_math_browser.py \
@@ -166,6 +174,48 @@ jobs:
           # Configs alongside the shots contain session cookies: keep only shots.
           path: browser-results/**/shots/**
           if-no-files-found: ignore
+
+  long-chats:
+    # Row 26: a real Workbench, gateway and inference driver over a recording stand-in engine
+    # that refuses a prompt past its window with llama-server's own body (about four minutes).
+    # Every port is the OS's, never 8079-8083, and every EUGENE_PLEXUS_* variable is dropped.
+    name: Long chats acceptance (row 26)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: workbench
+      - uses: actions/checkout@v6
+        with:
+          repository: eugene-plexus/gateway
+          ref: main
+          path: gateway
+      - uses: actions/checkout@v6
+        with:
+          repository: eugene-plexus/inference-driver
+          ref: main
+          path: inference-driver
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install Workbench, the gateway and the driver, each in its own environment
+        # The driver imports httpx at run time but declares it only for development
+        # (inference-driver#11), so it is named here.
+        run: |
+          python -m venv workbench/.venv && workbench/.venv/bin/pip install -q -e "./workbench[dev]"
+          python -m venv gateway/.venv && gateway/.venv/bin/pip install -q -e ./gateway
+          python -m venv inference-driver/.venv
+          inference-driver/.venv/bin/pip install -q -e ./inference-driver "httpx>=0.27,<1"
+      - name: Long chats acceptance
+        env:
+          EP_ROOT: ${{ github.workspace }}
+        run: |
+          for variable in ${!EUGENE_PLEXUS_@}; do unset "$variable"; done
+          workbench/.venv/bin/python workbench/scripts/row26-long-chats-acceptance.py
 
   codegen-freshness:
     name: Codegen freshness

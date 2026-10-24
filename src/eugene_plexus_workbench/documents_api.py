@@ -41,7 +41,7 @@ from . import config, context, conversation, files, memory_api, token_count
 from .answers import Progress, Refused
 from .api import _may_read_file, _own_chat, _person, _problem, _state
 from .hub import HubError
-from .knowledge import extract
+from .knowledge import extract, whole
 from .knowledge import index as index_module
 from .knowledge import reader as reading_module
 from .knowledge.index import Document, IndexUnavailable, chat_scope
@@ -211,14 +211,18 @@ def _room(
     root: Path,
     model_id: str,
     notes: str | None,
+    history: int | None = None,
 ) -> context.Room:
     """What the request holds before any document: the tokens of its messages
     (the chat's instructions and notes included), the room kept for the answer,
-    and the bytes of the images and audio it carries."""
-    lean = conversation.request_for(
-        chat, path, list(records.values()), root=root, model=model_id, search=False, memory=notes,
-        lean=True,
-    )  # fmt: skip
+    and the bytes of the images and audio it carries. `history` is the tokens of its
+    messages as a long chat's plan has them (row 26: earlier messages summarised)."""
+    if history is None:
+        lean = conversation.request_for(
+            chat, path, list(records.values()), root=root, model=model_id, search=False,
+            memory=notes, lean=True,
+        )  # fmt: skip
+        history = context.count_messages(lean["messages"])
     wanted = chat.settings.get("maxTokens")
     media = sum(
         records[i].size
@@ -227,7 +231,7 @@ def _room(
         if i in records and files.travels(records[i].media_type)
     )
     return context.Room(
-        history=context.count_messages(lean["messages"]),
+        history=history,
         reserve=int(wanted) if isinstance(wanted, int) and wanted > 0 else context.ANSWER_RESERVE,
         memory=token_count.estimate(notes) if notes else 0,
         media_bytes=media,
@@ -265,6 +269,7 @@ async def plan_for(
     wait: bool,
     progress: Progress | None = None,
     override: FileRecord | None = None,
+    history: int | None = None,
 ) -> tuple[
     context.Plan, list[context.Attached], context.Model, dict[str, Any], dict[str, FileRecord]
 ]:
@@ -306,11 +311,39 @@ async def plan_for(
             context.plan,
             items,
             model=model,
-            room=_room(chat, path, now, root, model_id or "", notes),
+            room=_room(chat, path, now, root, model_id or "", notes, history),
             load=_loader(root, now),
             render=render,
             ceiling=settings.whole_up_to_tokens,
         )
+
+    if (
+        wait
+        and settings.whole_by_parts != "never"
+        and path
+        and whole.asked_for_whole(path[-1].content)
+    ):
+        # This question searches the large attachments in their chat's own scope.
+        # The person's saved first-part/whole choice is left intact.
+        large = {
+            item.id
+            for item in attached
+            if item.state == "ready"
+            and (item.reading or {}).get("tokens", 0)
+            > min(settings.whole_up_to_tokens, int((model.window or 24000) * 0.25))
+            and not (item.is_pdf and model.file_input and item.size <= files.LIMITS["file"])
+        }
+        if large:
+            records = {
+                key: replace(
+                    record, reading={**(record.reading or {}), "choice": {"mode": "search"}}
+                )
+                if key in large
+                else record
+                for key, record in records.items()
+            }
+            searches = await _await_searches(request, chat, records, progress)
+            attached = _attached(path, records, searches)
 
     plan = await decide(records, attached)
     if lost := [d.id for d in plan.decisions if d.repair]:
@@ -425,7 +458,8 @@ async def check_send(
 ) -> None:
     """Before a message is stored: wait for its files to be read, and refuse, with
     a 409 that names what to do, if the request they would make cannot go. Nothing
-    is kept when it is refused, so the person fixes it and sends again."""
+    is kept when it is refused, so the person fixes it and sends again. A chat too long
+    for its model is refused here too, documents or not (row 26, `summaries.check`)."""
     prospective = Message(
         id="(next)",
         chat_id=chat.id,
@@ -437,13 +471,24 @@ async def check_send(
         attachments=list(attachments),
     )
     path = [*shown, prospective]
+    from . import summaries
+
+    notes = await memory_api.block_for(request, person, chat, model_id, freeze=False)
+    planned = await summaries.check(request, person, chat, path, records, model_id, notes)
     if not _has_documents(path, records):
         return
-    notes = await memory_api.block_for(request, person, chat, model_id, freeze=False)
     blocked: Blocked | None
     try:
         plan, _, _, _, _ = await plan_for(
-            request, chat, path, records, model_id, notes=notes, render=False, wait=True
+            request,
+            chat,
+            path,
+            records,
+            model_id,
+            notes=notes,
+            render=False,
+            wait=True,
+            history=planned.plan.lean,
         )
     except context.TextMissing as exc:
         blocked = _missing(exc)
@@ -474,13 +519,17 @@ async def prepare(
     model_id: str,
     notes: str | None,
     progress: Progress,
+    history: int | None = None,
 ) -> Prepared:
     """The documents of the request an answer is about to make, decided for the
     model it goes to, with their text. Raises `Blocked` (an answer fails with its
-    words) when they cannot go: the model, or the person's choices, changed since."""
+    words) when they cannot go: the model, or the person's choices, changed since.
+    `history` is the tokens of the request's messages as a long chat's plan has them."""
     if not _has_documents(path, records):
         root = _state(request).settings.data_dir
-        return Prepared({}, [], used=_room(chat, path, records, root, model_id, notes).history)
+        return Prepared(
+            {}, [], used=_room(chat, path, records, root, model_id, notes, history).history
+        )
     try:
         plan, attached, _, _, fresh = await plan_for(
             request,
@@ -492,6 +541,7 @@ async def prepare(
             render=True,
             wait=True,
             progress=progress,
+            history=history,
         )
     except context.TextMissing as exc:
         raise _missing(exc) from exc

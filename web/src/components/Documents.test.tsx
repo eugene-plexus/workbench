@@ -144,6 +144,15 @@ const refuse = (message: string, status: number, extra: object = {}) =>
 
 function listen() {
   vi.mocked(api).mockImplementation((async (path: string) => {
+    if (path.startsWith("/api/documents/page-reading/settings"))
+      return {
+        enabled: false,
+        outside: false,
+        model: null,
+        maxPages: 200,
+        wholeByParts: "always",
+        message: "Off: scanned pages are skipped",
+      };
     if (path === "/api/documents/folders") return server.folders;
     if (path !== "/api/documents") throw new Error(`not served: ${path}`);
     reads += 1;
