@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from typing import Any
 from urllib.parse import unquote
 
 import httpx
@@ -217,3 +218,136 @@ def test_browser_helper_keeps_cookies_per_host(world: World) -> None:
     browser = Browser(world.workbench, world.eugene)
     browser.sign_in("operator")
     assert browser.http.cookies.get("workbench_session")
+
+
+# --------------------------------------------------------------------------- #
+# row 70c: a person's groups and the policies they set, from the claims
+# --------------------------------------------------------------------------- #
+
+NIGHT = {"id": "g-night", "name": "Night shift"}
+DESK = {"id": "g-desk", "name": "Desk"}
+
+
+def _claims(*groups: dict[str, str], **policies: Any) -> dict[str, Any]:
+    set_by = {name: [g["id"] for g in groups] for name in policies}
+    return {
+        "eugene_groups": list(groups),
+        "eugene_policies": {**policies, **({"setBy": set_by} if set_by else {})},
+    }
+
+
+def test_groups_and_policies_come_from_the_claims(world: World) -> None:
+    world.eugene.claims["p-ada"] = _claims(NIGHT, queueBand="background", summaryContextPercent=70)
+    world.eugene.expires_in = 1  # every call is due for a refresh
+    ada = world.browser()
+    ada.sign_in("p-ada")
+    page = ada.get("/api/groups")
+    assert page.status_code == 200, page.text
+    shown = page.json()
+    assert shown["known"] is True
+    assert shown["groups"] == [NIGHT]
+    assert shown["policies"] == [
+        {"policy": "queueBand", "value": "background", "setBy": [NIGHT]},
+        {"policy": "summaryContextPercent", "value": 70, "setBy": [NIGHT]},
+    ]
+    # Moved to another group at Eugene: the next refresh says so.
+    world.eugene.claims["p-ada"] = _claims(DESK, summaryContextPercent=85)
+    time.sleep(0.05)
+    moved = ada.get("/api/groups").json()
+    assert moved["groups"] == [DESK]
+    assert moved["policies"] == [{"policy": "summaryContextPercent", "value": 85, "setBy": [DESK]}]
+    # Another person's groups are theirs alone.
+    bo = world.browser()
+    bo.sign_in("p-bo")
+    assert bo.get("/api/groups").json()["groups"] == []
+
+
+def test_a_cut_id_token_reads_every_group_from_userinfo(world: World) -> None:
+    every = [{"id": f"g{n}", "name": f"Team {n}"} for n in range(3)]
+    world.eugene.userinfo["p-ada"] = _claims(*every, queueBand="interactive")
+    world.eugene.claims["p-ada"] = {
+        **_claims(every[0], queueBand="interactive"),
+        "eugene_groups_truncated": True,
+    }
+    ada = world.browser()
+    ada.sign_in("p-ada")
+    shown = ada.get("/api/groups").json()
+    assert shown["groups"] == every
+    assert shown["policies"][0]["setBy"] == every
+    assert world.eugene.userinfo_calls == 1
+
+
+def test_a_cut_id_token_with_no_userinfo_is_not_a_partial_sign_in(world: World) -> None:
+    """A member must not lose a group's server because a list was cut: if every group cannot
+    be read, the sign-in stops and says why."""
+    world.eugene.claims["p-ada"] = {**_claims(NIGHT), "eugene_groups_truncated": True}
+    world.eugene.userinfo["p-ada"] = {"eugene_groups": "not a list"}
+    done = world.browser().sign_in("p-ada")
+    assert "#signin-error=" in done.headers["location"]
+    assert "groups" in unquote(done.headers["location"])
+
+
+def test_an_older_eugene_sends_no_group_claims(world: World) -> None:
+    ada = world.browser()
+    ada.sign_in("p-ada")
+    shown = ada.get("/api/groups").json()
+    assert shown == {
+        "known": False,
+        "groups": [],
+        "policies": [],
+        "servers": [],
+        "serversAllowed": shown["serversAllowed"],
+        "why": shown["why"],
+    }
+
+
+@pytest.mark.parametrize(
+    "claims",
+    [
+        {"eugene_groups": [{"id": "", "name": "x"}]},
+        {"eugene_groups": [{"id": "g1"}]},
+        {"eugene_groups": [{"id": "g1", "name": "x" * 81}]},
+        {"eugene_groups": [{"id": "g1", "name": "Ok"}] * 65},
+        {"eugene_groups": [], "eugene_policies": {"queueBand": "urgent"}},
+        {"eugene_groups": [], "eugene_policies": {"summaryContextPercent": 99}},
+        {"eugene_groups": [], "eugene_policies": {"summaryContextPercent": True}},
+        # Review should-fix 3: one valid group beside a policy out of shape.
+        {
+            "eugene_groups": [{"id": "g1", "name": "Night shift"}],
+            "eugene_policies": {"summaryContextPercent": 99},
+        },
+    ],
+)
+def test_a_group_claim_out_of_shape_stops_the_sign_in_and_says_why(
+    world: World, claims: dict[str, Any]
+) -> None:
+    """A claim Eugene sent out of the contract's shape is not half-believed, nor dropped: a
+    member must not lose a group's server they cannot turn off. The sign-in stops and says
+    why. An Eugene that sends no group claims at all is an older one, and signs in."""
+    world.eugene.claims["p-ada"] = claims
+    done = world.browser().sign_in("p-ada")
+    assert "#signin-error=" in done.headers["location"]
+    assert "groups" in unquote(done.headers["location"])
+
+
+def test_a_group_claim_out_of_shape_at_a_refresh_is_not_a_sign_out(world: World) -> None:
+    world.eugene.claims["p-ada"] = {"eugene_groups": [NIGHT], "eugene_policies": {}}
+    world.eugene.expires_in = 1  # every call is due for a refresh
+    ada = world.browser()
+    ada.sign_in("p-ada")
+    world.eugene.claims["p-ada"] = {"eugene_groups": [NIGHT], "eugene_policies": {"x": 1}}
+    time.sleep(0.05)
+    refused = ada.get("/api/groups")
+    assert refused.status_code == 503, refused.text
+    assert "groups" in refused.json()["detail"]["message"]
+    world.eugene.claims["p-ada"] = {"eugene_groups": [NIGHT], "eugene_policies": {}}
+    assert ada.get("/api/groups").json()["groups"] == [NIGHT]
+
+
+def test_userinfo_that_says_it_is_cut_is_not_taken_for_every_group(world: World) -> None:
+    """Review should-fix 3: userinfo is never cut; one that says it is cannot be the whole list."""
+    world.eugene.claims["p-ada"] = {**_claims(NIGHT), "eugene_groups_truncated": True}
+    world.eugene.userinfo["p-ada"] = {**_claims(NIGHT, DESK), "eugene_groups_truncated": True}
+    done = world.browser().sign_in("p-ada")
+    assert "#signin-error=" in done.headers["location"]
+    assert "groups" in unquote(done.headers["location"])
