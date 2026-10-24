@@ -1680,7 +1680,9 @@ class Index:
 
         return await self._run(go)
 
-    async def rescope(self, old: str, new: str) -> tuple[list[Document], list[Document]]:
+    async def rescope(
+        self, old: str, new: str, *, source_prefix: str | None = None
+    ) -> tuple[list[Document], list[Document]]:
         """Move every document of scope `old` to `new` (MV7b: a deleted project's documents to
         My documents), its sidecar too, so a Rebuild makes it again where it is now. Where `new`
         names its files, one of the same name there is replaced, as an upload of that name would
@@ -1695,6 +1697,7 @@ class Index:
                 moving = [
                     _document(r)
                     for r in db.execute("SELECT * FROM documents WHERE scope = ?", (old,))
+                    if source_prefix is None or str(r["source"]).startswith(source_prefix)
                 ]
                 replaced: list[Document] = []
                 for doc in moving:
@@ -2112,6 +2115,19 @@ class Index:
             ]
 
         return await self._run(go)
+
+    async def folder_scopes(self, grant_id: str) -> set[str]:
+        """The actual scopes of a folder, to reconcile an interrupted move from its record."""
+        low, high = _bounds(grant_id)
+        return await self._run(
+            lambda db: {
+                r[0]
+                for r in db.execute(
+                    "SELECT DISTINCT scope FROM documents WHERE source >= ? AND source < ?",
+                    (low, high),
+                )
+            }
+        )
 
     async def folder_grants(self) -> set[str]:
         """The ids of the grants any document was read from: what the boot reconcile checks against

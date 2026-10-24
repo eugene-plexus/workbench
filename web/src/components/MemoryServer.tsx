@@ -11,6 +11,7 @@ import { type FormEvent, useEffect, useId, useState } from "react";
 import { api, put } from "../lib/api";
 import { failureWords, plural } from "../lib/memory";
 import type { MemoryServerPage } from "../lib/types";
+import { MemoryBackfill } from "./MemoryBackfill";
 
 function when(seconds: number): string {
   return new Date(seconds * 1000).toLocaleString(undefined, {
@@ -160,6 +161,9 @@ export function MemoryServer() {
                 <li key={words}>{words}</li>
               ))}
             </ul>
+          )}
+          {server.verbs.includes("retain") && (
+            <MemoryBackfill key={server.url} allowed={data?.allowed ?? false} />
           )}
           {data?.allowed && !server.linked && !editing && !asking && (
             <div className="flex flex-wrap gap-2">

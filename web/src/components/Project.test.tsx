@@ -14,6 +14,7 @@ vi.mock("../lib/api", async (importOriginal) => ({
   post: vi.fn(),
   upload: vi.fn(),
 }));
+vi.mock("./ProjectFolders", () => ({ ProjectFolders: () => null }));
 
 const chat = (id: string, title: string): Chat => ({
   id,
@@ -87,6 +88,16 @@ function open(
 }
 
 const loaded = () => screen.findByTestId("project-title");
+
+it("shows the project model in effect and saves an expert choice", async () => {
+  held = { ...held, model: null, modelInEffect: "local", models: ["local", "bigger"] };
+  vi.mocked(patch).mockResolvedValue({ ...held, model: "bigger", modelInEffect: "bigger" });
+  open();
+  const picker = await screen.findByLabelText("Model for new chats");
+  expect(picker).toHaveTextContent("Workbench's default (local)");
+  fireEvent.change(picker, { target: { value: "bigger" } });
+  await waitFor(() => expect(patch).toHaveBeenCalledWith("/api/projects/p1", { model: "bigger" }));
+});
 
 it("shows the name, its chats in the server's order, and its notes", async () => {
   const { onOpenChat } = open();

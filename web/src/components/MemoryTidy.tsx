@@ -5,6 +5,7 @@
  */
 
 import { CircleAlert, Sparkles } from "lucide-react";
+import { useState } from "react";
 
 import { post } from "../lib/api";
 import { failureWords, kindLabel, noteDate } from "../lib/memory";
@@ -16,7 +17,8 @@ type Action =
   | { action: "keep"; keepId: string }
   | { action: "keep_both" }
   | { action: "remove" }
-  | { action: "keep_event" };
+  | { action: "keep_event" }
+  | { action: "keep_wording"; title?: string; body?: string };
 
 export function TidyProposals({
   proposals,
@@ -79,11 +81,74 @@ function Duplicate({
   busy: boolean;
   answer: (proposal: TidyProposal, body: Action) => Promise<void>;
 }) {
+  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState(proposal.merged?.title ?? "");
+  const [body, setBody] = useState(proposal.merged?.body ?? "");
   return (
     <div data-testid="memory-tidy-duplicate" className="notice">
       <Sparkles size={16} aria-hidden />
       <div className="flex min-w-0 flex-1 flex-col gap-2">
-        <span className="notice-title">These look like the same note</span>
+        <span className="notice-title">
+          {proposal.model
+            ? `${proposal.model} thinks these say the same thing`
+            : "These look like the same note"}
+        </span>
+        {proposal.merged && (
+          <div className="flex flex-col gap-2">
+            {editing ? (
+              <>
+                <label>
+                  Title
+                  <input
+                    data-testid="tidy-merged-title"
+                    className="control"
+                    value={title}
+                    onChange={(e) => setTitle(e.target.value)}
+                  />
+                </label>
+                <label>
+                  Body
+                  <textarea
+                    data-testid="tidy-merged-body"
+                    className="control"
+                    value={body}
+                    onChange={(e) => setBody(e.target.value)}
+                  />
+                </label>
+              </>
+            ) : (
+              <>
+                <p>{proposal.merged.title}</p>
+                <p className="whitespace-pre-wrap">{proposal.merged.body}</p>
+              </>
+            )}
+            <div className="flex gap-2">
+              <button
+                type="button"
+                data-testid="tidy-keep-wording"
+                className="btn"
+                disabled={busy || !title.trim()}
+                onClick={() =>
+                  void answer(
+                    proposal,
+                    editing ? { action: "keep_wording", title, body } : { action: "keep_wording" },
+                  )
+                }
+              >
+                Keep this wording
+              </button>
+              <button
+                type="button"
+                data-testid="tidy-edit-wording"
+                className="btn"
+                disabled={busy}
+                onClick={() => setEditing(!editing)}
+              >
+                {editing ? "Cancel edit" : "Edit"}
+              </button>
+            </div>
+          </div>
+        )}
         <ul className="flex flex-col gap-2">
           {proposal.notes.map((note) => (
             <li key={note.id} data-testid="memory-tidy-note" className="flex flex-col gap-1">

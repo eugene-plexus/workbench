@@ -16,6 +16,7 @@ import logging
 import secrets
 import time
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, BinaryIO, Literal
@@ -511,11 +512,19 @@ async def create_chat(request: Request, body: ChatCreate) -> dict[str, Any]:
     prefs = await store.documents_prefs(person.sub)
     if body.projectId is not None and await store.project(person.sub, body.projectId) is None:
         raise _problem(status.HTTP_404_NOT_FOUND, "There is no such project.")
+    model = body.model
+    if body.projectId is not None and model is None:
+        from .projects import model_in_effect
+
+        project = await store.project(person.sub, body.projectId)
+        assert project is not None
+        with suppress(HubError):
+            model, _ = await model_in_effect(_state(request).hub, project.model)
     chat = Chat(
         id=_new_id(),
         owner=person.sub,
         title=NEW_CHAT,
-        model=body.model,
+        model=model,
         created_at=now,
         updated_at=now,
         settings={"documents": "on"} if prefs["new_chats"] else {},
@@ -985,15 +994,20 @@ async def person_chats(request: Request, sub: str) -> dict[str, Any]:
     await people(request)  # the same checks
     store: Store = _state(request).store
     answers = _answers(request)
+    chats = await store.chats(sub)
+    project_ids = {c.project_id for c in chats if c.project_id is not None}
     return {
+        "projects": [
+            {"id": p.id, "name": p.name} for p in await store.projects(sub) if p.id in project_ids
+        ],
         "chats": [
             chat_view(
                 c,
                 running=answers.running(c.id) is not None or _state(request).agui.busy(c.id),
                 read_only=True,
             )
-            for c in await store.chats(sub)
-        ]
+            for c in chats
+        ],
     }
 
 

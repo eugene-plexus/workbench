@@ -21,13 +21,19 @@ import type {
 } from "../lib/types";
 import { ScrollText } from "./ScrollText";
 import { TagChips } from "./MemoryTags";
+import { WebProvenance } from "./WebProvenance";
 
 type Working = <T>(work: () => Promise<T>) => Promise<T>;
 
 /** One note whole, and the versions it replaced. */
 export async function readWhole(id: string): Promise<NoteWhole> {
   const got = await api<NoteWhole>(`/api/memory/notes/${encodeURIComponent(id)}`);
-  return { note: got.note, earlier: got.earlier ?? [], documents: got.documents ?? [] };
+  return {
+    note: got.note,
+    earlier: got.earlier ?? [],
+    documents: got.documents ?? [],
+    mergeHistory: got.mergeHistory ?? [],
+  };
 }
 
 /** Where in a document an answer found it: "page 4", "pages 4-5", "lines 9-12", then the heading. */
@@ -138,9 +144,13 @@ function BasedOn({
                 data-testid="memory-document"
                 className="flex flex-wrap items-center gap-x-2 gap-y-1 py-2"
               >
-                <span dir="auto" className="min-w-0 wrap-anywhere">
-                  {doc.name}
-                </span>
+                {doc.scope === "web" || doc.scope === "tool" ? (
+                  <WebProvenance noteId={note.id} link={doc} />
+                ) : (
+                  <span dir="auto" className="min-w-0 wrap-anywhere">
+                    {doc.name}
+                  </span>
+                )}
                 {where.length > 0 && (
                   <span data-testid="memory-document-place" className="text-xs text-muted">
                     {where.join("; ")}
@@ -279,6 +289,11 @@ export function Details({
             </p>
           )}
           <section aria-labelledby={`${uid}-earlier`} className="flex flex-col gap-1">
+            {whole.mergeHistory?.map((line, index) => (
+              <p key={index} className="help">
+                {line}
+              </p>
+            ))}
             <h4 id={`${uid}-earlier`} className="eyebrow text-muted">
               Earlier versions
             </h4>

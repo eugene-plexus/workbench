@@ -38,6 +38,7 @@ export function AddFolder({
   disabled,
   onAdded,
   onTools,
+  projectId,
 }: {
   choices: FolderChoice[];
   limits: FolderLimits;
@@ -48,6 +49,7 @@ export function AddFolder({
   onAdded: (folder: DocumentFolder) => void;
   /** Opens Toolbox · Tools, where the owner gives folders to people. */
   onTools?: () => void;
+  projectId?: string;
 }) {
   const uid = useId();
   const open = choices.filter((choice) => !choice.added);
@@ -70,6 +72,7 @@ export function AddFolder({
     try {
       const made = await post<DocumentFolder>("/api/documents/folders", {
         grantId,
+        ...(projectId ? { projectId } : {}),
         ...rulesOf(draft),
       });
       setDraft(FRESH);

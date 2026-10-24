@@ -59,6 +59,18 @@ const twins = (): TidyProposal => ({
   ],
 });
 
+it("keeps model wording only after the person chooses it", async () => {
+  shown = page([], {
+    tidy: [{ ...twins(), model: "qwen", merged: { title: "Lives in Porto", body: "Portugal" } }],
+  });
+  await opened();
+  expect(screen.getByText("qwen thinks these say the same thing")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Keep this wording" }));
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith("/api/memory/tidy/t1", { action: "keep_wording" }),
+  );
+});
+
 describe("tidy: notes that look the same", () => {
   it("shows both and keeps the one chosen", async () => {
     shown = page([], { tidy: [twins()] });

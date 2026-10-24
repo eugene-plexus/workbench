@@ -11,6 +11,11 @@ vi.mock("../lib/api", async (importOriginal) => ({
   put: vi.fn(),
   post: vi.fn(),
 }));
+vi.mock("./MemoryBackfill", () => ({
+  MemoryBackfill: ({ allowed }: { allowed: boolean }) => (
+    <div data-testid="backfill-panel">{allowed ? "allowed" : "paused"}</div>
+  ),
+}));
 
 type Connected = NonNullable<MemoryServerPage["server"]>;
 
@@ -43,6 +48,14 @@ function page(server: Partial<Connected> | null = null, over: Partial<MemoryServ
 }
 
 afterEach(() => vi.mocked(api).mockReset());
+
+it("keeps backfill progress visible when the owner turns memory servers off", async () => {
+  vi.mocked(api).mockResolvedValueOnce(
+    page({}, { allowed: false, mode: "off", why: "Memory is off" }),
+  );
+  render(<MemoryServer />);
+  expect(await screen.findByTestId("backfill-panel")).toHaveTextContent("paused");
+});
 
 it("connects this machine's Hindsight with one click and keeps the switch in effect", async () => {
   vi.mocked(api).mockResolvedValueOnce(page(null, { linkedAvailable: true }));
