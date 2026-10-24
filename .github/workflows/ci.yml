@@ -128,12 +128,17 @@ jobs:
         browser: [firefox, webkit]
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      # Not setup-python: its toolcache Python is mounted from the host and its
+      # scripts name the host's path, which does not exist in the container
+      # (run 39962600116: `spawn /__t/Python/3.12.15/x64/bin/pip ENOENT`).
+      # uv's Python is self-contained and installs as user 1001.
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
-          cache: pip
+          activate-environment: true
+          enable-cache: true
       - name: Install package + dev deps
-        run: pip install -e ".[dev]"
+        run: uv pip install -e ".[dev]"
       - run: npm ci
         working-directory: web
       - run: npm run build
