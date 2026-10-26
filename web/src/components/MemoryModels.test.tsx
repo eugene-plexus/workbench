@@ -114,6 +114,29 @@ test("a choice is sent for that model alone", async () => {
   );
 });
 
+test("merge proposals show the effective choice and changing it keeps the learning mode", async () => {
+  page = served({
+    keepAllowed: true,
+    models: [model({ mode: "auto", chosen: "auto", proposeMerges: true })],
+  });
+  vi.mocked(put).mockResolvedValue({
+    ...page,
+    models: [model({ mode: "auto", chosen: "auto", proposeMerges: false })],
+  });
+  render(<MemoryModels />);
+  const checkbox = await screen.findByRole("checkbox", {
+    name: "Let gemma-4-e4b propose merges",
+  });
+  expect(checkbox).toBeChecked();
+  expect(screen.getByRole("combobox", { name: "What gemma-4-e4b may do" })).toHaveValue("auto");
+  fireEvent.click(checkbox);
+  await waitFor(() => expect(checkbox).not.toBeChecked());
+  expect(put).toHaveBeenCalledWith("/api/memory/models/gemma-4-e4b", { proposeMerges: false });
+  expect(screen.getByTestId("memory-model-effective")).toHaveTextContent(
+    "In effect: Keep automatically.",
+  );
+});
+
 test("an outside model asks before it is measured, saying what goes and that it is charged", async () => {
   let calls = 0;
   vi.mocked(post).mockImplementation((async (_path: string, body: unknown) => {

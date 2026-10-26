@@ -180,3 +180,8 @@ def effective(
     if install.suggestions == "measured" and recommended_for_suggest(measured):
         return SUGGEST, MEASURED
     return OFF, DEFAULT
+
+
+def proposes_merges(chosen: str | None, mode: str, override: bool | None) -> bool:
+    """Troy's MEM-MERGE: on for Keep automatically, with an explicit override."""
+    return mode != OFF and (override if override is not None else chosen == AUTO)

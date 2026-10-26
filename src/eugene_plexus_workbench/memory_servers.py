@@ -24,9 +24,11 @@ failure is a reason in words. Logs carry counts and causes, never a chat's words
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import logging
+import re
 import socket
 import ssl
 import time
@@ -34,7 +36,8 @@ import unicodedata
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -218,7 +221,10 @@ class _CheckedBackend(httpcore2.AsyncNetworkBackend):
         if not addresses:
             raise ServerProblem("The memory server's name has no address.")
         for address in addresses:
-            if (reason := refused_address(address, self._mode, self._own, port)) is not None:
+            if self._mode == "linked" and (host != "127.0.0.1" or address != "127.0.0.1"):
+                raise ServerProblem("The linked memory server must stay on loopback.")
+            checked_mode = "any" if self._mode == "linked" else self._mode
+            if (reason := refused_address(address, checked_mode, self._own, port)) is not None:
                 raise ServerProblem(reason)
             if self._plain_http and self._mode != "any":
                 ip = _plain(ipaddress.ip_address(address.split("%", 1)[0]))
@@ -416,14 +422,98 @@ def _arguments(verb: dict[str, Any], wanted: dict[str, Any]) -> dict[str, Any]:
 class Servers:
     """Connections to people's memory servers, with the address rule of the install."""
 
-    def __init__(self, store: Store, settings: Any = None) -> None:
+    def __init__(self, store: Store, settings: Any = None, *, hub: Any = None) -> None:
         self.store = store
         self.settings = settings
+        self.hub = hub
         self.tls = ssl.create_default_context()
         self._own: list[str] = []
         self._own_at = -OWN_SECONDS
         #: Calls past their time, cancelled and left to close.
         self._closing: set[asyncio.Task[list[Item]]] = set()
+
+    def linked_url(self, owner: str) -> str | None:
+        base = getattr(self.settings, "memory_server_url", None)
+        if not base:
+            return None
+        parts = urlsplit(base)
+        if (
+            parts.scheme != "http"
+            or parts.hostname != "127.0.0.1"
+            or not parts.port
+            or parts.username
+            or parts.password
+            or parts.query
+            or parts.fragment
+            or not re.fullmatch(r"/(?:[A-Za-z0-9_~-]+/)*", parts.path)
+        ):
+            return None
+        bank = "wb-" + hashlib.sha256(owner.encode("utf-8")).hexdigest()[:16]
+        return str(base) + bank + "/"
+
+    def is_linked_url(self, url: str) -> bool:
+        sample = self.linked_url("")
+        if sample is None:
+            return False
+        base = sample.rsplit("wb-", 1)[0]
+        return re.fullmatch(re.escape(base) + r"wb-[0-9a-f]{16}/", url) is not None
+
+    def link_token(self) -> str:
+        path = getattr(self.settings, "memory_server_token_file", None)
+        try:
+            token = Path(path).read_text(encoding="utf-8").strip() if path else ""
+        except OSError as exc:
+            raise ServerProblem(f"The Hindsight link token could not be read: {exc}") from None
+        if not token:
+            raise ServerProblem("The Hindsight link token is missing or empty.")
+        return token
+
+    async def link_locality(self, hub: Any = None) -> tuple[str, str | None]:
+        path = getattr(self.settings, "memory_server_model_file", None)
+        try:
+            text = await asyncio.to_thread(Path(path).read_text, encoding="utf-8") if path else "{}"
+            data = json.loads(text)
+            model = data.get("memoryModel")
+            if not isinstance(model, str) or not model:
+                return "external", "Choose the model Hindsight reads your chats with"
+        except (OSError, ValueError, TypeError) as exc:
+            return "external", f"Hindsight's effective model could not be read: {exc}"
+        try:
+            facts = await memory_api.model_facts(hub or self.hub, model)
+        except Exception as exc:
+            return (
+                "external",
+                f"The locality of Hindsight's model {model} could not be checked: "
+                f"{why_failed(exc)}",
+            )
+        if facts.locality == "local":
+            return "local", None
+        return "external", f"Hindsight's model {model} has {facts.locality} locality."
+
+    async def mode(self, server: dict[str, Any] | None) -> tuple[str, str | None]:
+        local = False
+        why = None
+        if server and server.get("linked"):
+            locality, why = await self.link_locality()
+            local = locality == "local"
+        mode, refusal = await mode_for(self.store, local_link=local)
+        return mode, (f"{refusal} {why}" if refusal and why else refusal)
+
+    async def linked_chat_refusal(self, server: dict[str, Any], chat: Chat) -> str | None:
+        if not server.get("linked"):
+            return None
+        locality, why = await self.link_locality()
+        if locality == "local":
+            return None
+        install = await config.memory_settings(self.store)
+        prefs = await self.store.memory_prefs(chat.owner)
+        choice, _ = memory_api.resolve_external(install.external, prefs["external"])
+        if choice == "always" or (choice == "ask" and chat.settings.get("memoryExternal") is True):
+            return None
+        return (
+            "Hindsight was not sent this chat: its model is outside your machines or "
+            f"its locality is unknown, and your memory setting does not allow it. {why or ''}"
+        )
 
     async def own_addresses(self) -> list[str]:
         """This machine's addresses: its names', the address each IP family leaves by, and
@@ -462,6 +552,8 @@ class Servers:
             raise ServerProblem(problem)
         if mode == "off":
             raise ServerProblem(OWNER_OFF)
+        if mode == "linked" and not self.is_linked_url(url):
+            raise ServerProblem("The memory server does not match this machine's Hindsight link.")
         own = await self.own_addresses()
         transport = httpx2.AsyncHTTPTransport(verify=self.tls, trust_env=False)
         transport._pool = httpcore2.AsyncConnectionPool(
@@ -552,8 +644,16 @@ class Servers:
     ) -> list[Item]:
         owner = server["owner"]
         try:
+            token = server["token"]
+            if server.get("linked"):
+                if server["url"] != self.linked_url(owner):
+                    raise ServerProblem(
+                        "The saved memory server does not match this person's Hindsight link."
+                    )
+                token = self.link_token()
+                mode = "linked" if mode != "off" else mode
             async with asyncio.timeout(seconds):
-                async with self.session(server["url"], server["token"], mode, seconds) as client:
+                async with self.session(server["url"], token, mode, seconds) as client:
                     result = await client.session.call_tool(
                         found["tool"], _arguments(found, wanted), read_timeout_seconds=seconds
                     )
@@ -570,13 +670,13 @@ class Servers:
         return items_of(result.structured_content, texts)
 
 
-async def mode_for(store: Store) -> tuple[str, str | None]:
+async def mode_for(store: Store, *, local_link: bool = False) -> tuple[str, str | None]:
     """The install's rule for memory servers in effect, and why none may be used, if so. A
     server is a service outside the machines: the owner's "never" for memory forbids it."""
     install = await config.memory_settings(store)
     if install.servers == "off":
         return "off", OWNER_OFF
-    if install.external == "never":
+    if install.external == "never" and not local_link:
         return "off", OWNER_NEVER
     if not install.enabled:
         return "off", memory_api._OWNER_OFF
@@ -616,7 +716,7 @@ async def content_for(
             text = f"{text}\n\nAnswer: {reply}" if text else f"Answer: {reply}"
     if not text.strip():
         return None, "nothing of the person's own words"
-    if policy.get("secrets") == "refuse" and memory.looks_like_secret(text) is not None:
+    if memory.looks_like_secret(text) is not None:
         return None, "secret"
     return text, None
 
@@ -637,6 +737,149 @@ def _iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, UTC).isoformat(timespec="seconds")
 
 
+class Backfill:
+    """A consented, durable feeder. At most twenty ids wait; chat words stay in their chat."""
+
+    def __init__(self, store: Store) -> None:
+        self.store = store
+
+    async def paused(self, owner: str) -> bool:
+        mode, _ = await mode_for(self.store)
+        paused = mode == "off" or not (await self.store.memory_prefs(owner))["enabled"]
+        await self.store.pause_backfill(owner, paused)
+        return paused
+
+    async def exchanges(
+        self, owner: str, since: float | None, until: float
+    ) -> list[tuple[Chat, list[Message], Message]]:
+        found = []
+        for chat in await self.store.chats(owner):
+            if chat.project_id is not None or chat.settings.get("memory") == "off":
+                continue
+            path = await self.store.messages(chat.id)
+            users = {m.id: m for m in path if m.role == "user"}
+            latest_user = None
+            for answer in path:
+                if answer.role == "user":
+                    latest_user = answer
+                if answer.role != "assistant" or answer.status != "done":
+                    continue
+                if answer.created_at > until or (since is not None and answer.created_at < since):
+                    continue
+                asked = users.get(answer.parent_id or "") or latest_user
+                found.append((chat, [asked, answer] if asked else [answer], answer))
+        return sorted(found, key=lambda e: (e[2].created_at, e[0].id, e[2].id))
+
+    async def preview(self, owner: str, since: float | None = None) -> dict[str, Any]:
+        await self.paused(owner)
+        server = await self.store.memory_server(owner)
+        state = json.loads(server["backfill"]) if server and server.get("backfill") else None
+        until = time.time()
+        if state and state["state"] in ("stopped", "running"):
+            since = state["since"]
+            until = state["startedAt"]
+        count = tokens = skipped = 0
+        chats = set()
+        for chat, path, answer in await self.exchanges(owner, since, until):
+            text, why = await content_for(self.store, owner, chat, path, answer)
+            if text is None:
+                skipped += why == "secret"
+                continue
+            count += 1
+            chats.add(chat.id)
+            tokens += memory.estimate_tokens(text)
+        measured = state and len(state.get("samples", [])) >= 10
+        return {
+            "exchanges": count,
+            "chats": len(chats),
+            "tokens": tokens,
+            "skipped": skipped,
+            "estimateSeconds": count * state["msPerExchange"] / 1000
+            if measured and state
+            else None,
+            "backfill": state,
+        }
+
+    async def start(self, owner: str, since: float | None = None) -> None:
+        server = await self.store.memory_server(owner)
+        mode, why = await mode_for(self.store)
+        if server is None or "retain" not in server["verbs"]:
+            raise ServerProblem("Your memory server cannot receive chats.")
+        if mode == "off":
+            raise ServerProblem(why or OWNER_OFF)
+        if not (await self.store.memory_prefs(owner))["enabled"]:
+            raise ServerProblem("Paused: memory is off")
+        previous = server.get("backfill")
+        state = json.loads(previous) if previous else None
+        if state and state["state"] in ("stopped", "running"):
+            state.update(state="running", failures=0, error=None)
+        else:
+            preview = await self.preview(owner, since)
+            state = {
+                "state": "running",
+                "since": since,
+                "startedAt": time.time(),
+                "total": preview["exchanges"] + preview["skipped"],
+                "sent": 0,
+                "skipped": 0,
+                "cursor": None,
+                "msPerExchange": None,
+                "pending": [],
+            }
+        await self.store.put_backfill(owner, server["url"], state, expected=previous)
+
+    async def stop(self, owner: str) -> None:
+        server = await self.store.memory_server(owner)
+        if server and server.get("backfill"):
+            state = json.loads(server["backfill"])
+            if state["state"] == "running":
+                state["state"] = "stopped"
+                await self.store.put_backfill(
+                    owner, server["url"], state, expected=server["backfill"]
+                )
+
+    async def top_up(self, owner: str) -> None:
+        if await self.paused(owner):
+            return
+        server = await self.store.memory_server(owner)
+        if not server or not server.get("backfill"):
+            return
+        state = json.loads(server["backfill"])
+        if state["state"] != "running":
+            return
+        present = await self.store.memory_server_pending(owner)
+        missing = [i for i in state["pending"] if i not in present]
+        if missing:
+            for doc_id in missing:
+                await self.store.backfill_result(owner, server["url"], doc_id, "skipped")
+            await self.top_up(owner)
+            return
+        if len(state["pending"]) >= 20:
+            return
+        queue: list[tuple[str, str]] = []
+        state["exhausted"] = True
+        for chat, path, answer in await self.exchanges(owner, state["since"], state["startedAt"]):
+            cursor = [answer.created_at, chat.id, answer.id]
+            if state["cursor"] is not None and cursor <= state["cursor"]:
+                continue
+            if len(queue) + len(state["pending"]) >= 20:
+                state["exhausted"] = False
+                break
+            state["cursor"] = cursor
+            text, why = await content_for(self.store, owner, chat, path, answer)
+            if why == "memory is off" and await self.paused(owner):
+                return
+            if text is None:
+                state["skipped"] += 1
+                continue
+            queue.append((chat.id, answer.id))
+        if await self.paused(owner):
+            return
+        await self.store.put_backfill(
+            owner, server["url"], state, queue, expected=server["backfill"]
+        )
+
+
 class Courier:
     """Sends answered exchanges to people's servers and forgets deleted chats' there, in the
     background, trying again with back-off and giving up after a day."""
@@ -652,6 +895,7 @@ class Courier:
         self._stopped: set[str] = set()
         self._busy: dict[str, int] = {}
         self._calm = asyncio.Condition()
+        self.backfill = Backfill(store)
 
     def start(self) -> None:
         if self._task is None:
@@ -674,6 +918,14 @@ class Courier:
         that ends after its row was deleted leaves a row to forget (`_one`), which the purge
         then forgets with the rest."""
         self.stop_owner(owner)
+        await self.wait_idle(owner)
+
+    async def wait_idle(self, owner: str) -> None:
+        """Wait for this person's active call to settle, without disabling live work.
+
+        Backfill Stop saves its stopped state first, preventing further past-chat
+        sends, then waits here so none can arrive after its response.
+        """
         async with self._calm:
             await self._calm.wait_for(lambda: not self._busy.get(owner))
 
@@ -722,10 +974,43 @@ class Courier:
         """One round over what is due; how many were settled."""
         now = time.time() if now is None else now
         settled = 0
-        for row in await self.store.memory_server_due(now):
+        due = await self.store.memory_server_due(now, limit=1000)
+        backfills = {}
+        pending = set()
+        for owner in await self.store.backfill_owners():
+            server = await self.store.memory_server(owner)
+            if server and server.get("backfill"):
+                backfills[owner] = json.loads(server["backfill"])
+                pending.update(backfills[owner].get("pending", []))
+        live = await self.store.memory_server_live_due(now)
+        if live:
+            due = live[:20]
+        else:
+            for owner in backfills:
+                if owner not in self._stopped:
+                    await self.backfill.top_up(owner)
+            due = await self.store.memory_server_due(max(now, time.time()), limit=1000)
+        for row in due:
             if row["owner"] in self._stopped:
                 continue
+            server = await self.store.memory_server(row["owner"])
+            state = json.loads(server["backfill"]) if server and server.get("backfill") else {}
+            is_backfill = row["document_id"] in state.get("pending", [])
+            if is_backfill and row["state"] == "send" and await self.backfill.paused(row["owner"]):
+                continue
+            if is_backfill and state["state"] != "running" and row["state"] == "send":
+                continue
+            if (
+                is_backfill
+                and row["state"] == "send"
+                and await self.store.memory_server_live_due(time.time())
+            ):
+                return max(1, settled)  # Go round again now; the live row goes first.
             if now - row["created_at"] > GIVE_UP_SECONDS:
+                if is_backfill and server:
+                    await self.store.backfill_result(
+                        row["owner"], server["url"], row["document_id"], "skipped"
+                    )
                 await self.store.memory_server_drop(row["document_id"])
                 log.warning("memory servers: gave up on one %s after a day", row["state"])
                 continue
@@ -735,6 +1020,10 @@ class Courier:
                 if await self._one(row):
                     settled += 1
             except Exception as exc:
+                if is_backfill and server:
+                    await self.store.backfill_result(
+                        owner, server["url"], row["document_id"], "failed", reason=str(exc)
+                    )
                 if not isinstance(exc, ServerProblem):
                     log.warning(
                         "memory servers: one %s failed: %s", row["state"], type(exc).__name__
@@ -757,9 +1046,17 @@ class Courier:
     async def _one(self, row: dict[str, Any]) -> bool:
         owner = row["owner"]
         server = await self.store.memory_server(owner)
-        mode, _ = await mode_for(self.store)
+        mode, _ = (
+            await self.servers.mode(server)
+            if server and server.get("linked")
+            else await mode_for(self.store)
+        )
         if server is None:
             await self.store.memory_server_drop(row["document_id"])
+            return False
+        progress = json.loads(server["backfill"]) if server.get("backfill") else {}
+        is_backfill = row["document_id"] in progress.get("pending", [])
+        if is_backfill and row["state"] == "send" and await self.backfill.paused(owner):
             return False
         if row["state"] == "forget":
             if "forget" not in server["verbs"] or mode == "off":
@@ -772,18 +1069,39 @@ class Courier:
         if "retain" not in server["verbs"] or mode == "off" or chat is None:
             await self.store.memory_server_drop(row["document_id"])
             return False
+        if server.get("linked") and (
+            refusal := await self.servers.linked_chat_refusal(server, chat)
+        ):
+            await self.store.memory_server_reached(owner, refusal)
+            await self.store.memory_server_drop(row["document_id"])
+            return False
         path = await self.store.messages(row["chat_id"], via=row["message_id"])
+        target = next((i for i, m in enumerate(path) if m.id == row["message_id"]), None)
+        path = path[: target + 1] if target is not None else []
         answer = path[-1] if path and path[-1].id == row["message_id"] else None
         if answer is None:
             await self.store.memory_server_drop(row["document_id"])
             return False
         text, why = await content_for(self.store, owner, chat, path, answer)
         if text is None:
+            if is_backfill and why == "memory is off" and await self.backfill.paused(owner):
+                return False
             if why == "secret":
                 await self.store.memory_server_skipped(owner)
             await self.store.memory_server_drop(row["document_id"])
+            await self.store.backfill_result(owner, server["url"], row["document_id"], "skipped")
             return False
         asked_at = next((m.created_at for m in path if m.id == answer.parent_id), answer.created_at)
+        started = time.perf_counter()
+        current = await self.store.memory_server(owner)
+        if current is None or current["url"] != server["url"]:
+            return False
+        progress = json.loads(current["backfill"]) if current.get("backfill") else {}
+        if row["document_id"] in progress.get("pending", []) and progress["state"] != "running":
+            return False
+        context = await context_for(self.store, owner, chat)
+        if is_backfill and await self.backfill.paused(owner):
+            return False
         await self.servers.call(
             server,
             mode,
@@ -792,11 +1110,15 @@ class Courier:
                 "content": text,
                 "document_id": row["document_id"],
                 "timestamp": _iso(asked_at),
-                "context": await context_for(self.store, owner, chat),
+                "context": context,
             },
             RETAIN_SECONDS,
         )
-        settled = await self.store.memory_server_settled(row["document_id"], "send")
+        settled = await self.store.backfill_result(
+            owner, server["url"], row["document_id"], "sent", (time.perf_counter() - started) * 1000
+        )
+        if not settled:
+            settled = await self.store.memory_server_settled(row["document_id"], "send")
         if not settled and "forget" in server["verbs"]:
             # Its chat was deleted while it was being sent: it is to be forgotten, as any
             # deleted chat's exchange is, and tried at once.
@@ -881,7 +1203,7 @@ async def _turn_for(
     server = await store.memory_server(person.sub)
     if server is None:
         return ServerTurn()
-    mode, _ = await mode_for(store)
+    mode, _ = await state.memory_servers.mode(server)
     if mode == "off":
         return ServerTurn()
     decision = await memory_api.decide(state, person, chat, model_id)
@@ -891,6 +1213,8 @@ async def _turn_for(
         return ServerTurn()  # MV7: a project kept to itself is given no general memory
     facts = decision.facts
     name = server["name"] or "Your memory server"
+    if refusal := await state.memory_servers.linked_chat_refusal(server, chat):
+        return ServerTurn(record={"name": name, "why": refusal, "memories": []})
     if facts.locality != "local":
         install = await config.memory_settings(store)
         prefs = await store.memory_prefs(person.sub)
@@ -949,7 +1273,7 @@ async def clear(state: Any, owner: str) -> dict[str, Any] | None:
     server = await store.memory_server(owner)
     if server is None:
         return None
-    mode, why_not = await mode_for(store)
+    mode, why_not = await state.memory_servers.mode(server)
     name = server["name"] or "Your memory server"
     if mode == "off":
         return {"cleared": False, "left": None, "message": f"{name} was not cleared: {why_not}"}
@@ -1000,7 +1324,7 @@ async def export_items(state: Any, owner: str) -> dict[str, Any] | None:
     if server is None:
         return None
     out: dict[str, Any] = {"server": server["name"] or "", "url": server["url"]}
-    mode, why_not = await mode_for(store)
+    mode, why_not = await state.memory_servers.mode(server)
     if mode == "off":
         return {**out, "memories": None, "note": why_not}
     if "list" not in server["verbs"]:
@@ -1033,7 +1357,8 @@ def view(server: dict[str, Any] | None, counts: dict[str, int]) -> dict[str, Any
     return {
         "url": server["url"],
         "name": server["name"],
-        "hasToken": bool(server["token"]),
+        "hasToken": bool(server["token"]) or bool(server.get("linked")),
+        "linked": bool(server.get("linked")),
         "verbs": sorted(verbs),
         "missing": [MISSING_WORDS[v] for v in MISSING_WORDS if v not in verbs],
         "connectedAt": server["connected_at"],
@@ -1054,6 +1379,50 @@ def view(server: dict[str, Any] | None, counts: dict[str, int]) -> dict[str, Any
 router = APIRouter()
 
 
+class BackfillStart(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    since: date | None = None
+
+
+def _since(day: date | None) -> float | None:
+    return datetime(day.year, day.month, day.day, tzinfo=UTC).timestamp() if day else None
+
+
+@router.get("/api/memory/server/backfill")
+async def get_backfill(request: Request, since: date | None = None) -> dict[str, Any]:
+    from .api import _person, _state
+
+    person = await _person(request)
+    return await Backfill(_state(request).store).preview(person.sub, _since(since))
+
+
+@router.post("/api/memory/server/backfill")
+async def start_backfill(request: Request, body: BackfillStart) -> dict[str, Any]:
+    from .api import _person, _problem, _state
+
+    person = await _person(request)
+    state = _state(request)
+    feeder = Backfill(state.store)
+    try:
+        await feeder.start(person.sub, _since(body.since))
+    except ServerProblem as exc:
+        raise _problem(status.HTTP_400_BAD_REQUEST, exc.message) from None
+    state.memory_courier.poke()
+    return await feeder.preview(person.sub, _since(body.since))
+
+
+@router.delete("/api/memory/server/backfill")
+async def stop_backfill(request: Request) -> dict[str, Any]:
+    from .api import _person, _state
+
+    person = await _person(request)
+    state = _state(request)
+    feeder = Backfill(state.store)
+    await feeder.stop(person.sub)
+    await state.memory_courier.wait_idle(person.sub)
+    return await feeder.preview(person.sub)
+
+
 class ServerConnect(BaseModel):
     model_config = ConfigDict(extra="forbid")
     url: str = Field(min_length=1, max_length=MAX_URL)
@@ -1061,15 +1430,27 @@ class ServerConnect(BaseModel):
     token: str | None = Field(default=None, max_length=4096)
 
 
-async def _page(store: Store, owner: str) -> dict[str, Any]:
+async def _page(store: Store, owner: str, servers: Servers) -> dict[str, Any]:
     mode, why_not = await mode_for(store)
     server = await store.memory_server(owner)
     counts = await store.memory_server_counts(owner) if server is not None else {}
+    link_mode, link_why = (
+        await servers.mode({"linked": True}) if servers.linked_url(owner) else ("off", None)
+    )
+    available = False
+    if servers.linked_url(owner) and link_mode != "off":
+        try:
+            servers.link_token()
+            available = True
+        except ServerProblem as exc:
+            link_why = exc.message
     return {
         "allowed": mode != "off",
         "mode": mode,
         "why": why_not,
         "server": view(server, counts),
+        "linkedAvailable": available,
+        "linkedWhy": link_why,
     }
 
 
@@ -1079,7 +1460,8 @@ async def get_server(request: Request) -> dict[str, Any]:
     from .api import _person, _state
 
     person = await _person(request)
-    return await _page(_state(request).store, person.sub)
+    state = _state(request)
+    return await _page(state.store, person.sub, state.memory_servers)
 
 
 @router.put("/api/memory/server")
@@ -1107,10 +1489,10 @@ async def put_server(request: Request, body: ServerConnect) -> dict[str, Any]:
         name, verbs = await servers.discover(url, token, mode)
     except ServerProblem as exc:
         raise _problem(status.HTTP_400_BAD_REQUEST, exc.message) from None
-    await store.put_memory_server(person.sub, url, token, name, verbs)
+    await store.connect_memory_server(person.sub, url, token, name, verbs)
     await store.memory_server_reached(person.sub, None)
     log.info("a person connected a memory server (%d verbs)", len(verbs))
-    return await _page(store, person.sub)
+    return await _page(store, person.sub, state.memory_servers)
 
 
 @router.delete("/api/memory/server")
@@ -1119,6 +1501,39 @@ async def delete_server(request: Request) -> dict[str, Any]:
     from .api import _person, _state
 
     person = await _person(request)
-    store: Store = _state(request).store
+    state = _state(request)
+    store: Store = state.store
     await store.delete_memory_server(person.sub)
-    return await _page(store, person.sub)
+    return await _page(store, person.sub, state.memory_servers)
+
+
+class LinkedConnect(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool
+
+
+@router.put("/api/memory/server/linked")
+async def put_linked_server(request: Request, body: LinkedConnect) -> dict[str, Any]:
+    from .api import _person, _problem, _state
+
+    person = await _person(request)
+    state = _state(request)
+    servers: Servers = state.memory_servers
+    if not body.enabled:
+        old = await state.store.memory_server(person.sub)
+        if old and old.get("linked"):
+            await state.store.delete_memory_server(person.sub)
+        return await _page(state.store, person.sub, servers)
+    mode, why = await servers.mode({"linked": True})
+    if mode == "off":
+        raise _problem(403, why or OWNER_OFF)
+    url = servers.linked_url(person.sub)
+    if url is None:
+        raise _problem(409, "Hindsight on this machine is not linked to Workbench.")
+    try:
+        name, verbs = await servers.discover(url, servers.link_token(), "linked")
+    except ServerProblem as exc:
+        raise _problem(400, exc.message) from None
+    await state.store.put_memory_server(person.sub, url, "", name, verbs, linked=True)
+    await state.store.memory_server_reached(person.sub, None)
+    return await _page(state.store, person.sub, servers)

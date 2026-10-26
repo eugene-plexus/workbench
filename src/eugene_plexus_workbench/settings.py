@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     key_file: Path | None = None
     admin_token: str | None = None
     gateway_url: str | None = None
+    memory_server_url: str | None = None
+    memory_server_token_file: Path | None = None
+    memory_server_model_file: Path | None = None
     oidc_issuer: str | None = None
     oidc_client_id: str | None = None
     oidc_secret_file: Path | None = None

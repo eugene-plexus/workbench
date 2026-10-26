@@ -127,7 +127,7 @@ def test_the_store_v0_1_wrote_is_migrated_and_every_chat_comes_through(tmp_path:
     store = open_store(path)
     try:
         # The version is recorded.
-        assert schema_of(path) == str(SCHEMA_VERSION) == "31"
+        assert schema_of(path) == str(SCHEMA_VERSION) == "33"
         # Everything v0.1 held is there, column for column.
         for table, columns in {
             "people": "sub, name, username, role, first_seen, last_seen",

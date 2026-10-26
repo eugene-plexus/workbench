@@ -241,6 +241,7 @@ async def folder_view(
     interval = settings.sync_minutes * 60
     view: dict[str, Any] = {
         "id": record.grant_id,
+        "projectId": record.project_id,
         "name": record.name,
         "state": state,
         "headline": headline(record, state, run, counts, settings.sync_minutes, now),
@@ -329,7 +330,7 @@ async def _enabled(request: Request) -> None:
 
 
 @router.get("/api/documents/folders")
-async def list_folders(request: Request) -> dict[str, Any]:
+async def list_folders(request: Request, projectId: str | None = None) -> dict[str, Any]:
     """The asker's folders, each with its state, counts and last check; the granted folders they
     may add (`grants`, never with a path); every limit and the rules always in force (`limits`); and
     whether folders can be used on this Workbench (`available`, and `reason` when not)."""
@@ -339,6 +340,8 @@ async def list_folders(request: Request) -> dict[str, Any]:
     settings = await config.folder_settings(state.store)
     grants = await state.store.folder_grants()
     records = await state.store.folder_records(person.sub)
+    if projectId is not None and await state.store.project(person.sub, projectId) is None:
+        raise _problem(404, "There is no such project.")
     reason = state.tools.folders.unavailable()
     added = {r.grant_id for r in records}
     return {
@@ -348,6 +351,7 @@ async def list_folders(request: Request) -> dict[str, Any]:
         "folders": [
             await folder_view(request, person, r, grants=grants, install=install, settings=settings)
             for r in records
+            if r.project_id == projectId
         ],
         "grants": [
             {
@@ -373,6 +377,7 @@ class FolderAdd(BaseModel):
     includeHidden: StrictBool = False
     #: Respect the folder's own `.gitignore` files.
     useGitignore: StrictBool = True
+    projectId: str | None = Field(default=None, max_length=200)
 
 
 class FolderChange(BaseModel):
@@ -380,6 +385,7 @@ class FolderChange(BaseModel):
     ignore: list[str] | None = Field(default=None, max_length=folder_rules.MAX_PATTERNS + 1)
     includeHidden: StrictBool | None = None
     useGitignore: StrictBool | None = None
+    projectId: str | None = Field(default=None, max_length=200)
 
 
 class SyncNow(BaseModel):
@@ -398,6 +404,8 @@ async def add_folder(request: Request, body: FolderAdd) -> dict[str, Any]:
     person = await _person(request)
     await _enabled(request)
     state = _state(request)
+    if body.projectId is not None and await state.store.project(person.sub, body.projectId) is None:
+        raise _problem(404, "There is no such project.")
     if body.grantId.startswith("node:"):
         raise _problem(status.HTTP_400_BAD_REQUEST, _NODE_FOLDER)
     if reason := state.tools.folders.unavailable():
@@ -409,6 +417,7 @@ async def add_folder(request: Request, body: FolderAdd) -> dict[str, Any]:
             ignore=body.ignore,
             include_hidden=body.includeHidden,
             use_gitignore=body.useGitignore,
+            project_id=body.projectId,
         )
     except NoSuchGrant:
         raise _problem(status.HTTP_404_NOT_FOUND, _NO_FOLDER) from None
@@ -418,6 +427,8 @@ async def add_folder(request: Request, body: FolderAdd) -> dict[str, Any]:
         ) from None
     except folder_rules.BadPattern as exc:
         raise _problem(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from None
+    except ValueError as exc:
+        raise _problem(status.HTTP_404_NOT_FOUND, str(exc)) from None
     return await folder_view(request, person, record)
 
 
@@ -439,6 +450,18 @@ async def change_folder(request: Request, grant_id: str, body: FolderChange) -> 
     await _enabled(request)
     if record.status != "active":
         raise _problem(status.HTTP_409_CONFLICT, "The owner took away your access to this folder.")
+    if "projectId" in body.model_fields_set:
+        if (
+            body.projectId is not None
+            and await _state(request).store.project(person.sub, body.projectId) is None
+        ):
+            raise _problem(404, "There is no such project.")
+        try:
+            record = await _sync(request).move(person.sub, grant_id, body.projectId) or record
+        except Exception as exc:
+            raise _problem(503, f"The folder could not be moved: {exc}") from None
+        if not body.model_fields_set.intersection({"ignore", "includeHidden", "useGitignore"}):
+            return await folder_view(request, person, record)
     try:
         changed = await _sync(request).update(
             person.sub,

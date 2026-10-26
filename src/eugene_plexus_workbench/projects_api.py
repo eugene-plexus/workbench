@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from . import memory, memory_api, projects
 from .api import _answers, _new_id, _person, _problem, _state, chat_view, remove_chat
+from .hub import HubError
 from .store import Project, Store
 
 log = logging.getLogger(__name__)
@@ -39,7 +40,26 @@ def project_view(project: Project, chats: int = 0, notes: int = 0) -> dict[str, 
         "updatedAt": project.updated_at,
         "chats": chats,
         "notes": notes,
+        "model": project.model,
     }
+
+
+async def model_view(request: Request, project: Project) -> dict[str, Any]:
+    try:
+        effective, models = await projects.model_in_effect(_state(request).hub, project.model)
+        return {
+            "model": project.model,
+            "modelInEffect": effective,
+            "models": models,
+            "modelProblem": None,
+        }
+    except HubError as exc:
+        return {
+            "model": project.model,
+            "modelInEffect": None,
+            "models": [],
+            "modelProblem": f"Workbench could not check which model is served: {exc.message}",
+        }
 
 
 def _name(raw: str) -> str:
@@ -128,8 +148,10 @@ async def get_project(request: Request, project_id: str) -> dict[str, Any]:
     )
     return {
         **project_view(project, len(mine), len(notes)),
+        **await model_view(request, project),
         # MV7b: how many documents are kept to it (what Delete project names).
         "documents": documents,
+        "folders": sum(f.project_id == project.id for f in await store.folder_records(person.sub)),
         "chatList": [chat_view(c, running=answers.running(c.id) is not None) for c in mine],
     }
 
@@ -141,6 +163,7 @@ class ProjectUpdate(BaseModel):
     generalMemory: StrictBool | None = None
     #: Also search My documents (MV7b).
     generalDocuments: StrictBool | None = None
+    model: str | None = Field(default=None, min_length=1, max_length=256)
 
 
 @router.patch("/api/projects/{project_id}")
@@ -158,8 +181,14 @@ async def update_project(request: Request, project_id: str, body: ProjectUpdate)
     # Its chats' frozen pinned blocks were taken with, or without, general notes: they go
     # with the switch, in one step.
     await _put(request, project, retake=switched)
+    if "model" in body.model_fields_set:
+        await _store(request).set_project_model(person.sub, project.id, body.model)
+        project.model = body.model
     chats, notes = await _counts(_store(request), person.sub)
-    return project_view(project, chats.get(project.id, 0), notes.get(project.id, 0))
+    return {
+        **project_view(project, chats.get(project.id, 0), notes.get(project.id, 0)),
+        **await model_view(request, project),
+    }
 
 
 @router.delete("/api/projects/{project_id}")
@@ -173,6 +202,22 @@ async def delete_project(request: Request, project_id: str, keep: bool = False) 
     store = _store(request)
     saved = getattr(_state(request), "saved", None)
     if keep:
+        failed_folders = []
+        moved_folders = 0
+        for folder in await store.folder_records(person.sub):
+            if folder.project_id == project.id:
+                try:
+                    await _state(request).folder_sync.move(person.sub, folder.grant_id, None)
+                    moved_folders += 1
+                except Exception as exc:
+                    failed_folders.append(f"{folder.name} ({type(exc).__name__}: {exc})")
+        if failed_folders:
+            raise _problem(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                f"Moved {moved_folders} folders to My documents. These folders could not be moved: "
+                + "; ".join(failed_folders)
+                + ". The project and its other contents were kept. Try again in a moment.",
+            )
         # Its documents move to My documents first, as uploads of their names would (MV7b):
         # all or nothing, so a move that fails leaves the project whole to try again.
         moved = replaced = 0
@@ -194,6 +239,9 @@ async def delete_project(request: Request, project_id: str, keep: bool = False) 
             "documents": moved,
             "replaced": replaced,
         }
+    for folder in await store.folder_records(person.sub):
+        if folder.project_id == project.id:
+            await _state(request).folder_sync.remove(person.sub, folder.grant_id)
     gone_chats = gone_notes = 0
     for chat in [c for c in await store.chats(person.sub) if c.project_id == project.id]:
         async with _state(request).branches.lock(chat.id):

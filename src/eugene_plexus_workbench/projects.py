@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Any
 
 from .store import Chat, MemoryNote, Store
 
@@ -34,6 +35,17 @@ class Place:
 
 
 GENERAL = Place()
+
+
+async def model_in_effect(hub: Any, choice: str | None) -> tuple[str | None, list[str]]:
+    """Use the project's served choice, otherwise Workbench's first chat model."""
+    listing = await hub.models()
+    models = []
+    for entry in listing.get("data") or []:
+        surfaces = (entry.get("x_eugene_plexus") or {}).get("surfaces")
+        if entry.get("id") and (surfaces is None or "chat" in surfaces):
+            models.append(entry["id"])
+    return (choice if choice in models else next(iter(models), None)), models
 
 
 async def place_of(store: Store, chat: Chat | None) -> Place:
