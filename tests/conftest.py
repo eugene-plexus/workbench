@@ -1300,7 +1300,12 @@ class FakeGateway:
                 # A memory suggestion call (MR8): not streamed, answered with `suggest_answer`,
                 # kept apart so a chat's own requests stay what `requests` holds.
                 self.suggest_requests.append(
-                    {"body": body, "person": request.headers.get("X-Eugene-Person-Token")}
+                    {
+                        "body": body,
+                        "person": request.headers.get("X-Eugene-Person-Token"),
+                        # Row 11: the queue band the call asked for.
+                        "band": request.headers.get("X-Eugene-Band"),
+                    }
                 )
                 if self.suggest_refusal is not None:
                     status, message = self.suggest_refusal

@@ -584,10 +584,19 @@ class Hub:
             raise self._unreachable(exc) from exc
         return written
 
-    async def complete(self, body: dict[str, Any], *, seconds: float = 120.0) -> dict[str, Any]:
+    async def complete(
+        self, body: dict[str, Any], *, seconds: float = 120.0, band: str | None = None
+    ) -> dict[str, Any]:
         """One chat completion, not streamed (MR8's memory suggestions): the gateway's
-        answer as it sent it. Raises `HubError`."""
+        answer as it sent it. Raises `HubError`.
+
+        `band` lowers the request's place in the gateway's line (row 11): work
+        nobody watches (learning, the tidy pass) asks for `background`, so on a
+        busy machine it waits behind people's chats. A band can only be lowered.
+        """
         headers = await self._headers()
+        if band is not None:
+            headers["X-Eugene-Band"] = band
         try:
             response = await self._http.post(
                 f"{self.gateway_url}/v1/chat/completions",

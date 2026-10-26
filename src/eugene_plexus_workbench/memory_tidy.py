@@ -339,7 +339,10 @@ async def model_pass(
                             },
                             {"role": "user", "content": json.dumps(prompt)},
                         ],
-                    }
+                    },
+                    # Background (row 11): nobody watches the tidy pass, so it waits
+                    # behind people's chats; a refusal pauses it until the next pass.
+                    band="background",
                 )
                 text = answer["choices"][0]["message"]["content"]
                 result = json.loads(text)
