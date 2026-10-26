@@ -33,6 +33,7 @@ FILES = "files"
 MODE_SECONDS = 10.0
 PRODUCTION = "production"
 MAX_ANSWER = 100_000
+MAX_TOOL_ANSWER = 8 * 1024 * 1024
 
 
 def rpc(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -370,9 +371,12 @@ class NodeFolders:
                 else f"Eugene could not reach this machine's tools (HTTP {response.status_code})."
             )
             raise FolderError(self._refusal(response, fallback))
+        limit = MAX_TOOL_ANSWER if request.get("method") == "tools/call" else MAX_ANSWER
+        if len(response.content) > limit:
+            error = WriteUncertain if acting else FolderError
+            size = "8 MiB" if request.get("method") == "tools/call" else "100,000 bytes"
+            raise error(f"The machine's answer is larger than {size}. Ask for less.")
         try:
-            if len(response.content) > MAX_ANSWER:
-                raise ValueError
             value = response.json()
             if not isinstance(value, dict) or value.get("status") not in {
                 "done",

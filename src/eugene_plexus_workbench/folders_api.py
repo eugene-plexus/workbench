@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
 from .api import _new_id, _person, _problem, _state
@@ -82,6 +83,16 @@ async def add(request: Request, body: GrantCreate) -> dict[str, Any]:
     try:
         grant = await _state(request).tools.folders.add({"id": _new_id(), **body.model_dump()})
     except FolderError as exc:
+        if isinstance(exc.cause, PermissionError):
+            raise HTTPException(
+                400,
+                detail={
+                    "message": str(exc),
+                    "giveAccessUrl": _state(request).tools.folders.give_access_url(
+                        body.path, body.writable
+                    ),
+                },
+            ) from None
         raise _problem(400, str(exc)) from None
     return public(grant, person)
 
@@ -90,8 +101,16 @@ async def add(request: Request, body: GrantCreate) -> dict[str, Any]:
 async def remove(request: Request, grant_id: str) -> Response:
     if not (await _person(request)).is_owner:
         raise _problem(403, "Only the owner can remove folder access.")
-    await _state(request).tools.folders.remove(grant_id)
+    warning = await _state(request).tools.folders.remove(grant_id)
     # The grant is gone: what was read from the folder leaves the person's documents before this
     # returns (`knowledge/folder_sync.py`).
     await _state(request).folder_sync.grant_withdrawn(grant_id)
+    if warning:
+        return JSONResponse(
+            {
+                "warning": warning,
+                "giveAccessUrl": _state(request).tools.folders.give_access_url(""),
+            },
+            status_code=200,
+        )
     return Response(status_code=204)

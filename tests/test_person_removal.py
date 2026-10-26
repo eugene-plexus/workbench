@@ -188,12 +188,16 @@ def _holds(data: bytes, needle: bytes) -> bool:
 
 
 def _holding(directory: Path, mark: str) -> list[str]:
-    """Every file under `directory` that holds `mark`, a ZIP's members included."""
+    """Every file under `directory` that holds `mark`, a ZIP's members included.
+
+    A WAL store's -shm index is left out: it holds page numbers and checksums,
+    never row content, and Windows locks it while the server writes.
+    """
     needle = mark.encode()
     return sorted(
         str(p.relative_to(directory))
         for p in directory.rglob("*")
-        if p.is_file() and _holds(p.read_bytes(), needle)
+        if p.is_file() and not p.name.endswith("-shm") and _holds(p.read_bytes(), needle)
     )
 
 
@@ -202,6 +206,24 @@ def test_the_scan_finds_a_word_inside_a_download(tmp_path: Path) -> None:
         made.writestr("chats.json", json.dumps({"words": MARK["a"] * 20}))
     assert MARK["a"].encode() not in (tmp_path / "kept.zip").read_bytes()
     assert _holding(tmp_path, MARK["a"]) == ["kept.zip"]
+
+
+def test_the_scan_reads_a_store_while_the_server_writes_it(tmp_path: Path) -> None:
+    """Windows locks a WAL store's -shm index during every write; reading it failed.
+
+    The index holds page numbers and checksums, never a message, so the scan
+    leaves it out and still reads the store and its -wal.
+    """
+    store = sqlite3.connect(tmp_path / "workbench.sqlite3", isolation_level=None)
+    try:
+        store.execute("pragma journal_mode=wal")
+        store.execute("create table chats(words text)")
+        store.execute("insert into chats values (?)", (MARK["a"],))
+        store.execute("begin immediate")  # a write in progress, as in the server
+        assert _holding(tmp_path, MARK["a"]) == ["workbench.sqlite3-wal"]
+    finally:
+        store.execute("rollback")
+        store.close()
 
 
 def _purge(path: Path, sub: str) -> list[Path]:

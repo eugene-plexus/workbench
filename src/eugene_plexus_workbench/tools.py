@@ -8,12 +8,14 @@ TLS context is built once per Workbench, never while dispatching a tool.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import ipaddress
 import json
 import ssl
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
@@ -25,7 +27,7 @@ from mcp.client.streamable_http import streamable_http_client
 from referencing import Registry
 from referencing.exceptions import NoSuchResource
 
-from . import a2ui_state, folder_io, folders, mcp_ui, memory
+from . import a2ui_state, files, folder_io, folders, mcp_ui, memory
 from .content import CONTENT_VERSION, Keeper, normalize
 from .local_tools import LocalProcesses, LocalToolError, unavailable
 from .node_folders import FILES as SITE_FILES
@@ -48,7 +50,9 @@ ASK_META = "eugene-plexus/ask"
 #: instead of asking first.
 SIGNED_META = "eugene-plexus/signed"
 MAX_ARGUMENTS = 16_384
-MAX_RESPONSE = 2_097_152
+MAX_RESPONSE = 8 * 1024 * 1024
+MAX_PICTURES = 8
+MAX_PICTURE_BYTES = 10 * 1024 * 1024
 #: `search_memory` (MV1): the one tool Workbench runs itself, over the asking person's own
 #: notes. Its server id is what a kept call is known by, to withhold or hide its results.
 MEMORY_SERVER = "memory"
@@ -160,7 +164,11 @@ def _constant(value: str) -> Any:
 
 
 def transcript(
-    rounds: list[dict[str, Any]], *, notes: bool = True, chats: bool | None = None
+    rounds: list[dict[str, Any]],
+    *,
+    notes: bool = True,
+    chats: bool | None = None,
+    pictures: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Kept tool rounds as messages. Without `notes` (the request may not carry the person's
     notes: an outside model, memory turned off), a `search_memory` result is withheld, and so
@@ -191,7 +199,106 @@ def transcript(
                 result = (
                     memory.WITHHELD if call.get("serverId") == MEMORY_SERVER else CHATS_WITHHELD
                 )
+            elif pictures and call.get("result"):
+                result = _picture_content(call, pictures)
             out.append({"role": "tool", "tool_call_id": call["id"], "content": result})
+    return out
+
+
+def _picture_line(block: dict[str, Any], *, attached: bool = False) -> str:
+    size = files.describe_size(block["size"]) if block["size"] >= 1024 else f"{block['size']} bytes"
+    state = "It is attached." if attached else "The person sees it; you do not."
+    return (
+        f"[The tool returned a picture, {json.dumps(block['name'], ensure_ascii=False)} "
+        f"({block['mediaType']}, {size}). {state}]"
+    )
+
+
+def _picture_content(call: dict[str, Any], pictures: dict[str, str]) -> Any:
+    result = call["result"]
+    parts = []
+    for block in call.get("content", []):
+        if block.get("type") == "image" and (url := pictures.get(block.get("id"))):
+            line = _picture_line(block)
+            if line in result:
+                result = result.replace(line, _picture_line(block, attached=True), 1)
+                parts.append({"type": "image_url", "image_url": {"url": url}})
+    return [{"type": "text", "text": result}, *parts] if parts else result
+
+
+def _read_picture(path: Path) -> bytes:
+    with path.open("rb") as handle:
+        return handle.read(5 * files.MIB + 1)
+
+
+async def attach_pictures(
+    messages: list[dict[str, Any]],
+    rounds: list[dict[str, Any]],
+    store: Store,
+    root: Path,
+    owner: str,
+    chat_id: str,
+    *,
+    image_input: bool,
+) -> list[dict[str, Any]]:
+    """Read kept pictures at send time, newest first, across the whole request.
+
+    The store and bytes must still agree. Missing files and withheld results
+    keep their original line; only confirmed image input permits attachment.
+    """
+    if not image_input:
+        return messages
+    calls: dict[str, list[dict[str, Any]]] = {}
+    for turn in rounds:
+        for call in turn["calls"]:
+            calls.setdefault(call["id"], []).append(call)
+    candidates = []
+    for index, message in enumerate(messages):
+        if message.get("role") != "tool":
+            continue
+        matching = calls.get(message.get("tool_call_id", ""), [])
+        if not matching:
+            continue
+        call = matching.pop(0)
+        # Memory/privacy withholding has already been decided by transcript.
+        if not call.get("result") or message.get("content") != call["result"]:
+            continue
+        for block in call.get("content", []):
+            if block.get("type") == "image" and _picture_line(block) in call["result"]:
+                candidates.append((index, call, block))
+    count = total = 0
+    selected: dict[int, tuple[dict[str, Any], dict[str, str]]] = {}
+    for index, call, block in reversed(candidates):
+        if count >= MAX_PICTURES:
+            break
+        record = await store.file(block["fileId"])
+        if (
+            record is None
+            or record.owner != owner
+            or record.chat_id != chat_id
+            or record.origin != "tool"
+            or record.media_type not in {"image/png", "image/jpeg", "image/webp"}
+            or record.size > 5 * files.MIB
+            or total + record.size > MAX_PICTURE_BYTES
+        ):
+            continue
+        try:
+            data = await asyncio.to_thread(_read_picture, files.path_of(root, owner, record.id))
+        except OSError:
+            continue
+        if (
+            len(data) != record.size
+            or files.sniff_image(data) != record.media_type
+            or total + len(data) > MAX_PICTURE_BYTES
+        ):
+            continue
+        url = f"data:{record.media_type};base64," + base64.b64encode(data).decode("ascii")
+        selected.setdefault(index, (call, {}))[1][block["id"]] = url
+        count += 1
+        total += len(data)
+    out = list(messages)
+    for index, (call, pictures) in selected.items():
+        out[index] = {**out[index], "content": _picture_content(call, pictures)}
     return out
 
 
@@ -314,7 +421,7 @@ class Tools:
                             )
                         )
                         transport = streamable_http_client(
-                            server["url"], http_client=http, max_sse_event_size=1_048_576
+                            server["url"], http_client=http, max_sse_event_size=MAX_RESPONSE
                         )
                     client = await stack.enter_async_context(
                         Client(
@@ -525,7 +632,7 @@ class _LimitedBody(httpx2.AsyncByteStream):
         async for part in self.stream:
             size += len(part)
             if size > MAX_RESPONSE:
-                raise ToolError("The MCP response exceeded 2 MiB. Ask for a smaller result.")
+                raise ToolError("The MCP response exceeded 8 MiB. Ask for a smaller result.")
             yield part
 
     async def aclose(self) -> None:
