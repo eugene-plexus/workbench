@@ -47,9 +47,11 @@ import secrets
 import shutil
 import sqlite3
 import stat
+import struct
 import time
 import unicodedata
 import zipfile
+import zlib
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePath, PurePosixPath
@@ -290,7 +292,7 @@ def path_problem(path: str) -> str | None:
             return "is a name Windows keeps for a device"
         if part[-1] in " .":
             return "has a name that ends with a dot or a space, which Windows cannot hold"
-        if any(c in _FORBIDDEN or ord(c) < 32 for c in part):
+        if any(c in _FORBIDDEN or ord(c) < 32 or ord(c) == 127 for c in part):
             return 'has a character Windows does not allow in a name (<>:"|?* or a control)'
         if len(part.encode("utf-8")) > 255:
             return "has a name longer than 255 bytes"
@@ -300,6 +302,55 @@ def path_problem(path: str) -> str | None:
 def _same(path: str) -> str:
     """What makes two names one file on Windows (case) or macOS (case and Unicode form)."""
     return unicodedata.normalize("NFC", path).casefold()
+
+
+_LOCAL = struct.Struct("<4s5H3I2H")
+
+
+def _zip64_sizes(extra: bytes) -> tuple[int, int] | None:
+    """The sizes a local header's ZIP64 record holds: (unpacked, packed), or None."""
+    at = 0
+    while at + 4 <= len(extra):
+        kind, size = struct.unpack_from("<HH", extra, at)
+        if kind == 0x0001 and size >= 16:
+            unpacked, packed = struct.unpack_from("<QQ", extra, at + 4)
+            return int(unpacked), int(packed)
+        at += 4 + size
+    return None
+
+
+def _local_agrees(data: bytes, info: zipfile.ZipInfo) -> bool:
+    """Whether an entry's local header says what the archive's directory says of it: its packing,
+    its CRC and both sizes (from the data descriptor after its data, for an entry written as a
+    stream). Python reads by the directory, another tool by the local header: two answers in one
+    archive would show the person one file and the model another."""
+    at = info.header_offset
+    if at < 0 or at + _LOCAL.size > len(data):
+        return False
+    sig, _, flags, method, _, _, crc, packed, unpacked, name_len, extra_len = _LOCAL.unpack_from(
+        data, at
+    )
+    if sig != b"PK\x03\x04" or method != info.compress_type:
+        return False
+    wanted = (info.CRC, info.compress_size, info.file_size)
+    if flags & 0x08:
+        start = at + _LOCAL.size + name_len + extra_len + info.compress_size
+        tail = data[start : start + 24]
+        if tail[:4] == b"PK\x07\x08":
+            tail = tail[4:]
+        found: set[tuple[int, int, int]] = set()
+        if len(tail) >= 12:
+            found.add(struct.unpack_from("<III", tail))
+        if len(tail) >= 20:
+            found.add(struct.unpack_from("<IQQ", tail))
+        return wanted in found
+    if packed == 0xFFFFFFFF or unpacked == 0xFFFFFFFF:
+        start = at + _LOCAL.size + name_len
+        sizes = _zip64_sizes(data[start : start + extra_len])
+        if sizes is None:
+            return False
+        unpacked, packed = sizes
+    return (crc, packed, unpacked) == wanted
 
 
 def read_archive(data: bytes) -> Unpacked:
@@ -333,6 +384,12 @@ def read_archive(data: bytes) -> Unpacked:
 
     declared = 0
     for info in infos:
+        # `filename` is cut at a NUL already: the name as the archive has it is judged.
+        if "\0" in info.orig_filename:
+            raise _refuse(
+                info.orig_filename.replace("\\", "/"),
+                "has a NUL in its name, which a file name cannot hold",
+            )
         name = info.filename.replace("\\", "/")
         folder = name.endswith("/")
         path = name.rstrip("/") if folder else name
@@ -351,6 +408,8 @@ def read_archive(data: bytes) -> Unpacked:
         why = path_problem(path)
         if why is not None:
             raise _refuse(name, why)
+        if not _local_agrees(data, info):
+            raise _refuse(name, "has a local header that disagrees with the archive's directory")
         parts = path.split("/")
         if len(parts) - (0 if folder else 1) > MAX_DEPTH:
             raise _refuse(name, f"is nested deeper than {MAX_DEPTH} folders")
@@ -396,7 +455,14 @@ def read_archive(data: bytes) -> Unpacked:
                     chunks.append(piece)
         except Refused:
             raise
-        except (zipfile.BadZipFile, NotImplementedError, OSError, EOFError, ValueError) as exc:
+        except (
+            zipfile.BadZipFile,
+            NotImplementedError,
+            OSError,
+            EOFError,
+            ValueError,
+            zlib.error,
+        ) as exc:
             cause = (
                 "uses a kind of compression Workbench does not read"
                 if isinstance(exc, NotImplementedError)
@@ -443,6 +509,10 @@ class Skill:
     files: tuple[tuple[str, int], ...]
     created_at: float
     updated_at: float
+    #: Which folder holds its files (`<id>.<revision>`): every change of its content is a new
+    #: folder, and the row names it in the same step as the rest, so a reader never sees new
+    #: files under the old row, or old files under the new.
+    revision: str = ""
 
     @property
     def everyone(self) -> bool:
@@ -464,7 +534,25 @@ def _skill(row: sqlite3.Row) -> Skill:
         files=tuple((str(f["path"]), int(f["size"])) for f in json.loads(row["files"] or "[]")),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        revision=row["revision"],
     )
+
+
+def _removing(db: sqlite3.Connection, owner: str) -> Refused | None:
+    """A refusal when `owner` is a person whose removal has begun (row 7): nothing of theirs is
+    written from then on, so nothing is made after their purge. The install is never removed."""
+    if owner == INSTALL:
+        return None
+    marks = ", ".join("?" for _ in HIDDEN_STATES)
+    found = db.execute(
+        f"SELECT 1 FROM removed_people WHERE sub = ? AND state IN ({marks})",
+        (owner, *HIDDEN_STATES),
+    ).fetchone()
+    return Refused(GONE, 410) if found is not None else None
+
+
+#: What a person whose removal has begun is told, should a request of theirs still arrive.
+GONE = "Your data in this Workbench is being deleted."
 
 
 def _files_json(listing: Iterable[tuple[str, int]]) -> str:
@@ -527,11 +615,23 @@ class SkillStore:
         """Every skill, a hidden person's included: what the folders are checked against."""
         return await self._run(lambda db: [_skill(r) for r in db.execute("SELECT * FROM skills")])
 
-    async def put(self, skill: Skill, *, replacing: str | None = None) -> Refused | None:
-        """Add `skill`, or put it in place of `replacing` (its id is kept). None when done, else
-        why not: the owner's count or space would pass its limit, or the name is taken."""
+    async def removing(self, owner: str) -> bool:
+        """Whether `owner` is a person whose removal has begun."""
+        return await self._run(lambda db: _removing(db, owner) is not None)
+
+    async def put(
+        self, skill: Skill, *, replacing: str | None = None, clear_off: bool = False
+    ) -> Refused | None:
+        """Add `skill`, or put it in place of `replacing` (its id is kept): every column in one
+        step, its owner, revision and switch included. With `clear_off` (a skill given to
+        everyone, or taken back), whoever had it off as the install's no longer does. None when
+        done, else why not: its owner's removal has begun, the owner's count or space would pass
+        its limit, or the name is taken."""
 
         def go(db: sqlite3.Connection) -> Refused | None:
+            gone = _removing(db, skill.owner)
+            if gone is not None:
+                return gone
             taken = db.execute(
                 "SELECT id, name FROM skills WHERE owner = ? AND name = ? AND id != ?",
                 (skill.owner, skill.name, replacing or skill.id),
@@ -564,60 +664,51 @@ class SkillStore:
                 skill.bytes,
                 _files_json(skill.files),
                 skill.updated_at,
+                skill.revision,
             )
             if replacing is not None:
                 db.execute(
                     "UPDATE skills SET owner = ?, name = ?, description = ?, enabled = ?, "
-                    "source = ?, bytes = ?, files = ?, updated_at = ? WHERE id = ?",
+                    "source = ?, bytes = ?, files = ?, updated_at = ?, revision = ? WHERE id = ?",
                     (*values, replacing),
                 )
             else:
                 db.execute(
                     "INSERT INTO skills (owner, name, description, enabled, source, bytes, files, "
-                    "updated_at, id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "updated_at, revision, id, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (*values, skill.id, skill.created_at),
                 )
+            if clear_off:
+                db.execute("DELETE FROM skill_off WHERE skill_id = ?", (replacing or skill.id,))
             return None
 
         return await self._run(go)
 
-    async def set_enabled(self, skill_id: str, on: bool) -> None:
-        await self._run(
-            lambda db: (
-                db.execute(
-                    "UPDATE skills SET enabled = ? WHERE id = ?", (int(on), skill_id)
-                ).rowcount
-            )
-        )
+    async def set_enabled(self, skill_id: str, on: bool) -> Refused | None:
+        def go(db: sqlite3.Connection) -> Refused | None:
+            row = db.execute("SELECT owner FROM skills WHERE id = ?", (skill_id,)).fetchone()
+            gone = _removing(db, row["owner"]) if row is not None else None
+            if gone is None:
+                db.execute("UPDATE skills SET enabled = ? WHERE id = ?", (int(on), skill_id))
+            return gone
 
-    async def set_off(self, sub: str, skill_id: str, off: bool) -> None:
-        def go(db: sqlite3.Connection) -> None:
+        return await self._run(go)
+
+    async def set_off(self, sub: str, skill_id: str, off: bool) -> Refused | None:
+        """Turn one of the install's skills off for `sub`, or on again; refused once their
+        removal has begun, so no row of theirs is made after their purge."""
+
+        def go(db: sqlite3.Connection) -> Refused | None:
+            gone = _removing(db, sub)
+            if gone is not None:
+                return gone
             if off:
                 db.execute(
                     "INSERT OR IGNORE INTO skill_off (sub, skill_id) VALUES (?, ?)", (sub, skill_id)
                 )
             else:
                 db.execute("DELETE FROM skill_off WHERE sub = ? AND skill_id = ?", (sub, skill_id))
-
-        await self._run(go)
-
-    async def move(self, skill_id: str, owner: str, *, enabled: bool) -> Refused | None:
-        """Give a skill to everyone (`owner` is `install`) or take it back (the owner's `sub`):
-        whoever turned it off had it off as the install's, so those rows go."""
-
-        def go(db: sqlite3.Connection) -> Refused | None:
-            row = db.execute("SELECT name FROM skills WHERE id = ?", (skill_id,)).fetchone()
-            taken = db.execute(
-                "SELECT id, name FROM skills WHERE owner = ? AND name = ? AND id != ?",
-                (owner, row["name"], skill_id),
-            ).fetchone()
-            if taken is not None:
-                return conflict(owner, taken["id"], taken["name"])
-            db.execute(
-                "UPDATE skills SET owner = ?, enabled = ?, updated_at = ? WHERE id = ?",
-                (owner, int(enabled), time.time(), skill_id),
-            )
-            db.execute("DELETE FROM skill_off WHERE skill_id = ?", (skill_id,))
             return None
 
         return await self._run(go)
@@ -706,25 +797,41 @@ def _write(folder: Path, skill_md: bytes, members: dict[str, bytes]) -> None:
             ) from None
 
 
-def _read_skill_md(folder: Path) -> bytes:
-    with (folder / SKILL_MD).open("rb") as handle:
-        return handle.read(MAX_UNPACKED + 1)
-
-
-def _replace_file(target: Path, data: bytes) -> None:
-    """A file of a skill written again whole: beside it, then in its place, read-only."""
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fresh = target.with_name(f".{target.name}.{secrets.token_hex(4)}.part")
+def _read_inside(
+    root: Path, folder_key: str, folder_name: str, path: str, limit: int
+) -> bytes | None:
+    """The first `limit` bytes of the file `path` in the skill folder `root/folder_key/folder_name`,
+    or None when there is no such file there. Where it is is judged against the storage root as
+    Workbench resolves it, never against the skill's folder as that resolves now: a folder or a
+    file that is a link leads nowhere."""
     try:
-        with fresh.open("xb") as handle:
-            handle.write(data)
-        if target.exists():
-            os.chmod(target, stat.S_IWRITE)
-        os.replace(fresh, target)
-        os.chmod(target, stat.S_IREAD)
-    finally:
-        if fresh.exists():
-            _remove(fresh)
+        target = _inside(root / folder_key / folder_name, path)
+    except Refused:
+        return None
+    base = root.resolve() / folder_key / folder_name
+    try:
+        real = target.resolve()
+        if target.is_symlink() or not real.is_relative_to(base) or not real.is_file():
+            return None
+        with real.open("rb") as handle:
+            return handle.read(limit)
+    except OSError:
+        return None
+
+
+def _move_into(incoming: Path, target: Path) -> None:
+    """A finished folder moved to where a revision of a skill lives. Nothing names it yet."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(incoming, target)
+
+
+def _remove_later(path: Path) -> None:
+    """A folder no row names any more, removed now if it can be; otherwise (Windows keeps a file
+    a reader has open) the next start removes it (`Skills.reconcile`)."""
+    try:
+        _remove(path)
+    except OSError as exc:
+        log.warning("a skill folder no row names stays until the next start: %s", exc.strerror)
 
 
 # --------------------------------------------------------------------------- #
@@ -833,7 +940,8 @@ class Skills:
         self.lock = asyncio.Lock()
 
     def folder(self, skill: Skill) -> Path:
-        return self.root / owner_key(skill.owner) / skill.id
+        """Where the files of the skill's current revision are."""
+        return self.root / owner_key(skill.owner) / _folder_name(skill)
 
     def _incoming(self) -> Path:
         return self.root / f".incoming-{secrets.token_hex(8)}"
@@ -841,34 +949,33 @@ class Skills:
     # --- at start ------------------------------------------------------------
 
     async def reconcile(self) -> int:
-        """What a stop left: a half-written or set-aside folder, or one no skill's row names, is
-        removed; a skill whose folder a stop left under its other owner is moved back. How many
-        folders were removed."""
+        """What a stop left is removed: a half-written folder, and any revision no skill's row
+        names (one written before its row was, or one a newer revision replaced). A row names
+        exactly one folder, written whole before the row named it, so a skill stays as a person
+        last saw it. How many folders were removed."""
         rows = {s.id: s for s in await self.db.every()}
 
         def go() -> int:
             if not self.root.is_dir():
                 return 0
             gone = 0
-            found: dict[str, Path] = {}
             for entry in list(self.root.iterdir()):
                 if entry.name.startswith("."):
-                    _remove(entry)
+                    _remove_later(entry)
                     gone += 1
                     continue
                 if not entry.is_dir():
                     continue
                 for folder in list(entry.iterdir()):
-                    if folder.name.startswith(".") or folder.name not in rows:
-                        _remove(folder)
+                    skill_id, _, revision = folder.name.partition(".")
+                    row = rows.get(skill_id)
+                    if (
+                        row is None
+                        or row.revision != revision
+                        or owner_key(row.owner) != entry.name
+                    ):
+                        _remove_later(folder)
                         gone += 1
-                    else:
-                        found[folder.name] = folder
-            for skill_id, folder in found.items():
-                wanted = self.root / owner_key(rows[skill_id].owner) / skill_id
-                if folder != wanted and not wanted.exists():
-                    wanted.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(folder, wanted)
             return gone
 
         return await asyncio.to_thread(go)
@@ -881,8 +988,8 @@ class Skills:
         shared = await self.db.everyone()
         return own, shared, await self.db.off(person.sub)
 
-    async def listing(self, person: Person) -> Listing:
-        """What "All my skills" lists in a chat of theirs, and why each other skill is not."""
+    async def _candidates(self, person: Person) -> tuple[list[Skill], dict[str, str]]:
+        """The skills a chat of theirs may list, before the limits, and why each other is not."""
         own, shared, off = await self.seen(person)
         mine = {s.name for s in own}
         reasons: dict[str, str] = {}
@@ -897,17 +1004,23 @@ class Skills:
                 reasons[skill.id] = "Not listed in chats: you have your own skill with this name."
             else:
                 candidates.append(skill)
+        return candidates, reasons
+
+    async def listing(self, person: Person) -> Listing:
+        """What "All my skills" lists in a chat of theirs, and why each other skill is not."""
+        candidates, reasons = await self._candidates(person)
         listed, left = bounded(candidates)
         return Listing(listed, {**reasons, **left})
 
     async def for_chat(self, person: Person, chat: Chat) -> list[Skill]:
-        """The skills one chat's answer lists: all that are on, or the chat's pick of them."""
-        listed = (await self.listing(person)).listed
+        """The skills one chat's answer lists: those that are on, or the chat's pick of them.
+        The pick is made first and the limits after, so any skill that is on can be picked."""
+        candidates, _ = await self._candidates(person)
         pick = chat.settings.get("skills")
         if isinstance(pick, list):
             chosen = set(pick)
-            listed = [s for s in listed if s.id in chosen]
-        return listed
+            candidates = [s for s in candidates if s.id in chosen]
+        return bounded(candidates)[0]
 
     async def visible(self, person: Person, skill_id: str) -> Skill:
         """A skill the person may see: their own, or one Eugene gives everyone. Anything else is
@@ -929,17 +1042,91 @@ class Skills:
 
     async def read(self, skill: Skill) -> tuple[bytes, Parsed | None]:
         """A skill's `SKILL.md` as it is on the disk, and what it says (None when it no longer
-        parses, or is gone)."""
-        try:
-            data = await asyncio.to_thread(_read_skill_md, self.folder(skill))
-        except OSError:
+        parses, or is gone: then the bytes are empty)."""
+        data = await asyncio.to_thread(
+            _read_inside,
+            self.root,
+            owner_key(skill.owner),
+            _folder_name(skill),
+            SKILL_MD,
+            MAX_UNPACKED + 1,
+        )
+        if data is None:
             return b"", None
         try:
             return data, parse(data)
         except Refused:
             return data, None
 
+    async def _contents(self, skill: Skill) -> tuple[bytes, dict[str, bytes]]:
+        """Every file of the skill's current revision: its `SKILL.md`, and each file its row
+        lists. What a change writes again, as a new revision."""
+
+        def go() -> tuple[bytes, dict[str, bytes]] | None:
+            key, name = owner_key(skill.owner), _folder_name(skill)
+            skill_md = _read_inside(self.root, key, name, SKILL_MD, MAX_UNPACKED + 1)
+            if skill_md is None:
+                return None
+            members: dict[str, bytes] = {}
+            for path in skill.paths():
+                data = _read_inside(self.root, key, name, path, MAX_UNPACKED + 1)
+                if data is None:
+                    return None
+                members[path] = data
+            return skill_md, members
+
+        found = await asyncio.to_thread(go)
+        if found is None:
+            raise Refused("Its files cannot be read now. Delete this skill and add it again.", 409)
+        return found
+
+    async def _open_to(self, sub: str) -> None:
+        """Every change refuses a person whose removal has begun (row 7): together with the purge
+        taking this lock for its `skills` step, nothing of theirs is made after the purge."""
+        if await self.db.removing(sub):
+            raise Refused(GONE, 410)
+
     # --- adding and changing -----------------------------------------------------
+
+    async def _publish(
+        self,
+        new: Skill,
+        skill_md: bytes,
+        members: dict[str, bytes],
+        *,
+        before: Skill | None,
+        clear_off: bool = False,
+        verb: str = "Not changed",
+    ) -> None:
+        """Make `new` the skill. Its files are written whole as a new revision; then its row,
+        revision and switch are committed in one step. Until then the row names the old revision,
+        whose files are untouched, so a reader sees the old skill or the new one and never a mix;
+        a stop in between leaves a folder no row names, which the next start removes. The old
+        revision's folder goes after."""
+        incoming = self._incoming()
+        target = self.folder(new)
+        try:
+            await asyncio.to_thread(_write, incoming, skill_md, members)
+            await asyncio.to_thread(_move_into, incoming, target)
+            try:
+                refused = await self.db.put(
+                    new, replacing=before.id if before else None, clear_off=clear_off
+                )
+                if refused is not None:
+                    raise refused
+            except BaseException:
+                await asyncio.to_thread(_remove_later, target)
+                raise
+        except OSError as exc:
+            raise Refused(
+                f"{verb}: Workbench could not write the skill's files: "
+                f"{exc.strerror or type(exc).__name__}.",
+                500,
+            ) from None
+        finally:
+            await asyncio.to_thread(_remove_later, incoming)
+        if before is not None:
+            await asyncio.to_thread(_remove_later, self.folder(before))
 
     async def add(
         self,
@@ -951,9 +1138,10 @@ class Skills:
         on: bool = False,
     ) -> Skill:
         """Add a skill a person uploaded or wrote. A name they already use is a 409, unless they
-        chose to replace that skill (its id and place are kept, and it is off again: its words
-        changed) or keep both (this one is named `-2`, `-3`, ...)."""
+        chose to replace that skill (its id is kept, and it is off again, in the same step as its
+        new files: its words changed) or keep both (this one is named `-2`, `-3`, ...)."""
         async with self.lock:
+            await self._open_to(person.sub)
             name = unpacked.parsed.name
             own = {s.name: s for s in await self.db.owned(person.sub)}
             replacing: Skill | None = None
@@ -976,33 +1164,13 @@ class Skills:
                 files=tuple((m["path"], m["size"]) for m in unpacked.listing()),
                 created_at=replacing.created_at if replacing else now,
                 updated_at=now,
+                revision=secrets.token_hex(8),
             )
             # The quota is asked before anything is written, and again as the row goes in.
             await self._check_room(skill, replacing)
-            incoming = self._incoming()
-            try:
-                await asyncio.to_thread(_write, incoming, unpacked.skill_md, unpacked.members)
-                # The folder it replaces is kept aside until the row says the new one is it.
-                aside = await asyncio.to_thread(self._swap, incoming, self.folder(skill))
-                try:
-                    refused = await self.db.put(
-                        skill, replacing=replacing.id if replacing else None
-                    )
-                    if refused is not None:
-                        raise refused
-                except BaseException:
-                    await asyncio.to_thread(self._unswap, self.folder(skill), aside)
-                    raise
-                if aside is not None:
-                    await asyncio.to_thread(_remove, aside)
-            except OSError as exc:
-                raise Refused(
-                    "Not added: Workbench could not put the skill's folder in place: "
-                    f"{exc.strerror or type(exc).__name__}.",
-                    500,
-                ) from None
-            finally:
-                await asyncio.to_thread(_remove, incoming)
+            await self._publish(
+                skill, unpacked.skill_md, unpacked.members, before=replacing, verb="Not added"
+            )
             log.info("%s added the skill %s (%s)", person.name, skill.name, source)
             return skill
 
@@ -1023,32 +1191,11 @@ class Skills:
                 413,
             )
 
-    def _swap(self, incoming: Path, final: Path) -> Path | None:
-        """Move a new folder into a skill's place. The folder that was there is set aside, not
-        removed: where it is set aside is returned, for the caller to remove once the row says
-        the new one is the skill's, or to put back (`_unswap`)."""
-        final.parent.mkdir(parents=True, exist_ok=True)
-        aside: Path | None = None
-        if final.exists():
-            aside = self.root / f".old-{secrets.token_hex(8)}"
-            os.replace(final, aside)
-        try:
-            os.replace(incoming, final)
-        except BaseException:
-            if aside is not None:
-                os.replace(aside, final)
-            raise
-        return aside
-
-    def _unswap(self, final: Path, aside: Path | None) -> None:
-        _remove(final)
-        if aside is not None:
-            os.replace(aside, final)
-
     async def change(self, person: Person, skill_id: str, body: dict[str, Any]) -> Skill:
         """Turn a skill on or off (an install skill, for this person only), give it to everyone
         or take it back (the owner only), or write its name, description or instructions again."""
         async with self.lock:
+            await self._open_to(person.sub)
             skill = await self.visible(person, skill_id)
             # Whether each part may be done is asked first, so a refusal changes nothing.
             words = {k: body[k] for k in ("name", "description", "instructions") if k in body}
@@ -1057,22 +1204,27 @@ class Skills:
             if "everyone" in body and not person.is_owner:
                 raise Refused("Only the owner of this install gives a skill to everyone.", 403)
             if words:
-                await self._rewrite(skill, words)
+                skill = await self._rewrite(skill, words)
             if "on" in body:
-                if skill.everyone:
+                refused = (
                     await self.db.set_off(person.sub, skill.id, not body["on"])
-                else:
-                    await self.db.set_enabled(skill.id, bool(body["on"]))
+                    if skill.everyone
+                    else await self.db.set_enabled(skill.id, bool(body["on"]))
+                )
+                if refused is not None:
+                    raise refused
             if "everyone" in body and body["everyone"] != skill.everyone:
                 await self._give(person, await self.visible(person, skill_id), body["everyone"])
             return await self.visible(person, skill_id)
 
-    async def _rewrite(self, skill: Skill, words: dict[str, str]) -> None:
-        data, parsed = await self.read(skill)
-        if parsed is None:
+    async def _rewrite(self, skill: Skill, words: dict[str, str]) -> Skill:
+        skill_md, members = await self._contents(skill)
+        try:
+            parsed = parse(skill_md)
+        except Refused:
             raise Refused(
                 "Its SKILL.md cannot be read now. Delete this skill and add it again.", 409
-            )
+            ) from None
         meta = {**parsed.meta}
         meta.update({k: words[k] for k in ("name", "description") if k in words})
         body = words.get("instructions", parsed.body)
@@ -1084,13 +1236,12 @@ class Skills:
             skill,
             name=checked.name,
             description=checked.description,
-            bytes=skill.bytes - len(data) + len(new),
+            bytes=skill.bytes - len(skill_md) + len(new),
             updated_at=time.time(),
+            revision=secrets.token_hex(8),
         )
-        refused = await self.db.put(changed, replacing=skill.id)
-        if refused is not None:
-            raise refused
-        await asyncio.to_thread(_replace_file, self.folder(skill) / SKILL_MD, new)
+        await self._publish(changed, new, members, before=skill)
+        return changed
 
     async def _give(self, person: Person, skill: Skill, everyone: bool) -> None:
         if not person.is_owner:
@@ -1100,18 +1251,17 @@ class Skills:
         owner = INSTALL if everyone else person.sub
         # Taken back, it is on for the owner unless they had turned it off for themselves.
         on = True if everyone else skill.id not in await self.db.off(person.sub)
-        moved = replace(skill, owner=owner)
+        moved = replace(
+            skill,
+            owner=owner,
+            enabled=on,
+            updated_at=time.time(),
+            revision=secrets.token_hex(8),
+        )
         await self._check_room(moved, None)
-        refused = await self.db.move(skill.id, owner, enabled=on)
-        if refused is not None:
-            raise refused
-        try:
-            aside = await asyncio.to_thread(self._swap, self.folder(skill), self.folder(moved))
-        except BaseException:
-            await self.db.move(skill.id, skill.owner, enabled=skill.enabled)
-            raise
-        if aside is not None:
-            await asyncio.to_thread(_remove, aside)
+        skill_md, members = await self._contents(skill)
+        # Copied to its new owner's folder, then the row moves it, in one step.
+        await self._publish(moved, skill_md, members, before=skill, clear_off=True)
         log.info(
             "%s %s the skill %s",
             person.name,
@@ -1121,12 +1271,14 @@ class Skills:
 
     async def delete(self, person: Person, skill_id: str) -> None:
         async with self.lock:
+            await self._open_to(person.sub)
             skill = await self.editable(person, skill_id)
             await self.db.delete(skill.id)
-            await asyncio.to_thread(_remove, self.folder(skill))
+            await asyncio.to_thread(_remove_later, self.folder(skill))
 
     async def add_file(self, person: Person, skill_id: str, path: str, data: bytes) -> Skill:
         async with self.lock:
+            await self._open_to(person.sub)
             skill = await self.editable(person, skill_id)
             path = path.replace("\\", "/").strip()
             why = path_problem(path) if path else "is not a path"
@@ -1154,32 +1306,17 @@ class Skills:
                 files=tuple(sorted(listing.items())),
                 bytes=skill.bytes - before + len(data),
                 updated_at=time.time(),
+                revision=secrets.token_hex(8),
             )
             await self._check_room(changed, skill)
-            folder = self.folder(skill)
-
-            def write() -> None:
-                target = _inside(folder, path)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if not target.parent.resolve().is_relative_to(folder.resolve()):
-                    raise _refuse(path, "leaves the skill's folder")
-                _replace_file(target, data)
-
-            try:
-                await asyncio.to_thread(write)
-            except OSError as exc:
-                raise Refused(
-                    f"Not added: Workbench could not write `{shown(path)}`: "
-                    f"{exc.strerror or type(exc).__name__}.",
-                    500,
-                ) from None
-            refused = await self.db.put(changed, replacing=skill.id)
-            if refused is not None:
-                raise refused
+            skill_md, members = await self._contents(skill)
+            members[path] = data
+            await self._publish(changed, skill_md, members, before=skill, verb="Not added")
             return changed
 
     async def remove_file(self, person: Person, skill_id: str, path: str) -> Skill:
         async with self.lock:
+            await self._open_to(person.sub)
             skill = await self.editable(person, skill_id)
             listing = {p: s for p, s in skill.files}
             if path not in listing:
@@ -1190,12 +1327,11 @@ class Skills:
                 files=tuple(sorted(listing.items())),
                 bytes=skill.bytes - size,
                 updated_at=time.time(),
+                revision=secrets.token_hex(8),
             )
-            refused = await self.db.put(changed, replacing=skill.id)
-            if refused is not None:
-                raise refused
-            # The path is one the row lists, so it was judged when it was added.
-            await asyncio.to_thread(_remove, _inside(self.folder(skill), path))
+            skill_md, members = await self._contents(skill)
+            members.pop(path, None)
+            await self._publish(changed, skill_md, members, before=skill)
             return changed
 
     # --- the model's two tools ---------------------------------------------------
@@ -1210,26 +1346,40 @@ class Skills:
     ) -> tuple[str, str]:
         """Run `use_skill` or `read_skill_file` for the person: the call's status and what the
         model is told. A skill removed or turned off since the answer began is said, not an
-        error."""
+        error, also when that happens while its files are read: the row is read again, and what
+        it says now decides."""
         name = str(arguments.get("name") or "")
         entry = next((s for s in listed if s.name == name), None)
         if entry is None:
             return "failed", f"There is no skill named {shown(name)} in this chat."
-        skill = await self.db.get(entry.id)
-        if skill is None or skill.owner not in (person.sub, INSTALL):
-            return "done", f"The skill {entry.name} was removed. Answer without it."
-        if (skill.everyone and skill.id in await self.db.off(person.sub)) or (
-            not skill.everyone and not skill.enabled
-        ):
-            return "done", f"The skill {entry.name} was turned off. Answer without it."
-        if tool == USE_SKILL:
-            return await self._use(skill, sites)
-        return await self._read_file(skill, str(arguments.get("path") or ""))
+        tried: str | None = None
+        for _ in range(3):
+            skill = await self.db.get(entry.id)
+            if skill is None or skill.owner not in (person.sub, INSTALL):
+                return "done", f"The skill {entry.name} was removed. Answer without it."
+            if (skill.everyone and skill.id in await self.db.off(person.sub)) or (
+                not skill.everyone and not skill.enabled
+            ):
+                return "done", f"The skill {entry.name} was turned off. Answer without it."
+            if skill.revision == tried:
+                return "failed", f"The skill {skill.name} could not be read: its files are missing."
+            result = (
+                await self._use(skill, sites)
+                if tool == USE_SKILL
+                else await self._read_file(skill, str(arguments.get("path") or ""))
+            )
+            if result is not None:
+                return result
+            tried = skill.revision
+        return "failed", f"The skill {entry.name} changed while it was read. Call {tool} again."
 
-    async def _use(self, skill: Skill, sites: list[str]) -> tuple[str, str]:
-        _, parsed = await self.read(skill)
+    async def _use(self, skill: Skill, sites: list[str]) -> tuple[str, str] | None:
+        """What `use_skill` returns, or None when the skill's files are not there."""
+        data, parsed = await self.read(skill)
+        if not data:
+            return None
         if parsed is None:
-            return "failed", f"The skill {skill.name} could not be read: its SKILL.md is missing."
+            return "failed", f"The skill {skill.name} could not be read: its SKILL.md is not valid."
         body = parsed.body.strip()
         cut = len(body) > MAX_BODY
         lines = [f"The skill {skill.name}. Follow its instructions for this request.", ""]
@@ -1246,7 +1396,8 @@ class Skills:
             lines += ["", scripts_line(sites)]
         return "done", "\n".join(lines)
 
-    async def _read_file(self, skill: Skill, asked: str) -> tuple[str, str]:
+    async def _read_file(self, skill: Skill, asked: str) -> tuple[str, str] | None:
+        """What `read_skill_file` returns, or None when a file the row lists is not there."""
         path = asked.replace("\\", "/")
         while path.startswith("./"):
             path = path[2:]
@@ -1260,28 +1411,17 @@ class Skills:
                 f"The skill {skill.name} has no file `{shown(path)}`. Its files: "
                 f"{', '.join(known)}."
             )
-        folder = self.folder(skill)
-
-        def go() -> tuple[bytes, bool] | None:
-            try:
-                target = _inside(folder, path)
-            except Refused:
-                return None
-            if target.is_symlink() or not target.is_file():
-                return None
-            if not target.resolve().is_relative_to(folder.resolve()):
-                return None
-            with target.open("rb") as handle:
-                data = handle.read(MAX_FILE_TEXT * 4 + 1)
-            return data, len(data) > MAX_FILE_TEXT * 4
-
-        try:
-            found = await asyncio.to_thread(go)
-        except OSError:
-            found = None
-        if found is None:
-            return "failed", f"The file `{shown(path)}` of the skill {skill.name} is missing."
-        data, more = found
+        data = await asyncio.to_thread(
+            _read_inside,
+            self.root,
+            owner_key(skill.owner),
+            _folder_name(skill),
+            path,
+            MAX_FILE_TEXT * 4 + 1,
+        )
+        if data is None:
+            return None
+        more = len(data) > MAX_FILE_TEXT * 4
         size = dict(skill.files).get(path, len(data))
         try:
             if b"\0" in data[:8192]:
@@ -1302,6 +1442,11 @@ class Skills:
         """Each of the person's own skills, as a download holds it: its name and its folder. A
         removed person's too: the owner's download of them holds everything (row 7)."""
         return [(s.name, self.folder(s)) for s in await self.db.owned(sub, hidden_too=True)]
+
+
+def _folder_name(skill: Skill) -> str:
+    """The folder of a skill's current revision, in its owner's folder."""
+    return f"{skill.id}.{skill.revision}"
 
 
 def _free_name(name: str, taken: set[str]) -> str:

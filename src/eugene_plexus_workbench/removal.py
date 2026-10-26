@@ -154,6 +154,7 @@ class Removal:
         exports: Any = None,
         media: Any = None,
         courier: Any = None,
+        skills: Any = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.store = store
@@ -166,6 +167,8 @@ class Removal:
         self.exports = exports
         self.media = media
         self.courier = courier
+        #: Row 32: their skills (`skills.Skills`), whose lock the `skills` step takes.
+        self.skills = skills
         self.clock = clock
         self._asking = asyncio.Lock()
         self._purges: dict[str, asyncio.Task[None]] = {}
@@ -524,8 +527,13 @@ class Removal:
         return "done"
 
     async def _step_skills(self, sub: str) -> str:
-        """Their skills' folder (row 32); its rows go with the store's step."""
-        await asyncio.to_thread(remove_tree, self.data_dir / "skills" / files.person_key(sub))
+        """Their skills' folder (row 32); its rows go with the store's step. It takes the lock
+        every skill change holds, so a change in flight ends first: its row and folder go here
+        and in the store's step. Every later change refuses them, as `purging` was committed
+        before any step ran."""
+        lock = getattr(self.skills, "lock", None)
+        async with lock if lock is not None else contextlib.nullcontext():
+            await asyncio.to_thread(remove_tree, self.data_dir / "skills" / files.person_key(sub))
         return "done"
 
     async def _step_exports(self, sub: str) -> str:

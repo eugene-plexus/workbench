@@ -118,6 +118,13 @@ def _skills_dir(world: World, sub: str) -> Path:
     return world.data / "skills" / files.person_key(sub)
 
 
+def _folder(owner_dir: Path, skill_id: str) -> Path:
+    """A skill's one folder under its owner's: `<id>`, or `<id>.<revision>`."""
+    found = [p for p in owner_dir.glob(f"{skill_id}*") if p.name.split(".")[0] == skill_id]
+    assert len(found) == 1, found
+    return found[0]
+
+
 # --------------------------------------------------------------------------- #
 # adding a skill
 # --------------------------------------------------------------------------- #
@@ -131,7 +138,7 @@ def test_a_skill_zip_is_unpacked_and_listed(world: World) -> None:
     # An upload is a stranger's words: it waits off until the person has read it.
     assert (skill["name"], skill["on"], skill["source"]) == ("pdf-forms", False, "upload")
     assert sorted(f["path"] for f in skill["files"]) == ["references/style.md", "scripts/fill.py"]
-    folder = _skills_dir(world, "p-ada") / skill["id"]
+    folder = _folder(_skills_dir(world, "p-ada"), skill["id"])
     assert (folder / "SKILL.md").read_bytes() == _skill_md()
     assert (folder / "references" / "style.md").read_text(encoding="utf-8") == STYLE
     # Unpacked read-only, and nothing is left in the incoming folder.
@@ -163,7 +170,7 @@ def test_an_archive_made_on_a_mac_leaves_its_junk_out(world: World) -> None:
     )
     assert made.status_code == 201, made.text
     assert made.json()["files"] == []
-    folder = _skills_dir(world, "p-ada") / made.json()["id"]
+    folder = _folder(_skills_dir(world, "p-ada"), made.json()["id"])
     assert [p.name for p in folder.iterdir()] == ["SKILL.md"]
 
 
@@ -464,7 +471,7 @@ def test_an_owners_skill_reaches_everyone_and_can_be_turned_off(world: World) ->
     given = owner.patch(f"/api/skills/{made.json()['id']}", json={"everyone": True})
     assert given.status_code == 200 and given.json()["everyone"] is True, given.text
     skill_id = given.json()["id"]
-    assert (world.data / "skills" / "install" / skill_id / "SKILL.md").is_file()
+    assert (_folder(world.data / "skills" / "install", skill_id) / "SKILL.md").is_file()
     ada, bo = _signed_in(world, "p-ada"), _signed_in(world, "p-bo")
     seen = ada.get("/api/skills").json()["skills"]
     assert [(s["name"], s["fromEugene"], s["on"], s["canEdit"]) for s in seen] == [
@@ -515,12 +522,12 @@ def test_removing_a_person_deletes_their_skills(world: World) -> None:
     skill = _added(ada, _good_zip())
     ada.patch(f"/api/skills/{shared['id']}", json={"on": False}).raise_for_status()
     folder = _skills_dir(world, "p-ada")
-    assert (folder / skill["id"] / "SKILL.md").is_file()
+    assert (_folder(folder, skill["id"]) / "SKILL.md").is_file()
 
     del world.eugene.people["p-ada"]
     owner.post("/api/removed-people/check").raise_for_status()
     # Hidden for the wait: her skills are still on the disk until the purge.
-    assert (folder / skill["id"]).is_dir()
+    assert _folder(folder, skill["id"]).is_dir()
     started = owner.post("/api/removed-people/p-ada/delete")
     assert started.status_code == 202, started.text
     _until_purged(owner, "p-ada")
@@ -531,7 +538,7 @@ def test_removing_a_person_deletes_their_skills(world: World) -> None:
         assert db.execute("SELECT COUNT(*) FROM skill_off WHERE sub = 'p-ada'").fetchone() == (0,)
         # The install's skill stays for everyone else.
         assert db.execute("SELECT owner FROM skills").fetchall() == [("install",)]
-    assert (world.data / "skills" / "install" / shared["id"] / "SKILL.md").is_file()
+    assert (_folder(world.data / "skills" / "install", shared["id"]) / "SKILL.md").is_file()
 
 
 def _export(person: Browser, path: str = "/api/me/export") -> zipfile.ZipFile:

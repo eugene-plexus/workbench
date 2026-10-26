@@ -784,7 +784,8 @@ def _skills(db: sqlite3.Connection) -> None:
         "enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)), "
         "source TEXT NOT NULL CHECK (source IN ('upload', 'written')), "
         "bytes INTEGER NOT NULL, files TEXT NOT NULL DEFAULT '[]', "
-        "created_at REAL NOT NULL, updated_at REAL NOT NULL, UNIQUE (owner, name))"
+        "created_at REAL NOT NULL, updated_at REAL NOT NULL, "
+        "revision TEXT NOT NULL DEFAULT '', UNIQUE (owner, name))"
     )
     db.execute(
         "CREATE TABLE IF NOT EXISTS skill_off ("

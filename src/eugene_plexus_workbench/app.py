@@ -338,6 +338,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             exports=exports,
             media=media,
             courier=courier,
+            skills=skills,
         )
         sessions.on_refused = removal.soon
         removal.start()
