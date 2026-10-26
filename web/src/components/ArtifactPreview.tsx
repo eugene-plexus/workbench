@@ -193,6 +193,9 @@ export function ArtifactPreview({
         key: () => told.current.runKey,
         start: () => told.current.begin(),
         stop: (why: StopReason) => {
+          // Named as the one not answering: its first run did not finish, so its
+          // marker stays for the next load. Room and stuck stops are not its fault.
+          if (why === "culprit") keepMarker.current = true;
           setRun(null);
           const { note: say, noun: what } = told.current;
           if (why === "room") {

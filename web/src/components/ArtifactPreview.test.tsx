@@ -225,6 +225,18 @@ describe.each([FIREFOX, WEBKIT])("unfinished previews in %s", (agent) => {
     expect(stored()).not.toContain(key());
   });
 
+  it("the runner's culprit stop keeps the marker through a responsive unmount", () => {
+    const view = render(<ArtifactPreview {...props} />);
+    say(screen.getByTestId("artifact-frame") as HTMLIFrameElement, { type: "ready" });
+    expect(stored()).toContain(key());
+    // No heartbeat: the runner names this preview as the one not answering.
+    act(() => vi.advanceTimersByTime(START_WITHIN_MS - 1_000));
+    expect(screen.queryByTestId("artifact-frame")).toBeNull();
+    expect(screen.getByText(/stopped answering \(a loop\?\)/)).toBeVisible();
+    view.unmount();
+    expect(stored()).toContain(key());
+  });
+
   it.each([
     { chatId: "another chat" },
     { blockKey: "another message:html:original" },
