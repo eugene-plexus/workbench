@@ -12,6 +12,7 @@ import { fullnessWords, percentWords } from "../lib/longChats";
 import type { ChatSettings as Settings, LongChatView, Project } from "../lib/types";
 import { ToolSelection } from "./Tools";
 import { FolderSelection } from "./Folders";
+import { SkillSelection } from "./Skills";
 
 const FIELDS: {
   key: "temperature" | "topP" | "maxTokens";
@@ -107,6 +108,8 @@ export function ChatSettings({
   const [saved, setSaved] = useState(false);
   const [toolServers, setToolServers] = useState(settings.toolServers ?? []);
   const [folderGrants, setFolderGrants] = useState(settings.folderGrants ?? []);
+  // Row 32: null is "All my skills".
+  const [skills, setSkills] = useState<string[] | null>(settings.skills ?? null);
   // This switch takes effect at once. Show only what the server has kept,
   // including while a request is pending or if it fails.
   const runArtifacts = settings.runArtifacts !== false;
@@ -201,6 +204,7 @@ export function ChatSettings({
       instructions: instructions.trim() ? instructions : null,
       toolServers,
       folderGrants,
+      skills,
       repetitionMode: repetitionMode || null,
     };
     for (const field of FIELDS) {
@@ -447,6 +451,15 @@ export function ChatSettings({
               selected={toolServers}
               onChange={(ids) => {
                 setToolServers(ids);
+                setSaved(false);
+              }}
+            />
+          </div>
+          <div className="subsection">
+            <SkillSelection
+              selected={skills}
+              onChange={(ids) => {
+                setSkills(ids);
                 setSaved(false);
               }}
             />

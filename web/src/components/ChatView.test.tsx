@@ -20,6 +20,7 @@ let purgeNotice: string | null = null;
 // The settings panel's own lists fetch; this file is about the chat around it.
 vi.mock("./Tools", () => ({ ToolSelection: () => null }));
 vi.mock("./Folders", () => ({ FolderSelection: () => null }));
+vi.mock("./Skills", () => ({ SkillSelection: () => null }));
 // Agent controls have their own tests and the G5 browser wiring acceptance.
 vi.mock("./AGUIConversation", () => ({ AGUIConversation: () => null }));
 vi.mock("../lib/useChat", () => ({

@@ -128,7 +128,7 @@ async def test_migration_34_keeps_existing_servers_unlinked(tmp_path: Path) -> N
     await reopened.open()
     await reopened.close()
     with sqlite3.connect(store.path) as db:
-        assert db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0] == "33"
+        assert db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0] == "34"
         assert db.execute("SELECT token,linked FROM memory_servers").fetchone() == ("old-token", 0)
 
 

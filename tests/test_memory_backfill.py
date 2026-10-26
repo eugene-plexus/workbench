@@ -291,7 +291,7 @@ def test_migration_31_from_30(tmp_path: Path) -> None:
     storage._initialize_schema(migrated, path)
     migrated.close()
     with sqlite3.connect(path) as db:
-        assert storage.SCHEMA_VERSION == 33
+        assert storage.SCHEMA_VERSION == 34
         assert db.execute("SELECT name, model FROM projects WHERE id = 'p'").fetchone() == (
             "Garden",
             None,

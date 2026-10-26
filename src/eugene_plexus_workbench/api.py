@@ -408,6 +408,9 @@ class ChatSettings(BaseModel):
     #: Row 26: summarise this chat's earlier messages when it outgrows its model's window.
     #: Unset is on, as the install says.
     summarise: bool | None = None
+    #: Row 32: the skills this chat lists, by id; unset is "All my skills", and an empty list
+    #: is none.
+    skills: list[str] | None = Field(default=None, max_length=400)
 
 
 class ChatUpdate(BaseModel):
@@ -451,6 +454,7 @@ def chat_view(chat: Chat, *, running: bool, read_only: bool = False) -> dict[str
                 "documentsExternal",
                 "pastChats",
                 "summarise",
+                "skills",
                 *SAMPLING,
             )
         },
@@ -871,6 +875,10 @@ async def update_chat(request: Request, chat_id: str, body: ChatUpdate) -> dict[
                     "A selected tool server was removed or is unavailable to you. "
                     "Choose tools again.",
                 )
+        if body.settings.skills is not None:
+            own, shared, _ = await _state(request).skills.seen(person)
+            if set(body.settings.skills) - {s.id for s in [*own, *shared]}:
+                raise _problem(400, "A selected skill was removed. Choose skills again.")
         # Only the fields sent change; a `null` returns one to the model's own.
         merged = dict(chat.settings)
         merged.update(body.settings.model_dump(exclude_unset=True))
@@ -1159,6 +1167,11 @@ async def _ask(
             ask_anyway=ask_anyway,
         )
         decided["retrieved"] = found.block
+        # Row 32: the skills this chat lists, in `use_skill` and never in the system message;
+        # tools are assumed unless the gateway says the model refuses them.
+        listed: list[Any] = []
+        if turn.facts is None or turn.facts.tools:
+            listed = await _state(request).skills.for_chat(person, fresh)
         return Preparation(
             sources=[*prepared.sources, *found.sources],
             retrieval=found.retrieval,
@@ -1174,6 +1187,7 @@ async def _ask(
             summaries=planned.record(),
             recover=recover,
             filled=lambda: summaries.mark_filled(fresh.id),
+            skills=listed,
         )
 
     async def recover(exc: HubError, progress: Progress) -> list[dict[str, Any]]:

@@ -82,6 +82,11 @@ said it dropped part of the prompt (`prompt_truncated`), and which summaries it 
 (`summaries`, JSON). `chat_summaries` holds each summary of a run of a chat's messages: a new copy
 of chat text, deleted with its chat, and with any branch delete that removes a message of its
 run. The messages themselves are never changed.
+
+**Skills** (schema 34, row 32): `skills` holds each skill's row (its files are under
+`<data>/skills/`, `skills.py`), owned by a person's `sub` or by `install` for a skill the owner gave
+everyone; `skill_off` is which of the install's skills a person turned off. The SQL is
+`skills.SkillStore`'s, through this store's one thread.
 """
 
 from __future__ import annotations
@@ -108,7 +113,7 @@ from .agui_store import AGUIStore, allow_chat_write
 from .interaction_store import SCHEMA as INTERACTION_SCHEMA
 from .interaction_store import InteractionStore
 
-SCHEMA_VERSION = 33
+SCHEMA_VERSION = 34
 
 #: The oldest schema this migrates from: what Workbench v0.1.0 wrote. Schema 1 predates
 #: it, and nobody holds one.
@@ -764,6 +769,29 @@ def _memory_extras(db: sqlite3.Connection) -> None:
     )
 
 
+#: Row 32's one migration, and the one place its number is said.
+SKILLS_SCHEMA = 34
+
+
+def _skills(db: sqlite3.Connection) -> None:
+    """Schema 34 (row 32): a person's skills, and which of the install's skills a person turned
+    off. Two new tables; nothing that was there changes. Both are in PERSON_TABLES: `owner` is the
+    person's `sub`, or `install` for a skill the owner gave everyone, which no purge reaches."""
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS skills ("
+        "id TEXT PRIMARY KEY, owner TEXT NOT NULL, name TEXT NOT NULL, "
+        "description TEXT NOT NULL, "
+        "enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)), "
+        "source TEXT NOT NULL CHECK (source IN ('upload', 'written')), "
+        "bytes INTEGER NOT NULL, files TEXT NOT NULL DEFAULT '[]', "
+        "created_at REAL NOT NULL, updated_at REAL NOT NULL, UNIQUE (owner, name))"
+    )
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS skill_off ("
+        "sub TEXT NOT NULL, skill_id TEXT NOT NULL, PRIMARY KEY (sub, skill_id))"
+    )
+
+
 #: What brings a store written at version N-1 to N, for N above `OLDEST_SCHEMA`.
 #: `_SCHEMA` already holds the result, for a store made new. A step is a statement,
 #: or a function of the connection for what SQL alone cannot say.
@@ -926,6 +954,8 @@ _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
     32: [_linked_memory_server],
     # Memory extras (row 27a-e): nullable additions only.
     33: [_memory_extras],
+    # Skills (row 32): two new tables; nothing moves.
+    SKILLS_SCHEMA: [_skills],
 }
 
 
@@ -1067,6 +1097,7 @@ def _initialize_schema(
         _long_chats(db)
         _linked_memory_server(db)
         _memory_extras(db)
+        _skills(db)
         db.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?)",
             (str(SCHEMA_VERSION),),
@@ -1128,6 +1159,10 @@ PERSON_TABLES: tuple[tuple[str, str], ...] = (
     ("document_folders", "owner"),
     ("media", "owner"),
     ("projects", "owner"),
+    # Row 32: their skills (an install skill's owner is `install`, never a person's sub) and
+    # which of the install's skills they turned off. Their folder goes with removal's `skills`.
+    ("skill_off", "sub"),
+    ("skills", "owner"),
     ("folder_grants", "subject"),
     ("sessions", "sub"),
     ("chats", "owner"),

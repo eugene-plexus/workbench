@@ -3,8 +3,8 @@
 **Everyone can download their own data, at any time** (`POST /api/me/export`): their chats
 (each as Markdown, as shown, and every version of every message in `chats.json`), their files,
 media and artifacts, today's memory export (`memory.json`, `memory.md`, and what their own
-memory server lists, `memory-server.json`), the documents they kept, their projects, and their
-connections to other apps (never a token).
+memory server lists, `memory-server.json`), the documents they kept, their skills (row 32, each
+as its folder), their projects, and their connections to other apps (never a token).
 
 **The owner can download another person's data** (`POST /api/people/{sub}/export`):
 
@@ -211,17 +211,30 @@ class Exports:
         sub, name = row["subject"], row["subject_name"]
         snapshot = await self.store.export_snapshot(sub)
         memory: tuple[dict[str, Any], str] | None = None
+        #: Row 32: each of their own skills, as its folder (never one Eugene gives everyone).
+        skills: list[tuple[str, Path]] = []
         if full:
             from .memory_api import memory_export
 
             memory = await memory_export(self.state, sub, name, server_too=row["scope"] == SELF)
+            keeper = getattr(self.state, "skills", None)
+            if keeper is not None:
+                skills = await keeper.exported(sub)
         root, target = self.data_dir, self.path_of(row["id"])
         abort = threading.Event()
 
         def write() -> tuple[dict[str, int], int]:
             self.dir.mkdir(parents=True, exist_ok=True)
             partial = target.with_suffix(".part")
-            holds = {"chats": 0, "files": 0, "media": 0, "artifacts": 0, "notes": 0, "documents": 0}
+            holds = {
+                "chats": 0,
+                "files": 0,
+                "media": 0,
+                "artifacts": 0,
+                "notes": 0,
+                "documents": 0,
+                "skills": 0,
+            }
             used: set[str] = set()
 
             def unique(wanted: str) -> str:
@@ -333,6 +346,15 @@ class Exports:
                         where = scope.split(":", 1)[0]
                         archive.write(original, unique(f"documents/{where}/{_safe(doc_name)}"))
                         holds["documents"] += 1
+                for skill_name, folder in skills:
+                    # A skill's name is lowercase letters, digits and hyphens: a safe folder.
+                    kept = [p for p in sorted(folder.rglob("*")) if p.is_file()]
+                    for found in kept:
+                        if found.is_symlink():
+                            continue
+                        inside = found.relative_to(folder).as_posix()
+                        archive.write(found, f"skills/{skill_name}/{inside}")
+                    holds["skills"] += bool(kept)
                 archive.writestr("README.txt", _readme(row, holds, full))
             size = partial.stat().st_size
             if abort.is_set():  # deleted while it was written: nothing of it is kept
@@ -420,6 +442,7 @@ def _readme(row: dict[str, Any], holds: dict[str, int], full: bool) -> str:
         lines += [
             "memory.json     notes, earlier versions and tags (memory.md to read)",
             "documents/      the documents kept, as they were added",
+            "skills/         each skill, as its folder with its SKILL.md",
             "projects.json   projects",
             "connections.json  connections to other apps (no tokens)",
         ]

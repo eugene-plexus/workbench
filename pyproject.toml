@@ -52,6 +52,9 @@ dependencies = [
     # CPython 3.12 on Windows (x64, ARM64), macOS (Intel, Apple silicon) and Linux (glibc and
     # musl, x86-64 and arm64), so no installer needs a compiler or an extension to load.
     "numpy>=2.0,<3",
+    # A skill's SKILL.md opens with YAML frontmatter (row 32, `skills.py`): read with the safe
+    # loader, aliases refused. The same requirement other components already declare.
+    "pyyaml>=6.0,<7",
 ]
 
 [project.optional-dependencies]
@@ -114,6 +117,7 @@ ignore = []
 "src/eugene_plexus_workbench/api.py" = ["B008"]
 "src/eugene_plexus_workbench/media_api.py" = ["B008"]
 "src/eugene_plexus_workbench/saved_api.py" = ["B008"]
+"src/eugene_plexus_workbench/skills_api.py" = ["B008"]
 # Sabotage anchors are exact source text, so a line is as long as the source it names.
 "scripts/check-media-sabotage.py" = ["E501"]
 "scripts/check-memory-sabotage.py" = ["E501"]
@@ -156,7 +160,7 @@ module = "eugene_plexus_workbench._generated.*"
 ignore_errors = true
 
 [[tool.mypy.overrides]]
-module = ["authlib.*", "jsonschema.*", "pypdfium2.*"]
+module = ["authlib.*", "jsonschema.*", "pypdfium2.*", "yaml"]
 ignore_missing_imports = true
 
 # -----------------------------------------------------------------------------
