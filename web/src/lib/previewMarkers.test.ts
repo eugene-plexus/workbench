@@ -1,4 +1,9 @@
-import { markPreviewFinished, markPreviewStarted, previewWasUnfinished } from "./previewMarkers";
+import {
+  markPreviewFinished,
+  markPreviewSent,
+  markPreviewStarted,
+  previewWasUnfinished,
+} from "./previewMarkers";
 
 const STORE = "workbench.previews.unfinished";
 const FIREFOX = "Mozilla/5.0 Gecko/20100101 Firefox/155.0";
@@ -35,6 +40,39 @@ it("keeps only the 200 newest starts, moving a repeated start to the end", () =>
   ]);
 });
 
+it("pagehide clears only this page's begun markers", () => {
+  localStorage.setItem(STORE, JSON.stringify(["previous-page"]));
+  markPreviewStarted("begun");
+  window.dispatchEvent(new Event("pagehide"));
+  expect(JSON.parse(localStorage.getItem(STORE)!)).toEqual(["previous-page"]);
+});
+
+it("sent is memory only and survives pagehide", () => {
+  markPreviewStarted("sent");
+  const write = vi.spyOn(Storage.prototype, "setItem");
+  markPreviewSent("sent");
+  window.dispatchEvent(new Event("pagehide"));
+  expect(write).not.toHaveBeenCalled();
+  expect(previewWasUnfinished("sent")).toBe(true);
+  markPreviewFinished("sent");
+});
+
+it("a fresh attempt resets sent to begun for pagehide", () => {
+  markPreviewStarted("retry");
+  markPreviewSent("retry");
+  markPreviewStarted("retry");
+  window.dispatchEvent(new Event("pagehide"));
+  expect(previewWasUnfinished("retry")).toBe(false);
+});
+
+it("finishing forgets the stage so pagehide leaves a later stored marker alone", () => {
+  markPreviewStarted("finished");
+  markPreviewFinished("finished");
+  localStorage.setItem(STORE, JSON.stringify(["finished"]));
+  window.dispatchEvent(new Event("pagehide"));
+  expect(previewWasUnfinished("finished")).toBe(true);
+});
+
 it("does nothing when storage access, reads, or writes are blocked", () => {
   const blocked = () => {
     throw new DOMException("Blocked", "SecurityError");
@@ -64,7 +102,9 @@ it.each([
   const write = vi.spyOn(Storage.prototype, "setItem");
   expect(previewWasUnfinished("busy")).toBe(false);
   markPreviewStarted("other");
+  markPreviewSent("other");
   markPreviewFinished("busy");
+  window.dispatchEvent(new Event("pagehide"));
   expect(read).not.toHaveBeenCalled();
   expect(write).not.toHaveBeenCalled();
 });

@@ -54,18 +54,26 @@ describe.each([FIREFOX, WEBKIT])("unfinished previews in %s", (agent) => {
     ).toBeVisible();
   });
 
-  it("does not write a marker before the frame is ready", () => {
+  it("writes its marker in begin before the frame is ready", () => {
     localStorage.setItem(STORE, JSON.stringify(["another artifact"]));
     const write = vi.spyOn(Storage.prototype, "setItem");
     render(<ArtifactPreview {...props} />);
     expect(screen.getByTestId("artifact-frame")).toBeInTheDocument();
-    act(() => vi.advanceTimersByTime(READY_WITHIN_MS));
-    expect(screen.getByTestId("artifact-frame")).toBeInTheDocument();
-    expect(stored()).toEqual(["another artifact"]);
-    expect(write.mock.calls.filter(([name]) => name === STORE)).toEqual([]);
+    expect(stored()).toEqual(["another artifact", key()]);
+    expect(write.mock.calls.filter(([name]) => name === STORE)).toEqual([
+      [STORE, JSON.stringify(["another artifact", key()])],
+    ]);
   });
 
-  it("writes its marker immediately before sending run, once per frame", () => {
+  it("keeps the early marker while a silent frame is replaced", () => {
+    render(<ArtifactPreview {...props} />);
+    const first = screen.getByTestId("artifact-frame");
+    act(() => vi.advanceTimersByTime(READY_WITHIN_MS));
+    expect(screen.getByTestId("artifact-frame")).not.toBe(first);
+    expect(stored()).toEqual([key()]);
+  });
+
+  it("sends run once per frame without writing storage in ready", () => {
     render(<ArtifactPreview {...props} />);
     const frame = screen.getByTestId("artifact-frame") as HTMLIFrameElement;
     const write = vi.spyOn(Storage.prototype, "setItem");
@@ -78,9 +86,7 @@ describe.each([FIREFOX, WEBKIT])("unfinished previews in %s", (agent) => {
       { type: "run", nonce: expect.any(String), kind: props.kind, source: props.source },
       "*",
     );
-    expect(write.mock.calls.filter(([name]) => name === STORE)).toEqual([
-      [STORE, JSON.stringify([key()])],
-    ]);
+    expect(write.mock.calls.filter(([name]) => name === STORE)).toEqual([]);
   });
 
   it("Run starts a held artifact and re-marks it; only its matching finished reply clears it", () => {
@@ -88,7 +94,7 @@ describe.each([FIREFOX, WEBKIT])("unfinished previews in %s", (agent) => {
     render(<ArtifactPreview {...props} />);
     fireEvent.click(screen.getByRole("button", { name: "Run" }));
     const frame = screen.getByTestId("artifact-frame") as HTMLIFrameElement;
-    expect(stored()).toEqual([key(), "another artifact"]);
+    expect(stored()).toEqual(["another artifact", key()]);
     expect(
       screen.queryByText(
         "This preview didn't finish last time and may have frozen the page. Run it?",
@@ -108,15 +114,17 @@ describe.each([FIREFOX, WEBKIT])("unfinished previews in %s", (agent) => {
     say(frame, { type: "started", nonce });
     expect(stored()).toEqual(["another artifact"]);
     fireEvent.click(screen.getByRole("button", { name: "Reload the page" }));
-    expect(stored()).toEqual(["another artifact"]);
+    expect(stored()).toEqual(["another artifact", key()]);
     say(screen.getByTestId("artifact-frame") as HTMLIFrameElement, { type: "ready" });
     expect(stored()).toContain(key());
   });
 
-  it("unmounting a sent-but-not-started preview clears its marker", () => {
+  it.each(["begun", "sent"])("a responsive unmount clears a %s marker", (stage) => {
     localStorage.setItem(STORE, JSON.stringify(["another artifact"]));
     const view = render(<ArtifactPreview {...props} />);
-    say(screen.getByTestId("artifact-frame") as HTMLIFrameElement, { type: "ready" });
+    if (stage === "sent") {
+      say(screen.getByTestId("artifact-frame") as HTMLIFrameElement, { type: "ready" });
+    }
     expect(stored()).toEqual(["another artifact", key()]);
     view.unmount();
     expect(stored()).toEqual(["another artifact"]);
@@ -124,10 +132,49 @@ describe.each([FIREFOX, WEBKIT])("unfinished previews in %s", (agent) => {
     expect(screen.getByTestId("artifact-frame")).toBeInTheDocument();
   });
 
-  it("ending a sent-but-not-started run clears its marker", () => {
+  it.each(["begun", "sent"])("Reload while %s keeps the new early marker", (stage) => {
+    render(<ArtifactPreview {...props} />);
+    if (stage === "sent") {
+      say(screen.getByTestId("artifact-frame") as HTMLIFrameElement, { type: "ready" });
+    }
+    fireEvent.click(screen.getByRole("button", { name: "Reload the page" }));
+    expect(stored()).toEqual([key()]);
+  });
+
+  it.each(["begun", "sent"])("Stop keeps a %s marker on responsive unmount", (stage) => {
+    const view = render(<ArtifactPreview {...props} />);
+    if (stage === "sent") {
+      say(screen.getByTestId("artifact-frame") as HTMLIFrameElement, { type: "ready" });
+    }
+    fireEvent.click(screen.getByRole("button", { name: "Stop the page" }));
+    view.unmount();
+    expect(stored()).toEqual([key()]);
+  });
+
+  it("pagehide clears begun markers and keeps sent and previous-page markers", () => {
+    localStorage.setItem(STORE, JSON.stringify(["previous page"]));
+    const begun = { ...props, blockKey: "begun" };
+    const sent = { ...props, blockKey: "sent", auto: false };
+    render(<ArtifactPreview {...begun} />);
+    const second = render(<ArtifactPreview {...sent} />);
+    fireEvent.click(screen.getByRole("button", { name: "Run" }));
+    expect(stored()).toEqual(["previous page", key(begun), key(sent)]);
+    const frame = second.container.querySelector("iframe")!;
+    const posted = vi.spyOn(frame.contentWindow!, "postMessage").mockImplementation(() => {
+      // Stage must change before postMessage can give the frame a turn.
+      window.dispatchEvent(new Event("pagehide"));
+    });
+    say(frame, { type: "ready" });
+    expect(posted).toHaveBeenCalledOnce();
+    expect(stored()).toEqual(["previous page", key(sent)]);
+    window.dispatchEvent(new Event("pagehide"));
+    expect(stored()).toEqual(["previous page", key(sent)]);
+  });
+
+  it.each(["begun", "sent"])("ending a %s run responsively clears its marker", (stage) => {
     render(<ArtifactPreview {...props} />);
     const frame = screen.getByTestId("artifact-frame") as HTMLIFrameElement;
-    say(frame, { type: "ready" });
+    if (stage === "sent") say(frame, { type: "ready" });
     expect(stored()).toContain(key());
     say(frame, { type: "leaving" });
     expect(screen.queryByTestId("artifact-frame")).toBeNull();
@@ -212,6 +259,7 @@ it("Chromium starts even a marked artifact and never touches the marker store", 
   fireEvent.click(screen.getByRole("button", { name: "Reload the page" }));
   say(screen.getByTestId("artifact-frame") as HTMLIFrameElement, { type: "ready" });
   view.unmount();
+  window.dispatchEvent(new Event("pagehide"));
   expect(read.mock.calls.filter(([name]) => name === STORE)).toEqual([]);
   expect(write.mock.calls.filter(([name]) => name === STORE)).toEqual([]);
 });

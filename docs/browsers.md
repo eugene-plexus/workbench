@@ -31,18 +31,29 @@ is necessary. A sandbox controls access, not a separate thread or process;
 changing its attributes cannot provide that guarantee. A different execution
 architecture would be needed to fix this in Workbench (workbench#19).
 
-In Firefox and Safari (WebKit), Workbench records each preview when its frame
-is ready, immediately before sending it the run message. Waiting for a frame
-does not leave a marker. If a sent run never reports finishing before the page
-is closed or reloaded, its next showing waits for **Run** and says: "This preview
-didn't finish last time and may have frozen the page. Run it?" Every other artifact
-still runs by itself. Run records a fresh attempt when its frame is ready; a
+In Firefox and Safari (WebKit), Workbench records each preview in `begin()`,
+before creating its frame. These engines persist localStorage writes through
+another process asynchronously; waiting until the run message is sent lets a
+loop freeze the page before the marker is durable. In memory, this page tracks
+each attempt as **begun**, then **sent** immediately before posting the run
+message. Sending changes no storage. If a sent run never reports finishing
+before the page is closed or reloaded, its next showing waits for **Run** and
+says: "This preview didn't finish last time and may have frozen the page. Run it?"
+Every other artifact
+still runs by itself. Run records a fresh attempt before its frame exists; a
 matching first-run success or failure clears it. Unmounting or ending a run
 while the page still responds also clears it, except after the start timeout
-or the person's Stop. No pagehide or unload handler clears markers: a browser
-may run one after terminating a loop. The identity includes the chat, message
-and content, so a corrected revision can run by itself. Chrome and Edge do not
-use these markers.
+or the person's Stop. This applies to both begun and sent attempts. Replacing
+a silent frame keeps the same attempt and its early marker.
+
+One module-level `pagehide` listener clears only this page's begun markers:
+a preview whose run was never sent cannot have looped. It leaves sent markers
+and markers from previous pages alone, since a browser may dispatch `pagehide`
+after terminating a loop. A begun marker retained by Stop is also cleared on
+pagehide. Closing or reloading after sending but before completion keeps the
+marker; that window is normally milliseconds. The identity includes the chat,
+message and content, so a corrected revision can run by itself. Chrome and Edge
+do not use these markers.
 
 Only the 200 newest unfinished identities are kept, under
 `workbench.previews.unfinished` in localStorage; no artifact source is stored.
@@ -55,6 +66,8 @@ in these two engines. Chromium still runs them. The inline browser script checks
 reload recovery by intercepting only the looping fixture's run message before
 execution. The real preview records its start and gets no completion reply;
 after reload only that artifact waits for Run, and Run records its next attempt.
+The saved tool-artifact check also holds its bootstrap before ready, then
+reloads: pagehide must clear the begun marker so revision 2 runs by itself.
 No actual loop executes in that check. Both engines still check ordinary Stop,
 sandbox isolation, network and form refusals, navigation, components, and inline
 capacity. A deliberately
@@ -90,3 +103,14 @@ including the saved edit running after reload. The full inline script still
 failed the same two height checks and phone-layout check described above.
 Firefox 155.0 again failed to create its first page with the same `_page`
 error, before reaching Workbench. The Linux matrix remains for CI.
+
+31i early-write restoration, 2026-10-26: Linux CI run 40317981422 failed reload
+recovery in both engines on d304658; the write in ready was not durable before
+the frame could run. The marker is now written in begin, with begun/sent stages
+in memory and cleanup of begun markers on pagehide. Locally on Windows,
+WebKit 26.6 with Playwright 1.63.0 passed both recovery assertions and all
+tool-artifact checks, including a deliberately silent bootstrap followed by
+reload: revision 2 ran by itself again. The full inline script failed the
+existing short/tall frame-height check (tall 504 px, expected 630 px) and
+phone-layout check. Firefox 155.0 failed to create its first page with the
+same `_page` error above. Linux CI is the judge of this fix.

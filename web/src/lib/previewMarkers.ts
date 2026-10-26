@@ -2,6 +2,8 @@
  * Keep identities only, oldest first, under one key; storage is optional. */
 const STORE = "workbench.previews.unfinished";
 const LIMIT = 200;
+// Only attempts begun by this page; markers from an earlier page stay held.
+const stages = new Map<string, "begun" | "sent">();
 
 export function usesPreviewMarkers(userAgent = navigator.userAgent): boolean {
   // Match the engines as diagramClient's palette does. No feature check tells
@@ -44,11 +46,29 @@ export function previewWasUnfinished(key: string): boolean {
 export function markPreviewStarted(key: string): void {
   if (!usesPreviewMarkers()) return;
   const keys = read();
-  if (keys) write([...keys.filter((kept) => kept !== key), key].slice(-LIMIT));
+  if (keys) {
+    const kept = [...keys.filter((other) => other !== key), key].slice(-LIMIT);
+    write(kept);
+    stages.set(key, "begun");
+    for (const marked of stages.keys()) if (!kept.includes(marked)) stages.delete(marked);
+  }
+}
+
+export function markPreviewSent(key: string): void {
+  if (usesPreviewMarkers() && stages.has(key)) stages.set(key, "sent");
 }
 
 export function markPreviewFinished(key: string): void {
   if (!usesPreviewMarkers()) return;
+  stages.delete(key);
   const keys = read();
   if (keys?.includes(key)) write(keys.filter((kept) => kept !== key));
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", () => {
+    // A browser may dispatch this after terminating a loop. Only a preview
+    // whose run was never sent is safe to forget here.
+    for (const [key, stage] of stages) if (stage === "begun") markPreviewFinished(key);
+  });
 }

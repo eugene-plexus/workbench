@@ -145,7 +145,12 @@ async function unfinishedAfterReload() {
     });
   });
   await chat(page, cfg.chats.stuck);
-  await card(page, "Busy").getByTestId("artifact-frame").waitFor();
+  // The early marker alone does not mean run was sent. Reload only after the
+  // frame intercepted it, so pagehide must keep its sent marker.
+  await card(page, "Busy")
+    .frameLocator('[data-testid="artifact-frame"]')
+    .locator("html[data-run-intercepted]")
+    .waitFor();
   for (const title of ["Calm", "Calm too"]) {
     await card(page, title).getByRole("status").getByText("Running").waitFor();
   }
@@ -305,6 +310,22 @@ try {
         .innerText()
     ).includes("from fetch_page's result") && (await toolSource.inputValue()) === cfg.toolOriginal,
   );
+  if (browserName !== "chromium") {
+    step("a begun tool preview is cleared on reload");
+    // Give the saved edit a frame that cannot say ready. Its early marker
+    // must be cleared by pagehide, even though React does not unmount on reload.
+    const silentRuntime = (route) => route.fulfill({ contentType: "text/javascript", body: "" });
+    await toolPage.route("**/preview/runtime.js", silentRuntime);
+    await toolPage.reload();
+    await card(toolPage, "Page").getByText("HTML · 2 revisions", { exact: true }).waitFor();
+    await shownRuns(toolPage, "Page");
+    await toolPage.waitForFunction(
+      () =>
+        JSON.parse(window.localStorage.getItem("workbench.previews.unfinished") ?? "[]").length ===
+        1,
+    );
+    await toolPage.unroute("**/preview/runtime.js", silentRuntime);
+  }
   await toolPage.reload();
   await shownRuns(toolPage, "Page");
   // Reading the saved edit can replace the initial frame during startup.
@@ -313,6 +334,13 @@ try {
     .getByText("Edited tool page", { exact: true })
     .waitFor();
   check("a tool artifact's saved edit runs inline after reload", true);
+  if (browserName !== "chromium") {
+    check(
+      "pagehide clears a tool artifact's begun marker so its saved edit runs again",
+      (await card(toolPage, "Page").getByRole("button", { name: "Run", exact: true }).count()) ===
+        0,
+    );
+  }
   policy.push(...(await toolPage.evaluate(() => window.__policy)));
   await toolView.context.close();
 

@@ -33,6 +33,7 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { digest } from "../lib/artifacts";
 import {
   markPreviewFinished,
+  markPreviewSent,
   markPreviewStarted,
   previewWasUnfinished,
 } from "../lib/previewMarkers";
@@ -155,6 +156,9 @@ export function ArtifactPreview({
     setNotes((was) => (was.includes(words) ? was : [...was, words].slice(-NOTES)));
   const begin = () => {
     keepMarker.current = false;
+    // Firefox and WebKit persist storage asynchronously: give it the whole
+    // frame bootstrap, before a run can freeze the page's event loop.
+    markPreviewStarted(markerKey);
     setUnfinished(false);
     setNotes([]);
     setHeight(null);
@@ -247,12 +251,12 @@ export function ArtifactPreview({
   }, [inline, height, viewport, run]);
 
   const id = run?.id;
-  const tries = run?.tries ?? 0;
   useEffect(() => {
     if (id === undefined) return;
     const nonce = newNonce();
     let sent = false;
     let started = false;
+    let tries = 1;
     let late: number | undefined;
     let counted = 0;
     let countedFrom = performance.now();
@@ -278,8 +282,9 @@ export function ArtifactPreview({
         case "ready":
           if (sent) return;
           sent = true;
-          // Before the frame can run: a loop may give the chat no more turns.
-          markPreviewStarted(markerKey);
+          window.clearInterval(silent);
+          // Memory only: pagehide must retain any run the frame could execute.
+          markPreviewSent(markerKey);
           own.postMessage({ type: "run", nonce, kind, source }, "*");
           runner.ready(slot);
           late = window.setTimeout(() => {
@@ -342,10 +347,12 @@ export function ArtifactPreview({
     window.addEventListener("message", heard);
     // A frame that says nothing is in a process still stuck on an earlier preview:
     // a new frame, and the stuck one goes.
-    const silent = window.setTimeout(() => {
+    // Replacing a silent frame is still the same run: its marker stays begun.
+    const silent = window.setInterval(() => {
       if (sent) return;
       if (tries < TRIES) {
-        setRun((was) => (was?.id === id ? { ...was, tries: tries + 1 } : was));
+        tries += 1;
+        setRun((was) => (was?.id === id ? { ...was, tries } : was));
         return;
       }
       finish();
@@ -356,16 +363,19 @@ export function ArtifactPreview({
       );
     }, READY_WITHIN_MS);
     return () => {
-      // A responsive exit is not evidence of a loop, unless timed out or stopped.
-      if (sent && !started && !keepMarker.current) markPreviewFinished(markerKey);
+      // A responsive exit clears either stage, unless timed out or stopped.
+      // Reload already marked its new attempt; this cleanup belongs to the old one.
+      if (!started && !keepMarker.current && runs.current === id) {
+        markPreviewFinished(markerKey);
+      }
       window.removeEventListener("message", heard);
-      window.clearTimeout(silent);
+      window.clearInterval(silent);
       window.clearTimeout(late);
       window.clearTimeout(sizing);
     };
     // The source and kind are this preview's own: a new one is a new preview (its key).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, tries]);
+  }, [id]);
 
   // Gone from the page: so is its frame, and the runner is told.
   useEffect(() => () => runner.stopped(slot), [slot]);
