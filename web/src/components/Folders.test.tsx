@@ -3,9 +3,60 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { api, del, post } from "../lib/api";
 import { Folders, FolderSelection } from "./Folders";
 
+it("shows the permission refusal's console link", async () => {
+  vi.mocked(api).mockImplementation(async (path) =>
+    path === "/api/folders/people"
+      ? { people: [{ sub: "ada", name: "Ada" }] }
+      : { available: true, grants: [] },
+  );
+  vi.mocked(post).mockRejectedValue(
+    Object.assign(new Error("Workbench's account cannot open D:\\Projects."), {
+      detail: { giveAccessUrl: "https://eugene.test/apps/app?path=project" },
+    }),
+  );
+  render(<Folders owner />);
+  await screen.findByRole("option", { name: "Ada" });
+  fireEvent.change(screen.getByLabelText("Folder name"), { target: { value: "Project" } });
+  fireEvent.change(screen.getByLabelText(/Full folder path/), {
+    target: { value: "D:\\Projects" },
+  });
+  fireEvent.change(screen.getByLabelText("Person who can use it"), { target: { value: "ada" } });
+  fireEvent.submit(screen.getByRole("form", { name: "Grant folder access" }));
+  expect(await screen.findByRole("link", { name: /Give access in Eugene/ })).toHaveAttribute(
+    "href",
+    "https://eugene.test/apps/app?path=project",
+  );
+});
+
 vi.mock("../lib/api", () => ({ api: vi.fn(), post: vi.fn(), del: vi.fn() }));
 
 const grant = { id: "notes", name: "Project notes", subject: "ada", writable: false, usable: true };
+
+it("keeps a release failure visible and links to removing access in Eugene", async () => {
+  let removed = false;
+  vi.mocked(api).mockImplementation(async (path) =>
+    path === "/api/folders/people"
+      ? { people: [{ sub: "ada", name: "Ada" }] }
+      : { available: true, grants: removed ? [] : [grant] },
+  );
+  vi.mocked(del).mockImplementation(async () => {
+    removed = true;
+    return {
+      warning:
+        "Workbench no longer uses the project, but its access stays: connection refused. Remove it in Eugene.",
+      giveAccessUrl: "https://eugene.test/apps/app",
+    };
+  });
+  render(<Folders owner />);
+  fireEvent.click(await screen.findByRole("button", { name: "Remove grant for Project notes" }));
+  fireEvent.click(screen.getByRole("button", { name: "Remove access to Project notes" }));
+  expect(await screen.findByText(/its access stays: connection refused/)).toBeTruthy();
+  expect(screen.getByRole("link", { name: "Remove access in Eugene" })).toHaveAttribute(
+    "href",
+    "https://eugene.test/apps/app",
+  );
+  expect(screen.queryByRole("button", { name: "Remove grant for Project notes" })).toBeNull();
+});
 
 it("directs an empty chat folder picker to Workbench's folder grants", async () => {
   vi.mocked(api).mockResolvedValue({ available: true, grants: [] });
