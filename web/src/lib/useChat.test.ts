@@ -56,6 +56,21 @@ it("reloads every tab when another version is shown", async () => {
   expect(api).toHaveBeenLastCalledWith("/api/chats/c");
 });
 
+it("keeps the purge notice while reloading the chat, and clears it on another chat", async () => {
+  const { result, rerender } = renderHook(({ id }) => useChat(id), { initialProps: { id: "c" } });
+  await waitFor(() => expect(result.current.detail).not.toBeNull());
+  expect(result.current.notice).toBeNull();
+  const notice = "Also removed 1 older memory recall that could quote this answer.";
+  act(() => watched()({ type: "path", notice }));
+  await waitFor(() => expect(api).toHaveBeenCalledTimes(2));
+  expect(result.current.notice).toBe(notice);
+  act(() => watched()({ type: "path" }));
+  expect(result.current.notice).toBeNull();
+  act(() => watched()({ type: "path", notice }));
+  rerender({ id: "other" });
+  expect(result.current.notice).toBeNull();
+});
+
 it("looks through another branch, and keeps looking there on a reload", async () => {
   const { result } = renderHook(() => useChat("c"));
   await waitFor(() => expect(api).toHaveBeenCalledTimes(1));

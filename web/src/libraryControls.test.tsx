@@ -535,7 +535,7 @@ describe("under an answer", () => {
 
   it("the passages that were sent, each a row that opens, one cited", () => {
     const view = shown(message({ sources: [passage(), second()], retrieval: record() }));
-    expect(mine(view)).toHaveLength(2);
+    expect(mine(view)).toHaveLength(3);
     expect(lacking(mine(view), view.container)).toEqual([]);
     fireEvent.click(screen.getAllByTestId("passage-toggle")[0]!);
     expect(lacking(mine(view), view.container)).toEqual([]);
@@ -965,7 +965,7 @@ describe("under an answer, with search by meaning", () => {
     const mine = [...view.container.querySelectorAll('[data-testid="passage-sources"]')].flatMap(
       controlsIn,
     );
-    expect(mine).toHaveLength(3);
+    expect(mine).toHaveLength(6);
     expect(lacking(mine, view.container)).toEqual([]);
     for (const toggle of screen.getAllByTestId("passage-toggle")) {
       expect(toggle.getAttribute("aria-label")).toMatch(/, found by (words|meaning|both)/);

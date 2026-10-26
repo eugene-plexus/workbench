@@ -22,6 +22,7 @@ import { InteractionSurfaces } from "./InteractionSurfaces";
 
 import { del, patch } from "../lib/api";
 import { exportChat, saveDraft } from "../lib/conveniences";
+import { foldsOf, type Fold } from "../lib/longChats";
 import { failureWords } from "../lib/memory";
 import { placeName, projectPath, useProjects } from "../lib/projects";
 import { hideHint, hintCount, hintHidden } from "../lib/savedDocuments";
@@ -38,6 +39,7 @@ import { MemoryChip, MemoryDrawer } from "./MemoryChip";
 import { MemoryOffer } from "./MemoryOffer";
 import { MemoryToast, outcomeOf, type ToastOutcome } from "./MemoryToast";
 import { MessageView } from "./MessageView";
+import { SentWithSummaries, SummaryFold } from "./SummaryFold";
 import { DeletedBranches } from "./Versions";
 import type { RememberProps } from "./RememberThis";
 
@@ -71,7 +73,7 @@ export function ChatView({
   /** MV7: open a project's page, from the header's project name. */
   onOpenProject?: (id: string) => void;
 }) {
-  const { detail, update, progress, error, reload, look, learned } = useChat(chatId);
+  const { detail, update, progress, error, reload, look, learned, notice } = useChat(chatId);
   const interactive = useInteractions(
     chatId,
     detail?.chat.readOnly ? detail.messages.at(-1)?.id : undefined,
@@ -113,6 +115,8 @@ export function ChatView({
   const [actionError, setActionError] = useState<string | null>(null);
   const [acting, setActing] = useState(false);
   const [away, setAway] = useState(false);
+  // Row 26: the runs sent as summaries whose originals the person unfolded.
+  const [unfolded, setUnfolded] = useState<string[]>([]);
   const box = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
   // Follow the bottom until the reader scrolls up, and again once they
@@ -211,6 +215,12 @@ export function ChatView({
     );
 
   const { chat, messages } = detail;
+  // Row 26: runs of earlier messages the model was sent as summaries fold away; a link into
+  // one (an exchange opened from Search chats) unfolds it.
+  const folds = foldsOf(messages);
+  const atIndex = at ? messages.findIndex((m) => m.id === at) : -1;
+  const isUnfolded = (fold: Fold) =>
+    unfolded.includes(fold.id) || (atIndex >= fold.start && atIndex - 1 <= fold.end);
 
   function say(outcome: ToastOutcome | null) {
     if (outcome) setToast({ id: ++toasts.current, outcome });
@@ -502,8 +512,14 @@ export function ChatView({
           onChanged={() => void reload()}
         />
       )}
+      {!chat.readOnly && notice && (
+        <p role="status" className="notice notice--bar">
+          {notice}
+        </p>
+      )}
       {showSettings && !chat.readOnly && (
         <ChatSettings
+          chatId={chat.id}
           settings={chat.settings}
           onSave={saveSettings}
           onClose={() => setPanel(null)}
@@ -573,42 +589,66 @@ export function ChatView({
                 <MemoryOffer onOpenMemory={onOpenMemory} />
               </>
             )}
-            {messages.map((message: Message) => (
-              <Fragment key={message.id}>
-                <div
-                  id={`message-${message.id}`}
-                  data-marked={marked === message.id ? "true" : undefined}
-                  className={
-                    marked === message.id
-                      ? "scroll-mt-4 rounded-plexus ring-2 ring-accent ring-offset-4 ring-offset-bg"
-                      : "scroll-mt-4"
-                  }
-                >
-                  <MessageView
-                    key={message.id}
+            {messages.map((message: Message, index: number) => {
+              const fold = folds.find((f) => index >= f.start && index <= f.end);
+              const open = fold ? isUnfolded(fold) : true;
+              if (fold && !open && index !== fold.start) return null;
+              const head =
+                fold && index === fold.start ? (
+                  <SummaryFold
                     chatId={chat.id}
-                    message={message}
-                    progress={message.status === "running" ? progress : null}
-                    busy={running}
-                    readOnly={chat.readOnly}
-                    runArtifacts={chat.settings.runArtifacts !== false}
-                    onChanged={() => {
-                      void reload();
-                      onChanged();
-                    }}
-                    onLook={chat.readOnly ? look : undefined}
-                    memory={remember}
-                    documents={chat.readOnly ? undefined : { onManage: onOpenDocuments }}
+                    fold={fold}
+                    open={open}
+                    known={detail.summaries?.find((s) => s.id === fold.id)}
+                    onToggle={() =>
+                      setUnfolded((now) =>
+                        now.includes(fold.id)
+                          ? now.filter((id) => id !== fold.id)
+                          : [...now, fold.id],
+                      )
+                    }
                   />
-                </div>
-                <InteractionSurfaces
-                  chat={chat.id}
-                  message={message.id}
-                  snapshot={interactive.snapshot}
-                  refresh={interactive.refresh}
-                />
-              </Fragment>
-            ))}
+                ) : null;
+              if (!open) return <Fragment key={message.id}>{head}</Fragment>;
+              return (
+                <Fragment key={message.id}>
+                  {head}
+                  <div
+                    id={`message-${message.id}`}
+                    data-marked={marked === message.id ? "true" : undefined}
+                    className={
+                      marked === message.id
+                        ? "scroll-mt-4 rounded-plexus ring-2 ring-accent ring-offset-4 ring-offset-bg"
+                        : "scroll-mt-4"
+                    }
+                  >
+                    <MessageView
+                      key={message.id}
+                      chatId={chat.id}
+                      message={message}
+                      progress={message.status === "running" ? progress : null}
+                      busy={running}
+                      readOnly={chat.readOnly}
+                      runArtifacts={chat.settings.runArtifacts !== false}
+                      onChanged={() => {
+                        void reload();
+                        onChanged();
+                      }}
+                      onLook={chat.readOnly ? look : undefined}
+                      memory={remember}
+                      documents={chat.readOnly ? undefined : { onManage: onOpenDocuments }}
+                    />
+                  </div>
+                  <SentWithSummaries message={message} />
+                  <InteractionSurfaces
+                    chat={chat.id}
+                    message={message.id}
+                    snapshot={interactive.snapshot}
+                    refresh={interactive.refresh}
+                  />
+                </Fragment>
+              );
+            })}
             {interactive.error && (
               <p className="text-sm text-muted" role="status">
                 Interactive content is unavailable: {interactive.error}

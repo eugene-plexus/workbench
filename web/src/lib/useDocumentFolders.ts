@@ -20,7 +20,7 @@ import type { DocumentFolders } from "./types";
 
 const NOT_UNDERSTOOD = "Workbench's answer about your folders was not one this page understands.";
 
-export function useDocumentFolders() {
+export function useDocumentFolders(projectId?: string) {
   const [data, setData] = useState<DocumentFolders | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   // How many reads have ended, so each one (whether it worked or not) starts the wait for the next.
@@ -31,7 +31,11 @@ export function useDocumentFolders() {
   const reload = useCallback(async () => {
     const mine = ++latest.current;
     try {
-      const next = readFolders(await api<unknown>("/api/documents/folders"));
+      const next = readFolders(
+        await api<unknown>(
+          `/api/documents/folders${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`,
+        ),
+      );
       if (mine !== latest.current) return;
       if (!next) throw new Error(NOT_UNDERSTOOD);
       setData(next);
@@ -43,7 +47,7 @@ export function useDocumentFolders() {
       setProblem(failureWords(failure));
     }
     setReads((n) => n + 1);
-  }, []);
+  }, [projectId]);
 
   useEffect(() => {
     void reload();

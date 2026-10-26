@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -84,6 +85,16 @@ class Preparation:
     remember_tool: bool = False
     #: How a `reply` ends, as a message's `finish` says it.
     finish: str = "documents_only"
+    #: Row 26: the summaries this answer's request carries (`Message.summaries`), or None.
+    summaries: list[dict[str, Any]] | None = None
+    #: Row 26: what to do when the backend refuses the first request as longer than the
+    #: model's window: summarise (or say why not, raising `Refused`), so that the request is
+    #: built again and sent once more; it gives the summaries the answer then carries. None
+    #: leaves the refusal as it is.
+    recover: Callable[[HubError, Progress], Awaitable[list[dict[str, Any]]]] | None = None
+    #: Row 26: told when an answer's tool results filled the window, so that the next message is
+    #: sent with earlier messages summarised.
+    filled: Callable[[], None] | None = None
 
 
 def turn_context(message: Message, interactions: bool = False) -> Any:
@@ -170,6 +181,11 @@ def _only_repetition(exc: BaseException) -> bool:
     if isinstance(exc, BaseExceptionGroup):
         return all(_only_repetition(child) for child in exc.exceptions)
     return False
+
+
+def _count(value: Any) -> int | None:
+    """A count a backend reported: a whole number, not a boolean, not below zero."""
+    return value if type(value) is int and value >= 0 else None
 
 
 def _js_length(text: str) -> int:
@@ -281,6 +297,13 @@ def message_view(message: Message) -> dict[str, Any]:
         "retrieval": message.retrieval,
         "memoryUsed": message.memory_used,
         "branchName": message.branch_name,
+        # Row 26: what the last request used and could hold, as the backend and gateway said.
+        "promptTokens": message.prompt_tokens,
+        "completionTokens": message.completion_tokens,
+        "cachedTokens": message.cached_tokens,
+        "contextLength": message.context_length,
+        "promptTruncated": message.prompt_truncated,
+        "summaries": message.summaries,
     }
 
 
@@ -326,12 +349,17 @@ class Answers:
         self._tools = tools
         self._running: dict[str, Running] = {}
         self._watchers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
+        self._speeds: dict[str, tuple[float, float]] = {}
         #: Told the chat's id when an answer ends, whatever its outcome (MV2: its
         #: exchange goes in the person's index). Never in an answer's way.
         self.on_finished: Callable[[str], None] | None = None
 
     def running(self, chat_id: str) -> Running | None:
         return self._running.get(chat_id)
+
+    def speed(self, model: str) -> float | None:
+        measured = self._speeds.get(model)
+        return measured[1] if measured and time.perf_counter() - measured[0] < 600 else None
 
     # --- watching -------------------------------------------------------
 
@@ -436,6 +464,12 @@ class Answers:
             "retrieval": m.retrieval,
             "memory_used": m.memory_used,
             "model": m.model,
+            "prompt_tokens": m.prompt_tokens,
+            "completion_tokens": m.completion_tokens,
+            "cached_tokens": m.cached_tokens,
+            "context_length": m.context_length,
+            "prompt_truncated": m.prompt_truncated,
+            "summaries": m.summaries,
         }
         if final:
             values.update(
@@ -494,9 +528,14 @@ class Answers:
                 self.publish(chat_id, {"type": "progress", "id": m.id, "progress": value})
 
         memory_tool = chats_tool = remember_tool = False
+        recover: Callable[[HubError, Progress], Awaitable[list[dict[str, Any]]]] | None = None
+        filled: Callable[[], None] | None = None
         try:
             if prepare is not None:
                 prepared = await prepare(progress)
+                recover, filled = prepared.recover, prepared.filled
+                if prepared.summaries is not None:
+                    m.summaries = prepared.summaries
                 memory_tool = prepared.memory_tool
                 chats_tool = prepared.chats_tool
                 remember_tool = prepared.remember_tool
@@ -514,7 +553,11 @@ class Answers:
                 if prepared.reply is not None:
                     # Nothing to answer from, and the chat answers only from the
                     # person's documents: these are Workbench's words, not a model's.
-                    m.model, m.finish = None, prepared.finish
+                    whole_read = bool(
+                        ((prepared.retrieval or {}).get("whole") or {}).get("state") == "read"
+                    )
+                    m.model = m.model if whole_read else None
+                    m.finish = "whole_document" if whole_read else prepared.finish
                     told["contentAt"] = 0
                     told["content"] = m.content = prepared.reply
                 if told:
@@ -523,24 +566,38 @@ class Answers:
                 if prepared.reply is not None:
                     m.status = "done"
                     return
-            body = await asyncio.to_thread(build)
-            context = await self._store.interactions.model_context(chat_id)
-            if context:
-                # Ordinary user context, before the current explicit request.
-                body["messages"][-1:-1] = context
-            if tool_servers or folder_grants or memory_tool or chats_tool or remember_tool:
-                await self._with_tools(
-                    running,
-                    body,
-                    tool_servers,
-                    folder_grants,
-                    memory_tool=memory_tool,
-                    chats_tool=chats_tool,
-                    remember_tool=remember_tool,
-                    interactions=bool(context),
-                )
-            else:
-                await self._stream(running, body)
+
+            async def ask() -> None:
+                body = await asyncio.to_thread(build)
+                context = await self._store.interactions.model_context(chat_id)
+                if context:
+                    # Ordinary user context, before the current explicit request.
+                    body["messages"][-1:-1] = context
+                if tool_servers or folder_grants or memory_tool or chats_tool or remember_tool:
+                    await self._with_tools(
+                        running,
+                        body,
+                        tool_servers,
+                        folder_grants,
+                        memory_tool=memory_tool,
+                        chats_tool=chats_tool,
+                        remember_tool=remember_tool,
+                        interactions=bool(context),
+                    )
+                else:
+                    await self._stream(running, body)
+
+            try:
+                await ask()
+            except HubError as exc:
+                # Row 26: refused as too long before anything was said: summarise once, and send
+                # once more. Inside an answer's tool rounds it is said (below), not retried.
+                if exc.kind != "context" or recover is None or m.tool_rounds or m.content:
+                    raise
+                m.summaries = await recover(exc, progress)
+                running.progress = None
+                self.publish(chat_id, {"type": "delta", "id": m.id, "summaries": m.summaries})
+                await ask()
             m.status = "done"
         except asyncio.CancelledError:
             m.status = "interrupted" if running.shutting_down else "stopped"
@@ -548,6 +605,15 @@ class Answers:
             m.status, m.error = "stopped" if exc.kind == "repetition" else "failed", exc.message
             if exc.kind == "repetition":
                 m.finish = "repetition_detected"
+            elif exc.kind == "context" and m.tool_rounds:
+                # Row 26: the tool results of this answer filled the window. The next message
+                # is sent with earlier messages summarised.
+                from .long_chats import tools_filled_words
+
+                m.error = tools_filled_words(m.model, len(m.tool_rounds))
+                if filled is not None:
+                    with contextlib.suppress(Exception):
+                        filled()
         except Refused as exc:
             m.status, m.error = "failed", exc.message
         except ToolError as exc:
@@ -884,6 +950,21 @@ class Answers:
         m = running.message
         self._reasoning_tick(running)
         usage = chunk.get("usage")
+        if isinstance(usage, dict):
+            # Row 26: what this request used, as the backend counted it; the last request of an
+            # answer is what the next one builds on.
+            m.prompt_tokens = _count(usage.get("prompt_tokens"))
+            m.completion_tokens = _count(usage.get("completion_tokens"))
+            cached = usage.get("prompt_tokens_details")
+            m.cached_tokens = (
+                _count(cached.get("cached_tokens")) if isinstance(cached, dict) else None
+            )
+        window = _count((chunk.get("x_eugene_plexus") or {}).get("context_length"))
+        if window:
+            m.context_length = window
+        if (chunk.get("x_eugene_plexus") or {}).get("prompt_truncated") is True:
+            m.prompt_truncated = True
+            self.publish(running.chat_id, {"type": "delta", "id": m.id, "promptTruncated": True})
         details = usage.get("completion_tokens_details") if isinstance(usage, dict) else None
         tokens = details.get("reasoning_tokens") if isinstance(details, dict) else None
         if (
@@ -915,6 +996,15 @@ class Answers:
         if not choices:
             progress = extension.get("progress")
             if isinstance(progress, dict):
+                speed = progress.get("tokens_per_second")
+                if (
+                    m.model
+                    and isinstance(speed, int | float)
+                    and not isinstance(speed, bool)
+                    and math.isfinite(speed)
+                    and speed > 0
+                ):
+                    self._speeds[m.model] = (time.perf_counter(), float(speed))
                 if progress.get("stage") in ("tool", "prompt"):
                     self._reasoning_tick(running, end=True)
                 running.progress = progress

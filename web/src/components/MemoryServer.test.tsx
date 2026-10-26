@@ -11,6 +11,11 @@ vi.mock("../lib/api", async (importOriginal) => ({
   put: vi.fn(),
   post: vi.fn(),
 }));
+vi.mock("./MemoryBackfill", () => ({
+  MemoryBackfill: ({ allowed }: { allowed: boolean }) => (
+    <div data-testid="backfill-panel">{allowed ? "allowed" : "paused"}</div>
+  ),
+}));
 
 type Connected = NonNullable<MemoryServerPage["server"]>;
 
@@ -43,6 +48,31 @@ function page(server: Partial<Connected> | null = null, over: Partial<MemoryServ
 }
 
 afterEach(() => vi.mocked(api).mockReset());
+
+it("keeps backfill progress visible when the owner turns memory servers off", async () => {
+  vi.mocked(api).mockResolvedValueOnce(
+    page({}, { allowed: false, mode: "off", why: "Memory is off" }),
+  );
+  render(<MemoryServer />);
+  expect(await screen.findByTestId("backfill-panel")).toHaveTextContent("paused");
+});
+
+it("connects this machine's Hindsight with one click and keeps the switch in effect", async () => {
+  vi.mocked(api).mockResolvedValueOnce(page(null, { linkedAvailable: true }));
+  vi.mocked(put).mockResolvedValueOnce(page({ linked: true }, { linkedAvailable: true }));
+  render(<MemoryServer />);
+  const toggle = await screen.findByRole("checkbox", { name: "Use Hindsight on this machine" });
+  expect(toggle).not.toBeChecked();
+  fireEvent.click(toggle);
+  await waitFor(() =>
+    expect(put).toHaveBeenCalledWith("/api/memory/server/linked", { enabled: true }),
+  );
+  await waitFor(() => expect(toggle).toBeChecked());
+  vi.mocked(put).mockRejectedValueOnce(new Error("Hindsight refused the token."));
+  fireEvent.click(toggle);
+  expect(await screen.findByRole("alert")).toHaveTextContent("refused the token");
+  expect(toggle).toBeChecked();
+});
 
 it("connects a server with an address and a token, and never shows the token", async () => {
   vi.mocked(api).mockResolvedValueOnce(page());

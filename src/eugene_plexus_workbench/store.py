@@ -75,6 +75,13 @@ purge deletes every row `PERSON_TABLES` names, from the store and from every cop
 (`*.schema-N.bak`), and rewrites each file so no free page or log still holds their words.
 `exports` is the log of every download of a person's data, and where each file is while it is
 kept.
+
+**Long chats** (schema 31, row 26): an answer keeps what its last request used and could hold
+(`prompt_tokens`, `completion_tokens`, `cached_tokens`, `context_length`), whether the backend
+said it dropped part of the prompt (`prompt_truncated`), and which summaries it was sent
+(`summaries`, JSON). `chat_summaries` holds each summary of a run of a chat's messages: a new copy
+of chat text, deleted with its chat, and with any branch delete that removes a message of its
+run. The messages themselves are never changed.
 """
 
 from __future__ import annotations
@@ -101,7 +108,7 @@ from .agui_store import AGUIStore, allow_chat_write
 from .interaction_store import SCHEMA as INTERACTION_SCHEMA
 from .interaction_store import InteractionStore
 
-SCHEMA_VERSION = 29
+SCHEMA_VERSION = 33
 
 #: The oldest schema this migrates from: what Workbench v0.1.0 wrote. Schema 1 predates
 #: it, and nobody holds one.
@@ -695,9 +702,76 @@ def _removal(db: sqlite3.Connection) -> None:
     db.execute("CREATE INDEX IF NOT EXISTS exports_by_asker ON exports (asker, created_at)")
 
 
+def _group_claims(db: sqlite3.Connection) -> None:
+    """Schema 30 (row 70c): the permission groups a person is in and the policies those set,
+    as Eugene's sign-in claims last said (`eugene_groups`, `eugene_policies`), kept with the
+    person so their groups' memory servers apply when no request of theirs is open. NULL is
+    "Eugene said nothing" (an Eugene from before row 70), not "in no group"."""
+    present = {row[1] for row in db.execute("PRAGMA table_info(people)")}
+    for column in ("groups_json", "policies_json"):
+        if column not in present:
+            db.execute(f"ALTER TABLE people ADD COLUMN {column} TEXT")
+
+
+#: Row 26's one migration, and the one place its number is said.
+LONG_CHATS_SCHEMA = 31
+
+
+def _long_chats(db: sqlite3.Connection) -> None:
+    """Schema 31 (row 26): what an answer's last request used and could hold, whether the backend
+    dropped part of it, which summaries it was sent; and the summaries of a chat's earlier messages.
+    New columns and one new table; no message changes."""
+    present = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
+    for column, declaration in (
+        ("prompt_tokens", "INTEGER"),
+        ("completion_tokens", "INTEGER"),
+        ("cached_tokens", "INTEGER"),
+        ("context_length", "INTEGER"),
+        ("prompt_truncated", "INTEGER"),
+        ("summaries", "TEXT"),
+    ):
+        if column not in present:
+            db.execute(f"ALTER TABLE messages ADD COLUMN {column} {declaration}")
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS chat_summaries ("
+        "id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, owner TEXT NOT NULL, "
+        "first_id TEXT NOT NULL, last_id TEXT NOT NULL, digest TEXT NOT NULL, "
+        "text TEXT NOT NULL, nonce TEXT NOT NULL, tokens INTEGER NOT NULL, "
+        "source_tokens INTEGER NOT NULL, model TEXT NOT NULL, made_at REAL NOT NULL, "
+        "carries TEXT NOT NULL DEFAULT '{}', "
+        "cut INTEGER NOT NULL DEFAULT 0 CHECK (cut IN (0, 1)), "
+        "how TEXT NOT NULL CHECK (how IN ('auto', 'overflow', 'merge')), "
+        "instruction INTEGER NOT NULL DEFAULT 1)"
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS chat_summaries_by_chat ON chat_summaries (chat_id)")
+
+
+def _memory_extras(db: sqlite3.Connection) -> None:
+    """Schema 33 (row 27a-e): nullable additions only. All four tables are in PERSON_TABLES."""
+    for table, columns in {
+        "memory_servers": ("backfill",),
+        "projects": ("model",),
+        "memory_tidy": ("model", "merged"),
+        "document_folders": ("project_id",),
+    }.items():
+        present = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
+        for column in columns:
+            if column not in present:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS document_folders_by_project "
+        "ON document_folders (owner, project_id)"
+    )
+
+
 #: What brings a store written at version N-1 to N, for N above `OLDEST_SCHEMA`.
 #: `_SCHEMA` already holds the result, for a store made new. A step is a statement,
 #: or a function of the connection for what SQL alone cannot say.
+def _linked_memory_server(db: sqlite3.Connection) -> None:
+    if "linked" not in {r[1] for r in db.execute("PRAGMA table_info(memory_servers)")}:
+        db.execute("ALTER TABLE memory_servers ADD COLUMN linked INTEGER NOT NULL DEFAULT 0")
+
+
 _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
     3: [
         "ALTER TABLE messages ADD COLUMN tool_rounds TEXT NOT NULL DEFAULT '[]'",
@@ -845,6 +919,13 @@ _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
     # A removed person (row 7, 2026-10-21): two new tables and one new column.
     28: [_removal],
     29: [branch_store.migration],
+    30: [_group_claims],
+    # Long chats (row 26, 2026-10-23): new columns and one new table; nothing moves.
+    LONG_CHATS_SCHEMA: [_long_chats],
+    # A linked memory server (row 72): one new column.
+    32: [_linked_memory_server],
+    # Memory extras (row 27a-e): nullable additions only.
+    33: [_memory_extras],
 }
 
 
@@ -961,7 +1042,7 @@ def _initialize_schema(
                 f"unsupported schema {version}{origin}; {known}",
             )
         if version is not None:
-            for target in range(version + 1, SCHEMA_VERSION + 1):
+            for target in sorted(t for t in _MIGRATIONS if version < t <= SCHEMA_VERSION):
                 for statement in _MIGRATIONS[target]:
                     if callable(statement):
                         statement(db)
@@ -982,6 +1063,10 @@ def _initialize_schema(
         _projects(db)
         _removal(db)
         branch_store.migration(db)
+        _group_claims(db)
+        _long_chats(db)
+        _linked_memory_server(db)
+        _memory_extras(db)
         db.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?)",
             (str(SCHEMA_VERSION),),
@@ -1019,6 +1104,8 @@ PERSON_TABLES: tuple[tuple[str, str], ...] = (
     ("interaction_surfaces", "chat_id"),
     ("interaction_surfaces", "owner"),
     ("interaction_cursors", "chat_id"),
+    ("chat_summaries", "chat_id"),
+    ("chat_summaries", "owner"),
     ("messages", "chat_id"),
     ("files", "chat_id"),
     ("files", "owner"),
@@ -1048,7 +1135,7 @@ PERSON_TABLES: tuple[tuple[str, str], ...] = (
 )
 _NULLED: tuple[tuple[str, str], ...] = (("memory_measurements", "owner"),)
 #: The settings kept per person, as `<name>:<sub>` (`api.py`).
-_PERSON_SETTINGS = ("installModeSeen", "runPreviews")
+_PERSON_SETTINGS = ("installModeSeen", "runPreviews", "memoryMerges")
 
 
 def _purge_rows(
@@ -1129,7 +1216,14 @@ def _all_copies(path: Path) -> list[Path]:
     return sorted(p for p in path.parent.iterdir() if named.fullmatch(p.name) and p.is_file())
 
 
-def _purge_copy(copy: Path, sub: str, *, branch: dict[str, Any] | None = None) -> None:
+def _purge_copy(
+    copy: Path,
+    sub: str,
+    *,
+    branch: dict[str, Any] | None = None,
+    removed: branch_store.RemovedRecalls | None = None,
+    recalls_only: bool = False,
+) -> None:
     """The purge, on one kept copy: its own tables, then the file written again. The copy stays
     for everyone else in it; a copy is one file in rollback-journal mode, as `_keep_backup` makes
     it, and is left that way."""
@@ -1140,8 +1234,14 @@ def _purge_copy(copy: Path, sub: str, *, branch: dict[str, Any] | None = None) -
         db.execute("PRAGMA secure_delete=ON")
         db.execute("BEGIN IMMEDIATE")
         try:
-            _purge_rows(db, sub, branch=branch)
+            recalls = branch_store.legacy_recalls(db, branch) if branch is not None else []
+            if recalls_only and branch is not None:
+                branch_store.remove_legacy_recalls(db, branch)
+            else:
+                _purge_rows(db, sub, branch=branch)
             db.execute("COMMIT")
+            if removed is not None:
+                removed.add(recalls)
         except BaseException:
             with contextlib.suppress(sqlite3.Error):
                 db.execute("ROLLBACK")
@@ -1159,6 +1259,11 @@ class Person:
     username: str | None = None
     #: The email Eugene's ID token carried, if any (row 7: kept with a removed person's data).
     email: str | None = None
+    #: The permission groups Eugene's sign-in said they are in, as `{id, name}` (row 70c), or
+    #: None when Eugene said nothing of groups (an Eugene from before row 70).
+    groups: list[dict[str, str]] | None = None
+    #: The policies their groups set (`PoliciesInEffect`, `setBy` included), or None as above.
+    policies: dict[str, Any] | None = None
     # Request-only context. Never persisted with the person or sent to a browser.
     session_id: str | None = None
 
@@ -1210,6 +1315,7 @@ class Project:
     general_memory: bool = True
     #: Whether its chats search My documents too (MV7b).
     general_documents: bool = True
+    model: str | None = None
 
 
 @dataclass
@@ -1284,6 +1390,7 @@ class FolderRecord:
     report: dict[str, Any] | None = None
     synced_at: float | None = None
     checked_at: float | None = None
+    project_id: str | None = None
 
 
 class MemoryFull(Exception):
@@ -1381,6 +1488,47 @@ class Message:
     reasoning_tokens: int | None = None
     reasoning_seconds: float | None = None
     branch_name: str | None = None
+    #: Row 26: what this answer's last request used, as the backend counted it (`usage`), and
+    #: the window the gateway said applied to it; None where it did not say.
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    cached_tokens: int | None = None
+    context_length: int | None = None
+    #: The gateway said the backend dropped part of the prompt (`prompt_truncated`).
+    prompt_truncated: bool | None = None
+    #: The summaries of earlier messages this answer was sent (`summaries.record`); None for
+    #: an answer from before row 26, or one that never reached the model.
+    summaries: list[dict[str, Any]] | None = None
+
+
+@dataclass
+class SummaryRow:
+    """One summary of a run of a chat's messages (row 26, `summaries.py`): a new copy of chat
+    text, kept with the chat and deleted with it. The messages it stands for never change."""
+
+    id: str
+    chat_id: str
+    owner: str
+    #: The first and last message of the run, on the path it was made from.
+    first_id: str
+    last_id: str
+    #: SHA-256 of the run as it was sent (`long_chats.digest`).
+    digest: str
+    text: str
+    #: The suffix of the block's tags, chosen when it was made.
+    nonce: str
+    #: The block as sent, and the run it stands for, in tokens.
+    tokens: int
+    source_tokens: int
+    model: str
+    made_at: float
+    #: What the run carried when it was summarised: `{"notes": bool, "chats": bool}`.
+    carries: dict[str, bool] = field(default_factory=dict)
+    #: The summary stopped at its limit.
+    cut: bool = False
+    #: `auto`, `overflow` (after a backend refused the chat as too long) or `merge`.
+    how: str = "auto"
+    instruction: int = 1
 
 
 @dataclass
@@ -1663,6 +1811,34 @@ def _message(row: sqlite3.Row) -> Message:
         reasoning_tokens=row["reasoning_tokens"],
         reasoning_seconds=row["reasoning_seconds"],
         branch_name=row["branch_name"],
+        prompt_tokens=row["prompt_tokens"],
+        completion_tokens=row["completion_tokens"],
+        cached_tokens=row["cached_tokens"],
+        context_length=row["context_length"],
+        prompt_truncated=None if row["prompt_truncated"] is None else bool(row["prompt_truncated"]),
+        summaries=_json_or_none(row["summaries"]),
+    )
+
+
+def _summary(row: sqlite3.Row) -> SummaryRow:
+    carries = _json_or_none(row["carries"])
+    return SummaryRow(
+        id=row["id"],
+        chat_id=row["chat_id"],
+        owner=row["owner"],
+        first_id=row["first_id"],
+        last_id=row["last_id"],
+        digest=row["digest"],
+        text=row["text"],
+        nonce=row["nonce"],
+        tokens=row["tokens"],
+        source_tokens=row["source_tokens"],
+        model=row["model"],
+        made_at=row["made_at"],
+        carries={k: bool(v) for k, v in carries.items()} if isinstance(carries, dict) else {},
+        cut=bool(row["cut"]),
+        how=row["how"],
+        instruction=row["instruction"],
     )
 
 
@@ -1830,6 +2006,12 @@ _MESSAGE_FIELDS = {
     "memory_used",
     "reasoning_tokens",
     "reasoning_seconds",
+    "prompt_tokens",
+    "completion_tokens",
+    "cached_tokens",
+    "context_length",
+    "prompt_truncated",
+    "summaries",
 }
 _CHAT_FIELDS = {"title", "model", "settings", "search", "updated_at", "project_id"}
 _JSON_FIELDS = {
@@ -1841,6 +2023,7 @@ _JSON_FIELDS = {
     "output_cap",
     "retrieval",
     "memory_used",
+    "summaries",
 }
 
 
@@ -1877,6 +2060,7 @@ _FOLDER_FIELDS = frozenset(
         "report",
         "synced_at",
         "checked_at",
+        "project_id",
     }
 )
 
@@ -1906,6 +2090,7 @@ def _folder_record(row: sqlite3.Row) -> FolderRecord:
         report=report if isinstance(report, dict) else None,
         synced_at=row["synced_at"],
         checked_at=row["checked_at"],
+        project_id=row["project_id"],
     )
 
 
@@ -2138,10 +2323,12 @@ class Store:
             now = time.time()
             self._conn().execute(
                 "INSERT INTO people (sub, name, username, role, first_seen, last_seen, known_at, "
-                "email) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(sub) DO UPDATE SET "
+                "email, groups_json, policies_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(sub) DO UPDATE SET "
                 "name = excluded.name, username = excluded.username, role = excluded.role, "
                 "last_seen = excluded.last_seen, known_at = excluded.known_at, "
-                "email = excluded.email",
+                "email = excluded.email, groups_json = excluded.groups_json, "
+                "policies_json = excluded.policies_json",
                 (
                     person.sub,
                     person.name,
@@ -2151,6 +2338,8 @@ class Store:
                     now,
                     now,
                     person.email,
+                    None if person.groups is None else json.dumps(person.groups),
+                    None if person.policies is None else json.dumps(person.policies),
                 ),
             )
 
@@ -2167,8 +2356,14 @@ class Store:
             )
             if row is None:
                 return None
+            groups, policies = row["groups_json"], row["policies_json"]
             return Person(
-                sub=row["sub"], name=row["name"], role=row["role"], username=row["username"]
+                sub=row["sub"],
+                name=row["name"],
+                role=row["role"],
+                username=row["username"],
+                groups=None if groups is None else json.loads(groups),
+                policies=None if policies is None else json.loads(policies),
             )
 
         return await self._run(go)
@@ -2355,6 +2550,7 @@ class Store:
             updated_at=row["updated_at"],
             general_memory=bool(row["general_memory"]),
             general_documents=bool(row["general_documents"]),
+            model=row["model"],
         )
 
     async def projects(self, owner: str) -> list[Project]:
@@ -2583,21 +2779,51 @@ class Store:
 
         return await self._run(go)
 
-    async def delete_chat(self, chat_id: str) -> None:
+    async def delete_chat(self, chat_id: str) -> branch_store.RemovedRecalls:
         """Delete a chat and everything of it, and (MV2) every copy of its exchanges the
         person's other answers kept, in one transaction: a turn's record of the excerpts it
         was sent (`memory_used.pastChats`) and a kept `search_chats` result that quoted it.
         Its exchanges in the person's index go first, by the route (`exchanges_index`)."""
 
         now = time.time()
+        removed = branch_store.RemovedRecalls()
+
+        def recall_payload() -> dict[str, Any] | None:
+            db = self._conn()
+            chat = db.execute("SELECT owner FROM chats WHERE id=?", (chat_id,)).fetchone()
+            if chat is None:
+                return None
+            messages = [r for r in branch_store.rows(db, "messages") if r["chat_id"] == chat_id]
+            for archive in branch_store.rows(db, "deleted_branches"):
+                if archive["chat_id"] == chat_id:
+                    messages += branch_store.flatten(json.loads(archive["payload"]))["tables"][
+                        "messages"
+                    ]
+            return {
+                "owner": chat["owner"],
+                "chat": chat_id,
+                "ids": [m["id"] for m in messages],
+                "tables": {"messages": messages},
+            }
+
+        payload = await self._run(recall_payload)
+        if payload is not None:
+            await self.purge_copies(
+                payload["owner"], branch=payload, removed=removed, recalls_only=True
+            )
         await self.expire_chat_branches(chat_id, now=now)
         for archive in await self.deleted_branches(chat_id):
-            await self.purge_branch(archive["id"], now=now, queue_forget=True)
+            result = await self.purge_branch(archive["id"], now=now, queue_forget=True)
+            if result is not None:
+                removed.keys.update(result.keys)
 
         def go() -> None:
             db = self._conn()
             db.execute("BEGIN")
             try:
+                recalls = branch_store.legacy_recalls(db, payload) if payload is not None else []
+                if payload is not None:
+                    branch_store.remove_legacy_recalls(db, payload)
                 found = db.execute("SELECT owner FROM chats WHERE id = ?", (chat_id,)).fetchone()
                 if found is not None:
                     _drop_chat_from_answers(db, found["owner"], chat_id)
@@ -2607,6 +2833,8 @@ class Store:
                     (chat_id,),
                 )
                 db.execute("DELETE FROM artifacts WHERE chat_id = ?", (chat_id,))
+                # Row 26: a summary is a copy of the chat's words, and goes with it.
+                db.execute("DELETE FROM chat_summaries WHERE chat_id = ?", (chat_id,))
                 db.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
                 db.execute("DELETE FROM files WHERE chat_id = ?", (chat_id,))
                 # Suggestions waiting from it go with it (their quotes are its words); notes
@@ -2630,11 +2858,15 @@ class Store:
                 )
                 db.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
                 db.execute("COMMIT")
+                removed.add(recalls)
             except BaseException:
                 db.execute("ROLLBACK")
                 raise
 
         await self._run(go)
+        if payload is not None:
+            await self._run(lambda: _rewrite(self._conn()))
+        return removed
 
     # --- messages -------------------------------------------------------
 
@@ -2830,23 +3062,6 @@ class Store:
     async def expire_chat_branches(self, chat_id: str, *, now: float) -> None:
         def go() -> None:
             db = self._conn()
-            # Check every branch before changing any Undo deadline or purging a sibling.
-            for row in db.execute(
-                "SELECT payload FROM deleted_branches WHERE chat_id=?", (chat_id,)
-            ):
-                payload = branch_store.resolve(db, json.loads(row[0]))
-                payload["deleting_chat"] = True
-                if recalls := self._branch_legacy_recalls(payload):
-                    from .interaction_store import InteractionError
-
-                    recall = recalls[0]
-                    raise InteractionError(
-                        "This chat cannot be deleted while an older memory recall may quote "
-                        f"one of its deleted answers: {recall['title']} "
-                        f"(answer {recall['id']}), {recall['text']!r}. "
-                        "Remove that recall to finish.",
-                        503,
-                    )
             db.execute(
                 "UPDATE deleted_branches SET delete_at=?,state='purging' WHERE chat_id=?",
                 (now, chat_id),
@@ -2858,13 +3073,10 @@ class Store:
         self, payload: dict[str, Any], *, overlapping: bool = True
     ) -> list[dict[str, str]]:
         found = branch_store.legacy_recalls(self._conn(), payload, overlapping=overlapping)
-        backup_payload = branch_store.backup_scope(self._conn(), payload)
         for path in _all_copies(self._path):
             copy = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
             try:
-                found.extend(
-                    branch_store.legacy_recalls(copy, backup_payload, overlapping=overlapping)
-                )
+                found.extend(branch_store.legacy_recalls(copy, payload, overlapping=overlapping))
             finally:
                 copy.close()
         return sorted(
@@ -2920,24 +3132,26 @@ class Store:
 
     async def purge_branch(
         self, message_id: str, *, now: float | None = None, queue_forget: bool = False
-    ) -> bool:
+    ) -> branch_store.RemovedRecalls | None:
         """Use row 7's scoped purge, VACUUM/checkpoints and every-backup cleanup."""
         now = time.time() if now is None else now
         row = next((r for r in await self.deleted_branches() if r["id"] == message_id), None)
         if row is None or row["delete_at"] > now:
-            return False
+            return None
         payload = await self._run(
             lambda: branch_store.resolve(self._conn(), json.loads(row["payload"]))
         )
         payload["deleting_chat"] = queue_forget
         await self.put_branch(message_id, state="purging")
+        removed = branch_store.RemovedRecalls()
         # Copies first: the durable recovery record survives any failed copy or rewrite.
-        await self.purge_copies(row["owner"], branch=payload)
+        await self.purge_copies(row["owner"], branch=payload, removed=removed)
 
         def go() -> None:
             db = self._conn()
             db.execute("BEGIN IMMEDIATE")
             try:
+                recalls = branch_store.legacy_recalls(db, payload)
                 _purge_rows(db, row["owner"], branch=payload)
                 if queue_forget:
                     # Chat deletion uses the same durable courier queue as its live answers.
@@ -2955,6 +3169,7 @@ class Store:
                 # It survives a failed rewrite after the deletion transaction commits.
                 db.execute("INSERT OR REPLACE INTO settings VALUES ('branchRewrite', 'true')")
                 db.execute("COMMIT")
+                removed.add(recalls)
             except BaseException:
                 db.execute("ROLLBACK")
                 raise
@@ -2963,7 +3178,7 @@ class Store:
             db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
         await self._run(go)
-        return True
+        return removed
 
     async def finish_branch_rewrite(self) -> None:
         def go() -> None:
@@ -3276,6 +3491,69 @@ class Store:
             )
 
         await self._run(go)
+
+    # --- long chats (row 26) ---------------------------------------------
+
+    async def chat_summaries(self, chat_id: str) -> list[SummaryRow]:
+        """Every summary of the chat's messages, oldest first."""
+
+        def go() -> list[SummaryRow]:
+            rows = self._conn().execute(
+                "SELECT * FROM chat_summaries WHERE chat_id = ? ORDER BY made_at, id", (chat_id,)
+            )
+            return [_summary(r) for r in rows]
+
+        return await self._run(go)
+
+    async def add_summary(self, row: SummaryRow) -> bool:
+        """Keep a summary, in one transaction with the check that its chat is still its owner's
+        and both ends of its run are still messages of that chat. False when not (a delete won):
+        nothing is kept."""
+
+        def go() -> bool:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                chat = db.execute(
+                    "SELECT 1 FROM chats WHERE id = ? AND owner = ?", (row.chat_id, row.owner)
+                ).fetchone()
+                ends = db.execute(
+                    "SELECT COUNT(*) FROM messages WHERE chat_id = ? AND id IN (?, ?)",
+                    (row.chat_id, row.first_id, row.last_id),
+                ).fetchone()[0]
+                if chat is None or ends != len({row.first_id, row.last_id}):
+                    db.execute("ROLLBACK")
+                    return False
+                db.execute(
+                    "INSERT INTO chat_summaries (id, chat_id, owner, first_id, last_id, digest, "
+                    "text, nonce, tokens, source_tokens, model, made_at, carries, cut, how, "
+                    "instruction) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        row.id,
+                        row.chat_id,
+                        row.owner,
+                        row.first_id,
+                        row.last_id,
+                        row.digest,
+                        row.text,
+                        row.nonce,
+                        row.tokens,
+                        row.source_tokens,
+                        row.model,
+                        row.made_at,
+                        json.dumps(row.carries),
+                        int(row.cut),
+                        row.how,
+                        row.instruction,
+                    ),
+                )
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            return True
+
+        return await self._run(go)
 
     async def filter_retained(self, message_id: str, **values: Any) -> dict[str, Any]:
         if not self._branch_forget:
@@ -6009,26 +6287,299 @@ class Store:
 
         return await self._run(go)
 
-    async def put_memory_server(
-        self, owner: str, url: str, token: str, name: str, verbs: dict[str, str]
+    async def backfill_owners(self) -> list[str]:
+        return await self._run(
+            lambda: [
+                r[0]
+                for r in self._conn().execute(
+                    "SELECT owner FROM memory_servers WHERE backfill IS NOT NULL"
+                )
+            ]
+        )
+
+    async def memory_server_live_due(self, now: float) -> list[dict[str, Any]]:
+        """Due live work, including forgetting, ahead of any past-chat send."""
+        return await self._run(
+            lambda: [
+                dict(r)
+                for r in self._conn().execute(
+                    "SELECT q.* FROM memory_server_sent q "
+                    "LEFT JOIN memory_servers s ON s.owner = q.owner "
+                    "WHERE q.state IN ('send', 'forget') AND q.next_at <= ? AND "
+                    "(q.state = 'forget' OR NOT EXISTS "
+                    "(SELECT 1 FROM json_each(s.backfill, '$.pending') "
+                    "WHERE value = q.document_id)) ORDER BY q.next_at, q.document_id LIMIT 20",
+                    (now,),
+                )
+            ]
+        )
+
+    async def memory_server_pending(self, owner: str) -> set[str]:
+        return await self._run(
+            lambda: {
+                r[0]
+                for r in self._conn().execute(
+                    "SELECT document_id FROM memory_server_sent WHERE owner = ? AND state = 'send'",
+                    (owner,),
+                )
+            }
+        )
+
+    async def put_backfill(
+        self,
+        owner: str,
+        url: str,
+        state: dict[str, Any],
+        queue: Sequence[tuple[str, str]] = (),
+        *,
+        expected: str | None = None,
+    ) -> bool:
+        """Commit a cursor and its queue together, only for the server the person confirmed.
+        Compare the previous JSON too: Stop or a completed send wins over a stale scan."""
+
+        def go() -> bool:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute(
+                    "SELECT url, backfill FROM memory_servers WHERE owner = ?", (owner,)
+                ).fetchone()
+                if row is None or row["url"] != url or row["backfill"] != expected:
+                    db.execute("COMMIT")
+                    return False
+                pending = list(state.get("pending", []))
+                for chat_id, message_id in queue:
+                    doc_id = f"{chat_id}:{message_id}"
+                    now = time.time()
+                    inserted = db.execute(
+                        "INSERT OR IGNORE INTO memory_server_sent "
+                        "(document_id, owner, chat_id, message_id, state, created_at, next_at) "
+                        "VALUES (?, ?, ?, ?, 'send', ?, ?)",
+                        (doc_id, owner, chat_id, message_id, now, now),
+                    ).rowcount
+                    if inserted:
+                        pending.append(doc_id)
+                    else:
+                        state["sent"] += 1
+                state["pending"] = pending
+                if state.get("exhausted") and not pending and state["state"] == "running":
+                    state["state"] = "done"
+                db.execute(
+                    "UPDATE memory_servers SET backfill = ? WHERE owner = ?",
+                    (json.dumps(state), owner),
+                )
+                db.execute("COMMIT")
+                return True
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+
+        return await self._run(go)
+
+    async def backfill_result(
+        self,
+        owner: str,
+        url: str,
+        document_id: str,
+        outcome: str,
+        ms: float = 0,
+        reason: str | None = None,
+    ) -> bool:
+        """Record a send and its progress in one transaction; stable document ids replace
+        an uncertain remote write after a crash. No exchange words are kept here."""
+
+        def go() -> bool:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute(
+                    "SELECT url, backfill FROM memory_servers WHERE owner = ?", (owner,)
+                ).fetchone()
+                if row is None or row["url"] != url or not row["backfill"]:
+                    db.execute("COMMIT")
+                    return False
+                state = json.loads(row["backfill"])
+                if document_id not in state.get("pending", []):
+                    db.execute("COMMIT")
+                    return False
+                if outcome == "failed":
+                    state["failures"] = state.get("failures", 0) + 1
+                    state["error"] = reason
+                    state["errorAt"] = time.time()
+                    if state["failures"] >= 3:
+                        state["state"] = "stopped"
+                else:
+                    state["pending"].remove(document_id)
+                    state["failures"] = 0
+                    state["error"] = None
+                    if outcome == "sent":
+                        changed = db.execute(
+                            "UPDATE memory_server_sent SET state = 'sent', attempts = 0 "
+                            "WHERE owner = ? AND document_id = ? AND state = 'send'",
+                            (owner, document_id),
+                        ).rowcount
+                        state["sent"] += bool(changed)
+                        samples = [*state.get("samples", []), ms][-20:]
+                        state["samples"] = samples
+                        state["msPerExchange"] = sum(samples) / len(samples)
+                    else:
+                        state["skipped"] += 1
+                        db.execute(
+                            "DELETE FROM memory_server_sent WHERE owner = ? "
+                            "AND document_id = ? AND state = 'send'",
+                            (owner, document_id),
+                        )
+                    if (
+                        not state["pending"]
+                        and state.get("exhausted")
+                        and state["state"] == "running"
+                    ):
+                        state["state"] = "done"
+                db.execute(
+                    "UPDATE memory_servers SET backfill = ? WHERE owner = ?",
+                    (json.dumps(state), owner),
+                )
+                db.execute("COMMIT")
+                return outcome != "sent" or bool(changed)
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+
+        return await self._run(go)
+
+    async def set_project_model(self, owner: str, project_id: str, model: str | None) -> None:
+        await self._run(
+            lambda: self._conn().execute(
+                "UPDATE projects SET model = ? WHERE owner = ? AND id = ?",
+                (model, owner, project_id),
+            )
+        )
+
+    async def add_scoped_folder_record(self, record: FolderRecord) -> bool:
+        """Keep a new folder and its place in the same insert, before any sync can start."""
+
+        def go() -> bool:
+            values = {
+                "owner": record.owner,
+                "grant_id": record.grant_id,
+                "name": record.name,
+                "added_at": record.added_at,
+                "ignore": json.dumps(record.ignore),
+                "include_hidden": int(record.include_hidden),
+                "use_gitignore": int(record.use_gitignore),
+                "project_id": record.project_id,
+            }
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                if (
+                    record.project_id is not None
+                    and db.execute(
+                        "SELECT 1 FROM projects WHERE owner = ? AND id = ?",
+                        (record.owner, record.project_id),
+                    ).fetchone()
+                    is None
+                ):
+                    raise ValueError("This project was deleted before the folder could be added.")
+                inserted = db.execute(
+                    f"INSERT OR IGNORE INTO document_folders ({', '.join(values)}) "
+                    f"VALUES ({', '.join('?' for _ in values)})",
+                    tuple(values.values()),
+                ).rowcount
+                db.execute("COMMIT")
+                return bool(inserted)
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+
+        return await self._run(go)
+
+    async def check_web_hash(
+        self, owner: str, note_id: str, link: dict[str, Any], sha256: str
+    ) -> bool:
+        """Keep only Workbench's last check of this version of this page, never its words.
+        Web links do not snooze: their existing snoozed_sha slot holds the checked hash.
+        Relinking the page clears it, as it clears a document's snooze."""
+        return await self._run(
+            lambda: bool(
+                self._conn()
+                .execute(
+                    "UPDATE memory_note_documents SET snoozed_sha = ? "
+                    "WHERE owner = ? AND note_id = ? AND doc_id = ? AND scope = 'web' "
+                    "AND source = ? AND sha256 = ?",
+                    (sha256, owner, note_id, link["doc_id"], link["source"], link["sha256"]),
+                )
+                .rowcount
+            )
+        )
+
+    async def accept_web_hash(self, owner: str, note_id: str, doc_id: str, sha256: str) -> bool:
+        """The person's Still true: accept the explicitly checked page's hash, never its words."""
+        return await self._run(
+            lambda: bool(
+                self._conn()
+                .execute(
+                    "UPDATE memory_note_documents SET sha256 = snoozed_sha, "
+                    "linked_at = ?, snoozed_sha = NULL "
+                    "WHERE owner = ? AND note_id = ? AND doc_id = ? AND scope = 'web' "
+                    "AND snoozed_sha = ?",
+                    (time.time(), owner, note_id, doc_id, sha256),
+                )
+                .rowcount
+            )
+        )
+
+    async def note_merge_history(self, owner: str, note_id: str) -> list[str]:
+        return await self._run(
+            lambda: [
+                r[0]
+                for r in self._conn().execute(
+                    "SELECT old_text FROM memory_events WHERE owner = ? AND note_id = ? "
+                    "AND event = 'merge' AND old_text LIKE 'merged as %' ORDER BY ts",
+                    (owner, note_id),
+                )
+            ]
+        )
+
+    async def connect_memory_server(
+        self,
+        owner: str,
+        url: str,
+        token: str,
+        name: str,
+        verbs: dict[str, Any],
+        *,
+        linked: bool = False,
     ) -> None:
-        """Connect a person's server, replacing any they had. At another address, what was
-        recorded of the old one goes (it can no longer be asked to forget anything); at the same
-        address (a new token), what it is still to forget stays."""
+        """An address change ends consent. A new token at the same address keeps progress."""
 
         def go() -> None:
             db = self._conn()
-            db.execute("BEGIN")
+            db.execute("BEGIN IMMEDIATE")
             try:
                 old = db.execute(
                     "SELECT url FROM memory_servers WHERE owner = ?", (owner,)
                 ).fetchone()
-                if old is None or old["url"] != url:
+                if old is not None and old["url"] != url:
                     db.execute("DELETE FROM memory_server_sent WHERE owner = ?", (owner,))
                 db.execute(
-                    "INSERT OR REPLACE INTO memory_servers (owner, url, token, name, verbs, "
-                    "connected_at) VALUES (?, ?, ?, ?, ?, ?)",
-                    (owner, url, token, name, json.dumps(verbs), time.time()),
+                    "INSERT INTO memory_servers "
+                    "(owner, url, token, name, verbs, connected_at, linked) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(owner) DO UPDATE SET "
+                    "backfill = CASE WHEN memory_servers.url = excluded.url "
+                    "THEN backfill ELSE NULL END, "
+                    "url = excluded.url, token = excluded.token, name = excluded.name, "
+                    "verbs = excluded.verbs, connected_at = excluded.connected_at, "
+                    "linked = excluded.linked",
+                    (
+                        owner,
+                        url,
+                        "" if linked else token,
+                        name,
+                        json.dumps(verbs),
+                        time.time(),
+                        int(linked),
+                    ),
                 )
                 db.execute("COMMIT")
             except BaseException:
@@ -6036,6 +6587,218 @@ class Store:
                 raise
 
         await self._run(go)
+
+    async def add_model_tidy(
+        self,
+        owner: str,
+        ids: Sequence[str],
+        model: str,
+        merged: dict[str, str],
+        *,
+        inputs: dict[str, str] | None = None,
+    ) -> bool:
+        """A model's wording is a waiting duplicate proposal, never a note."""
+
+        def go() -> bool:
+            fingerprints = inputs
+            if fingerprints is None:
+                held = self._notes(
+                    self._conn(), owner, " AND id IN (?, ?)", list(ids), with_body=True
+                )
+                fingerprints = {note.id: self.tidy_fingerprint(note) for note in held}
+            return bool(
+                self._conn()
+                .execute(
+                    "INSERT OR IGNORE INTO memory_tidy "
+                    "(id, owner, kind, pair, created_at, model, merged) "
+                    "SELECT ?, ?, 'duplicate', ?, ?, ?, ? WHERE "
+                    "(SELECT COUNT(*) FROM memory_tidy WHERE owner = ? AND settled IS NULL) < 20",
+                    (
+                        secrets.token_hex(8),
+                        owner,
+                        json.dumps(sorted(ids)),
+                        time.time(),
+                        model,
+                        json.dumps({**merged, "inputs": fingerprints}),
+                        owner,
+                    ),
+                )
+                .rowcount
+            )
+
+        return await self._run(go)
+
+    @staticmethod
+    def tidy_fingerprint(note: MemoryNote) -> str:
+        content = json.dumps([note.text, note.body or "", note.kind, note.project_id])
+        return hashlib.sha256(content.encode()).hexdigest()
+
+    async def model_tidy_wording(self, owner: str) -> dict[str, dict[str, Any]]:
+        return await self._run(
+            lambda: {
+                r["id"]: {"model": r["model"], "merged": json.loads(r["merged"])}
+                for r in self._conn().execute(
+                    "SELECT id, model, merged FROM memory_tidy "
+                    "WHERE owner = ? AND model IS NOT NULL",
+                    (owner,),
+                )
+            }
+        )
+
+    async def keep_model_merge(
+        self, owner: str, tidy_id: str, new: MemoryNote, limit: int
+    ) -> MemoryNote | None:
+        """The person's Keep: new wording supersedes both notes in one transaction."""
+
+        def go() -> MemoryNote | None:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                proposal = db.execute(
+                    "SELECT * FROM memory_tidy WHERE owner = ? AND id = ? "
+                    "AND settled IS NULL AND model IS NOT NULL",
+                    (owner, tidy_id),
+                ).fetchone()
+                if proposal is None:
+                    db.execute("COMMIT")
+                    return None
+                ids = json.loads(proposal["pair"])
+                notes = self._notes(
+                    db, owner, " AND id IN (?, ?) AND status = 'active'", ids, with_body=True
+                )
+                if (
+                    len(notes) != 2
+                    or notes[0].project_id != notes[1].project_id
+                    or notes[0].kind != notes[1].kind
+                    or any(
+                        json.loads(proposal["merged"]).get("inputs", {}).get(n.id)
+                        != self.tidy_fingerprint(n)
+                        for n in notes
+                    )
+                ):
+                    db.execute("COMMIT")
+                    return None
+                count = db.execute(
+                    "SELECT COUNT(*) FROM memory_notes WHERE owner = ?", (owner,)
+                ).fetchone()[0]
+                if count >= limit:
+                    raise MemoryFull(limit)
+                new.project_id = notes[0].project_id
+                new.kind = notes[0].kind
+                new.pinned = any(n.pinned for n in notes)
+                self._insert_note(db, new)
+                self._link_tags(
+                    db,
+                    owner,
+                    new.id,
+                    list(dict.fromkeys(t for n in notes for t in n.tags)),
+                    new.created_at,
+                )
+                tail, seen = notes[0].id, {notes[0].id}
+                while True:
+                    previous = db.execute(
+                        "SELECT id FROM memory_notes WHERE owner = ? AND superseded_by = ?",
+                        (owner, tail),
+                    ).fetchone()
+                    if previous is None or previous["id"] in seen:
+                        break
+                    tail = previous["id"]
+                    seen.add(tail)
+                for i, note in enumerate(notes):
+                    self._supersede(
+                        db, owner, note.id, new.id if i == 0 else tail, new.created_at, "person"
+                    )
+                    self._carry_documents(db, owner, note.id, new.id)
+                self._event(
+                    db,
+                    owner,
+                    new.id,
+                    "merge",
+                    "person",
+                    f"merged as {proposal['model']} proposed; you kept it",
+                    None,
+                )
+                db.execute(
+                    "UPDATE memory_tidy SET settled = 'merged', settled_at = ? WHERE id = ?",
+                    (new.created_at, tidy_id),
+                )
+                db.execute("COMMIT")
+                return new
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+
+        return await self._run(go)
+
+    async def put_memory_server(
+        self,
+        owner: str,
+        url: str,
+        token: str,
+        name: str,
+        verbs: dict[str, Any],
+        *,
+        linked: bool = False,
+    ) -> None:
+        """Legacy entry point, with the same address-change consent as the connect route."""
+        await self.connect_memory_server(owner, url, token, name, verbs, linked=linked)
+
+    async def pause_backfill(self, owner: str, paused: bool) -> None:
+        """A memory-off pause consumes neither exchanges nor their day for retrying."""
+
+        def go() -> None:
+            db = self._conn()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute(
+                    "SELECT backfill FROM memory_servers WHERE owner = ?", (owner,)
+                ).fetchone()
+                state = json.loads(row[0]) if row and row[0] else {}
+                if state.get("state") == "running":
+                    now = time.time()
+                    if paused and state.get("pausedAt") is None:
+                        state.update(pausedAt=now, pauseReason="Paused: memory is off")
+                    elif not paused and state.get("pausedAt") is not None:
+                        seconds = max(0, now - state.pop("pausedAt"))
+                        state.pop("pauseReason", None)
+                        db.execute(
+                            "UPDATE memory_server_sent SET created_at = created_at + ?, "
+                            "next_at = next_at + ? WHERE owner = ? AND state = 'send' "
+                            "AND document_id IN (SELECT value FROM json_each(?, '$.pending'))",
+                            (seconds, seconds, owner, row[0]),
+                        )
+                    else:
+                        db.execute("COMMIT")
+                        return
+                    db.execute(
+                        "UPDATE memory_servers SET backfill = ? WHERE owner = ?",
+                        (json.dumps(state), owner),
+                    )
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+
+        await self._run(go)
+
+    async def group_memory_servers(self) -> list[dict[str, Any]]:
+        """Every group's memory server (row 70c): kept as owner `group:<id>`, which no person's
+        id is, with its verbs decoded, by owner."""
+
+        def go() -> list[dict[str, Any]]:
+            rows = (
+                self._conn()
+                .execute("SELECT * FROM memory_servers WHERE owner LIKE 'group:%' ORDER BY owner")
+                .fetchall()
+            )
+            found = []
+            for row in rows:
+                server = dict(row)
+                server["verbs"] = json.loads(server["verbs"] or "{}")
+                found.append(server)
+            return found
+
+        return await self._run(go)
 
     async def delete_memory_server(self, owner: str) -> None:
         def go() -> None:
@@ -6477,7 +7240,14 @@ class Store:
 
         return await self._run(go)
 
-    async def purge_copies(self, sub: str, *, branch: dict[str, Any] | None = None) -> list[Path]:
+    async def purge_copies(
+        self,
+        sub: str,
+        *,
+        branch: dict[str, Any] | None = None,
+        removed: branch_store.RemovedRecalls | None = None,
+        recalls_only: bool = False,
+    ) -> list[Path]:
         """The purge, on every copy kept beside the store before a migration. The copies stay,
         for everyone else in them. A half-written copy (`.bak.part`, left by a stop) is removed.
         The copies purged."""
@@ -6487,11 +7257,8 @@ class Store:
             for partial in self._path.parent.glob(f"{self._path.name}.schema-*.bak.part"):
                 partial.unlink(missing_ok=True)
             copies = _all_copies(self._path)
-            backup_payload = (
-                branch_store.backup_scope(self._conn(), branch) if branch is not None else None
-            )
             for copy in copies:
-                _purge_copy(copy, sub, branch=backup_payload)
+                _purge_copy(copy, sub, branch=branch, removed=removed, recalls_only=recalls_only)
             return copies
 
         return await self._run(go)

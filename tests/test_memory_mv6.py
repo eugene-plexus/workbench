@@ -447,6 +447,7 @@ def test_a_schema_25_store_gains_links_tidy_and_its_backup(
     with monkeypatch.context() as m:
         m.setattr(storage, "SCHEMA_VERSION", 25)
         m.setattr(storage, "_provenance", lambda db: None)
+        m.setattr(storage, "_memory_extras", lambda db: None)
         m.setattr(storage, "MEMORY_PREFS_DEFAULT", {
             k: v for k, v in storage.MEMORY_PREFS_DEFAULT.items() if k != "tidy_at"
         })  # fmt: skip

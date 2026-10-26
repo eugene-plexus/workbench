@@ -298,7 +298,7 @@ def test_a_passage_under_an_answer_has_the_fields_the_page_reads(world: World) -
     assert passages
     for passage in passages:
         # `cited` is added when the answer is done, which it is.
-        assert set(passage) == interface("PassageSource")
+        assert set(passage) == interface("PassageSource") - {"wholeParts", "readBy"}
     assert passages[0]["cited"] is True and passages[0]["rank"] == 1
     assert passages[0]["page_start"] == 4 and passages[0]["via"] == "words"
     assert len(passages[0]["snippet"]) <= 240
@@ -364,5 +364,5 @@ def test_a_passage_and_the_snippet_the_page_shows_agree_with_how_the_server_cuts
         terms=("code",),
     )
     entry = context.passage_entry(found)
-    assert set(entry) == interface("PassageSource") - {"cited"}
+    assert set(entry) == interface("PassageSource") - {"cited", "wholeParts", "readBy"}
     assert len(entry["snippet"]) <= 240 and entry["heading"] == "A > B"

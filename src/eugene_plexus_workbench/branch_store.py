@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from dataclasses import dataclass, field
 from typing import Any
 
 from .interaction_store import InteractionError
@@ -12,58 +13,36 @@ from .interaction_store import InteractionError
 DAY = 86400
 
 
-def _word_runs(text: str) -> set[tuple[str, ...]]:
-    words = text.casefold().split()
-    return {tuple(words[n : n + 8]) for n in range(len(words) - 7)}
+@dataclass
+class RemovedRecalls:
+    # A recall present in several schema backups is counted once. Keep no recalled words.
+    keys: set[tuple[str, str, str]] = field(default_factory=set)
 
+    def add(self, recalls: list[dict[str, str]]) -> None:
+        self.keys.update((r["chat"], r["id"], r["signature"]) for r in recalls)
 
-def _branch_runs(payload: dict[str, Any]) -> set[tuple[str, ...]]:
-    return set().union(
-        *(
-            _word_runs(str(message.get(field) or ""))
-            for message in payload["tables"]["messages"]
-            for field in ("content", "reasoning")
+    @property
+    def notice(self) -> str | None:
+        count = len(self.keys)
+        if not count:
+            return None
+        return (
+            f"Also removed {count} older memory {'recall' if count == 1 else 'recalls'} "
+            "that could quote this answer."
         )
-    )
-
-
-class LegacyRecall(InteractionError):
-    def __init__(self, recalls: list[dict[str, str]]) -> None:
-        # Retry metadata must not keep another copy of the recalled answer's words.
-        self.recalls = [
-            {key: recall[key] for key in ("id", "title", "signature")} for recall in recalls
-        ]
-        super().__init__(
-            "This answer cannot be deleted for good while an older memory recall may quote it: "
-            f"{recalls[0]['title']}. Remove that recall to finish."
-        )
-
-
-def backup_scope(db: sqlite3.Connection, payload: dict[str, Any]) -> dict[str, Any]:
-    """A backup recall can block only while its answer is reachable in the live store."""
-    return {
-        **payload,
-        "live_recall_messages": {
-            (r[0], r[1])
-            for r in db.execute(
-                "SELECT m.chat_id,m.id FROM messages m JOIN chats c ON c.id=m.chat_id "
-                "WHERE c.owner=?",
-                (payload["owner"],),
-            )
-        },
-    }
 
 
 def legacy_recalls(
     db: sqlite3.Connection, payload: dict[str, Any], *, overlapping: bool = True
 ) -> list[dict[str, str]]:
-    """Only an unidentified recall sharing eight consecutive words can hold this purge."""
+    """Source-less recalls saved after this branch began, for the same person.
+
+    `overlapping=False` keeps the unfiltered lookup used by older callers.
+    """
     payload = flatten(payload)
     ids = set(payload["ids"])
 
-    branch_runs = _branch_runs(payload)
-    if overlapping and not branch_runs:
-        return []
+    first = min((m["created_at"] for m in payload["tables"]["messages"]), default=float("inf"))
     chats = {r["id"]: r["title"] for r in rows(db, "chats") if r["owner"] == payload["owner"]}
     copies = rows(db, "messages")
     for archive in rows(db, "deleted_branches"):
@@ -73,23 +52,20 @@ def legacy_recalls(
     for message in copies:
         if message["chat_id"] not in chats or message["id"] in ids:
             continue
-        live = payload.get("live_recall_messages")
-        if live is not None and (message["chat_id"], message["id"]) not in live:
-            continue
-        if payload.get("deleting_chat") and message["chat_id"] == payload["chat"]:
+        if overlapping and message["created_at"] <= first:
             continue
         used = json.loads(message.get("memory_used") or "null") or {}
         recalled = (used.get("memoryServer") or {}).get("memories") or []
         for recall in recalled:
-            if not recall.get("documentId") and (
-                not overlapping or branch_runs & _word_runs(str(recall.get("text") or ""))
-            ):
+            if not recall.get("documentId"):
                 found.append(
                     {
                         "id": message["id"],
+                        "chat": message["chat_id"],
                         "title": chats[message["chat_id"]],
                         "signature": fingerprint(recall),
                         "text": str(recall.get("text") or ""),
+                        "recall": json.dumps(recall),
                     }
                 )
     return sorted(found, key=lambda r: (r["id"], r["signature"]))
@@ -132,6 +108,12 @@ def remove_recall(db: sqlite3.Connection, chat: str, mid: str, recall: dict[str,
             )
             changed = True
     return changed
+
+
+def remove_legacy_recalls(db: sqlite3.Connection, payload: dict[str, Any]) -> None:
+    """Called inside each store or backup purge transaction."""
+    for recall in legacy_recalls(db, payload):
+        remove_recall(db, recall["chat"], recall["id"], json.loads(recall["recall"]))
 
 
 def deleted_view(row: dict[str, Any]) -> dict[str, Any]:
@@ -462,21 +444,7 @@ def scrub_message(row: dict[str, Any], payload: dict[str, Any]) -> dict[str, str
         if isinstance(server, dict):
             documents = {r["document_id"] for r in payload["tables"].get("memory_server_sent", [])}
             old_memories = server.get("memories") or []
-            chat_deleted = payload.get("deleting_chat") and row.get("chat_id") == payload["chat"]
-            live = payload.get("live_recall_messages")
-            orphaned = live is not None and (row.get("chat_id"), row.get("id")) not in live
-            scrub_legacy = chat_deleted or orphaned
-            branch_runs = _branch_runs(payload) if scrub_legacy else set()
-            kept_memories = [
-                m
-                for m in old_memories
-                if m.get("documentId") not in documents
-                and not (
-                    scrub_legacy
-                    and not m.get("documentId")
-                    and branch_runs & _word_runs(str(m.get("text") or ""))
-                )
-            ]
+            kept_memories = [m for m in old_memories if m.get("documentId") not in documents]
             if len(kept_memories) != len(old_memories):
                 server["memories"] = kept_memories
                 server["forgotten"] = (
@@ -593,8 +561,8 @@ def purge_rows(
     payload = flatten(payload)
     owner, chat, ids = payload["owner"], payload["chat"], set(payload["ids"])
     tables = payload["tables"]
-    if not hiding and (recalls := legacy_recalls(db, payload)):
-        raise LegacyRecall(recalls)
+    if not hiding:
+        remove_legacy_recalls(db, payload)
     # Backups may predate a child or its records. Find dependencies in that copy too.
     local = {r["id"] for r in rows(db, "messages") if r["chat_id"] == chat and r["id"] in ids}
     actual = dict(tables)
@@ -686,6 +654,17 @@ def purge_rows(
         "deleted_branches",
     )
     gone = {table: _delete(db, table, actual.get(table, [])) for table in order}
+    if not hiding and rows_exist(db, "chat_summaries"):
+        # Row 26: a summary whose run held a deleted message is a copy of its words, so it goes
+        # too. A run is a stretch of one path, and a branch is a message and everything after
+        # it, so a run that held one ends in the branch. While a branch is hidden its summaries
+        # stay, unused (their run is off every path), so Undo brings them back.
+        marks = ", ".join("?" for _ in ids)
+        cursor = db.execute(
+            f"DELETE FROM chat_summaries WHERE chat_id = ? AND owner = ? AND last_id IN ({marks})",
+            (chat, owner, *ids),
+        )
+        gone["chat_summaries"] = max(cursor.rowcount, 0)
     for archive in rows(db, "deleted_branches"):
         if hiding or archive["owner"] != owner:
             continue

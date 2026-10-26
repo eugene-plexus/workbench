@@ -19,10 +19,13 @@ is still sent to models until the person answers (MV6-C2).
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import time
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 from .store import MAX_NOTE_DOCUMENTS, Message, Store
 
@@ -73,13 +76,68 @@ def _now_of(doc: Any) -> dict[str, Any]:
     }
 
 
-async def link_answer(state: Any, owner: str, note_id: str, message: Message) -> int:
+def evidence(message: Message) -> list[dict[str, Any]]:
+    """Locations and hashes of answer evidence. No words go in a link."""
+    out: list[dict[str, Any]] = []
+    for i, source in enumerate(message.sources or []):
+        url = source.get("url")
+        if source.get("kind") != "web" or not isinstance(url, str):
+            continue
+        if urlsplit(url).scheme not in ("http", "https"):
+            continue
+        text = source.get("text", source.get("snippet"))
+        digest = source.get("sha256") or (
+            hashlib.sha256(text.encode()).hexdigest() if isinstance(text, str) else ""
+        )
+        out.append(
+            {
+                "key": f"web:{i}",
+                "selected": source.get("cited") is not False,
+                "doc_id": hashlib.sha256(url.encode()).hexdigest(),
+                "scope": "web",
+                "source": url,
+                "name": source.get("title") or url,
+                "sha256": digest,
+                "place": [],
+            }
+        )
+    for turn in message.tool_rounds:
+        for call in turn.get("calls", []):
+            if call.get("status") != "done" or not isinstance(call.get("result"), str):
+                continue
+            origin = f"{call.get('serverId', '')}/{call.get('tool', '')}"
+            out.append(
+                {
+                    "key": f"tool:{call['id']}",
+                    "selected": False,
+                    "doc_id": hashlib.sha256(origin.encode()).hexdigest(),
+                    "scope": "tool",
+                    "source": origin,
+                    "name": f"{call.get('serverName', '')}: {call.get('tool', '')}",
+                    "sha256": hashlib.sha256(call["result"].encode()).hexdigest(),
+                    "place": [],
+                }
+            )
+    return out
+
+
+async def link_answer(
+    state: Any, owner: str, note_id: str, message: Message, selected: list[str] | None = None
+) -> int:
     """Name the documents `message`, an answer, rests on, on the person's note. How many
     were linked; 0 when there were none, or the person's index cannot be read (then the note
     is kept without them, and that is logged)."""
     wanted = answer_documents(message)
+    external = [
+        e
+        for e in evidence(message)
+        if (e["selected"] if selected is None else e["key"] in selected)
+    ]
+    store: Store = state.store
+    if external:
+        await store.link_note_documents(owner, note_id, external, "answer", MAX_LINKS)
     if not wanted:
-        return 0
+        return len(external)
     saved = getattr(state, "saved", None)
     if saved is None:
         return 0
@@ -98,7 +156,6 @@ async def link_answer(state: Any, owner: str, note_id: str, message: Message) ->
         return 0
     if not links:
         return 0
-    store: Store = state.store
     count = await store.link_note_documents(owner, note_id, links, "answer", MAX_LINKS)
     return max(count, 0)
 
@@ -143,6 +200,8 @@ async def check(
             return {}
         for note_id, held in links.items():
             for link in held:
+                if link["scope"] in ("web", "tool"):
+                    continue
                 doc_id = link["doc_id"]
                 if doc_id not in seen:
                     seen[doc_id] = await index.document(doc_id)
@@ -214,8 +273,49 @@ def link_view(link: dict[str, Any]) -> dict[str, Any]:
     return {
         "docId": link["doc_id"],
         "name": link["name"],
-        "scope": "chat" if str(link["scope"]).startswith("chat:") else "library",
+        "scope": link["scope"]
+        if link["scope"] in ("web", "tool")
+        else "chat"
+        if str(link["scope"]).startswith("chat:")
+        else "library",
+        "source": link["source"] if link["scope"] in ("web", "tool") else None,
+        "canCompare": bool(link["sha256"]),
         "how": link["how"],
         "place": link["place"],
         "linkedAt": link["linked_at"],
+    }
+
+
+async def check_web(
+    state: Any, person: Any, link: dict[str, Any], server_id: str, tool_name: str
+) -> dict[str, Any]:
+    """Only the person's explicit action fetches a page, through their selected web tool."""
+    async with state.tools.connect([server_id], person) as session:
+        match = next(
+            (
+                (name, schema)
+                for name, (server, _, tool, schema) in session.tools.items()
+                if server["id"] == server_id and tool == tool_name
+            ),
+            None,
+        )
+        if match is None:
+            raise ValueError("That web tool is not available to your account.")
+        name, schema = match
+        if "url" not in schema.get("properties", {}):
+            raise ValueError("This tool has no URL input. Choose a web page tool.")
+        call = session.prepare(
+            {
+                "id": "check-page",
+                "function": {"name": name, "arguments": json.dumps({"url": link["source"]})},
+            }
+        )
+        await session.execute(call)
+        if call["status"] != "done":
+            raise ValueError(str(call.get("result") or "The web tool returned no page."))
+        digest = hashlib.sha256(call["result"].encode()).hexdigest()
+    return {
+        "changed": bool(link["sha256"]) and digest != link["sha256"],
+        "canCompare": bool(link["sha256"]),
+        "sha256": digest,
     }

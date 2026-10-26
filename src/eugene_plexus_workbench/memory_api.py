@@ -456,6 +456,7 @@ async def get_note(request: Request, note_id: str) -> dict[str, Any]:
     return {
         "note": note_view(note),
         "earlier": [note_view(n) for n in history],
+        "mergeHistory": await store.note_merge_history(person.sub, note_id),
         # MV6: the documents it rests on, as they were when linked.
         "documents": [memory_provenance.link_view(link) for link in links],
     }
@@ -534,6 +535,7 @@ class NoteCreate(BaseModel):
     messageId: str | None = Field(default=None, max_length=200)
     #: MV7: typed on a project's page, the project; from a chat, its chat's project instead.
     projectId: str | None = Field(default=None, max_length=200)
+    basedOn: list[str] | None = Field(default=None, max_length=20)
 
 
 class NoteUpdate(BaseModel):
@@ -546,6 +548,99 @@ class NoteUpdate(BaseModel):
     #: MV1: "Save as a new version" (the fact changed: the note is kept as history), not
     #: "Save" (a typo: changed in place).
     asNewVersion: StrictBool = False
+
+
+@router.get("/api/chats/{chat_id}/messages/{message_id}/provenance")
+async def answer_evidence(request: Request, chat_id: str, message_id: str) -> dict[str, Any]:
+    person = await _person(request)
+    await _own_chat(request, person, chat_id)
+    message = await _store(request).message(message_id)
+    if message is None or message.chat_id != chat_id or message.role != "assistant":
+        raise _problem(404, "There is no such answer in this chat.")
+    return {
+        "items": [
+            {"key": e["key"], "name": e["name"], "selected": e["selected"], "scope": e["scope"]}
+            for e in memory_provenance.evidence(message)
+        ]
+    }
+
+
+class CheckWeb(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    serverId: str = Field(min_length=1, max_length=256)
+    tool: str = Field(default="fetch", min_length=1, max_length=256)
+
+
+@router.get("/api/memory/web-tools")
+async def web_page_tools(request: Request) -> dict[str, Any]:
+    from .tools import visible_server
+
+    person = await _person(request)
+    state = _state(request)
+    choices = []
+    for server in await state.store.tool_servers():
+        if not visible_server(server, person):
+            continue
+        try:
+            async with state.tools.connect([server["id"]], person) as session:
+                for entry, _, tool, schema in session.tools.values():
+                    if "url" in schema.get("properties", {}) and tool in (
+                        "fetch",
+                        "fetch_url",
+                        "web_fetch",
+                        "read_url",
+                        "read_page",
+                    ):
+                        choices.append(
+                            {
+                                "serverId": entry["id"],
+                                "tool": tool,
+                                "name": f"{entry['name']}: {tool}",
+                            }
+                        )
+        except Exception as exc:
+            raise _problem(
+                502, f"Web tools from {server['name']} could not be listed: {exc}"
+            ) from None
+    return {"tools": choices}
+
+
+@router.post("/api/memory/notes/{note_id}/documents/{doc_id}/check")
+async def check_web_link(
+    request: Request, note_id: str, doc_id: str, body: CheckWeb
+) -> dict[str, Any]:
+    person = await _person(request)
+    store = _store(request)
+    held = (await store.note_documents(person.sub, [note_id])).get(note_id, [])
+    link = next(
+        (item for item in held if item["doc_id"] == doc_id and item["scope"] == "web"), None
+    )
+    if link is None:
+        raise _problem(404, "There is no such web page on your note.")
+    try:
+        result = await memory_provenance.check_web(
+            _state(request), person, link, body.serverId, body.tool
+        )
+    except Exception as exc:
+        raise _problem(502, f"The page could not be checked: {exc}") from None
+    if not await store.check_web_hash(person.sub, note_id, link, result["sha256"]):
+        raise _problem(409, "This page's link changed while it was checked. Check it again.")
+    return {**result, "name": link["name"], "linkedAt": link["linked_at"]}
+
+
+class WebHash(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+@router.patch("/api/memory/notes/{note_id}/documents/{doc_id}/check")
+async def accept_web_check(
+    request: Request, note_id: str, doc_id: str, body: WebHash
+) -> dict[str, Any]:
+    person = await _person(request)
+    if not await _store(request).accept_web_hash(person.sub, note_id, doc_id, body.sha256):
+        raise _problem(409, "Check this page again before confirming it.")
+    return {"accepted": True}
 
 
 class PrefsUpdate(BaseModel):
@@ -666,7 +761,9 @@ async def add_note(request: Request, body: NoteCreate) -> JSONResponse:
         await _reindex(_state(request), person.sub, [kept.id])
         if answer is not None:
             # MV6: kept from an answer, it rests on the documents the answer cited.
-            await memory_provenance.link_answer(_state(request), person.sub, kept.id, answer)
+            await memory_provenance.link_answer(
+                _state(request), person.sub, kept.id, answer, body.basedOn
+            )
     return JSONResponse(
         {"note": note_view(kept), "created": created},
         status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
@@ -1135,6 +1232,8 @@ def tidy_view(item: dict[str, Any]) -> dict[str, Any]:
         "id": item["id"],
         "kind": item["kind"],
         "notes": [note_view(n) for n in item["notes"]],
+        "model": item.get("model"),
+        "merged": item.get("merged"),
     }
 
 
@@ -1143,7 +1242,9 @@ async def _tidy(request: Request, owner: str, today: str) -> list[dict[str, Any]
     page is read whatever the pass came to."""
     store = _store(request)
     try:
-        await memory_tidy.run(store, owner, today)
+        await memory_tidy.run(
+            store, owner, today, state=_state(request), person=await _person(request)
+        )
         return [tidy_view(i) for i in await memory_tidy.proposals(store, owner, today)]
     except Exception as exc:
         log.warning("the tidy pass did not run: %s: %s", type(exc).__name__, exc)
@@ -1343,8 +1444,10 @@ class TidyAnswer(BaseModel):
     model_config = ConfigDict(extra="forbid")
     #: `keep` (two notes: keep `keepId`, the other becomes its earliest version), `keep_both`;
     #: `remove` (an event long past: forget it), `keep_event`.
-    action: Literal["keep", "keep_both", "remove", "keep_event"]
+    action: Literal["keep", "keep_both", "remove", "keep_event", "keep_wording"]
     keepId: str | None = Field(default=None, max_length=200)
+    title: str | None = Field(default=None, max_length=2000)
+    body: str | None = Field(default=None, max_length=40_000)
 
 
 @router.post("/api/memory/tidy/{tidy_id}")
@@ -1359,6 +1462,29 @@ async def answer_tidy(request: Request, tidy_id: str, body: TidyAnswer) -> dict[
     if item is None:
         raise _problem(status.HTTP_404_NOT_FOUND, "Nothing waits under that id.")
     ids = [n.id for n in item["notes"]]
+    if item.get("model") and body.action == "keep_wording":
+        install = await config.memory_settings(store)
+        if not install.enabled:
+            raise _problem(403, _OWNER_OFF)
+        wording = item["merged"]
+        now = time.time()
+        note = MemoryNote(
+            id=_new_id(),
+            owner=person.sub,
+            text=_vetted(body.title if body.title is not None else wording["title"]),
+            body=_vetted_body(body.body if body.body is not None else wording["body"], install),
+            kind=item["notes"][0].kind,
+            created_at=now,
+            updated_at=now,
+        )
+        try:
+            kept = await store.keep_model_merge(person.sub, tidy_id, note, install.max_notes)
+        except MemoryFull as exc:
+            raise _refused(409, _full(exc.limit)) from None
+        if kept is None:
+            raise _problem(409, "These notes changed since; nothing was done.")
+        await _reindex(state, person.sub, [*ids, kept.id])
+        return {"action": body.action, "note": note_view(kept)}
     if item["kind"] == "duplicate":
         if body.action == "keep_both":
             await store.settle_tidy(person.sub, tidy_id, "kept")
@@ -1480,6 +1606,8 @@ async def memory_export(
             "documents": [
                 {
                     "name": link["name"],
+                    "scope": link["scope"],
+                    "source": link["source"],
                     "sha256": link["sha256"],
                     "how": link["how"],
                     "place": link["place"],

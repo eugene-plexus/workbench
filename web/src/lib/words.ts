@@ -32,11 +32,20 @@ export function takes(model: Model): string[] {
 
 /** What an answer that has not started is waiting on, said plainly. */
 export function progressWords(progress: Progress | null | undefined): string {
+  if (progress?.stage === "documents_whole")
+    return [progress.cost, progress.message !== progress.cost ? progress.message : null]
+      .filter(Boolean)
+      .join(" ");
   if (!progress) return "Waiting for the model…";
   // The answer is held for its files to be read (MR2), or for the person's
   // documents to be searched (MR4): not the model's wait.
   if (progress.stage === "documents") {
     return progress.phase === "searching" ? "Searching your documents…" : "Reading your files…";
+  }
+  // A long chat's earlier messages are summarised before it is sent (row 26).
+  if (progress.stage === "summarising") {
+    const n = progress.messages ?? 0;
+    return `Summarising ${n} earlier message${n === 1 ? "" : "s"} to fit ${progress.model ?? "the model"}'s window…`;
   }
   if (progress.stage === "tool") {
     if (progress.phase === "approval") return "Review the tool calls to continue.";

@@ -323,6 +323,7 @@ class FolderSync:
         ignore: list[str] | None = None,
         include_hidden: bool = False,
         use_gitignore: bool = True,
+        project_id: str | None = None,
     ) -> FolderRecord:
         """Point a person's Documents at a folder that was granted them. `NoSuchGrant` when it is
         not theirs (the same answer as one that does not exist); `AlreadyAdded` when it is there;
@@ -346,8 +347,9 @@ class FolderSync:
             ignore=folder_rules.validate_list(ignore or []),
             include_hidden=include_hidden,
             use_gitignore=use_gitignore,
+            project_id=project_id,
         )
-        if not await self.store.add_folder_record(record):
+        if not await self.store.add_scoped_folder_record(record):
             raise AlreadyAdded
         self.request(person.sub, grant_id, manual=False)
         return record
@@ -419,6 +421,42 @@ class FolderSync:
         self._states.pop((sub, grant_id), None)
         self._rest.pop((sub, grant_id), None)
         return removed
+
+    async def move(self, sub: str, grant_id: str, project_id: str | None) -> FolderRecord | None:
+        """Move the indexed words and sidecars, without reading the folder again.
+        Close and drain the old sync first so it cannot put a file back in the old scope."""
+        record = await self.store.folder_record(sub, grant_id)
+        if record is None:
+            return None
+        held = self.state(sub, grant_id)
+        held.closed = True
+        if held.task is not None:
+            held.task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await held.task
+        async with held.lock:
+            try:
+                # Commit the destination first. A stopped process or a failed index move is
+                # repaired from this record before the next sync can write any documents.
+                record = await self.store.update_folder_record(sub, grant_id, project_id=project_id)
+                if record is None:
+                    return None
+                index = self.saved.index(sub, create=False)
+                if index is not None:
+                    await self._rescope(record, index)
+                return record
+            finally:
+                held.closed = False
+
+    async def _rescope(self, record: FolderRecord, index: Index) -> None:
+        new = f"project:{record.project_id}" if record.project_id else LIBRARY
+        old_scopes = await index.folder_scopes(record.grant_id) - {new}
+        if old_scopes:
+            await self.saved._cancel(
+                record.owner, [h.doc_id for h in await index.folder_files(record.grant_id)]
+            )
+            for old in sorted(old_scopes):
+                await index.rescope(old, new, source_prefix=f"folder:{record.grant_id}/")
 
     async def grant_withdrawn(self, grant_id: str) -> int:
         """The owner took this grant away: the folder's documents leave the index before the
@@ -618,6 +656,10 @@ class FolderSync:
         settings = await self._settings()
         index = self.saved.index(sub)
         assert index is not None
+        async with state.lock:
+            if state.closed:
+                raise _Stopped
+            await self._rescope(record, index)
         rules = folder_rules.Rules(
             record.ignore, include_hidden=record.include_hidden, use_gitignore=record.use_gitignore
         )
@@ -832,7 +874,9 @@ class _Work:
             FolderSkip(
                 NewDocument(
                     id=new_id(),
-                    scope=LIBRARY,
+                    scope=f"project:{self.record.project_id}"
+                    if self.record.project_id
+                    else LIBRARY,
                     name=self._named(found),
                     media_type="application/octet-stream",
                     bytes=found.size,
@@ -859,6 +903,11 @@ class _Work:
         part = self.index.part_path(new_id())
         verdict: dict[str, files.Detected] = {}
         room = self.settings.max_bytes - self.used
+        from .page_reader import enabled
+
+        read_pictures = bool(self.install.page_reader) and await enabled(
+            self.index, f"folder:{self.grant_id}"
+        )
 
         def check(head: bytes, size: int) -> folder_io.Declined | None:
             try:
@@ -867,7 +916,7 @@ class _Work:
                 return folder_io.Declined(
                     "unsupported", unsupported_words(exc.message), exc.message
                 )
-            if not got.is_document:
+            if not got.is_document and not (got.kind == "image" and read_pictures):
                 return folder_io.Declined("not_document", not_a_document_words(got.kind))
             if size > room:
                 return folder_io.Declined(
@@ -987,7 +1036,7 @@ class _Work:
             await owner.saved.add(
                 self.sub,
                 doc_id=part.name.removesuffix(".part"),
-                scope=LIBRARY,
+                scope=f"project:{self.record.project_id}" if self.record.project_id else LIBRARY,
                 name=name,
                 detected=detected,
                 size=taken.size,

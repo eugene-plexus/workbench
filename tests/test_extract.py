@@ -220,10 +220,7 @@ def test_a_pdf_of_pictures_is_skipped_with_the_reason_and_its_page_count(tmp_pat
         extract.read(written(tmp_path, "scan.pdf", docs.pdf_pictures(3)), "pdf")
     assert skipped.value.state == "skipped" and skipped.value.code == "no_text"
     assert skipped.value.pages == 3
-    assert skipped.value.message == (
-        "Skipped: this PDF has no text, only pictures of pages. "
-        "Workbench cannot read scanned pages yet."
-    )
+    assert skipped.value.message == ("Skipped: this PDF has no text, only pictures of pages.")
 
 
 def test_a_locked_pdf_is_skipped_as_password_protected(tmp_path: Path) -> None:

@@ -571,6 +571,7 @@ function PeoplesChats({
 }) {
   const [people, setPeople] = useState<Person[] | null>(null);
   const [chats, setChats] = useState<Record<string, Chat[]>>({});
+  const [projects, setProjects] = useState<Record<string, { id: string; name: string }[]>>({});
   const [error, setError] = useState<string | null>(null);
 
   async function load() {
@@ -615,10 +616,12 @@ function PeoplesChats({
               onClick={async () => {
                 setError(null);
                 try {
-                  const found = await api<{ chats: Chat[] }>(
-                    `/api/people/${encodeURIComponent(person.sub)}/chats`,
-                  );
+                  const found = await api<{
+                    chats: Chat[];
+                    projects?: { id: string; name: string }[];
+                  }>(`/api/people/${encodeURIComponent(person.sub)}/chats`);
                   setChats((current) => ({ ...current, [person.sub]: found.chats }));
+                  setProjects((current) => ({ ...current, [person.sub]: found.projects ?? [] }));
                 } catch (e) {
                   setError(
                     `${person.name}'s chats did not load: ${e instanceof Error ? e.message : String(e)}`,
@@ -639,15 +642,37 @@ function PeoplesChats({
             )}
             {chats[person.sub]?.length === 0 && <p className="py-0.5 pl-5 text-muted">No chats.</p>}
             <ul>
-              {chats[person.sub]?.map((chat) => (
-                <li key={chat.id}>
-                  <button
-                    type="button"
-                    className="w-full truncate rounded-plexus py-0.5 pl-5 pr-2 text-left text-muted hover:bg-hover hover:text-fg"
-                    onClick={() => onOpen(chat.id)}
-                  >
-                    {chat.title}
-                  </button>
+              {chats[person.sub]
+                ?.filter((chat) => !chat.projectId)
+                .map((chat) => (
+                  <li key={chat.id}>
+                    <button
+                      type="button"
+                      className="w-full truncate rounded-plexus py-0.5 pl-5 pr-2 text-left text-muted hover:bg-hover hover:text-fg"
+                      onClick={() => onOpen(chat.id)}
+                    >
+                      {chat.title}
+                    </button>
+                  </li>
+                ))}
+              {projects[person.sub]?.map((project) => (
+                <li key={project.id}>
+                  <span className="block py-1 pl-5 font-medium">{project.name}</span>
+                  <ul>
+                    {chats[person.sub]
+                      ?.filter((chat) => chat.projectId === project.id)
+                      .map((chat) => (
+                        <li key={chat.id}>
+                          <button
+                            type="button"
+                            className="w-full truncate py-0.5 pl-8 text-left text-muted hover:bg-hover"
+                            onClick={() => onOpen(chat.id)}
+                          >
+                            {chat.title}
+                          </button>
+                        </li>
+                      ))}
+                  </ul>
                 </li>
               ))}
             </ul>

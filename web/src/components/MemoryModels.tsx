@@ -32,6 +32,8 @@ export interface LearningModel {
   };
   tagsInRequest: boolean;
   lastRun: { outcome: string; text: string } | null;
+  proposeMerges?: boolean;
+  mergeProblem?: string | null;
 }
 
 interface Run {
@@ -237,6 +239,36 @@ export function MemoryModels() {
                   </option>
                 </select>
               </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={m.proposeMerges ?? false}
+                  data-testid="memory-model-merges"
+                  disabled={busy || m.mode === "off"}
+                  onChange={async (event) => {
+                    setBusy(true);
+                    setProblem(null);
+                    try {
+                      setData(
+                        await put<LearningModels>(
+                          `/api/memory/models/${encodeURIComponent(m.id)}`,
+                          { proposeMerges: event.target.checked },
+                        ),
+                      );
+                    } catch (error) {
+                      setProblem(failureWords(error));
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                />
+                Let {m.id} propose merges
+              </label>
+              {m.mergeProblem && (
+                <p role="status" className="help">
+                  {m.mergeProblem}
+                </p>
+              )}
             </div>
             <p className="help" data-testid="memory-model-effective">
               In effect: <strong>{MODE_LABELS[m.mode]}</strong>. {modeByWords(m)}

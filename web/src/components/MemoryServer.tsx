@@ -11,6 +11,7 @@ import { type FormEvent, useEffect, useId, useState } from "react";
 import { api, put } from "../lib/api";
 import { failureWords, plural } from "../lib/memory";
 import type { MemoryServerPage } from "../lib/types";
+import { MemoryBackfill } from "./MemoryBackfill";
 
 function when(seconds: number): string {
   return new Date(seconds * 1000).toLocaleString(undefined, {
@@ -75,6 +76,20 @@ export function MemoryServer() {
     }
   }
 
+  async function changeLinkedServer(enabled: boolean) {
+    setBusy(true);
+    setProblem(null);
+    try {
+      setData(await put<MemoryServerPage>("/api/memory/server/linked", { enabled }));
+      setEditing(false);
+      setToken("");
+    } catch (failure) {
+      setProblem(failureWords(failure));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const server = data?.server ?? null;
   const showForm = data?.allowed && (server === null || editing);
   return (
@@ -101,6 +116,18 @@ export function MemoryServer() {
           {data.why}
         </p>
       )}
+      {(data?.linkedAvailable || server?.linked) && (
+        <label className="field-label">
+          <input
+            type="checkbox"
+            checked={!!server?.linked}
+            disabled={busy || (!data?.linkedAvailable && !server?.linked)}
+            onChange={(event) => void changeLinkedServer(event.target.checked)}
+          />{" "}
+          Use Hindsight on this machine
+        </label>
+      )}
+      {data?.linkedWhy && <p className="help">{data.linkedWhy}</p>}
       {server && (
         <div data-testid="memory-server-connected" className="flex flex-col gap-1 text-sm">
           <p>
@@ -135,7 +162,10 @@ export function MemoryServer() {
               ))}
             </ul>
           )}
-          {data?.allowed && !editing && !asking && (
+          {server.verbs.includes("retain") && (
+            <MemoryBackfill key={server.url} allowed={data?.allowed ?? false} />
+          )}
+          {data?.allowed && !server.linked && !editing && !asking && (
             <div className="flex flex-wrap gap-2">
               <button
                 type="button"
