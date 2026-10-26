@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { digest } from "../lib/artifacts";
 import { runner } from "../lib/previewRunner";
-import { ArtifactPreview } from "./ArtifactPreview";
+import { ArtifactPreview, READY_WITHIN_MS, START_WITHIN_MS } from "./ArtifactPreview";
 
 const STORE = "workbench.previews.unfinished";
 const FIREFOX = "Mozilla/5.0 Gecko/20100101 Firefox/155.0";
@@ -54,11 +54,33 @@ describe.each([FIREFOX, WEBKIT])("unfinished previews in %s", (agent) => {
     ).toBeVisible();
   });
 
-  it("an unmarked artifact starts by itself and records its start", () => {
+  it("does not write a marker before the frame is ready", () => {
     localStorage.setItem(STORE, JSON.stringify(["another artifact"]));
+    const write = vi.spyOn(Storage.prototype, "setItem");
     render(<ArtifactPreview {...props} />);
     expect(screen.getByTestId("artifact-frame")).toBeInTheDocument();
-    expect(stored()).toEqual(["another artifact", key()]);
+    act(() => vi.advanceTimersByTime(READY_WITHIN_MS));
+    expect(screen.getByTestId("artifact-frame")).toBeInTheDocument();
+    expect(stored()).toEqual(["another artifact"]);
+    expect(write.mock.calls.filter(([name]) => name === STORE)).toEqual([]);
+  });
+
+  it("writes its marker immediately before sending run, once per frame", () => {
+    render(<ArtifactPreview {...props} />);
+    const frame = screen.getByTestId("artifact-frame") as HTMLIFrameElement;
+    const write = vi.spyOn(Storage.prototype, "setItem");
+    const sent = vi.spyOn(frame.contentWindow!, "postMessage").mockImplementation(() => {
+      expect(stored()).toEqual([key()]);
+    });
+    say(frame, { type: "ready" });
+    say(frame, { type: "ready" });
+    expect(sent).toHaveBeenCalledExactlyOnceWith(
+      { type: "run", nonce: expect.any(String), kind: props.kind, source: props.source },
+      "*",
+    );
+    expect(write.mock.calls.filter(([name]) => name === STORE)).toEqual([
+      [STORE, JSON.stringify([key()])],
+    ]);
   });
 
   it("Run starts a held artifact and re-marks it; only its matching finished reply clears it", () => {
@@ -66,7 +88,12 @@ describe.each([FIREFOX, WEBKIT])("unfinished previews in %s", (agent) => {
     render(<ArtifactPreview {...props} />);
     fireEvent.click(screen.getByRole("button", { name: "Run" }));
     const frame = screen.getByTestId("artifact-frame") as HTMLIFrameElement;
-    expect(stored()).toEqual(["another artifact", key()]);
+    expect(stored()).toEqual([key(), "another artifact"]);
+    expect(
+      screen.queryByText(
+        "This preview didn't finish last time and may have frozen the page. Run it?",
+      ),
+    ).toBeNull();
     const sent = vi.spyOn(frame.contentWindow!, "postMessage").mockImplementation(() => {});
     say(frame, { type: "ready" });
     expect(stored()).toContain(key());
@@ -81,16 +108,74 @@ describe.each([FIREFOX, WEBKIT])("unfinished previews in %s", (agent) => {
     say(frame, { type: "started", nonce });
     expect(stored()).toEqual(["another artifact"]);
     fireEvent.click(screen.getByRole("button", { name: "Reload the page" }));
+    expect(stored()).toEqual(["another artifact"]);
+    say(screen.getByTestId("artifact-frame") as HTMLIFrameElement, { type: "ready" });
     expect(stored()).toContain(key());
   });
 
-  it("an unfinished start survives unmount and its next showing waits for Run", () => {
+  it("unmounting a sent-but-not-started preview clears its marker", () => {
+    localStorage.setItem(STORE, JSON.stringify(["another artifact"]));
     const view = render(<ArtifactPreview {...props} />);
-    expect(screen.getByTestId("artifact-frame")).toBeInTheDocument();
+    say(screen.getByTestId("artifact-frame") as HTMLIFrameElement, { type: "ready" });
+    expect(stored()).toEqual(["another artifact", key()]);
     view.unmount();
+    expect(stored()).toEqual(["another artifact"]);
     render(<ArtifactPreview {...props} />);
+    expect(screen.getByTestId("artifact-frame")).toBeInTheDocument();
+  });
+
+  it("ending a sent-but-not-started run clears its marker", () => {
+    render(<ArtifactPreview {...props} />);
+    const frame = screen.getByTestId("artifact-frame") as HTMLIFrameElement;
+    say(frame, { type: "ready" });
+    expect(stored()).toContain(key());
+    say(frame, { type: "leaving" });
+    expect(screen.queryByTestId("artifact-frame")).toBeNull();
+    expect(stored()).not.toContain(key());
+  });
+
+  it("Run resets Stop's marker retention on the same preview", () => {
+    const view = render(<ArtifactPreview {...props} />);
+    say(screen.getByTestId("artifact-frame") as HTMLIFrameElement, { type: "ready" });
+    fireEvent.click(screen.getByRole("button", { name: "Stop the page" }));
+    expect(stored()).toContain(key());
+    fireEvent.click(screen.getByRole("button", { name: "Run" }));
+    say(screen.getByTestId("artifact-frame") as HTMLIFrameElement, { type: "ready" });
+    view.unmount();
+    expect(stored()).not.toContain(key());
+  });
+
+  it.each(["timeout", "Stop"])("%s keeps the marker, until a new responsive run exits", (exit) => {
+    const view = render(<ArtifactPreview {...props} />);
+    const frame = screen.getByTestId("artifact-frame") as HTMLIFrameElement;
+    say(frame, { type: "ready" });
+    expect(stored()).toContain(key());
+    if (exit === "timeout") {
+      // Bootstrap heartbeats keep the runner from stopping it before its start deadline.
+      for (let elapsed = 1_000; elapsed < START_WITHIN_MS; elapsed += 1_000) {
+        act(() => vi.advanceTimersByTime(1_000));
+        say(frame, { type: "alive" });
+      }
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(
+        screen.getByText(
+          `The page did not start within ${START_WITHIN_MS / 1000} seconds, and was stopped.`,
+        ),
+      ).toBeVisible();
+    } else {
+      fireEvent.click(screen.getByRole("button", { name: "Stop the page" }));
+    }
+    expect(screen.queryByTestId("artifact-frame")).toBeNull();
+    expect(stored()).toContain(key());
+    view.unmount();
+    expect(stored()).toContain(key());
+    const next = render(<ArtifactPreview {...props} />);
     expect(screen.queryByTestId("artifact-frame")).toBeNull();
     expect(screen.getByRole("button", { name: "Run" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Run" }));
+    say(screen.getByTestId("artifact-frame") as HTMLIFrameElement, { type: "ready" });
+    next.unmount();
+    expect(stored()).not.toContain(key());
   });
 
   it.each([
@@ -100,7 +185,7 @@ describe.each([FIREFOX, WEBKIT])("unfinished previews in %s", (agent) => {
   ])("only holds the same chat, message and content: %s", (other) => {
     localStorage.setItem(STORE, JSON.stringify([key()]));
     render(<ArtifactPreview {...props} {...other} />);
-    expect(screen.getByTestId("artifact-frame")).toBeInTheDocument();
+    say(screen.getByTestId("artifact-frame") as HTMLIFrameElement, { type: "ready" });
     expect(stored()).toContain(key(other));
   });
 
@@ -118,8 +203,15 @@ it("Chromium starts even a marked artifact and never touches the marker store", 
   localStorage.setItem(STORE, JSON.stringify([key()]));
   const read = vi.spyOn(Storage.prototype, "getItem");
   const write = vi.spyOn(Storage.prototype, "setItem");
-  render(<ArtifactPreview {...props} />);
-  expect(screen.getByTestId("artifact-frame")).toBeInTheDocument();
+  const view = render(<ArtifactPreview {...props} />);
+  const frame = screen.getByTestId("artifact-frame") as HTMLIFrameElement;
+  const sent = vi.spyOn(frame.contentWindow!, "postMessage").mockImplementation(() => {});
+  say(frame, { type: "ready" });
+  const { nonce } = sent.mock.calls[0]![0] as { nonce: string };
+  say(frame, { type: "started", nonce });
+  fireEvent.click(screen.getByRole("button", { name: "Reload the page" }));
+  say(screen.getByTestId("artifact-frame") as HTMLIFrameElement, { type: "ready" });
+  view.unmount();
   expect(read.mock.calls.filter(([name]) => name === STORE)).toEqual([]);
   expect(write.mock.calls.filter(([name]) => name === STORE)).toEqual([]);
 });

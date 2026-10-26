@@ -148,13 +148,13 @@ export function ArtifactPreview({
   const root = useRef<HTMLDivElement>(null);
   const frame = useRef<HTMLIFrameElement>(null);
   const runs = useRef(0);
+  const keepMarker = useRef(false);
   const noun = kind === "html" ? "page" : "component";
 
   const note = (words: string) =>
     setNotes((was) => (was.includes(words) ? was : [...was, words].slice(-NOTES)));
   const begin = () => {
-    // Before making the frame: the chat may get no more turns once it runs.
-    markPreviewStarted(markerKey);
+    keepMarker.current = false;
     setUnfinished(false);
     setNotes([]);
     setHeight(null);
@@ -172,6 +172,7 @@ export function ArtifactPreview({
     runner.stopped(slot);
   };
   const stop = () => {
+    keepMarker.current = true;
     setHeld(true);
     ended();
   };
@@ -277,10 +278,13 @@ export function ArtifactPreview({
         case "ready":
           if (sent) return;
           sent = true;
+          // Before the frame can run: a loop may give the chat no more turns.
+          markPreviewStarted(markerKey);
           own.postMessage({ type: "run", nonce, kind, source }, "*");
           runner.ready(slot);
           late = window.setTimeout(() => {
             if (started) return;
+            keepMarker.current = true;
             finish();
             setHeld(true);
             note(
@@ -352,6 +356,8 @@ export function ArtifactPreview({
       );
     }, READY_WITHIN_MS);
     return () => {
+      // A responsive exit is not evidence of a loop, unless timed out or stopped.
+      if (sent && !started && !keepMarker.current) markPreviewFinished(markerKey);
       window.removeEventListener("message", heard);
       window.clearTimeout(silent);
       window.clearTimeout(late);

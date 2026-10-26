@@ -138,8 +138,10 @@ async function unfinishedAfterReload() {
         event.source === window.parent &&
         event.data?.type === "run" &&
         event.data.source?.includes("for (;;) {}")
-      )
+      ) {
+        document.documentElement.setAttribute("data-run-intercepted", "");
         event.stopImmediatePropagation();
+      }
     });
   });
   await chat(page, cfg.chats.stuck);
@@ -172,7 +174,10 @@ async function unfinishedAfterReload() {
       (await card(page, "Calm too").getByTestId("artifact-frame").count()) === 1,
   );
   await card(page, "Busy").getByRole("button", { name: "Run" }).click();
-  await card(page, "Busy").getByTestId("artifact-frame").waitFor();
+  await card(page, "Busy")
+    .frameLocator('[data-testid="artifact-frame"]')
+    .locator("html[data-run-intercepted]")
+    .waitFor();
   check(
     "Run starts the unfinished preview and records its new attempt",
     await page.evaluate(

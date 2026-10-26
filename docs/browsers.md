@@ -31,19 +31,24 @@ is necessary. A sandbox controls access, not a separate thread or process;
 changing its attributes cannot provide that guarantee. A different execution
 architecture would be needed to fix this in Workbench (workbench#19).
 
-In Firefox and Safari (WebKit), Workbench now records each preview before it
-starts. If it never reports finishing its first run before the page is closed
-or reloaded, its next showing waits for **Run** and says: "This preview didn't
-finish last time and may have frozen the page. Run it?" Every other artifact
-still runs by itself. Run records a fresh attempt; a matching first-run success
-or failure clears it. The identity includes the chat, message and content, so
-a corrected revision can run by itself. Chrome and Edge do not use these markers.
+In Firefox and Safari (WebKit), Workbench records each preview when its frame
+is ready, immediately before sending it the run message. Waiting for a frame
+does not leave a marker. If a sent run never reports finishing before the page
+is closed or reloaded, its next showing waits for **Run** and says: "This preview
+didn't finish last time and may have frozen the page. Run it?" Every other artifact
+still runs by itself. Run records a fresh attempt when its frame is ready; a
+matching first-run success or failure clears it. Unmounting or ending a run
+while the page still responds also clears it, except after the start timeout
+or the person's Stop. No pagehide or unload handler clears markers: a browser
+may run one after terminating a loop. The identity includes the chat, message
+and content, so a corrected revision can run by itself. Chrome and Edge do not
+use these markers.
 
 Only the 200 newest unfinished identities are kept, under
 `workbench.previews.unfinished` in localStorage; no artifact source is stored.
 Blocked storage keeps the previous behaviour. This is evidence of an unfinished
-start, not proof of a loop: closing the page early can also leave a marker.
-A loop that begins after the first run finished leaves no marker.
+start, not proof of a loop: closing the page after the run was sent can also
+leave a marker. A loop that begins after the first run finished leaves no marker.
 
 Only infinite-loop responsiveness and live recovery after that loop are skipped
 in these two engines. Chromium still runs them. The inline browser script checks
@@ -78,3 +83,10 @@ The full inline script still failed its height and phone-layout checks on this
 Windows engine. Firefox 155.0 could launch but failed to create even a blank
 page (`Cannot read properties of undefined (reading '_page')`), reproduced
 without Workbench. The Linux browser matrix remains to be checked in CI.
+
+31i marker timing and cleanup fix, 2026-10-26, Windows: WebKit 26.6 with
+Playwright 1.63.0 passed both recovery assertions and all tool-artifact checks,
+including the saved edit running after reload. The full inline script still
+failed the same two height checks and phone-layout check described above.
+Firefox 155.0 again failed to create its first page with the same `_page`
+error, before reaching Workbench. The Linux matrix remains for CI.
