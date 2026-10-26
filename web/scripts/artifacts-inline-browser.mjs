@@ -226,6 +226,12 @@ try {
     .getByRole("option", { name: /^Revision 2 of 2, edited/ })
     .waitFor({ state: "attached" });
   await toolDialog.getByRole("combobox", { name: "Revision", exact: true }).selectOption("1");
+  // The Source box shows revision 1 after React redraws it; reading it at once can
+  // still see the edit (workbench#22, Firefox). Wait on the box itself, then check.
+  for (let waited = 0; waited < 5_000; waited += 100) {
+    if ((await toolSource.inputValue()) === cfg.toolOriginal) break;
+    await toolPage.waitForTimeout(100);
+  }
   check(
     "a saved tool artifact names its origin and keeps revision one unchanged",
     (
