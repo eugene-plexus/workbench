@@ -22,6 +22,7 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 from eugene_plexus_workbench import files
@@ -533,8 +534,8 @@ def test_removing_a_person_deletes_their_skills(world: World) -> None:
     assert (world.data / "skills" / "install" / shared["id"] / "SKILL.md").is_file()
 
 
-def _export(person: Browser) -> zipfile.ZipFile:
-    made = person.post("/api/me/export")
+def _export(person: Browser, path: str = "/api/me/export") -> zipfile.ZipFile:
+    made = person.post(path)
     assert made.status_code == 202, made.text
     export = made.json()["export"]
     deadline = time.perf_counter() + 60
@@ -556,6 +557,23 @@ def test_export_includes_skills(world: World) -> None:
     assert archive.read("skills/pdf-forms/references/style.md").decode() == STYLE
     assert "skills/pdf-forms/scripts/fill.py" in names
     assert "skills/" in archive.read("README.txt").decode()
+    # The owner's download of a person who uses Workbench holds no skills, as it holds no notes.
+    owner = _signed_in(world, "operator")
+    changed = httpx.patch(
+        f"{world.workbench}/v1/config",
+        headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
+        json={"ownerReadsChats": True},
+        trust_env=False,
+    )
+    assert changed.status_code == 200, changed.text
+    assert not any(
+        n.startswith("skills/") for n in _export(owner, "/api/people/p-ada/export").namelist()
+    )
+    # Of a person removed from Eugene, it holds everything Workbench keeps of them (row 7).
+    del world.eugene.people["p-ada"]
+    owner.post("/api/removed-people/check").raise_for_status()
+    removed = _export(owner, "/api/people/p-ada/export")
+    assert removed.read("skills/pdf-forms/SKILL.md") == _skill_md()
 
 
 # --------------------------------------------------------------------------- #
@@ -599,7 +617,6 @@ def test_a_schema_33_store_gains_skills_and_keeps_a_copy(tmp_path: Path) -> None
 
 def test_the_admin_token_is_not_a_way_in(world: World) -> None:
     """Skills are a person's: the install's admin token reaches no skill route."""
-    import httpx
 
     answer = httpx.get(
         f"{world.workbench}/api/skills",

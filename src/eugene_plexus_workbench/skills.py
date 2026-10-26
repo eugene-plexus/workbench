@@ -500,11 +500,14 @@ class SkillStore:
 
         return await self._run(go)
 
-    async def owned(self, owner: str) -> list[Skill]:
+    async def owned(self, owner: str, *, hidden_too: bool = False) -> list[Skill]:
+        """The owner's skills, by name. A person removed from Eugene has none, unless
+        `hidden_too` (the owner's download of everything Workbench holds of them, row 7)."""
+
         def go(db: sqlite3.Connection) -> list[Skill]:
+            hidden = "" if hidden_too else f" AND owner NOT IN {_HIDDEN}"
             rows = db.execute(
-                f"SELECT * FROM skills WHERE owner = ? AND owner NOT IN {_HIDDEN} ORDER BY name",
-                (owner,),
+                f"SELECT * FROM skills WHERE owner = ?{hidden} ORDER BY name", (owner,)
             )
             return [_skill(r) for r in rows]
 
@@ -1296,8 +1299,9 @@ class Skills:
     # --- a person's data -----------------------------------------------------------
 
     async def exported(self, sub: str) -> list[tuple[str, Path]]:
-        """Each of the person's own skills, as a download holds it: its name and its folder."""
-        return [(s.name, self.folder(s)) for s in await self.db.owned(sub)]
+        """Each of the person's own skills, as a download holds it: its name and its folder. A
+        removed person's too: the owner's download of them holds everything (row 7)."""
+        return [(s.name, self.folder(s)) for s in await self.db.owned(sub, hidden_too=True)]
 
 
 def _free_name(name: str, taken: set[str]) -> str:
