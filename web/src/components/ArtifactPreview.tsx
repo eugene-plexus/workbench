@@ -31,6 +31,11 @@
 import { Play, RotateCw, Square } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { digest } from "../lib/artifacts";
+import {
+  markPreviewFinished,
+  markPreviewStarted,
+  previewWasUnfinished,
+} from "../lib/previewMarkers";
 import { runner, type StopReason } from "../lib/previewRunner";
 
 /** Where a preview runs; the server gives it its own policy there. */
@@ -109,6 +114,7 @@ function newNonce(): string {
 type Running = { id: number; tries: number; state: "starting" | "running" };
 
 export function ArtifactPreview({
+  chatId,
   kind,
   source,
   title,
@@ -116,6 +122,7 @@ export function ArtifactPreview({
   inline = false,
   auto = false,
 }: {
+  chatId: string;
   kind: "html" | "react";
   source: string;
   title: string;
@@ -130,10 +137,12 @@ export function ArtifactPreview({
   const slot = useId();
   // Remembered when it loops, by the words it runs: a revision that fixes it runs.
   const runKey = useMemo(() => `${blockKey}:${digest(source)}`, [blockKey, source]);
+  const markerKey = JSON.stringify([chatId, runKey]);
+  const [unfinished, setUnfinished] = useState(() => previewWasUnfinished(markerKey));
   const [run, setRun] = useState<Running | null>(null);
   const [notes, setNotes] = useState<string[]>([]);
   // Stopped by the person, or for not answering: it waits for Run.
-  const [held, setHeld] = useState(() => runner.isStuck(runKey));
+  const [held, setHeld] = useState(() => unfinished || runner.isStuck(runKey));
   const [height, setHeight] = useState<number | null>(null);
   const [viewport, setViewport] = useState(() => window.innerHeight);
   const root = useRef<HTMLDivElement>(null);
@@ -144,6 +153,9 @@ export function ArtifactPreview({
   const note = (words: string) =>
     setNotes((was) => (was.includes(words) ? was : [...was, words].slice(-NOTES)));
   const begin = () => {
+    // Before making the frame: the chat may get no more turns once it runs.
+    markPreviewStarted(markerKey);
+    setUnfinished(false);
     setNotes([]);
     setHeight(null);
     runs.current += 1;
@@ -294,14 +306,17 @@ export function ArtifactPreview({
           );
           return;
         case "started":
-          if (said.nonce === nonce) {
+          if (sent && said.nonce === nonce) {
+            markPreviewFinished(markerKey);
             started = true;
             runner.alive(slot);
             setRun((was) => (was?.id === id ? { ...was, state: "running" } : was));
           }
           return;
         case "failed":
-          if (said.nonce !== nonce) return;
+          if (!sent || said.nonce !== nonce) return;
+          // It returned a failure, so this first run did finish.
+          markPreviewFinished(markerKey);
           started = true;
           finish();
           setHeld(true);
@@ -382,10 +397,12 @@ export function ArtifactPreview({
               Run
             </button>
             <span className="text-sm text-muted">
-              {waiting
-                ? "Runs here when it is on screen, after the previews before it."
-                : "Runs here, in a frame of its own: it cannot reach this page or your session, " +
-                  "and loads nothing from the network. If it goes to another address, it is stopped."}
+              {unfinished
+                ? "This preview didn't finish last time and may have frozen the page. Run it?"
+                : waiting
+                  ? "Runs here when it is on screen, after the previews before it."
+                  : "Runs here, in a frame of its own: it cannot reach this page or your session, " +
+                    "and loads nothing from the network. If it goes to another address, it is stopped."}
             </span>
           </>
         )}

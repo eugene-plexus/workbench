@@ -125,7 +125,72 @@ const notes = async (page, title) =>
     ? card(page, title).getByTestId("artifact-notes").innerText()
     : "";
 
+async function unfinishedAfterReload() {
+  step("an unfinished looping preview waits after reload");
+  const { context, page } = await open("dark", DESK);
+  // A real loop would freeze this page and the browser check. Intercept only
+  // Busy's run message before the runtime sees it: the real parent records
+  // its start but gets no first-run acknowledgement, as with a frozen frame.
+  await context.addInitScript(() => {
+    if (window === window.parent) return;
+    window.addEventListener("message", (event) => {
+      if (
+        event.source === window.parent &&
+        event.data?.type === "run" &&
+        event.data.source?.includes("for (;;) {}")
+      )
+        event.stopImmediatePropagation();
+    });
+  });
+  await chat(page, cfg.chats.stuck);
+  await card(page, "Busy").getByTestId("artifact-frame").waitFor();
+  for (const title of ["Calm", "Calm too"]) {
+    await card(page, title).getByRole("status").getByText("Running").waitFor();
+  }
+  await page.waitForFunction(() => {
+    const keys = JSON.parse(window.localStorage.getItem("workbench.previews.unfinished") ?? "[]");
+    return keys.length === 1;
+  });
+  const unfinished = await page.evaluate(
+    () => JSON.parse(window.localStorage.getItem("workbench.previews.unfinished") ?? "[]")[0],
+  );
+  await page.reload();
+  await card(page, "Busy")
+    .getByText("This preview didn't finish last time and may have frozen the page. Run it?")
+    .waitFor();
+  // Check the automatic starts after reload. The completed first runs above
+  // already proved that only Busy retained a marker.
+  for (const title of ["Calm", "Calm too"]) {
+    await card(page, title).getByTestId("artifact-frame").waitFor({ timeout: 30_000 });
+  }
+  await page.waitForTimeout(4_000);
+  check(
+    "after a reload, only the unfinished looping preview waits for Run",
+    (await card(page, "Busy").getByTestId("artifact-frame").count()) === 0 &&
+      (await card(page, "Busy").getByRole("button", { name: "Run" }).count()) === 1 &&
+      (await card(page, "Calm").getByTestId("artifact-frame").count()) === 1 &&
+      (await card(page, "Calm too").getByTestId("artifact-frame").count()) === 1,
+  );
+  await card(page, "Busy").getByRole("button", { name: "Run" }).click();
+  await card(page, "Busy").getByTestId("artifact-frame").waitFor();
+  check(
+    "Run starts the unfinished preview and records its new attempt",
+    await page.evaluate(
+      (key) =>
+        JSON.parse(window.localStorage.getItem("workbench.previews.unfinished") ?? "[]").includes(
+          key,
+        ),
+      unfinished,
+    ),
+  );
+  await card(page, "Busy").getByRole("button", { name: "Stop the page" }).click();
+  policy.push(...(await page.evaluate(() => window.__policy)));
+  await context.close();
+}
+
 try {
+  if (browserName !== "chromium") await unfinishedAfterReload();
+
   // --- the chat's switch -------------------------------------------------------------------
   step("the chat's switch");
   let { context, page } = await open("light", DESK);

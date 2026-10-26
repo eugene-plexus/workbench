@@ -18,7 +18,7 @@ browsers could not run in the builder's sandbox. Real Safari and iOS remain unch
 | Dark diagram section labels below 4.5:1                                     | WebKit 26.6; Firefox once its dark theme works | App: darken only the two offending diagram fills in these engines. Vitest checks contrast and preserves Chromium's exact palette. Status colours elsewhere stay unchanged.                                                                                                                                                                                                                                                      |
 | Service worker called “allowed [object Promise]”                            | Firefox 155.0                                  | Check: registration rejects asynchronously (also visible in the screenshot's error note). Observe the real registration promise; resolution fails the check. No sandbox permission changes.                                                                                                                                                                                                                                     |
 | Invalid chart reason differs                                                | Both                                           | Check: pie charts are now supported; this fixture has no series. Require that exact reason and its original JSON source.                                                                                                                                                                                                                                                                                                        |
-| Busy preview hangs manual and inline runs                                   | Both                                           | Engine limit; only loop-specific scenarios are skipped, with a printed reason. See below.                                                                                                                                                                                                                                                                                                                                       |
+| Busy preview hangs manual and inline runs                                   | Both                                           | Engine limit; an unfinished first run now waits for Run when shown again. Live loop recovery is still skipped; reload recovery is checked without freezing the browser. See below.                                                                                                                                                                                                                                              |
 | Send never enables in the live-answer step                                  | Both                                           | Check: New chat opens the chat's own address and replaces the composer; a slower engine filled the first one, which was then empty. Wait for the address, then fill.                                                                                                                                                                                                                                                            |
 | Page errors "... /api/... due to access control checks" at the end of a run | WebKit 26.6                                    | Engine report: WebKit gives that text for a request the page abandons at the next navigation, for the same origin too. Only that text for the app's own `/api` is ignored in WebKit (`ignorablePageError`); every other page error still fails.                                                                                                                                                                                 |
 | Two comboboxes in the artifact dialog                                       | Firefox 155.0                                  | Check: the dialog has Revision and Compare with revision. Select by the name "Revision".                                                                                                                                                                                                                                                                                                                                        |
@@ -29,12 +29,30 @@ and WebKit builds. The person sees a frozen chat: Stop and the watchdog cannot
 run, and other previews cannot recover. Closing the tab through the browser
 is necessary. A sandbox controls access, not a separate thread or process;
 changing its attributes cannot provide that guarantee. A different execution
-architecture would be needed to fix this in Workbench.
+architecture would be needed to fix this in Workbench (workbench#19).
 
-Only infinite-loop responsiveness, recovery after that loop, and remembering
-that loop across reload are skipped in these two engines. Chromium still runs
-them. Both engines still check ordinary Stop, sandbox isolation, network and
-form refusals, navigation, components, and inline capacity. A deliberately
+In Firefox and Safari (WebKit), Workbench now records each preview before it
+starts. If it never reports finishing its first run before the page is closed
+or reloaded, its next showing waits for **Run** and says: "This preview didn't
+finish last time and may have frozen the page. Run it?" Every other artifact
+still runs by itself. Run records a fresh attempt; a matching first-run success
+or failure clears it. The identity includes the chat, message and content, so
+a corrected revision can run by itself. Chrome and Edge do not use these markers.
+
+Only the 200 newest unfinished identities are kept, under
+`workbench.previews.unfinished` in localStorage; no artifact source is stored.
+Blocked storage keeps the previous behaviour. This is evidence of an unfinished
+start, not proof of a loop: closing the page early can also leave a marker.
+A loop that begins after the first run finished leaves no marker.
+
+Only infinite-loop responsiveness and live recovery after that loop are skipped
+in these two engines. Chromium still runs them. The inline browser script checks
+reload recovery by intercepting only the looping fixture's run message before
+execution. The real preview records its start and gets no completion reply;
+after reload only that artifact waits for Run, and Run records its next attempt.
+No actual loop executes in that check. Both engines still check ordinary Stop,
+sandbox isolation, network and form refusals, navigation, components, and inline
+capacity. A deliberately
 silent bootstrap separately proves the 3 s ready rule, its waiting message,
 replacement and successful startup without hanging the browser.
 
@@ -53,3 +71,10 @@ the address was never requested. Chromium and Firefox still check the note.
 The phone-size checks passed in WebKit on Linux in CI. WebKit on Windows
 measures a 79 px overflow there; it is not the CI engine and is not treated as
 a finding.
+
+31i local verification, 2026-10-25, Windows: the two new recovery assertions
+passed in WebKit 26.6 with Playwright 1.63.0, using the existing fixture servers.
+The full inline script still failed its height and phone-layout checks on this
+Windows engine. Firefox 155.0 could launch but failed to create even a blank
+page (`Cannot read properties of undefined (reading '_page')`), reproduced
+without Workbench. The Linux browser matrix remains to be checked in CI.
