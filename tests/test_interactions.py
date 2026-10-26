@@ -301,10 +301,17 @@ def test_authorization_is_checked_after_wait_before_effect(setup: Any, change: s
         update = {"expires_at": time.time() - 1} if change == "expiry" else {"fallback": "Changed"}
         ref.run(ref.service.publish(surface.model_copy(update=update), base=1))
     elif change == "lease":
+        # The lease ended and Eugene's next renewal is over as soon as it is
+        # given. Any renewal before the claim (a request by the person, or
+        # background work that carries their token) must not bring them back.
+        world.eugene.expires_in = 0.001
         with sqlite3.connect(world.data / DATABASE) as db:
             db.execute(
                 "UPDATE sessions SET access_expires_at=? WHERE sub='p-ada'", (time.time() - 1,)
             )
+        # Force the renewal. CI once renewed the lease in this window and the
+        # action dispatched (candidate-workbench, specs run 40097628340).
+        assert ada.get("/api/chats").status_code == 200
     else:
         ref.denied = True
     ref.hold_authorization = False

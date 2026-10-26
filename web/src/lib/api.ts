@@ -131,7 +131,7 @@ export const patch = <T>(path: string, body: unknown) =>
 export const put = <T>(path: string, body: unknown) =>
   api<T>(path, { method: "PUT", body: JSON.stringify(body) });
 
-export const del = (path: string) => api<void>(path, { method: "DELETE" });
+export const del = <T = void>(path: string) => api<T>(path, { method: "DELETE" });
 
 /** Every blob: address made for a file, so signing out can end them all. */
 const made = new Set<string>();
