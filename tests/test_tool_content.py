@@ -24,7 +24,7 @@ from mcp.types import (
     TextResourceContents,
 )
 
-from eugene_plexus_workbench import content, files
+from eugene_plexus_workbench import content, files, tools
 from eugene_plexus_workbench.app import DATABASE
 from eugene_plexus_workbench.content import Keeper, normalize
 from eugene_plexus_workbench.store import Chat, FileRecord, Message, Store
@@ -54,6 +54,91 @@ def keep_in(tmp_path: Path, *, owner: str = "p-ada") -> tuple[Store, Keeper]:
 
 def blocks_of(keeper: Keeper | None, blocks: Any, structured: Any = None) -> Any:
     return asyncio.run(normalize("call-1", blocks, structured, keeper))
+
+
+@pytest.mark.parametrize("vision", [True, False])
+def test_a_vision_model_gets_the_tools_picture(tmp_path: Path, vision: bool) -> None:
+    store, keeper = keep_in(tmp_path)
+    blocks, text = blocks_of(
+        keeper, [{"type": "image", "data": b64(PICTURE), "mimeType": "image/png"}]
+    )
+    rounds = [
+        {
+            "assistant": {"role": "assistant", "content": None},
+            "calls": [{"id": "call-1", "result": text, "content": blocks}],
+        }
+    ]
+    messages = tools.transcript(rounds)
+    sent = asyncio.run(
+        tools.attach_pictures(messages, rounds, store, tmp_path, "p-ada", "c1", image_input=vision)
+    )
+    result = sent[-1]["content"]
+    if vision:
+        assert result[1]["image_url"]["url"] == "data:image/png;base64," + b64(PICTURE)
+        assert "It is attached." in result[0]["text"]
+        assert "you do not" not in result[0]["text"]
+    else:
+        assert result == text and "The person sees it; you do not." in result
+    assert rounds[0]["calls"][0]["result"] == text
+    asyncio.run(store.close())
+
+
+def test_picture_replay_preserves_unfinished_and_withheld_results() -> None:
+    rounds = [
+        {
+            "assistant": {"role": "assistant"},
+            "calls": [
+                {"id": "unfinished", "result": None},
+                {"id": "private", "serverId": tools.MEMORY_SERVER, "result": "Private notes"},
+            ],
+        }
+    ]
+    sent = tools.transcript(rounds, notes=False, pictures={"image": "data:image/png;base64,AA=="})
+    assert sent[1]["content"] == "This call did not finish. Do not assume it succeeded."
+    assert sent[2]["content"] == tools.memory.WITHHELD
+
+
+@pytest.mark.parametrize("limit", ["count", "bytes"])
+def test_only_the_8_newest_pictures_are_attached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, limit: str
+) -> None:
+    store, _ = keep_in(tmp_path)
+    rounds = []
+    for i in range(14):
+        keeper = Keeper(store, tmp_path, "p-ada", "c1", f"m{i}")
+        blocks, text = asyncio.run(
+            normalize(
+                str(i),
+                [{"type": "image", "data": b64(PICTURE), "mimeType": "image/png"}],
+                keeper=keeper,
+            )
+        )
+        rounds.append(
+            {
+                "assistant": {"role": "assistant", "content": None},
+                "calls": [{"id": str(i), "result": text, "content": blocks}],
+            }
+        )
+    if limit == "bytes":
+        monkeypatch.setattr(tools, "MAX_PICTURE_BYTES", len(PICTURE) * 3)
+    sent = asyncio.run(
+        tools.attach_pictures(
+            tools.transcript(rounds), rounds, store, tmp_path, "p-ada", "c1", image_input=True
+        )
+    )
+    attached = [
+        m["tool_call_id"] for m in sent if m["role"] == "tool" and isinstance(m["content"], list)
+    ]
+    assert attached == [str(i) for i in range(11 if limit == "bytes" else 6, 14)]
+    missing = rounds[-1]["calls"][0]["content"][0]["fileId"]
+    files.path_of(tmp_path, "p-ada", missing).unlink()
+    sent = asyncio.run(
+        tools.attach_pictures(
+            tools.transcript(rounds), rounds, store, tmp_path, "p-ada", "c1", image_input=True
+        )
+    )
+    assert isinstance(sent[-1]["content"], str)
+    asyncio.run(store.close())
 
 
 def test_every_kind_of_block_is_kept_in_order_and_said_to_the_model(tmp_path: Path) -> None:
@@ -272,7 +357,9 @@ PLOT = {
 }
 
 
-def run_mixed(world: World, url: str, tool: str = "mixed") -> tuple[Any, Any, str, dict[str, Any]]:
+def run_mixed(
+    world: World, url: str, tool: str = "mixed", *, model: str | None = None
+) -> tuple[Any, Any, str, dict[str, Any]]:
     owner = world.browser()
     owner.sign_in("operator")
     added = owner.post("/api/tools/servers", json={"name": "Mixed", "url": url, "token": ""})
@@ -280,6 +367,8 @@ def run_mixed(world: World, url: str, tool: str = "mixed") -> tuple[Any, Any, st
     ada = world.browser()
     ada.sign_in("p-ada")
     chat = ada.new_chat()
+    if model is not None:
+        assert ada.patch(f"/api/chats/{chat}", json={"model": model}).status_code == 200
     settings = {"settings": {"toolServers": [added.json()["id"]]}}
     assert ada.patch(f"/api/chats/{chat}", json=settings).status_code == 200
     world.gateway.mode = "tools"
@@ -289,6 +378,16 @@ def run_mixed(world: World, url: str, tool: str = "mixed") -> tuple[Any, Any, st
     done = ada.wait_answer(chat)
     assert done["status"] == "done", done
     return owner, ada, chat, done["toolRounds"][0]["calls"][0]
+
+
+def test_a_text_model_gets_the_line_only(world: World, mixed: str) -> None:
+    from .conftest import chat_model
+
+    world.gateway.more_chat_models.append(chat_model("text-only", locality="local"))
+    _, _, _, call = run_mixed(world, mixed, model="text-only")
+    sent = world.gateway.requests[-1]["messages"][-1]["content"]
+    assert isinstance(sent, str) and "The person sees it; you do not." in sent
+    assert call["content"][1]["type"] == "image"
 
 
 def test_a_mixed_result_is_kept_shown_after_a_refresh_and_replayed_as_words(
@@ -320,8 +419,10 @@ def test_a_mixed_result_is_kept_shown_after_a_refresh_and_replayed_as_words(
     # The model is told what it cannot see, never where it is kept.
     replay = world.gateway.requests[-1]["messages"][-1]
     assert replay["role"] == "tool"
-    assert "[The tool returned a picture" in replay["content"]
-    assert "Made for hello." in replay["content"] and '{"made": "hello"}' in replay["content"]
+    assert replay["content"][1]["type"] == "image_url"
+    words = replay["content"][0]["text"]
+    assert "[The tool returned a picture" in words and "It is attached." in words
+    assert "Made for hello." in words and '{"made": "hello"}' in words
     assert image["fileId"] not in json.dumps(world.gateway.requests)
     # Only what a person uploaded counts as an upload.
     assert ada.delete(f"/api/chats/{chat}/files/{image['fileId']}").status_code == 404
@@ -387,11 +488,36 @@ def test_a_tool_file_no_answer_names_is_removed_and_one_an_answer_names_stays(
 # --- a job site ------------------------------------------------------------------------
 
 
-def test_a_sites_picture_is_kept_and_hidden_from_the_install_owner_as_its_message_is(
-    site_world: tuple[World, dict[str, Any]],  # noqa: F811 (the fixture, imported)
+def test_a_site_answer_over_8_mib_names_the_observed_limit(
+    site_world: tuple[World, dict[str, Any]],  # noqa: F811
 ) -> None:
     world, state = site_world
-    state["picture"] = PICTURE
+    state["content"] = "x" * (8 * files.MIB)
+    ada = world.browser()
+    ada.sign_in("p-ada")
+    chat = ada.new_chat()
+    assert (
+        ada.patch(
+            f"/api/chats/{chat}", json={"settings": {"folderGrants": ["node:site-notes"]}}
+        ).status_code
+        == 200
+    )
+    world.gateway.mode = "tools"
+    message = offer(world, ada, chat, "read_text", folder="Notes", path="note.txt")
+    assert decide(ada, chat, message, True).status_code == 204
+    answer = ada.wait_answer(chat)
+    call = answer["toolRounds"][0]["calls"][0]
+    assert "8 MiB" in call["result"]
+
+
+@pytest.mark.parametrize("large", [False, True])
+def test_a_sites_picture_is_kept_and_hidden_from_the_install_owner_as_its_message_is(
+    site_world: tuple[World, dict[str, Any]],  # noqa: F811 (the fixture, imported)
+    large: bool,
+) -> None:
+    world, state = site_world
+    picture = PICTURE.ljust(4 * files.MIB, b"\0") if large else PICTURE
+    state["picture"] = picture
     owner, ada = world.browser(), world.browser()
     owner.sign_in("operator")
     ada.sign_in("p-ada")
@@ -405,7 +531,8 @@ def test_a_sites_picture_is_kept_and_hidden_from_the_install_owner_as_its_messag
     call = finish(ada, chat, reading)
     image = next(b for b in call["content"] if b["type"] == "image")
     assert json.loads(call["result"].splitlines()[0])["text"] == "SITE-SECRET"
-    assert ada.get(f"/api/files/{image['fileId']}").content == PICTURE
+    assert ada.get(f"/api/files/{image['fileId']}").content == picture
+    assert isinstance(world.gateway.requests[-1]["messages"][-1]["content"], list)
     _owner_reads(world)
     assert owner.get(f"/api/chats/{chat}").status_code == 200, "the owner reads the chat"
     assert owner.get(f"/api/files/{image['fileId']}").status_code == 404, "not its picture"
