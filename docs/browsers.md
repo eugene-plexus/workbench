@@ -35,25 +35,27 @@ In Firefox and Safari (WebKit), Workbench records each preview in `begin()`,
 before creating its frame. These engines persist localStorage writes through
 another process asynchronously; waiting until the run message is sent lets a
 loop freeze the page before the marker is durable. In memory, this page tracks
-each attempt as **begun**, then **sent** immediately before posting the run
-message. Sending changes no storage. If a sent run never reports finishing
-before the page is closed or reloaded, its next showing waits for **Run** and
-says: "This preview didn't finish last time and may have frozen the page. Run it?"
-Every other artifact
-still runs by itself. Run records a fresh attempt before its frame exists; a
-matching first-run success or failure clears it. Unmounting or ending a run
-while the page still responds also clears it, except after the start timeout
-or the person's Stop. This applies to both begun and sent attempts. Replacing
-a silent frame keeps the same attempt and its early marker.
+each key as **begun**, then **sent** immediately before posting the run
+message. Sending changes no storage. The stage only moves forward: begin writes
+the marker again on a restart, but a key already sent stays sent. If a sent run
+never reports finishing before the page is closed or reloaded, its next showing
+waits for **Run** and says:
+"This preview didn't finish last time and may have frozen the page. Run it?"
+Every other artifact still runs by itself. Run records an attempt before its
+frame exists. Only a matching first-run `started` or `failed` reply clears a
+sent marker and its in-memory stage. Stop, a timeout, any runner stop, unmount
+and pagehide all keep a sent marker, even while the page still responds.
+The next load then waits for Run because that first run did not finish.
+Replacing a silent frame keeps the same run, marker and stage.
 
 One module-level `pagehide` listener clears only this page's begun markers:
 a preview whose run was never sent cannot have looped. It leaves sent markers
 and markers from previous pages alone, since a browser may dispatch `pagehide`
-after terminating a loop. A begun marker retained by Stop is also cleared on
-pagehide. Closing or reloading after sending but before completion keeps the
-marker; that window is normally milliseconds. The identity includes the chat,
-message and content, so a corrected revision can run by itself. Chrome and Edge
-do not use these markers.
+after terminating a loop. The running effect's cleanup also clears only begun
+markers when the run ends, is stopped or unmounts before a completion reply.
+A preview that was only queued or loading and never sent its run cannot have
+looped. The identity includes the chat, message and content, so a corrected
+revision can run by itself. Chrome and Edge do not use these markers.
 
 Only the 200 newest unfinished identities are kept, under
 `workbench.previews.unfinished` in localStorage; no artifact source is stored.
@@ -114,3 +116,15 @@ reload: revision 2 ran by itself again. The full inline script failed the
 existing short/tall frame-height check (tall 504 px, expected 630 px) and
 phone-layout check. Firefox 155.0 failed to create its first page with the
 same `_page` error above. Linux CI is the judge of this fix.
+
+31i forward-only stages, 2026-10-26: Linux CI run 40327931931 failed the
+unfinished-preview reload check in both engines on f8c4910. Responsive runner
+restarts could reset sent to begun, then cleanup or pagehide erased the marker.
+Restarts now retain sent; only the frame's matching completion reply clears it.
+Locally on Windows, three full inline-script runs with WebKit 26.6 and
+Playwright 1.63.0 passed both unfinished-preview recovery assertions and the
+unsent-bootstrap reload assertion. All three failed only the documented two
+frame-height checks and phone-layout check. Firefox 155.0 launched but could
+not create its first page, with the same `_page` error before Workbench loaded.
+The browser script and its reload assertions are unchanged. Linux CI remains
+the judge of this fix.

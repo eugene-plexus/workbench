@@ -1,7 +1,8 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { digest } from "../lib/artifacts";
+import { markPreviewFinished } from "../lib/previewMarkers";
 import { runner } from "../lib/previewRunner";
-import { ArtifactPreview, READY_WITHIN_MS, START_WITHIN_MS } from "./ArtifactPreview";
+import { ArtifactPreview, READY_WITHIN_MS, START_WITHIN_MS, TRIES } from "./ArtifactPreview";
 
 const STORE = "workbench.previews.unfinished";
 const FIREFOX = "Mozilla/5.0 Gecko/20100101 Firefox/155.0";
@@ -27,6 +28,8 @@ const say = (frame: HTMLIFrameElement, data: unknown) =>
 
 beforeEach(() => {
   vi.useFakeTimers();
+  vi.spyOn(navigator, "userAgent", "get").mockReturnValue(FIREFOX);
+  for (const marked of stored()) markPreviewFinished(marked);
   localStorage.clear();
   runner.reset();
 });
@@ -119,17 +122,25 @@ describe.each([FIREFOX, WEBKIT])("unfinished previews in %s", (agent) => {
     expect(stored()).toContain(key());
   });
 
-  it.each(["begun", "sent"])("a responsive unmount clears a %s marker", (stage) => {
+  it("a responsive unmount clears a begun marker", () => {
     localStorage.setItem(STORE, JSON.stringify(["another artifact"]));
     const view = render(<ArtifactPreview {...props} />);
-    if (stage === "sent") {
-      say(screen.getByTestId("artifact-frame") as HTMLIFrameElement, { type: "ready" });
-    }
     expect(stored()).toEqual(["another artifact", key()]);
     view.unmount();
     expect(stored()).toEqual(["another artifact"]);
     render(<ArtifactPreview {...props} />);
     expect(screen.getByTestId("artifact-frame")).toBeInTheDocument();
+  });
+
+  it("a responsive unmount keeps a sent marker and the next mount waits for Run", () => {
+    localStorage.setItem(STORE, JSON.stringify(["another artifact"]));
+    const view = render(<ArtifactPreview {...props} />);
+    say(screen.getByTestId("artifact-frame") as HTMLIFrameElement, { type: "ready" });
+    view.unmount();
+    expect(stored()).toEqual(["another artifact", key()]);
+    render(<ArtifactPreview {...props} />);
+    expect(screen.queryByTestId("artifact-frame")).toBeNull();
+    expect(screen.getByRole("button", { name: "Run" })).toBeVisible();
   });
 
   it.each(["begun", "sent"])("Reload while %s keeps the new early marker", (stage) => {
@@ -141,12 +152,45 @@ describe.each([FIREFOX, WEBKIT])("unfinished previews in %s", (agent) => {
     expect(stored()).toEqual([key()]);
   });
 
-  it.each(["begun", "sent"])("Stop keeps a %s marker on responsive unmount", (stage) => {
+  it.each(["begun", "sent"])("Stop clears only a begun marker: %s", (stage) => {
     const view = render(<ArtifactPreview {...props} />);
     if (stage === "sent") {
       say(screen.getByTestId("artifact-frame") as HTMLIFrameElement, { type: "ready" });
     }
     fireEvent.click(screen.getByRole("button", { name: "Stop the page" }));
+    expect(stored()).toEqual(stage === "sent" ? [key()] : []);
+    view.unmount();
+    expect(stored()).toEqual(stage === "sent" ? [key()] : []);
+  });
+
+  it.each(["room", "stuck", "culprit"] as const)(
+    "the runner's %s stop clears only a begun marker",
+    (reason) => {
+      const registered = vi.spyOn(runner, "register");
+      for (const stage of ["begun", "sent"]) {
+        const view = render(<ArtifactPreview {...props} />);
+        if (stage === "sent") {
+          say(screen.getByTestId("artifact-frame") as HTMLIFrameElement, { type: "ready" });
+        }
+        act(() => registered.mock.calls.at(-1)![0].stop(reason));
+        expect(screen.queryByTestId("artifact-frame")).toBeNull();
+        expect(stored()).toEqual(stage === "sent" ? [key()] : []);
+        view.unmount();
+        expect(stored()).toEqual(stage === "sent" ? [key()] : []);
+      }
+    },
+  );
+
+  it("a runner restart after sent keeps the marker through pagehide and unmount", () => {
+    const registered = vi.spyOn(runner, "register");
+    const view = render(<ArtifactPreview {...props} />);
+    say(screen.getByTestId("artifact-frame") as HTMLIFrameElement, { type: "ready" });
+    act(() => registered.mock.calls[0]![0].stop("stuck"));
+    expect(stored()).toEqual([key()]);
+    act(() => registered.mock.calls[0]![0].start());
+    expect(screen.getByTestId("artifact-frame")).toBeInTheDocument();
+    window.dispatchEvent(new Event("pagehide"));
+    expect(stored()).toEqual([key()]);
     view.unmount();
     expect(stored()).toEqual([key()]);
   });
@@ -171,28 +215,39 @@ describe.each([FIREFOX, WEBKIT])("unfinished previews in %s", (agent) => {
     expect(stored()).toEqual(["previous page", key(sent)]);
   });
 
-  it.each(["begun", "sent"])("ending a %s run responsively clears its marker", (stage) => {
+  it.each(["begun", "sent"])("ending a run clears only a begun marker: %s", (stage) => {
     render(<ArtifactPreview {...props} />);
     const frame = screen.getByTestId("artifact-frame") as HTMLIFrameElement;
     if (stage === "sent") say(frame, { type: "ready" });
     expect(stored()).toContain(key());
     say(frame, { type: "leaving" });
     expect(screen.queryByTestId("artifact-frame")).toBeNull();
-    expect(stored()).not.toContain(key());
+    expect(stored()).toEqual(stage === "sent" ? [key()] : []);
   });
 
-  it("Run resets Stop's marker retention on the same preview", () => {
+  it("Run after Stop keeps the sent stage even before its new frame is ready", () => {
     const view = render(<ArtifactPreview {...props} />);
     say(screen.getByTestId("artifact-frame") as HTMLIFrameElement, { type: "ready" });
     fireEvent.click(screen.getByRole("button", { name: "Stop the page" }));
     expect(stored()).toContain(key());
     fireEvent.click(screen.getByRole("button", { name: "Run" }));
-    say(screen.getByTestId("artifact-frame") as HTMLIFrameElement, { type: "ready" });
+    window.dispatchEvent(new Event("pagehide"));
+    expect(stored()).toContain(key());
     view.unmount();
-    expect(stored()).not.toContain(key());
+    expect(stored()).toContain(key());
   });
 
-  it.each(["timeout", "Stop"])("%s keeps the marker, until a new responsive run exits", (exit) => {
+  it("a silent bootstrap timeout clears a begun marker", () => {
+    render(<ArtifactPreview {...props} />);
+    for (let tries = 0; tries < TRIES; tries++) {
+      act(() => vi.advanceTimersByTime(READY_WITHIN_MS));
+    }
+    expect(screen.queryByTestId("artifact-frame")).toBeNull();
+    expect(screen.getByText(/browser gave its frame no place to run/)).toBeVisible();
+    expect(stored()).toEqual([]);
+  });
+
+  it.each(["timeout", "Stop"])("%s and a later sent run's unmount keep the marker", (exit) => {
     const view = render(<ArtifactPreview {...props} />);
     const frame = screen.getByTestId("artifact-frame") as HTMLIFrameElement;
     say(frame, { type: "ready" });
@@ -222,10 +277,10 @@ describe.each([FIREFOX, WEBKIT])("unfinished previews in %s", (agent) => {
     fireEvent.click(screen.getByRole("button", { name: "Run" }));
     say(screen.getByTestId("artifact-frame") as HTMLIFrameElement, { type: "ready" });
     next.unmount();
-    expect(stored()).not.toContain(key());
+    expect(stored()).toContain(key());
   });
 
-  it("the runner's culprit stop keeps the marker through a responsive unmount", () => {
+  it("the runner's culprit stop after sent keeps the marker through a responsive unmount", () => {
     const view = render(<ArtifactPreview {...props} />);
     say(screen.getByTestId("artifact-frame") as HTMLIFrameElement, { type: "ready" });
     expect(stored()).toContain(key());
@@ -235,6 +290,26 @@ describe.each([FIREFOX, WEBKIT])("unfinished previews in %s", (agent) => {
     expect(screen.getByText(/stopped answering \(a loop\?\)/)).toBeVisible();
     view.unmount();
     expect(stored()).toContain(key());
+  });
+
+  it.each(["started", "failed"])("a matching %s clears the marker and stage", (type) => {
+    const view = render(<ArtifactPreview {...props} />);
+    const frame = screen.getByTestId("artifact-frame") as HTMLIFrameElement;
+    const sent = vi.spyOn(frame.contentWindow!, "postMessage").mockImplementation(() => {});
+    say(frame, { type: "ready" });
+    const { nonce } = sent.mock.calls[0]![0] as { nonce: string };
+    say(frame, { type, nonce: "another run", message: "bad source" });
+    expect(stored()).toEqual([key()]);
+    say(frame, { type, nonce, message: "bad source" });
+    expect(stored()).toEqual([]);
+    fireEvent.click(
+      screen.getByRole("button", { name: type === "started" ? "Reload the page" : "Run" }),
+    );
+    expect(stored()).toEqual([key()]);
+    // The finished stage was forgotten, so this new, unsent attempt is begun.
+    window.dispatchEvent(new Event("pagehide"));
+    expect(stored()).toEqual([]);
+    view.unmount();
   });
 
   it.each([

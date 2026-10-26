@@ -57,12 +57,13 @@ it("sent is memory only and survives pagehide", () => {
   markPreviewFinished("sent");
 });
 
-it("a fresh attempt resets sent to begun for pagehide", () => {
+it("a restart keeps sent so pagehide retains the marker", () => {
   markPreviewStarted("retry");
   markPreviewSent("retry");
   markPreviewStarted("retry");
   window.dispatchEvent(new Event("pagehide"));
-  expect(previewWasUnfinished("retry")).toBe(false);
+  expect(previewWasUnfinished("retry")).toBe(true);
+  markPreviewFinished("retry");
 });
 
 it("finishing forgets the stage so pagehide leaves a later stored marker alone", () => {

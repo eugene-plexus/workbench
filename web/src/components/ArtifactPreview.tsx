@@ -32,6 +32,7 @@ import { Play, RotateCw, Square } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { digest } from "../lib/artifacts";
 import {
+  clearUnsentPreview,
   markPreviewFinished,
   markPreviewSent,
   markPreviewStarted,
@@ -149,13 +150,11 @@ export function ArtifactPreview({
   const root = useRef<HTMLDivElement>(null);
   const frame = useRef<HTMLIFrameElement>(null);
   const runs = useRef(0);
-  const keepMarker = useRef(false);
   const noun = kind === "html" ? "page" : "component";
 
   const note = (words: string) =>
     setNotes((was) => (was.includes(words) ? was : [...was, words].slice(-NOTES)));
   const begin = () => {
-    keepMarker.current = false;
     // Firefox and WebKit persist storage asynchronously: give it the whole
     // frame bootstrap, before a run can freeze the page's event loop.
     markPreviewStarted(markerKey);
@@ -176,7 +175,6 @@ export function ArtifactPreview({
     runner.stopped(slot);
   };
   const stop = () => {
-    keepMarker.current = true;
     setHeld(true);
     ended();
   };
@@ -193,9 +191,6 @@ export function ArtifactPreview({
         key: () => told.current.runKey,
         start: () => told.current.begin(),
         stop: (why: StopReason) => {
-          // Named as the one not answering: its first run did not finish, so its
-          // marker stays for the next load. Room and stuck stops are not its fault.
-          if (why === "culprit") keepMarker.current = true;
           setRun(null);
           const { note: say, noun: what } = told.current;
           if (why === "room") {
@@ -292,7 +287,6 @@ export function ArtifactPreview({
           runner.ready(slot);
           late = window.setTimeout(() => {
             if (started) return;
-            keepMarker.current = true;
             finish();
             setHeld(true);
             note(
@@ -350,7 +344,7 @@ export function ArtifactPreview({
     window.addEventListener("message", heard);
     // A frame that says nothing is in a process still stuck on an earlier preview:
     // a new frame, and the stuck one goes.
-    // Replacing a silent frame is still the same run: its marker stays begun.
+    // Replacing a silent frame is still the same run: its marker and stage stay.
     const silent = window.setInterval(() => {
       if (sent) return;
       if (tries < TRIES) {
@@ -366,10 +360,10 @@ export function ArtifactPreview({
       );
     }, READY_WITHIN_MS);
     return () => {
-      // A responsive exit clears either stage, unless timed out or stopped.
-      // Reload already marked its new attempt; this cleanup belongs to the old one.
-      if (!started && !keepMarker.current && runs.current === id) {
-        markPreviewFinished(markerKey);
+      // Only a key never sent by this page is safe to forget without a reply.
+      // Reload already marked its new attempt; do not clear its begun marker.
+      if (!started && runs.current === id) {
+        clearUnsentPreview(markerKey);
       }
       window.removeEventListener("message", heard);
       window.clearInterval(silent);
