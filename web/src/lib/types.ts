@@ -347,6 +347,42 @@ export interface ChatSettings {
   pastChats?: true | null;
   /** Row 26: summarise earlier messages when the chat outgrows its model; unset is on. */
   summarise?: boolean | null;
+  /** Row 32: the skills this chat lists, by id; unset is "All my skills", empty is none. */
+  skills?: string[] | null;
+}
+
+/** Row 32: a skill as the Skills page reads it. */
+export interface Skill {
+  id: string;
+  name: string;
+  description: string;
+  source: "upload" | "written";
+  bytes: number;
+  files: { path: string; size: number }[];
+  createdAt: number;
+  updatedAt: number;
+  /** On for this person: their own skill's switch, or, for one Eugene gives everyone, not
+   * turned off by them. */
+  on: boolean;
+  /** Eugene gives it to everyone on this install (the owner's switch). */
+  everyone: boolean;
+  /** Given to everyone, seen by someone who is not the owner: read-only to them. */
+  fromEugene: boolean;
+  canEdit: boolean;
+  /** Listed in this person's chats when they use "All my skills". */
+  listed: boolean;
+  /** Why it is not listed, when it is not. */
+  notListed: string | null;
+  hasScripts: boolean;
+}
+
+/** Row 32: one skill with its whole SKILL.md. */
+export interface SkillDetail extends Skill {
+  skillMd: string;
+  instructions: string | null;
+  /** Frontmatter keys Workbench keeps and shows, and never acts on. */
+  others: { key: string; value: string }[];
+  problem: string | null;
 }
 
 export interface FolderGrant {

@@ -32,6 +32,7 @@ from . import (
     memory_api,
     memory_models_api,
     saved_api,
+    skills_api,
     summaries,
     tools_api,
     web,
@@ -301,6 +302,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return text, note
 
         tools.remember = remember
+        # Skills (row 32): what a stop left half-made goes, and the two tools run here.
+        from .skills import Skills
+
+        skills = app.state.skills = Skills(store, settings.data_dir)
+        try:
+            tidied = await skills.reconcile()
+        except Exception as exc:
+            # Never in the way of starting: what was left is tidied at the next start.
+            log.warning("skill folders were not checked: %s: %s", type(exc).__name__, exc)
+            tidied = 0
+        if tidied:
+            log.info("%d skill folder(s) a stop left half-made were removed", tidied)
+        tools.skills = skills.run
         # Memory servers (MV5): a person's own, sent their answered exchanges in the
         # background and asked every turn.
         from .memory_servers import Courier, Servers
@@ -324,6 +338,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             exports=exports,
             media=media,
             courier=courier,
+            skills=skills,
         )
         sessions.on_refused = removal.soon
         removal.start()
@@ -450,6 +465,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(folder_docs_api.router)
     app.include_router(saved_api.router)
     app.include_router(tools_api.router)
+    app.include_router(skills_api.router)
     app.include_router(folders_api.router)
     app.include_router(job_sites_api.router)
     app.include_router(connections_api.router)

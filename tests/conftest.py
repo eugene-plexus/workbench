@@ -738,6 +738,9 @@ class FakeGateway:
     #: How many rounds of tool calls an answer makes, and how many a round.
     tool_rounds: int = 1
     tools_per_round: int = 1
+    #: Row 32, mode "tools-script": each round's one call, as (tool name, arguments), in order;
+    #: then the answer's words.
+    tool_script: list[tuple[str, str]] = field(default_factory=list)
     repetition_modes: list[str | None] = field(default_factory=list)
     search: dict[str, Any] = field(default_factory=lambda: {"available": True, "reason": None})
     #: Where the chat model runs and how much it holds, as the gateway lists
@@ -1446,7 +1449,29 @@ class FakeGateway:
                 asked_at = max(i for i, m in enumerate(messages) if m["role"] == "user")
                 answered = sum(1 for m in messages[asked_at:] if m["role"] == "tool")
                 wanted = self.tool_rounds * self.tools_per_round
-                if self.mode.startswith("tools") and answered < wanted:
+                if self.mode == "tools-script" and answered < len(self.tool_script):
+                    name, arguments = self.tool_script[answered]
+                    yield chunk({"content": "I will use the tool."})
+                    yield chunk(
+                        {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": f"call-{answered + 1}",
+                                    "type": "function",
+                                    "function": {"name": name, "arguments": arguments},
+                                }
+                            ]
+                        }
+                    )
+                    yield chunk({}, finish="tool_calls", extension=extension())
+                    yield "data: [DONE]\n\n"
+                    return
+                if (
+                    self.mode.startswith("tools")
+                    and self.mode != "tools-script"
+                    and answered < wanted
+                ):
                     name = body["tools"][0]["function"]["name"]
                     if self.tool_name:
                         name = next(

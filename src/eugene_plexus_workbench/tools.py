@@ -65,6 +65,12 @@ CHATS_WITHHELD = "Past-chat results are not sent to this model."
 #: MV3b: `remember`, the tool a model set to Keep automatically may call.
 WRITE_SERVER = "memory-write"
 REMEMBER_TOOL_NAME = "remember"
+#: Row 32: `use_skill` and `read_skill_file` (`skills.py`), run by Workbench over the asking
+#: person's skills, as `search_memory` is over their notes.
+SKILLS_SERVER = "skills"
+SkillRunner = Callable[
+    [Person, list[Any], str, dict[str, Any], list[str]], Awaitable[tuple[str, str]]
+]
 
 
 class ToolError(Exception):
@@ -368,6 +374,10 @@ class Tools:
             Callable[[Person, str, str | None, dict[str, Any], Any], Awaitable[tuple[str, Any]]]
             | None
         ) = None
+        #: Row 32: runs one `use_skill` or `read_skill_file` call (`skills.Skills.run`): the
+        #: person, the skills the answer listed, the tool, its arguments and the job sites this
+        #: answer may run commands on; its status and what the model is told.
+        self.skills: SkillRunner | None = None
 
     @asynccontextmanager
     async def connect(
@@ -659,6 +669,9 @@ class ToolSession:
         self.chats_calls = 0
         self.remember = tools.remember
         self.remember_calls = 0
+        self.skills = tools.skills
+        #: The skills this answer lists (row 32), as the answer began.
+        self.skill_listing: list[Any] = []
         #: What the answer has read so far this turn (`memory_write.TurnContext`), for
         #: `remember`'s write policy.
         self.turn_context: Callable[[], Any] = lambda: None
@@ -742,6 +755,35 @@ class ToolSession:
                     "description": memory.SEARCH_TOOL_DESCRIPTION,
                     "parameters": memory.SEARCH_TOOL_SCHEMA,
                 },
+            }
+        )
+
+    def add_skills(self, listing: list[Any]) -> None:
+        """Offer `use_skill` and `read_skill_file` (row 32) for the skills `listing` holds:
+        Workbench runs them over the asking person's skills without asking first (they read and
+        change nothing). Each skill's name and description are in `use_skill`'s description,
+        never in the system message."""
+        from .skills import USE_SKILL, definitions
+
+        if self.skills is None or not listing or USE_SKILL in self.tools:
+            return
+        self.skill_listing = list(listing)
+        server = {"id": SKILLS_SERVER, "name": "Skills", "transport": "skills"}
+        for definition in definitions(self.skill_listing):
+            function = definition["function"]
+            self.tools[function["name"]] = (server, None, function["name"], function["parameters"])
+            self.asks[function["name"]] = False
+            self.metadata[function["name"]] = {}
+            self.model_names.add(function["name"])
+            self.definitions.append(definition)
+
+    def _command_sites(self) -> list[str]:
+        """The job sites this answer may run a command on: those whose tools offer `run_command`."""
+        return sorted(
+            {
+                str(server.get("label") or server.get("site"))
+                for server, _, tool, _ in self.tools.values()
+                if server.get("transport") == "site" and tool == "run_command"
             }
         )
 
@@ -870,6 +912,15 @@ class ToolSession:
                     self.person, self.chat_id or "", self.model, call["arguments"]
                 )
                 call.update(status="done", result=text)
+            return
+        if server["transport"] == "skills":
+            if self.skills is None or self.person is None:
+                call.update(status="failed", result="Skills are unavailable.")
+            else:
+                state, text = await self.skills(
+                    self.person, self.skill_listing, tool, call["arguments"], self._command_sites()
+                )
+                call.update(status=state, result=text)
             return
         if server["transport"] == "memory-write":
             from .memory_write import REMEMBER_CALLS
