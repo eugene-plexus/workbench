@@ -329,7 +329,9 @@ class Learner:
         self._calls.setdefault(owner, deque()).append(now)
         try:
             with acting_as(owner, person.session_id):
-                answer = await self._hub.complete(body)
+                # Background (row 11): it waits behind people's chats, and a refusal
+                # (a full line) is the pass's `skipped`, tried again at the next one.
+                answer = await self._hub.complete(body, band="background")
         except HubError as exc:
             log.warning("memory suggestions were not made: the gateway said %s", exc.message)
             return Outcome(asked=True, skipped="gateway")

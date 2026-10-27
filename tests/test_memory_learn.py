@@ -364,3 +364,15 @@ def test_a_measured_model_suggests_by_default_until_the_person_chooses() -> None
     assert memory_learn.effective(choose, unset, "gemma-4-E4B-it-Q4_K_M") == ("off", "default")
     off = MemorySettings(enabled=True, max_notes=300, external="ask", suggestions="off")
     assert memory_learn.effective(off, {**chose, "learn": "suggest"}, "x") == ("off", "owner")
+
+
+def test_learning_waits_behind_people_chatting(world: World) -> None:
+    """Row 11: the suggestion call asks for the background band, so on a busy
+    machine it waits behind people's chats; a refusal is tried again later."""
+    ada = signed_in(world)
+    learn(ada)
+    world.gateway.suggest_answer = notes(note("Works as a nurse.", "I'm a nurse"))
+    chat = chat_of(ada)
+    ask(world, ada, chat, "I'm a nurse working night shifts.")
+    call = wait_suggest_calls(world, 1)[0]
+    assert call["band"] == "background"

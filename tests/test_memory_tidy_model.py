@@ -14,6 +14,7 @@ class Hub:
 
     def __init__(self) -> None:
         self.requests: list[dict[str, Any]] = []
+        self.bands: list[str | None] = []
 
     async def models(self) -> dict[str, Any]:
         return {
@@ -22,8 +23,9 @@ class Hub:
             ]
         }
 
-    async def complete(self, body: dict[str, Any]) -> dict[str, Any]:
+    async def complete(self, body: dict[str, Any], *, band: str | None = None) -> dict[str, Any]:
         self.requests.append(body)
+        self.bands.append(band)
         return {
             "choices": [
                 {
@@ -52,6 +54,8 @@ async def test_model_merge_is_only_a_proposal(tmp_path: Path) -> None:
         )
         [proposal] = await memory_tidy.proposals(store, "ada", "2026-10-23")
         assert proposal["model"] == "m" and proposal["merged"]["title"] == "I grow red tomatoes."
+        # Row 11: the tidy pass is work nobody watches, so it waits behind chats.
+        assert hub.bands == ["background"]
         assert all(n.status == "active" for n in await store.memory_notes("ada"))
         merged = await store.keep_model_merge(
             "ada",
