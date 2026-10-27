@@ -125,7 +125,82 @@ const notes = async (page, title) =>
     ? card(page, title).getByTestId("artifact-notes").innerText()
     : "";
 
+async function unfinishedAfterReload() {
+  step("an unfinished looping preview waits after reload");
+  const { context, page } = await open("dark", DESK);
+  // A real loop would freeze this page and the browser check. Intercept only
+  // Busy's run message before the runtime sees it: the real parent records
+  // its start but gets no first-run acknowledgement, as with a frozen frame.
+  await context.addInitScript(() => {
+    if (window === window.parent) return;
+    window.addEventListener("message", (event) => {
+      if (
+        event.source === window.parent &&
+        event.data?.type === "run" &&
+        event.data.source?.includes("for (;;) {}")
+      ) {
+        document.documentElement.setAttribute("data-run-intercepted", "");
+        event.stopImmediatePropagation();
+      }
+    });
+  });
+  await chat(page, cfg.chats.stuck);
+  // The early marker alone does not mean run was sent. Reload only after the
+  // frame intercepted it, so pagehide must keep its sent marker.
+  await card(page, "Busy")
+    .frameLocator('[data-testid="artifact-frame"]')
+    .locator("html[data-run-intercepted]")
+    .waitFor();
+  for (const title of ["Calm", "Calm too"]) {
+    await card(page, title).getByRole("status").getByText("Running").waitFor();
+  }
+  await page.waitForFunction(() => {
+    const keys = JSON.parse(window.localStorage.getItem("workbench.previews.unfinished") ?? "[]");
+    return keys.length === 1;
+  });
+  const unfinished = await page.evaluate(
+    () => JSON.parse(window.localStorage.getItem("workbench.previews.unfinished") ?? "[]")[0],
+  );
+  await page.reload();
+  await card(page, "Busy")
+    .getByText("This preview didn't finish last time and may have frozen the page. Run it?")
+    .waitFor();
+  // Check the automatic starts after reload. The completed first runs above
+  // already proved that only Busy retained a marker.
+  for (const title of ["Calm", "Calm too"]) {
+    await card(page, title).getByTestId("artifact-frame").waitFor({ timeout: 30_000 });
+  }
+  await page.waitForTimeout(4_000);
+  check(
+    "after a reload, only the unfinished looping preview waits for Run",
+    (await card(page, "Busy").getByTestId("artifact-frame").count()) === 0 &&
+      (await card(page, "Busy").getByRole("button", { name: "Run" }).count()) === 1 &&
+      (await card(page, "Calm").getByTestId("artifact-frame").count()) === 1 &&
+      (await card(page, "Calm too").getByTestId("artifact-frame").count()) === 1,
+  );
+  await card(page, "Busy").getByRole("button", { name: "Run" }).click();
+  await card(page, "Busy")
+    .frameLocator('[data-testid="artifact-frame"]')
+    .locator("html[data-run-intercepted]")
+    .waitFor();
+  check(
+    "Run starts the unfinished preview and records its new attempt",
+    await page.evaluate(
+      (key) =>
+        JSON.parse(window.localStorage.getItem("workbench.previews.unfinished") ?? "[]").includes(
+          key,
+        ),
+      unfinished,
+    ),
+  );
+  await card(page, "Busy").getByRole("button", { name: "Stop the page" }).click();
+  policy.push(...(await page.evaluate(() => window.__policy)));
+  await context.close();
+}
+
 try {
+  if (browserName !== "chromium") await unfinishedAfterReload();
+
   // --- the chat's switch -------------------------------------------------------------------
   step("the chat's switch");
   let { context, page } = await open("light", DESK);
@@ -241,6 +316,22 @@ try {
         .innerText()
     ).includes("from fetch_page's result") && (await toolSource.inputValue()) === cfg.toolOriginal,
   );
+  if (browserName !== "chromium") {
+    step("a begun tool preview is cleared on reload");
+    // Give the saved edit a frame that cannot say ready. Its early marker
+    // must be cleared by pagehide, even though React does not unmount on reload.
+    const silentRuntime = (route) => route.fulfill({ contentType: "text/javascript", body: "" });
+    await toolPage.route("**/preview/runtime.js", silentRuntime);
+    await toolPage.reload();
+    await card(toolPage, "Page").getByText("HTML · 2 revisions", { exact: true }).waitFor();
+    await shownRuns(toolPage, "Page");
+    await toolPage.waitForFunction(
+      () =>
+        JSON.parse(window.localStorage.getItem("workbench.previews.unfinished") ?? "[]").length ===
+        1,
+    );
+    await toolPage.unroute("**/preview/runtime.js", silentRuntime);
+  }
   await toolPage.reload();
   await shownRuns(toolPage, "Page");
   // Reading the saved edit can replace the initial frame during startup.
@@ -249,6 +340,13 @@ try {
     .getByText("Edited tool page", { exact: true })
     .waitFor();
   check("a tool artifact's saved edit runs inline after reload", true);
+  if (browserName !== "chromium") {
+    check(
+      "pagehide clears a tool artifact's begun marker so its saved edit runs again",
+      (await card(toolPage, "Page").getByRole("button", { name: "Run", exact: true }).count()) ===
+        0,
+    );
+  }
   policy.push(...(await toolPage.evaluate(() => window.__policy)));
   await toolView.context.close();
 
