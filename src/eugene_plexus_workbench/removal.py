@@ -32,10 +32,11 @@ records each step it finishes in `steps`, and is resumed after a restart. It is 
 1. `memory`: their own memory server is asked to forget each exchange Workbench sent it, never
    to purge (it may hold other apps' memories). Three failures in a row end the step, and the
    cause is recorded: what the server keeps stays there.
-2. `knowledge` and 3. `files`: their directories, renamed out of the way and removed.
-4. `exports`: every download of theirs, or of them.
-5. `store`: every row `store.PERSON_TABLES` names, then the file written again.
-6. `copies`: the same, in every `*.schema-N.bak` copy, which stays for everyone else.
+2. `knowledge`, 3. `files` and 4. `skills` (row 32): their directories, renamed out of the way and
+   removed. A skill they made that the owner gave everyone is the install's, not theirs, and stays.
+5. `exports`: every download of theirs, or of them.
+6. `store`: every row `store.PERSON_TABLES` names, then the file written again.
+7. `copies`: the same, in every `*.schema-N.bak` copy, which stays for everyone else.
 
 A step that fails is said in words (`last_error`) and tried again at the next round or on Try
 again; the others go on, so as much as can go goes at once.
@@ -80,11 +81,12 @@ FORGET_TRIES = 3
 #: Tries at moving a directory that Windows says another program holds open.
 MOVE_TRIES = 5
 
-STEPS = ("memory", "knowledge", "files", "exports", "store", "copies")
+STEPS = ("memory", "knowledge", "files", "skills", "exports", "store", "copies")
 #: What each step's failure leaves of the person's data, for the sentence that says so.
 _LEFT = {
     "knowledge": "their documents",
     "files": "their files",
+    "skills": "their skills",
     "exports": "their downloads",
     "store": "their chats and notes",
     "copies": "the copies kept from earlier updates",
@@ -152,6 +154,7 @@ class Removal:
         exports: Any = None,
         media: Any = None,
         courier: Any = None,
+        skills: Any = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.store = store
@@ -164,6 +167,8 @@ class Removal:
         self.exports = exports
         self.media = media
         self.courier = courier
+        #: Row 32: their skills (`skills.Skills`), whose lock the `skills` step takes.
+        self.skills = skills
         self.clock = clock
         self._asking = asyncio.Lock()
         self._purges: dict[str, asyncio.Task[None]] = {}
@@ -519,6 +524,16 @@ class Removal:
 
     async def _step_files(self, sub: str) -> str:
         await asyncio.to_thread(remove_tree, files.person_dir(self.data_dir, sub))
+        return "done"
+
+    async def _step_skills(self, sub: str) -> str:
+        """Their skills' folder (row 32); its rows go with the store's step. It takes the lock
+        every skill change holds, so a change in flight ends first: its row and folder go here
+        and in the store's step. Every later change refuses them, as `purging` was committed
+        before any step ran."""
+        lock = getattr(self.skills, "lock", None)
+        async with lock if lock is not None else contextlib.nullcontext():
+            await asyncio.to_thread(remove_tree, self.data_dir / "skills" / files.person_key(sub))
         return "done"
 
     async def _step_exports(self, sub: str) -> str:

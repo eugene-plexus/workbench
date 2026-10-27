@@ -11,11 +11,12 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 const WORKSHOP = ["Jigs", "Crew", "The shop", "Foreman", "Dispatch"];
-/** A built workshop name, and the plain meaning it never appears without. */
-const BUILT: [string, string][] = [
-  ["Toolbox", "Toolbox · Tools"],
-  ["Bins", "Bins · Media"],
-  ["Work orders", "Work orders · Long jobs"],
+/** A built workshop name, and the plain meanings it never appears without (Toolbox holds
+ * Tools, and Skills since row 32). */
+const BUILT: [string, string[]][] = [
+  ["Toolbox", ["Toolbox · Tools", "Toolbox · Skills"]],
+  ["Bins", ["Bins · Media"]],
+  ["Work orders", ["Work orders · Long jobs"]],
 ];
 
 function sources(dir: string): string[] {
@@ -30,8 +31,9 @@ it("explains Toolbox, Bins and Work orders and keeps unbuilt workshop names off 
   const found: string[] = [];
   for (const path of sources(import.meta.dirname)) {
     const text = readFileSync(path, "utf8");
-    for (const [name, plain] of BUILT) {
-      if (new RegExp(`\\b${name}\\b`).test(text.replaceAll(plain, ""))) {
+    for (const [name, plains] of BUILT) {
+      const rest = plains.reduce((left, plain) => left.replaceAll(plain, ""), text);
+      if (new RegExp(`\\b${name}\\b`).test(rest)) {
         found.push(`${path}: ${name} without its plain meaning`);
       }
     }

@@ -6,6 +6,7 @@ import { ChatSettings, SHEET_OVERLAY_QUERY } from "./ChatSettings";
 
 vi.mock("./Tools", () => ({ ToolSelection: () => null }));
 vi.mock("./Folders", () => ({ FolderSelection: () => null }));
+vi.mock("./Skills", () => ({ SkillSelection: () => null }));
 
 it("run_artifacts_defaults_on_and_keeps_an_off_choice", async () => {
   const save = vi.fn().mockResolvedValue(undefined);

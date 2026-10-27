@@ -6,6 +6,7 @@ import {
   Info,
   Keyboard,
   Laptop,
+  ScrollText,
   Settings as SettingsIcon,
   Wrench,
 } from "lucide-react";
@@ -24,6 +25,7 @@ import { type Handoff, Media } from "./components/Media";
 import { Sidebar } from "./components/Sidebar";
 import { SignIn } from "./components/SignIn";
 import { RunPreviews } from "./components/Artifact";
+import { Skills } from "./components/Skills";
 import { Tools } from "./components/Tools";
 import { api, onSignedOut, patch, post, put, releaseAllFileUrls, SignedOut } from "./lib/api";
 import { forgetDrafts } from "./lib/artifacts";
@@ -92,6 +94,7 @@ type View =
   | "chat"
   | "home"
   | "tools"
+  | "skills"
   | "media"
   | "documents"
   | "memory"
@@ -102,6 +105,7 @@ type View =
 
 const PAGE_TITLES = {
   tools: "Toolbox · Tools",
+  skills: "Toolbox · Skills",
   media: "Bins · Media",
   documents: "Documents",
   memory: "Memory",
@@ -153,6 +157,8 @@ export default function App() {
   const [models, setModels] = useState<Models | null>(null);
   const [modelsError, setModelsError] = useState<string | null>(null);
   const [showTools, setShowTools] = useState(false);
+  // Which page shows: Toolbox · Tools, or Toolbox · Skills (row 32).
+  const [toolbox, setToolbox] = useState<"tools" | "skills">("tools");
   const [showSites, setShowSites] = useState(false);
   const [showChats, setShowChats] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
@@ -165,7 +171,7 @@ export default function App() {
   const view: View = showSites
     ? "sites"
     : showTools
-      ? "tools"
+      ? toolbox
       : media
         ? "media"
         : documentsOpen
@@ -641,11 +647,27 @@ export default function App() {
                 onClick={() => {
                   if (view === "tools") return;
                   setShowSites(false);
+                  setToolbox("tools");
                   setShowTools(true);
                 }}
               >
                 <Wrench size={14} aria-hidden />
                 Toolbox · Tools
+              </button>
+              <button
+                type="button"
+                aria-current={view === "skills" ? "page" : undefined}
+                className="nav-tab"
+                data-testid="open-skills"
+                onClick={() => {
+                  if (view === "skills") return;
+                  setShowSites(false);
+                  setToolbox("skills");
+                  setShowTools(true);
+                }}
+              >
+                <ScrollText size={14} aria-hidden />
+                Toolbox · Skills
               </button>
               <button
                 type="button"
@@ -771,6 +793,8 @@ export default function App() {
           )}
           {showSites ? (
             <JobSites onClose={() => setShowSites(false)} sub={phase.me.sub} />
+          ) : showTools && toolbox === "skills" ? (
+            <Skills owner={phase.me.owner} onClose={() => setShowTools(false)} />
           ) : showTools ? (
             <Tools owner={phase.me.owner} onClose={() => setShowTools(false)} />
           ) : media ? (
@@ -807,6 +831,7 @@ export default function App() {
               onOpenSettings={() => openSettings("documents")}
               onTools={() => {
                 setShowSites(false);
+                setToolbox("tools");
                 setShowTools(true);
               }}
             />
