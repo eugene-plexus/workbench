@@ -37,6 +37,7 @@ import * as ReactDOM from "react-dom";
 import * as ReactDOMClient from "react-dom/client";
 import * as JsxRuntime from "react/jsx-runtime";
 import { transform } from "sucrase";
+import { usesPreviewMarkers } from "../lib/previewMarkers";
 
 /** What a component may import: React, and nothing else. */
 const MODULES = new Map<string, unknown>([
@@ -215,8 +216,20 @@ function isRun(data: unknown): data is Run {
 }
 
 function runHtml(source: string, nonce: string): void {
-  post({ type: "started", nonce });
+  const acknowledgeAfterRun = usesPreviewMarkers();
+  if (!acknowledgeAfterRun) post({ type: "started", nonce });
   document.open();
+  // document.open removes listeners; install this after it. Wait for module
+  // scripts and load handlers too, since either can freeze the first run.
+  if (acknowledgeAfterRun) {
+    window.addEventListener(
+      "load",
+      () => window.setTimeout(() => post({ type: "started", nonce }), 0),
+      {
+        once: true,
+      },
+    );
+  }
   document.write(withReporter(source));
   document.close();
 }
@@ -262,9 +275,14 @@ function runReact(source: string, nonce: string): void {
   const root = document.createElement("div");
   root.id = "root";
   document.body.replaceChildren(root);
-  ReactDOMClient.createRoot(root, {
+  const renderer = ReactDOMClient.createRoot(root, {
     onUncaughtError: (error) => post({ type: "error", message: words(error) }),
-  }).render(createElement(Component));
+  });
+  const render = () => renderer.render(createElement(Component));
+  // A component can loop in its first render, after the module itself returned.
+  // Only these engines need the acknowledgement to wait for that first render.
+  if (usesPreviewMarkers()) ReactDOM.flushSync(render);
+  else render();
   post({ type: "started", nonce });
 }
 
