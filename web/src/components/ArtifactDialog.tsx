@@ -289,6 +289,7 @@ export default function ArtifactDialog({
     preview = (
       <ArtifactPreview
         key={`${selected}`}
+        chatId={scope.chatId}
         kind={kind === "html" ? "html" : "react"}
         source={shown}
         title={title}

@@ -55,6 +55,8 @@ const card = (title: string) =>
   screen.getAllByTestId("artifact-card").find((c) => within(c).queryByText(title))!;
 
 beforeEach(() => {
+  // jsdom identifies as WebKit; unfinished frames must not leak between tests.
+  localStorage.clear();
   vi.mocked(api).mockReset();
   forgetDrafts();
   runner.reset();

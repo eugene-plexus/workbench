@@ -117,6 +117,7 @@ const message = (over: Partial<Message>): Message => ({
 });
 
 beforeEach(() => {
+  localStorage.clear();
   vi.stubGlobal(
     "ResizeObserver",
     class {

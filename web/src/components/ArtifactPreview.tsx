@@ -31,6 +31,13 @@
 import { Play, RotateCw, Square } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { digest } from "../lib/artifacts";
+import {
+  clearUnsentPreview,
+  markPreviewFinished,
+  markPreviewSent,
+  markPreviewStarted,
+  previewWasUnfinished,
+} from "../lib/previewMarkers";
 import { runner, type StopReason } from "../lib/previewRunner";
 
 /** Where a preview runs; the server gives it its own policy there. */
@@ -109,6 +116,7 @@ function newNonce(): string {
 type Running = { id: number; tries: number; state: "starting" | "running" };
 
 export function ArtifactPreview({
+  chatId,
   kind,
   source,
   title,
@@ -116,6 +124,7 @@ export function ArtifactPreview({
   inline = false,
   auto = false,
 }: {
+  chatId: string;
   kind: "html" | "react";
   source: string;
   title: string;
@@ -130,10 +139,12 @@ export function ArtifactPreview({
   const slot = useId();
   // Remembered when it loops, by the words it runs: a revision that fixes it runs.
   const runKey = useMemo(() => `${blockKey}:${digest(source)}`, [blockKey, source]);
+  const markerKey = JSON.stringify([chatId, runKey]);
+  const [unfinished, setUnfinished] = useState(() => previewWasUnfinished(markerKey));
   const [run, setRun] = useState<Running | null>(null);
   const [notes, setNotes] = useState<string[]>([]);
   // Stopped by the person, or for not answering: it waits for Run.
-  const [held, setHeld] = useState(() => runner.isStuck(runKey));
+  const [held, setHeld] = useState(() => unfinished || runner.isStuck(runKey));
   const [height, setHeight] = useState<number | null>(null);
   const [viewport, setViewport] = useState(() => window.innerHeight);
   const root = useRef<HTMLDivElement>(null);
@@ -144,6 +155,10 @@ export function ArtifactPreview({
   const note = (words: string) =>
     setNotes((was) => (was.includes(words) ? was : [...was, words].slice(-NOTES)));
   const begin = () => {
+    // Firefox and WebKit persist storage asynchronously: give it the whole
+    // frame bootstrap, before a run can freeze the page's event loop.
+    markPreviewStarted(markerKey);
+    setUnfinished(false);
     setNotes([]);
     setHeight(null);
     runs.current += 1;
@@ -234,12 +249,12 @@ export function ArtifactPreview({
   }, [inline, height, viewport, run]);
 
   const id = run?.id;
-  const tries = run?.tries ?? 0;
   useEffect(() => {
     if (id === undefined) return;
     const nonce = newNonce();
     let sent = false;
     let started = false;
+    let tries = 1;
     let late: number | undefined;
     let counted = 0;
     let countedFrom = performance.now();
@@ -265,6 +280,9 @@ export function ArtifactPreview({
         case "ready":
           if (sent) return;
           sent = true;
+          window.clearInterval(silent);
+          // Memory only: pagehide must retain any run the frame could execute.
+          markPreviewSent(markerKey);
           own.postMessage({ type: "run", nonce, kind, source }, "*");
           runner.ready(slot);
           late = window.setTimeout(() => {
@@ -294,14 +312,17 @@ export function ArtifactPreview({
           );
           return;
         case "started":
-          if (said.nonce === nonce) {
+          if (sent && said.nonce === nonce) {
+            markPreviewFinished(markerKey);
             started = true;
             runner.alive(slot);
             setRun((was) => (was?.id === id ? { ...was, state: "running" } : was));
           }
           return;
         case "failed":
-          if (said.nonce !== nonce) return;
+          if (!sent || said.nonce !== nonce) return;
+          // It returned a failure, so this first run did finish.
+          markPreviewFinished(markerKey);
           started = true;
           finish();
           setHeld(true);
@@ -323,10 +344,12 @@ export function ArtifactPreview({
     window.addEventListener("message", heard);
     // A frame that says nothing is in a process still stuck on an earlier preview:
     // a new frame, and the stuck one goes.
-    const silent = window.setTimeout(() => {
+    // Replacing a silent frame is still the same run: its marker and stage stay.
+    const silent = window.setInterval(() => {
       if (sent) return;
       if (tries < TRIES) {
-        setRun((was) => (was?.id === id ? { ...was, tries: tries + 1 } : was));
+        tries += 1;
+        setRun((was) => (was?.id === id ? { ...was, tries } : was));
         return;
       }
       finish();
@@ -337,14 +360,19 @@ export function ArtifactPreview({
       );
     }, READY_WITHIN_MS);
     return () => {
+      // Only a key never sent by this page is safe to forget without a reply.
+      // Reload already marked its new attempt; do not clear its begun marker.
+      if (!started && runs.current === id) {
+        clearUnsentPreview(markerKey);
+      }
       window.removeEventListener("message", heard);
-      window.clearTimeout(silent);
+      window.clearInterval(silent);
       window.clearTimeout(late);
       window.clearTimeout(sizing);
     };
     // The source and kind are this preview's own: a new one is a new preview (its key).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, tries]);
+  }, [id]);
 
   // Gone from the page: so is its frame, and the runner is told.
   useEffect(() => () => runner.stopped(slot), [slot]);
@@ -382,10 +410,12 @@ export function ArtifactPreview({
               Run
             </button>
             <span className="text-sm text-muted">
-              {waiting
-                ? "Runs here when it is on screen, after the previews before it."
-                : "Runs here, in a frame of its own: it cannot reach this page or your session, " +
-                  "and loads nothing from the network. If it goes to another address, it is stopped."}
+              {unfinished
+                ? "This preview didn't finish last time and may have frozen the page. Run it?"
+                : waiting
+                  ? "Runs here when it is on screen, after the previews before it."
+                  : "Runs here, in a frame of its own: it cannot reach this page or your session, " +
+                    "and loads nothing from the network. If it goes to another address, it is stopped."}
             </span>
           </>
         )}

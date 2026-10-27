@@ -133,6 +133,7 @@ export default function ArtifactBody({
     body = (
       <ArtifactPreview
         key={shownKey}
+        chatId={scope.chatId}
         kind={kind === "html" ? "html" : "react"}
         source={latest.source}
         title={title}
