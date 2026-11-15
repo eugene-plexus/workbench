@@ -1861,10 +1861,21 @@ async def _current_pinned(
         return None, None
     snapshot = memory.Snapshot.from_json(chat.memory_snapshot)
     place = await projects.place_of(store, chat)
-    if snapshot is not None and chat.project_id is not None and place.project_id is None:
-        # Row 47: its project is gone or no longer shared with them: nothing of it goes again.
-        own = {n.id for n in await projects.chat_notes(store, person.sub, chat)}
-        if any(sent.id not in own for sent in snapshot.sent):
+    if (
+        snapshot is not None
+        and chat.project_id is not None
+        and (place.project_id is None or place.shared_from is not None)
+    ):
+        # Row 47: a project shared with them gives its owner's notes, which only its owner
+        # changes. Its project gone or no longer shared, a note of the owner's deleted or moved,
+        # or one changed or added since the block was taken: it is taken again, so nothing the
+        # owner took back keeps going, and nothing they changed goes stale.
+        given = await projects.chat_notes(store, person.sub, chat)
+        ids = {n.id for n in given}
+        theirs = [n for n in given if n.owner != person.sub]
+        if any(sent.id not in ids for sent in snapshot.sent) or any(
+            n.updated_at > snapshot.frozen_at for n in theirs
+        ):
             await store.set_memory_snapshot(chat.id, person.sub, None)
             snapshot = None
     if snapshot is None and await store.memory_count(person.sub) == 0 and place.shared_from is None:

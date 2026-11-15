@@ -19,7 +19,7 @@ import { type FormEvent, useCallback, useEffect, useId, useRef, useState } from 
 import { api, del, fileOf, patch, post } from "../lib/api";
 import { characters, failureWords, kindLabel, NOTE_LIMIT, plural, saveFile } from "../lib/memory";
 import { problemWords } from "../lib/projects";
-import { putSharing } from "../lib/team";
+import { putSharing, setOutside } from "../lib/team";
 import { OWNER_OFF, OWNER_OFF_EFFECT } from "../lib/savedDocuments";
 import type { MemoryNote, NotesFound, ProjectDetail } from "../lib/types";
 import { useSavedDocuments } from "../lib/useSavedDocuments";
@@ -593,6 +593,31 @@ export function ProjectPage({
               }
             }}
           />
+          {project.collectionId && project.sharing && (
+            <label className="flex items-center gap-2 text-sm" data-testid="project-outside">
+              <input
+                type="checkbox"
+                checked={project.sharing.outsideModels}
+                onChange={async () => {
+                  if (!project.sharing || !project.collectionId) return;
+                  try {
+                    const kept = await setOutside(
+                      project.collectionId,
+                      !project.sharing.outsideModels,
+                    );
+                    setProject({
+                      ...project,
+                      sharing: { ...project.sharing, outsideModels: kept.outsideModels },
+                    });
+                  } catch (failure) {
+                    setProblem(problemWords(failure));
+                  }
+                }}
+                className="accent-accent"
+              />
+              Outside models may read its documents: {project.sharing.outsideModels ? "On" : "Off"}
+            </label>
+          )}
           <ChatTeam projectId={project.id} />
         </section>
 
@@ -651,6 +676,11 @@ export function ProjectPage({
                 <TriangleAlert size={16} aria-hidden />
                 {`This project has ${counts}${project.folders ? ` and ${plural(project.folders, "folder")}` : ""}. What should happen to them?`}
               </p>
+              {Boolean(project.sharing?.othersDocuments) && (
+                <p data-testid="project-delete-others">
+                  {`${plural(project.sharing?.othersDocuments ?? 0, "document")} of them other people added to it. Delete removes them for everyone. Keep moves them to your documents.`}
+                </p>
+              )}
               {Boolean(project.folders) && (
                 <p>
                   Delete removes the folders from Documents. Keep moves them to My documents. Files

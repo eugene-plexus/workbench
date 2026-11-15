@@ -93,9 +93,17 @@ async def chat_notes(
     mine = in_place(await store.memory_notes(owner, status=status), place)
     if place.shared_from is None or status != "active":
         return mine
-    theirs = [
-        n
-        for n in await store.memory_notes(place.shared_from, status="active")
-        if n.project_id == place.project_id and memory.is_always(n)
-    ]
-    return mine + theirs
+    return mine + await shared_notes(store, place.shared_from, place.project_id)
+
+
+async def shared_notes(store: Store, owner: str, project_id: str | None) -> list[MemoryNote]:
+    """What a shared project gives the people it is shared with of its owner's notes: its
+    instructions and pinned notes, but none a model kept by itself that its owner has not seen
+    yet (call 12: `memory.shareable`)."""
+    return memory.shareable(
+        [
+            n
+            for n in await store.memory_notes(owner, status="active")
+            if n.project_id == project_id and memory.is_always(n)
+        ]
+    )

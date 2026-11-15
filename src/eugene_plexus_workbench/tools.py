@@ -788,8 +788,8 @@ class ToolSession:
 
     def add_team_notes(self, chat_id: str, model: str | None, collections: list[Any]) -> None:
         """Offer `suggest_team_note` (row 47) for the team collections the person adds to in
-        this chat: Workbench runs it without asking first, because it keeps nothing; a note it
-        proposes waits for a contributor."""
+        this chat. The person approves each call, seeing its words, before anything leaves the
+        chat; a note it proposes then waits for a contributor."""
         from .team import TOOL, tool_definition
 
         self.chat_id, self.model = chat_id, model or self.model
@@ -798,7 +798,9 @@ class ToolSession:
         definition = tool_definition(collections)
         server = {"id": TEAM_SERVER, "name": "Team notes", "transport": "team-notes"}
         self.tools[TOOL] = (server, None, TOOL, definition["function"]["parameters"])
-        self.asks[TOOL] = False
+        # Asked about each time: the words leave the person's chat for other people's eyes,
+        # and a document or page the model read may have written them.
+        self.asks[TOOL] = True
         self.metadata[TOOL] = {}
         self.model_names.add(TOOL)
         self.definitions.append(definition)

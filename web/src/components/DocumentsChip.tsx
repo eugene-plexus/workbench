@@ -131,6 +131,25 @@ function Status({
   const code = view.reasonCode;
   const model = view.model?.id ?? "the model";
   const { library, chat } = view.counts;
+  const held = view.team?.held ?? [];
+  if (view.sending && !view.searching.library && !view.searching.chat && view.searching.team) {
+    // Row 47: only team collections chosen for this chat or its project.
+    const names = (view.team?.sent ?? []).map((c) => c.name).join(", ");
+    return (
+      <div data-testid="documents-status" className="notice">
+        <Info size={16} aria-hidden />
+        <div>
+          {names} {(view.team?.sent.length ?? 0) === 1 ? "is" : "are"} searched for each question,
+          and matching passages go to {model}. Your own documents are off here.
+          {held.map((c) => (
+            <span key={c.id} className="mt-1 block text-muted" data-testid="documents-team-held">
+              {c.why}
+            </span>
+          ))}
+        </div>
+      </div>
+    );
+  }
   if (view.sending) {
     const outside = view.outside;
     // Only the files of this chat that the person chose to search: their own act,

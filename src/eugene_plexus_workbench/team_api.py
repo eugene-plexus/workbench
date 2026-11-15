@@ -16,7 +16,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, File, Request, UploadFile, status
 from fastapi.responses import Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from . import config, memory, team
 from .api import _own_chat, _person, _problem, _state
@@ -106,6 +106,8 @@ def collection_view(
         "notes": counts[1],
         # What waits for a contributor: never told to a reader.
         "proposed": counts[2] if team.at_least(role, "contribute") else 0,
+        #: Whether its passages may go to a model outside the install's machines.
+        "outsideModels": collection.outside,
     }
 
 
@@ -224,12 +226,19 @@ async def get_collection(request: Request, collection_id: str) -> dict[str, Any]
             else None
         ),
     }
+    if role == "manage":
+        # What deleting it takes from other people: their documents, counted for the question.
+        out["othersDocuments"] = sum(
+            i.kind == "document" and i.state == "active" and i.added_by != person.sub for i in items
+        )
     return out
 
 
 class CollectionUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    name: str = Field(max_length=400)
+    name: str | None = Field(default=None, max_length=400)
+    #: Whether its passages may go to a model outside the install's machines (a cloud account).
+    outsideModels: StrictBool | None = None
 
 
 @router.patch("/api/collections/{collection_id}")
@@ -238,11 +247,17 @@ async def rename_collection(
 ) -> dict[str, Any]:
     person = await _person(request)
     collection, role = await _usable(request, person, collection_id, "manage")
-    _install_only(collection)
-    name = _name(body.name)
-    if not await _store(request).collections.rename(collection.id, name, time.time()):
-        raise _problem(status.HTTP_409_CONFLICT, "A collection of that name is here already.")
-    collection.name = name
+    store = _store(request)
+    if body.name is not None:
+        _install_only(collection)
+        name = _name(body.name)
+        if not await store.collections.rename(collection.id, name, time.time()):
+            raise _problem(status.HTTP_409_CONFLICT, "A collection of that name is here already.")
+        collection.name = name
+    if body.outsideModels is not None:
+        # Its manager's word: a shared project's owner for its own collection.
+        await store.collections.set_outside(collection.id, body.outsideModels, time.time())
+        collection.outside = body.outsideModels
     return collection_view(collection, role)
 
 
@@ -279,7 +294,7 @@ async def check_grantees(
     """The grants, each to a person who has signed in here, or a group Eugene lists (the owner)
     or the asker is in (anyone else). One that is not is refused by name."""
     store = _store(request)
-    people = {p.sub for p, _, _ in await store.people()}
+    people = {p["sub"] for p in await shareable_people(store, person)}
     groups = {g["id"] for g in person.groups or []}
     if any_group and any(g.kind == "group" and g.id not in groups for g in grants):
         try:
@@ -294,7 +309,10 @@ async def check_grantees(
         if grant.kind == "person" and grant.id not in people:
             raise _problem(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
-                "A person must sign in to Workbench once before something is shared with them.",
+                "Share only with someone in one of your groups who has signed in to Workbench."
+                if not person.is_owner
+                else "A person must sign in to Workbench once before something is shared with "
+                "them.",
             )
         if grant.kind == "group" and (not GROUP_ID.fullmatch(grant.id) or grant.id not in groups):
             raise _problem(
@@ -321,17 +339,28 @@ async def put_grants(request: Request, collection_id: str, body: GrantsUpdate) -
     return {"grants": await _grants_view(store, collection.id, await _names(store))}
 
 
+async def shareable_people(store: Store, person: Person) -> list[dict[str, Any]]:
+    """The people the asker may share with and see the names of: everyone who has signed in to
+    this Workbench, for its owner; for anyone else, only the people in a group with them."""
+    mine = {g["id"] for g in person.groups or []}
+    out = []
+    for other, _, _ in await store.people():
+        if other.sub == person.sub:
+            continue
+        if not person.is_owner and not mine & {g["id"] for g in other.groups or []}:
+            continue
+        out.append({"sub": other.sub, "name": other.name, "username": other.username})
+    return out
+
+
 @router.get("/api/team/people")
 async def team_people(request: Request) -> dict[str, Any]:
-    """Who the asker may share with: the people who have signed in to this Workbench, and the
-    groups Eugene lists for it (the owner) or the asker's own groups (anyone else)."""
+    """Who the asker may share with: the people who have signed in to this Workbench (its
+    owner) or the people in a group with them (anyone else), and the groups Eugene lists for it
+    (the owner) or the asker's own groups (anyone else)."""
     person = await _person(request)
     store = _store(request)
-    people = [
-        {"sub": p.sub, "name": p.name, "username": p.username}
-        for p, _, _ in await store.people()
-        if p.sub != person.sub
-    ]
+    people = await shareable_people(store, person)
     groups = list(person.groups or [])
     problem = None
     if person.is_owner:
@@ -350,11 +379,17 @@ async def team_people(request: Request) -> dict[str, Any]:
 
 
 async def add_to_collection(
-    request: Request, person: Person, collection: Collection, uploads: list[UploadFile]
+    request: Request,
+    person: Person,
+    collection: Collection,
+    uploads: list[UploadFile],
+    role: str,
 ) -> dict[str, Any]:
     """Keep files in a collection, as `POST /api/documents` keeps them in My documents, each
-    recorded as added by the asker. A file of the same name replaces the one there."""
-    from .saved_api import MAX_FILES, keep_files
+    recorded as added by the asker. A file of the same name replaces the one there, only when
+    the asker added that one or manages the collection: anyone else's is refused, by name and
+    by whose it is, as taking it out would be."""
+    from .saved_api import MAX_FILES, _clean_name, _refusal, keep_files
 
     store = _store(request)
     install = await config.document_settings(store)
@@ -367,7 +402,32 @@ async def add_to_collection(
             status.HTTP_413_CONTENT_TOO_LARGE,
             f"That is {len(uploads):,} files at once; add at most {MAX_FILES} at a time.",
         )
-    kept, refused = await keep_files(
+    refused: list[dict[str, Any]] = []
+    if role != "manage":
+        names = await _names(store)
+        held = {
+            i.title.casefold(): i
+            for i in await store.collections.items(collection.id)
+            if i.kind == "document"
+        }
+        allowed = []
+        for upload in uploads:
+            name = _clean_name(upload.filename)
+            there = held.get(name.casefold())
+            if there is not None and there.added_by != person.sub:
+                refused.append(
+                    _refusal(
+                        name,
+                        status.HTTP_409_CONFLICT,
+                        f"{collection.name} has a {name} that {_who(names, there.added_by)} "
+                        "added. Give yours another name, or ask them or the collection's "
+                        "owner to replace it.",
+                    )
+                )
+            else:
+                allowed.append(upload)
+        uploads = allowed
+    kept, more = await keep_files(
         request,
         team.key(collection.id),
         LIBRARY,
@@ -375,6 +435,7 @@ async def add_to_collection(
         install,
         holder=f"{collection.name} already keeps",
     )
+    refused += more
     now = time.time()
     for view in kept:
         for gone in view.get("replaced") or []:
@@ -402,8 +463,8 @@ async def add_documents(
     request: Request, collection_id: str, uploads: list[UploadFile] = File(..., alias="files")
 ) -> dict[str, Any]:
     person = await _person(request)
-    collection, _ = await _usable(request, person, collection_id, "contribute")
-    return await add_to_collection(request, person, collection, uploads)
+    collection, role = await _usable(request, person, collection_id, "contribute")
+    return await add_to_collection(request, person, collection, uploads, role)
 
 
 class NoteIn(BaseModel):
@@ -417,6 +478,11 @@ async def add_note(request: Request, collection_id: str, body: NoteIn) -> dict[s
     """A contributor's own note: searched by the team's chats from now."""
     person = await _person(request)
     collection, _ = await _usable(request, person, collection_id, "contribute")
+    if collection.project_id is not None:
+        raise _problem(
+            status.HTTP_409_CONFLICT,
+            "A shared project keeps documents. Keep notes for it on the project's page.",
+        )
     store = _store(request)
     try:
         item = await team.add_note(
@@ -528,11 +594,20 @@ async def chat_collections(request: Request, chat_id: str) -> dict[str, Any]:
     """The team collections this chat searches, and the ones the asker may choose."""
     person = await _person(request)
     chat = await _own_chat(request, person, chat_id)
+    from .saved_api import _local, decide_access
+
     out = await _links_view(request, person, f"chat:{chat.id}")
     used = await team.for_chat(
         _store(request), person, chat, documents_on=chat.settings.get("documents") == "on"
     )
-    out["searched"] = [{"id": c.id, "name": c.name} for c in used]
+    # What its next answer is sent, never only what was chosen: a model outside the machines,
+    # or documents turned off, keeps some or all of them back, and each says why.
+    access = await decide_access(request, person, chat, chat.model)
+    sent, held = team.split(
+        used, allowed=access.library, local=_local(access), reason=access.reason
+    )
+    out["searched"] = [{"id": c.id, "name": c.name} for c in sent]
+    out["held"] = [{"id": c.id, "name": c.name, "why": why} for c, why in held]
     return out
 
 

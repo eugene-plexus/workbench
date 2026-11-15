@@ -523,7 +523,7 @@ async def add_documents(
             # Row 47: a shared project's documents are its collection's.
             from .team_api import add_to_collection
 
-            return await add_to_collection(request, person, shared, uploads)
+            return await add_to_collection(request, person, shared, uploads, "manage")
     if len(uploads) > MAX_FILES:
         raise _problem(
             status.HTTP_413_CONTENT_TOO_LARGE,
@@ -1262,8 +1262,14 @@ async def chat_documents_view(
     facts = access.facts
     searching_library = switch == "on" and access.library
     searching_chat = bool(chat_docs) and not access.too_small and access.code != "install_off"
+    # Row 47: the team collections its next answer is sent, and each other chosen one with why.
+    shared = await team.for_chat(_store(request), person, chat, documents_on=switch == "on")
+    team_sent, team_held = team.split(
+        shared, allowed=access.library, local=_local(access), reason=access.reason
+    )
+    searching_team = bool(team_sent) and access.code not in ("install_off", "no_model")
     reason, code, hint = access.reason, access.code, access.hint
-    if switch == "off" and not searching_chat:
+    if switch == "off" and not searching_chat and not searching_team:
         reason, code, hint = "Documents are off for this chat.", "chat_off", None
     elif switch == "off":
         reason = code = hint = None
@@ -1272,8 +1278,12 @@ async def chat_documents_view(
         "readOnly": False,
         "switch": switch,
         "documentsOnly": strict,
-        "sending": searching_library or searching_chat,
-        "searching": {"library": searching_library, "chat": searching_chat},
+        "sending": searching_library or searching_chat or searching_team,
+        "searching": {"library": searching_library, "chat": searching_chat, "team": searching_team},
+        "team": {
+            "sent": [{"id": c.id, "name": c.name} for c in team_sent] if searching_team else [],
+            "held": [{"id": c.id, "name": c.name, "why": why} for c, why in team_held],
+        },
         "reason": reason,
         "reasonCode": code,
         "hint": hint,
@@ -1498,8 +1508,12 @@ async def retrieve(
         if access.code in ("install_off", "no_model"):
             return Found()
         library_ok = switch and access.library
-        # A team's documents go only where the person's own may (row 47).
-        team_ok = bool(shared) and access.library
+        # A team's documents go only where the person's own may (row 47), and to a model
+        # outside the machines only where the collection's owner allows it.
+        sent, held = team.split(shared, allowed=access.library, local=_local(access))
+        team_ok = bool(sent)
+        if access.library:
+            notes.extend({"code": "team_kept_local", "message": why} for _, why in held)
         if (switch or shared) and not access.library:
             notes.append({"code": str(access.code), "message": str(access.reason)})
             if access.hint:
@@ -1519,7 +1533,7 @@ async def retrieve(
             await index.count_found(scopes) if index is not None and scopes else (0, 0, 0)
         )
         if team_ok:
-            more = await _team_counts(saved, shared)
+            more = await _team_counts(saved, sent)
             documents, passages_n, waiting = (
                 documents + more[0],
                 passages_n + more[1],
@@ -1581,7 +1595,7 @@ async def retrieve(
                 saved,
                 index if scopes else None,
                 scopes,
-                shared,
+                sent,
                 query,
                 question=last.content,
                 budget=budget.allowed - block_cost,
@@ -1717,6 +1731,11 @@ async def retrieve(
             select_by_question=bool(selected),
         )
     return found
+
+
+def _local(access: Access) -> bool:
+    """Whether the chat's model runs on the install's own machines, as the gateway says."""
+    return access.facts is not None and access.facts.locality == "local"
 
 
 async def _team_counts(saved: SavedDocuments, shared: list[Any]) -> tuple[int, int, int]:

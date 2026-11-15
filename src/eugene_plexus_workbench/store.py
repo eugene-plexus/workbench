@@ -2428,7 +2428,14 @@ class Store:
             )
             return [
                 (
-                    Person(sub=r["sub"], name=r["name"], role=r["role"], username=r["username"]),
+                    Person(
+                        sub=r["sub"],
+                        name=r["name"],
+                        role=r["role"],
+                        username=r["username"],
+                        # Row 47: who shares a group with whom (`team_api.shareable_people`).
+                        groups=None if r["groups_json"] is None else json.loads(r["groups_json"]),
+                    ),
                     int(r["chats"]),
                     int(r["media"]),
                 )

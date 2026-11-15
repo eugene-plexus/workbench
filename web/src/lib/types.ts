@@ -1839,7 +1839,13 @@ export interface ChatDocuments {
   /** Whether the next request searches anything: the person's documents, this
    * chat's own searched files, or both. */
   sending: boolean;
-  searching: { library: boolean; chat: boolean };
+  /** Row 47: `team` is whether team collections are sent. */
+  searching: { library: boolean; chat: boolean; team?: boolean };
+  /** Row 47: the team collections the next request is sent, and each other with why not. */
+  team?: {
+    sent: { id: string; name: string }[];
+    held: { id: string; name: string; why: string }[];
+  };
   reason: string | null;
   reasonCode: DocumentsReason | null;
   hint: string | null;

@@ -325,6 +325,13 @@ def test_contributions_stay_attributed_to_a_former_member(tmp_path: Path) -> Non
                     (ann,),
                 )
             await team.set_shares("proj-a", [Grant("person", ben, "read")])
+            # Ben's chat in Ann's shared project was sent her instruction (review B2).
+            with store._conn() as db:
+                db.execute(
+                    "INSERT INTO chats (id, owner, title, created_at, updated_at, project_id, "
+                    "memory_snapshot) VALUES ('ben-chat', ?, 't', 1, 1, 'proj-a', '{}')",
+                    (ben,),
+                )
             await team.set_shares("proj-b", [Grant("person", ann, "read")])
         finally:
             await store.close()
@@ -336,8 +343,12 @@ def test_contributions_stay_attributed_to_a_former_member(tmp_path: Path) -> Non
         grants = db.execute("SELECT COUNT(*) FROM collection_grants").fetchone()[0]
         shares = db.execute("SELECT project_id, subject FROM project_shares").fetchall()
         kept = [r[0] for r in db.execute("SELECT id FROM collections")]
+        snapshot = db.execute("SELECT memory_snapshot FROM chats WHERE id = 'ben-chat'").fetchone()[
+            0
+        ]
     assert items == {"doc-a": None, "note-a": None, "doc-b": ben}
     assert grants == 0 and shares == [] and kept == ["hand"]
+    assert snapshot is None
 
 
 class _Server:

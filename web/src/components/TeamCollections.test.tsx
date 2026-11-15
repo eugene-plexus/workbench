@@ -22,6 +22,7 @@ function handbook(over: Partial<CollectionDetail> = {}): CollectionDetail {
     documents: 1,
     notes: 0,
     proposed: 1,
+    outsideModels: false,
     documentList: [
       {
         id: "d1",
@@ -137,4 +138,50 @@ test("a project shared with the person says whose it is, and shows only their ch
     "Answer as a lighthouse keeper.",
   );
   expect(screen.getByTestId("project-chats")).toHaveTextContent("My question");
+});
+
+test("the chat's settings say which chosen collection its next answer is sent, and why not", async () => {
+  const { ChatTeam } = await import("./ChatTeam");
+  vi.mocked(api).mockImplementation(async () => ({
+    chosen: [
+      { id: "hand", name: "Handbook" },
+      { id: "price", name: "Prices" },
+    ],
+    available: [
+      { id: "hand", name: "Handbook", role: "read" },
+      { id: "price", name: "Prices", role: "read" },
+    ],
+    searched: [{ id: "price", name: "Prices" }],
+    held: [{ id: "hand", name: "Handbook", why: "Handbook was not sent: outside model." }],
+  }));
+  render(<ChatTeam chatId="c" />);
+  const team = await screen.findByTestId("chat-team");
+  expect(team).toHaveTextContent("Handbook: Handbook was not sent: outside model.");
+  expect(team).toHaveTextContent("Prices: Searched");
+});
+
+test("the documents chip names the team collections sent with the chat's own documents off", async () => {
+  const { chatChipWords } = await import("../lib/savedDocuments");
+  const words = chatChipWords({
+    chatId: "c",
+    readOnly: false,
+    switch: "off",
+    documentsOnly: false,
+    sending: true,
+    searching: { library: false, chat: false, team: true },
+    team: { sent: [{ id: "hand", name: "Handbook" }], held: [] },
+    reason: null,
+    reasonCode: null,
+    hint: null,
+    model: null,
+    outside: null,
+    counts: {
+      library: { documents: 3, passages: 9, waiting: 0 },
+      chat: { documents: 0, passages: 0, waiting: 0 },
+    },
+    chatDocuments: [],
+    budget: { limit: 1000, window: null },
+  } as never);
+  expect(words.label).toBe("Documents: Handbook");
+  expect(words.tone).toBe("on");
 });

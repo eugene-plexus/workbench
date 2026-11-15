@@ -42,7 +42,8 @@ def migration(db: sqlite3.Connection) -> None:
         "CREATE TABLE IF NOT EXISTS collections ("
         "id TEXT PRIMARY KEY, "
         "name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 80), "
-        "belongs_to TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL)"
+        "belongs_to TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL, "
+        "outside INTEGER NOT NULL DEFAULT 0 CHECK (outside IN (0, 1)))"
     )
     db.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS collections_of_projects ON collections (belongs_to) "
@@ -111,6 +112,11 @@ def purge_rows(db: sqlite3.Connection, sub: str, have: dict[str, set[str]]) -> N
         part = projects[start : start + 400]
         marks = ", ".join("?" for _ in part)
         db.execute(f"DELETE FROM project_shares WHERE project_id IN ({marks})", part)
+        if "memory_snapshot" in have.get("chats", set()):
+            # Other people's chats in them were sent the person's instructions: not again.
+            db.execute(
+                f"UPDATE chats SET memory_snapshot = NULL WHERE project_id IN ({marks})", part
+            )
         if "collections" in have:
             owners = [f"project:{p}" for p in part]
             ids = [
@@ -139,6 +145,9 @@ class Collection:
     belongs_to: str
     created_at: float
     updated_at: float
+    #: Whether its passages may go to a model that runs outside the install's machines (a cloud
+    #: account): its manager's word, off until they say so.
+    outside: bool = False
 
     @property
     def project_id(self) -> str | None:
@@ -169,7 +178,12 @@ class Item:
 
 def _collection(row: sqlite3.Row) -> Collection:
     return Collection(
-        row["id"], row["name"], row["belongs_to"], row["created_at"], row["updated_at"]
+        row["id"],
+        row["name"],
+        row["belongs_to"],
+        row["created_at"],
+        row["updated_at"],
+        bool(row["outside"]),
     )
 
 
@@ -275,6 +289,14 @@ class CollectionStore:
             return True
 
         return await self._write(go)
+
+    async def set_outside(self, collection_id: str, allowed: bool, now: float) -> None:
+        await self._write(
+            lambda db: db.execute(
+                "UPDATE collections SET outside = ?, updated_at = ? WHERE id = ?",
+                (int(allowed), now, collection_id),
+            )
+        )
 
     async def rename(self, collection_id: str, name: str, now: float) -> bool:
         def go(db: sqlite3.Connection) -> bool:

@@ -160,7 +160,8 @@ def test_a_chats_file_is_searched_in_that_chat_whatever_the_switch_says_and_in_n
     wait_searchable(ada, chat, file_id)
     state = ada.get(f"/api/chats/{chat}/documents").json()
     assert (state["switch"], state["sending"]) == ("off", True)
-    assert state["searching"] == {"library": False, "chat": True} and state["reason"] is None
+    assert state["searching"] == {"library": False, "chat": True, "team": False}
+    assert state["reason"] is None
     assert [d["name"] for d in state["chatDocuments"]] == ["survey.pdf"]
     ask(ada, chat, QUESTION, attachments=[file_id])
     assert CODE in block_of(world)[1]

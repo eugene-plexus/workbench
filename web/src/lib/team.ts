@@ -3,7 +3,7 @@
  * and the projects shared with the person. The words around them, and the calls.
  */
 
-import { api, del, post, put } from "./api";
+import { api, del, patch, post, put } from "./api";
 
 export type TeamRole = "manage" | "contribute" | "read";
 
@@ -18,6 +18,8 @@ export interface Collection {
   notes: number;
   /** Notes a model proposed that wait for a contributor (0 for a reader). */
   proposed: number;
+  /** Whether its passages may go to a model outside the install's machines. */
+  outsideModels: boolean;
 }
 
 export interface TeamItem {
@@ -52,6 +54,8 @@ export interface CollectionDetail extends Collection {
   inbox: TeamItem[];
   /** Who may use it: only for its manager, and only for an install collection. */
   grants: Grant[] | null;
+  /** For its manager: how many of its documents other people added. */
+  othersDocuments?: number;
 }
 
 export interface TeamPeople {
@@ -65,13 +69,19 @@ export interface Sharing {
   collectionId: string | null;
   /** How many chats other people have in the project: a count, never their content. */
   othersChats: number;
+  /** How many of its documents other people added: what deleting it takes from them. */
+  othersDocuments: number;
+  /** Whether its documents may go to a model outside the install's machines. */
+  outsideModels: boolean;
 }
 
 export interface ChatCollections {
   chosen: { id: string; name: string }[];
   available: { id: string; name: string; role: TeamRole }[];
-  /** Every collection this chat's next answer searches, the project's included. */
+  /** Every collection this chat's next answer is sent, the project's included. */
   searched?: { id: string; name: string }[];
+  /** Each chosen one its next answer is not sent, and why (an outside model, documents off). */
+  held?: { id: string; name: string; why: string }[];
 }
 
 const at = (id: string) => `/api/collections/${encodeURIComponent(id)}`;
@@ -80,6 +90,8 @@ export const listCollections = () =>
   api<{ collections: Collection[]; canCreate: boolean }>("/api/collections");
 export const readCollection = (id: string) => api<CollectionDetail>(at(id));
 export const makeCollection = (name: string) => post<Collection>("/api/collections", { name });
+export const setOutside = (id: string, outsideModels: boolean) =>
+  patch<Collection>(at(id), { outsideModels });
 export const deleteCollection = (id: string) => del<{ documents: number; notes: number }>(at(id));
 export const putGrants = (id: string, grants: Omit<Grant, "name">[]) =>
   put<{ grants: Grant[] }>(`${at(id)}/grants`, { grants });

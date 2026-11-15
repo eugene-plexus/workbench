@@ -139,6 +139,27 @@ async def visible(store: Store, person: Person) -> list[tuple[Collection, str]]:
     return out
 
 
+#: Why a team collection was not sent to a model outside the machines.
+KEPT_LOCAL = (
+    "{name} was not sent: this chat's model runs outside your machines, and the collection's "
+    "owner keeps it to them."
+)
+
+
+def split(
+    collections: Sequence[Collection], *, allowed: bool, local: bool, reason: str | None = None
+) -> tuple[list[Collection], list[tuple[Collection, str]]]:
+    """Which of a chat's collections its next answer is sent, and each other with why: none
+    where the person's own documents may not go (`allowed`, with their `reason`); to a model
+    outside the machines, only the ones whose owner allows it (`Collection.outside`)."""
+    if not allowed:
+        return [], [(c, reason or "Not sent.") for c in collections]
+    if local:
+        return list(collections), []
+    sent = [c for c in collections if c.outside]
+    return sent, [(c, KEPT_LOCAL.format(name=c.name)) for c in collections if not c.outside]
+
+
 async def usable_project(store: Store, person: Person, project_id: str) -> Project | None:
     """A project the person may put a chat of theirs in: theirs, or shared with them now."""
     own = await store.project(person.sub, project_id)
@@ -271,71 +292,112 @@ async def drop(store: Store, saved: Any, collection: Collection) -> None:
     await store.collections.drop(collection.id)
 
 
+async def copy_one(saved: Any, source: str, doc: Document, target: str, scope: str) -> Any:
+    """Copy one document's original from one index into another, where it is read again: what
+    `SavedDocuments.add` made of it (`Added`), or None when its original is gone."""
+    from_index = saved.index(source, create=False)
+    if from_index is None:
+        return None
+    original = from_index.original_path(doc.id)
+    if not original.is_file():
+        return None
+    to_index = saved.index(target)
+    doc_id = new_id()
+    part = to_index.part_path(doc_id)
+    part.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        await asyncio.to_thread(shutil.copyfile, original, part)
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
+    return await saved.add(
+        target,
+        doc_id=doc_id,
+        scope=scope,
+        name=doc.name,
+        detected=files.Detected(doc.media_type, doc.kind, doc.language),
+        size=doc.bytes,
+        sha256=doc.sha256,
+        source="upload",
+    )
+
+
 async def copy_documents(
     saved: Any, source: str, documents: Sequence[Document], target: str, scope: str
 ) -> list[tuple[Document, Document]]:
     """Copy each document's original from one index into another, where it is read again:
     `(was, now)` for each copied. One whose original is gone is left where it was."""
-    from_index = saved.index(source, create=False)
-    if from_index is None:
-        return []
-    to_index = saved.index(target)
     done = []
     for doc in documents:
-        original = from_index.original_path(doc.id)
-        if not original.is_file():
-            continue
-        doc_id = new_id()
-        part = to_index.part_path(doc_id)
-        part.parent.mkdir(parents=True, exist_ok=True)
-        await asyncio.to_thread(shutil.copyfile, original, part)
-        added = await saved.add(
-            target,
-            doc_id=doc_id,
-            scope=scope,
-            name=doc.name,
-            detected=files.Detected(doc.media_type, doc.kind, doc.language),
-            size=doc.bytes,
-            sha256=doc.sha256,
-            source="upload",
-        )
-        done.append((doc, added.document))
+        added = await copy_one(saved, source, doc, target, scope)
+        if added is not None:
+            done.append((doc, added.document))
     return done
 
 
+class ShareIncomplete(Exception):
+    """Some of a project's documents did not move into its collection: how many did, of how
+    many, and what was observed. What moved stays moved; sharing again moves the rest."""
+
+    def __init__(self, moved: int, total: int, cause: str) -> None:
+        self.moved, self.total, self.cause = moved, total, cause
+        super().__init__(cause)
+
+    @property
+    def message(self) -> str:
+        return (
+            f"Moved {self.moved} of {self.total} of this project's documents into what it shares; "
+            f"the next could not be moved ({self.cause}). Share it again to move the rest."
+        )
+
+
 async def share_project(store: Store, saved: Any, project: Project) -> Collection:
-    """The project's own collection, made when the project is first shared: the documents the
-    owner added to it move there, kept as theirs. Documents read from a folder stay the owner's
-    (a folder is read on its owner's machine, as its owner). The same collection after that."""
-    existing = await store.collections.of_project(project.id)
-    if existing is not None:
-        return existing
-    now = time.time()
-    collection = Collection(new_id(), project.name[:NAME_CHARS], PROJECT + project.id, now, now)
-    if not await store.collections.add(collection):
-        found = await store.collections.of_project(project.id)
-        assert found is not None
-        return found
+    """The project's own collection, made when the project is first shared, and the documents
+    the owner added to it moved there, kept as theirs, **one at a time**: each is copied, its
+    row written and its old copy removed before the next, so a move cut short (a full disk)
+    leaves each document in one place, and sharing again moves the rest. Documents read from a
+    folder stay the owner's (a folder is read on its owner's machine, as its owner).
+    `ShareIncomplete` says what moved and what stopped it."""
+    collection = await store.collections.of_project(project.id)
+    if collection is None:
+        now = time.time()
+        made = Collection(new_id(), project.name[:NAME_CHARS], PROJECT + project.id, now, now)
+        collection = made if await store.collections.add(made) else None
+        collection = collection or await store.collections.of_project(project.id)
+        assert collection is not None
     index = saved.index(project.owner, create=False)
     if index is None:
         return collection
     documents = await index.documents(project_scope(project.id), only="upload")
-    moved = await copy_documents(saved, project.owner, documents, key(collection.id), LIBRARY)
-    for was, now_doc in moved:
-        await store.collections.add_item(
-            Item(
-                id=now_doc.id,
-                collection_id=collection.id,
-                kind="document",
-                state="active",
-                added_by=project.owner,
-                added_at=was.added_at,
-                title=was.name,
+    moved = 0
+    for was in documents:
+        try:
+            added = await copy_one(saved, project.owner, was, key(collection.id), LIBRARY)
+            if added is None:
+                continue
+            for gone in added.replaced:
+                await store.collections.drop_item(collection.id, gone.id)
+            await store.collections.add_item(
+                Item(
+                    id=added.document.id,
+                    collection_id=collection.id,
+                    kind="document",
+                    state="active",
+                    added_by=project.owner,
+                    added_at=was.added_at,
+                    title=was.name,
+                )
             )
-        )
-    if moved:
-        await saved.remove_documents(project.owner, [was.id for was, _ in moved])
-    log.info("a project was shared: %d of its documents moved to its collection", len(moved))
+            await saved.remove(project.owner, was.id)
+        except Exception as exc:
+            cause = (exc.strerror if isinstance(exc, OSError) else None) or (
+                str(exc) or type(exc).__name__
+            )
+            log.warning("a project's document did not move into its collection: %s", cause)
+            raise ShareIncomplete(moved, len(documents), cause) from None
+        moved += 1
+    if documents:
+        log.info("a project was shared: %d of its documents moved to its collection", moved)
     return collection
 
 

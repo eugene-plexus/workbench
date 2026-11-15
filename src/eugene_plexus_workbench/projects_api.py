@@ -161,6 +161,16 @@ async def sharing_view(request: Request, project: Project) -> dict[str, Any]:
         "collectionId": collection.id if collection is not None else None,
         # What its owner sees of other people's chats in it: a count, never their content.
         "othersChats": await store.others_chats_in(project.id, project.owner),
+        # Documents other people added, which deleting it takes too: what the question names.
+        "othersDocuments": (
+            sum(
+                i.kind == "document" and i.added_by != project.owner
+                for i in await store.collections.items(collection.id)
+            )
+            if collection is not None
+            else 0
+        ),
+        "outsideModels": collection.outside if collection is not None else False,
     }
 
 
@@ -175,11 +185,7 @@ async def _shared_project(request: Request, person: Person, project_id: str) -> 
         raise _problem(status.HTTP_404_NOT_FOUND, "There is no such project.")
     names = {p.sub: p.name for p, _, _ in await store.people()}
     mine = [c for c in await store.chats(person.sub) if c.project_id == project.id]
-    pinned = [
-        n
-        for n in await store.memory_notes(project.owner, status="active")
-        if n.project_id == project.id and memory.is_always(n)
-    ]
+    pinned = await projects.shared_notes(store, project.owner, project.id)
     collection = await store.collections.of_project(project.id)
     documents = (
         sum(i.kind == "document" for i in await store.collections.items(collection.id))
@@ -397,7 +403,11 @@ async def put_sharing(request: Request, project_id: str, body: SharingUpdate) ->
     store = _store(request)
     shares = await team_api.check_grantees(request, person, body.shares, any_group=person.is_owner)
     if shares:
-        await team.share_project(store, _state(request).saved, project)
+        # Every time: a first share cut short moves the rest now.
+        try:
+            await team.share_project(store, _state(request).saved, project)
+        except team.ShareIncomplete as exc:
+            raise _problem(status.HTTP_503_SERVICE_UNAVAILABLE, exc.message) from None
     await store.collections.set_shares(project.id, shares)
     return await sharing_view(request, project)
 

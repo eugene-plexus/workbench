@@ -23,6 +23,7 @@ function shape(got: Partial<ChatCollections> | null | undefined): ChatCollection
     chosen: Array.isArray(got?.chosen) ? got.chosen : [],
     available: Array.isArray(got?.available) ? got.available : [],
     searched: Array.isArray(got?.searched) ? got.searched : [],
+    held: Array.isArray(got?.held) ? got.held : [],
   };
 }
 
@@ -68,6 +69,11 @@ export function ChatTeam({ chatId, projectId }: { chatId?: string; projectId?: s
   }
 
   const extra = (data.searched ?? []).filter((c) => !chosen.has(c.id));
+  const sent = new Set((data.searched ?? []).map((c) => c.id));
+  const why = new Map((data.held ?? []).map((c) => [c.id, c.why]));
+  // What the next answer is sent, never only what was chosen (settings never lie).
+  const stateWords = (id: string) =>
+    !chosen.has(id) ? "Not chosen" : sent.has(id) ? "Searched" : (why.get(id) ?? "Not sent");
   return (
     <fieldset className="flex min-w-0 flex-col gap-2" data-testid="chat-team">
       <legend className="eyebrow mb-3 text-muted">Team collections</legend>
@@ -80,7 +86,7 @@ export function ChatTeam({ chatId, projectId }: { chatId?: string; projectId?: s
             onChange={() => void toggle(collection.id)}
             className="accent-accent"
           />
-          {collection.name}: {chosen.has(collection.id) ? "Searched" : "Not searched"}
+          {collection.name}: {stateWords(collection.id)}
         </label>
       ))}
       <p className="help">

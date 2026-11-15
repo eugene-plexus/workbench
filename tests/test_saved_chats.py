@@ -76,7 +76,7 @@ def test_turning_documents_on_for_a_chat_is_remembered_in_the_chat_and_says_what
     chat = chat_on(ada)
     state = ada.get(f"/api/chats/{chat}/documents").json()
     assert state["switch"] == "on" and state["sending"] is True and state["reason"] is None
-    assert state["searching"] == {"library": True, "chat": False}
+    assert state["searching"] == {"library": True, "chat": False, "team": False}
     assert state["documentsOnly"] is False and state["search"]["mode"] == "words"
     assert state["model"] == {"id": MODEL, "window": 32768, "locality": "local", "runsOn": None}
     assert state["budget"] == {"limit": 3000, "window": 32768}

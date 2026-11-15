@@ -486,6 +486,17 @@ export function chatChipWords(
     const { library, chat } = view.counts;
     const here =
       (view.searching.library ? library.documents : 0) + (view.searching.chat ? chat.documents : 0);
+    // Row 47: team collections chosen for the chat are sent whatever its own switch says.
+    const team = view.searching.team ? (view.team?.sent ?? []).map((c) => c.name) : [];
+    if (team.length > 0) {
+      const names = team.join(", ");
+      return {
+        label:
+          here > 0 ? `Documents (${here.toLocaleString()}) and ${names}` : `Documents: ${names}`,
+        short: (here + team.length).toLocaleString(),
+        tone: "on",
+      };
+    }
     if (here === 0) {
       const waiting =
         (view.searching.library ? library.waiting : 0) + (view.searching.chat ? chat.waiting : 0);

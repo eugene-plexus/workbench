@@ -24,6 +24,7 @@ import {
   readCollection,
   removeItem,
   roleWords,
+  setOutside,
   type TeamItem,
   teamPeople,
   type TeamPeople,
@@ -358,6 +359,24 @@ export function CollectionPanel({
           />
         </div>
       )}
+      {data.role === "manage" && (
+        <label className="flex items-center gap-2 text-sm" data-testid="team-outside">
+          <input
+            type="checkbox"
+            checked={data.outsideModels}
+            disabled={busy}
+            onChange={() => void act(() => setOutside(id, !data.outsideModels))}
+            className="accent-accent"
+          />
+          Outside models may read it: {data.outsideModels ? "On" : "Off"}
+        </label>
+      )}
+      {data.role === "manage" && (
+        <p className="help">
+          When on, passages go to a model on an outside account (a cloud service) for people who
+          send their own documents there. When off, only models on your machines read it.
+        </p>
+      )}
       {data.role === "manage" && data.kind === "install" && !documentsOnly && (
         <div>
           <button
@@ -367,7 +386,10 @@ export function CollectionPanel({
             onClick={() => {
               if (
                 window.confirm(
-                  `Delete ${data.name}? Its ${plural(data.documents, "document")} and ${plural(data.notes, "note")} go for everyone.`,
+                  `Delete ${data.name}? Its ${plural(data.documents, "document")} and ${plural(data.notes, "note")} go for everyone.` +
+                    (data.othersDocuments
+                      ? ` ${plural(data.othersDocuments, "document")} of them other people added.`
+                      : ""),
                 )
               ) {
                 void act(async () => {
