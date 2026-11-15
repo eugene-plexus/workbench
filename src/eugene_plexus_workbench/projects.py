@@ -18,6 +18,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
+from . import memory
 from .store import Chat, MemoryNote, Store
 
 #: At most this many projects a person.
@@ -32,6 +33,9 @@ class Place:
 
     project_id: str | None = None
     general: bool = True
+    #: Row 47: the owner of a project shared with the chat's person, whose instructions and
+    #: pinned notes in it the chat is given, read only. None for a project of their own.
+    shared_from: str | None = None
 
 
 GENERAL = Place()
@@ -49,13 +53,24 @@ async def model_in_effect(hub: Any, choice: str | None) -> tuple[str | None, lis
 
 
 async def place_of(store: Store, chat: Chat | None) -> Place:
-    """The place a chat is in. A chat whose project has just gone is in none."""
+    """The place a chat is in. A chat whose project has just gone is in none; so is one in a
+    project that is no longer shared with its person (row 47), which keeps their own chat and
+    loses the project's notes at once."""
     if chat is None or chat.project_id is None:
         return GENERAL
     project = await store.project(chat.owner, chat.project_id)
-    if project is None:
+    if project is not None:
+        return Place(project.id, project.general_memory)
+    shared = await store.shared_project(chat.project_id)
+    person = await store.person(chat.owner) if shared is not None else None
+    if shared is None or person is None:
         return GENERAL
-    return Place(project.id, project.general_memory)
+    from .team import project_role
+
+    if await project_role(store, person, shared) is None:
+        return GENERAL
+    # Their own general notes come as in any chat of theirs: the project's switch is its owner's.
+    return Place(shared.id, True, shared.owner)
 
 
 def in_place(notes: Iterable[MemoryNote], place: Place) -> list[MemoryNote]:
@@ -72,5 +87,15 @@ def in_place(notes: Iterable[MemoryNote], place: Place) -> list[MemoryNote]:
 async def chat_notes(
     store: Store, owner: str, chat: Chat | None, *, status: str | None = "active"
 ) -> list[MemoryNote]:
-    """The person's notes a chat may be given."""
-    return in_place(await store.memory_notes(owner, status=status), await place_of(store, chat))
+    """The person's notes a chat may be given; in a project shared with them (row 47), its
+    owner's instructions and pinned notes in it too, read only."""
+    place = await place_of(store, chat)
+    mine = in_place(await store.memory_notes(owner, status=status), place)
+    if place.shared_from is None or status != "active":
+        return mine
+    theirs = [
+        n
+        for n in await store.memory_notes(place.shared_from, status="active")
+        if n.project_id == place.project_id and memory.is_always(n)
+    ]
+    return mine + theirs

@@ -607,9 +607,9 @@ def test_a_schema_33_store_gains_skills_and_keeps_a_copy(tmp_path: Path) -> None
         )
     db.close()
     asyncio.run(make())
-    assert SCHEMA_VERSION == 34
+    assert SCHEMA_VERSION == 35
     with sqlite3.connect(path) as db:
-        assert db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone() == ("34",)
+        assert db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone() == ("35",)
         assert db.execute("SELECT title FROM chats").fetchall() == [("Kept",)]
         columns = {r[1] for r in db.execute("PRAGMA table_info(skills)")}
         assert {"id", "owner", "name", "description", "enabled", "source", "bytes"} <= columns

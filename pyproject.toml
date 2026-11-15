@@ -118,6 +118,7 @@ ignore = []
 "src/eugene_plexus_workbench/media_api.py" = ["B008"]
 "src/eugene_plexus_workbench/saved_api.py" = ["B008"]
 "src/eugene_plexus_workbench/skills_api.py" = ["B008"]
+"src/eugene_plexus_workbench/team_api.py" = ["B008"]
 # Sabotage anchors are exact source text, so a line is as long as the source it names.
 "scripts/check-media-sabotage.py" = ["E501"]
 "scripts/check-memory-sabotage.py" = ["E501"]

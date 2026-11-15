@@ -291,6 +291,55 @@ def test_purge_reaches_every_copy_and_keeps_them_for_everyone_else(tmp_path: Pat
             assert db.execute("SELECT COUNT(*) FROM chats").fetchone()[0] == 1
 
 
+def test_contributions_stay_attributed_to_a_former_member(tmp_path: Path) -> None:
+    """Row 47, call R47-LEAVE: what a removed person added to a team collection stays with the
+    team, by "a former member"; what they proposed and nobody accepted goes, and so do their
+    grants, their shares and their own shared project's collection."""
+    from eugene_plexus_workbench.collection_store import Collection, Grant, Item
+
+    path = tmp_path / "workbench.sqlite3"
+    ann, ben = SUB["a"], SUB["b"]
+
+    async def seed() -> None:
+        store = Store(path)
+        await store.open()
+        try:
+            team = store.collections
+            await team.add(Collection("hand", "Handbook", "install", 1.0, 1.0))
+            await team.add(Collection("anns", "Ann's project", "project:proj-a", 1.0, 1.0))
+            await team.set_grants("hand", [Grant("person", ann, "contribute")])
+            for item_id, by, state in (
+                ("doc-a", ann, "active"),
+                ("note-a", ann, "active"),
+                ("idea-a", ann, "proposed"),
+                ("doc-b", ben, "active"),
+            ):
+                await team.add_item(
+                    Item(item_id, "hand", "note", state, by, 1.0, f"{item_id} words")
+                )
+            await team.add_item(Item("in-anns", "anns", "document", "active", ben, 1.0, "x"))
+            with store._conn() as db:
+                db.execute(
+                    "INSERT INTO projects (id, owner, name, created_at, updated_at) "
+                    "VALUES ('proj-a', ?, 'Ann''s project', 1, 1)",
+                    (ann,),
+                )
+            await team.set_shares("proj-a", [Grant("person", ben, "read")])
+            await team.set_shares("proj-b", [Grant("person", ann, "read")])
+        finally:
+            await store.close()
+
+    asyncio.run(seed())
+    _purge(path, ann)
+    with _open(path) as db:
+        items = dict(db.execute("SELECT id, added_by FROM collection_items").fetchall())
+        grants = db.execute("SELECT COUNT(*) FROM collection_grants").fetchone()[0]
+        shares = db.execute("SELECT project_id, subject FROM project_shares").fetchall()
+        kept = [r[0] for r in db.execute("SELECT id FROM collections")]
+    assert items == {"doc-a": None, "note-a": None, "doc-b": ben}
+    assert grants == 0 and shares == [] and kept == ["hand"]
+
+
 class _Server:
     """A person's memory server that fails each forget `fails` times before it answers."""
 

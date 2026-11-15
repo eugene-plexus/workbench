@@ -514,14 +514,20 @@ async def create_chat(request: Request, body: ChatCreate) -> dict[str, Any]:
     store: Store = _state(request).store
     # Documents are off in a new chat unless the person has said otherwise for new chats.
     prefs = await store.documents_prefs(person.sub)
-    if body.projectId is not None and await store.project(person.sub, body.projectId) is None:
+    from . import team
+
+    # Row 47: a project of theirs, or one shared with them now.
+    project = (
+        await team.usable_project(store, person, body.projectId)
+        if body.projectId is not None
+        else None
+    )
+    if body.projectId is not None and project is None:
         raise _problem(status.HTTP_404_NOT_FOUND, "There is no such project.")
     model = body.model
-    if body.projectId is not None and model is None:
+    if project is not None and model is None:
         from .projects import model_in_effect
 
-        project = await store.project(person.sub, body.projectId)
-        assert project is not None
         with suppress(HubError):
             model, _ = await model_in_effect(_state(request).hub, project.model)
     chat = Chat(
@@ -885,7 +891,12 @@ async def update_chat(request: Request, chat_id: str, body: ChatUpdate) -> dict[
         values["settings"] = {k: v for k, v in merged.items() if v is not None}
     if "projectId" in body.model_fields_set and body.projectId != chat.project_id:
         store_: Store = _state(request).store
-        if body.projectId is not None and await store_.project(person.sub, body.projectId) is None:
+        from . import team
+
+        if (
+            body.projectId is not None
+            and await team.usable_project(store_, person, body.projectId) is None
+        ):
             raise _problem(status.HTTP_404_NOT_FOUND, "There is no such project.")
         # Its frozen pinned block goes with the move: the next turn is given the notes of
         # where the chat is now (MV7).
@@ -1170,8 +1181,13 @@ async def _ask(
         # Row 32: the skills this chat lists, in `use_skill` and never in the system message;
         # tools are assumed unless the gateway says the model refuses them.
         listed: list[Any] = []
+        team_notes: list[Any] = []
         if turn.facts is None or turn.facts.tools:
             listed = await _state(request).skills.for_chat(person, fresh)
+            # Row 47: the team collections chosen here that the person adds notes to.
+            from . import team
+
+            team_notes = await team.contributes_to(_state(request).store, person, fresh)
         return Preparation(
             sources=[*prepared.sources, *found.sources],
             retrieval=found.retrieval,
@@ -1188,6 +1204,7 @@ async def _ask(
             recover=recover,
             filled=lambda: summaries.mark_filled(fresh.id),
             skills=listed,
+            team_notes=team_notes,
         )
 
     async def recover(exc: HubError, progress: Progress) -> list[dict[str, Any]]:

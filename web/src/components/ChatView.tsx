@@ -342,23 +342,37 @@ export function ChatView({
               {chat.title}
             </h1>
           )}
-          {renaming === null && chat.projectId && (
-            <a
-              href={projectPath(chat.projectId)}
-              data-testid="chat-project"
-              title="Open this chat's project"
-              className="badge link shrink-0 max-lg:order-first"
-              onClick={(event) => {
-                if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey) return;
-                if (!onOpenProject) return;
-                event.preventDefault();
-                onOpenProject(chat.projectId!);
-              }}
-            >
-              <FolderOpen size={12} aria-hidden />
-              {placeName(projectList.projects ?? [], chat.projectId) ?? "Project"}
-            </a>
-          )}
+          {renaming === null &&
+            chat.projectId &&
+            projectList.projects &&
+            !projectList.projects.some((p) => p.id === chat.projectId) && (
+              // Row 47: its project was deleted, or is no longer shared with this person. The
+              // chat stays theirs; nothing of the project goes with it now.
+              <span data-testid="chat-project-gone" className="badge shrink-0">
+                Not in a project now: its notes and documents are not used
+              </span>
+            )}
+          {renaming === null &&
+            chat.projectId &&
+            (!projectList.projects ||
+              projectList.projects.some((p) => p.id === chat.projectId)) && (
+              <a
+                href={projectPath(chat.projectId)}
+                data-testid="chat-project"
+                title="Open this chat's project"
+                className="badge link shrink-0 max-lg:order-first"
+                onClick={(event) => {
+                  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey)
+                    return;
+                  if (!onOpenProject) return;
+                  event.preventDefault();
+                  onOpenProject(chat.projectId!);
+                }}
+              >
+                <FolderOpen size={12} aria-hidden />
+                {placeName(projectList.projects ?? [], chat.projectId) ?? "Project"}
+              </a>
+            )}
           {renaming === null && !confirmDelete && (
             <DocumentsChip
               view={documents.view}

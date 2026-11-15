@@ -19,12 +19,16 @@ import { type FormEvent, useCallback, useEffect, useId, useRef, useState } from 
 import { api, del, fileOf, patch, post } from "../lib/api";
 import { characters, failureWords, kindLabel, NOTE_LIMIT, plural, saveFile } from "../lib/memory";
 import { problemWords } from "../lib/projects";
+import { putSharing } from "../lib/team";
 import { OWNER_OFF, OWNER_OFF_EFFECT } from "../lib/savedDocuments";
 import type { MemoryNote, NotesFound, ProjectDetail } from "../lib/types";
 import { useSavedDocuments } from "../lib/useSavedDocuments";
 import { AddDocuments } from "./AddDocuments";
 import { DocumentRow } from "./DocumentRow";
+import { ChatTeam } from "./ChatTeam";
 import { ProjectFolders } from "./ProjectFolders";
+import { SharedProject } from "./SharedProject";
+import { CollectionPanel, GrantEditor } from "./TeamCollections";
 
 export function ProjectPage({
   projectId,
@@ -144,6 +148,17 @@ export function ProjectPage({
           )}
         </div>
       </section>
+    );
+  }
+
+  if (project.shared) {
+    return (
+      <SharedProject
+        project={project}
+        header={header}
+        onOpenChat={onOpenChat}
+        onChanged={() => void load()}
+      />
     );
   }
 
@@ -469,7 +484,20 @@ export function ProjectPage({
               </span>
             </p>
           )}
+          {project.collectionId && (
+            <>
+              <p className="help" data-testid="project-shared-documents">
+                This project is shared, so its documents are kept for everyone it is shared with.
+              </p>
+              <CollectionPanel
+                id={project.collectionId}
+                documentsOnly
+                onChanged={() => void load()}
+              />
+            </>
+          )}
           {docs &&
+            !project.collectionId &&
             (docs.documents.length === 0 ? (
               <p className="empty">No documents in this project yet.</p>
             ) : (
@@ -504,7 +532,7 @@ export function ProjectPage({
                 ))}
               </ul>
             ))}
-          {docs && !docsOff && (
+          {docs && !docsOff && !project.collectionId && (
             <AddDocuments
               projectId={project.id}
               onChanged={() => {
@@ -534,6 +562,38 @@ export function ProjectPage({
               {docsSwitchProblem}
             </p>
           )}
+        </section>
+
+        <section
+          aria-labelledby={`${uid}-sharing`}
+          className="section"
+          data-testid="project-sharing"
+        >
+          <h2 id={`${uid}-sharing`} className="title-section">
+            Sharing
+          </h2>
+          <p className="help">
+            People you share it with see its instructions, pinned notes and documents, and start
+            their own chats in it. Chats are never shared.
+            {project.sharing && project.sharing.othersChats > 0
+              ? ` Others have ${plural(project.sharing.othersChats, "chat")} in it.`
+              : ""}
+          </p>
+          <GrantEditor
+            grants={project.sharing?.shares ?? []}
+            empty="Not shared."
+            onSave={async (next) => {
+              try {
+                const sharing = await putSharing(project.id, next);
+                setProject({ ...project, sharing, collectionId: sharing.collectionId });
+                setProblem(null);
+                onChanged();
+              } catch (failure) {
+                setProblem(problemWords(failure));
+              }
+            }}
+          />
+          <ChatTeam projectId={project.id} />
         </section>
 
         <section aria-labelledby={`${uid}-memory`} className="section">

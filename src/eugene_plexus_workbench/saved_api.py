@@ -61,7 +61,7 @@ import errno
 import logging
 import shutil
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -69,7 +69,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, Response, Upl
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
-from . import config, context, files, memory_api
+from . import config, context, files, memory_api, team
 from .answers import Progress, Refused
 from .api import _own_chat, _person, _problem, _save_upload, _state
 from .hub import HubError
@@ -93,7 +93,7 @@ from .knowledge.index import (
 )
 from .knowledge.meaning import Queue, Status
 from .knowledge.saved import OriginalMissing, SavedDocuments, hash_file, new_id
-from .knowledge.search import Retrieval, Retrieved, plan_query
+from .knowledge.search import PASSAGES, Retrieval, Retrieved, pack, plan_query
 from .knowledge.sorting import Standing
 from .store import Chat, Message, Person, Store
 
@@ -517,12 +517,45 @@ async def add_documents(
         raise _problem(status.HTTP_403_FORBIDDEN, _OWNER_OFF)
     # MV7b: kept to a project when its page adds them.
     where = await _scope_for(store, person.sub, project_id)
+    if project_id is not None:
+        shared = await store.collections.of_project(project_id)
+        if shared is not None:
+            # Row 47: a shared project's documents are its collection's.
+            from .team_api import add_to_collection
+
+            return await add_to_collection(request, person, shared, uploads)
     if len(uploads) > MAX_FILES:
         raise _problem(
             status.HTTP_413_CONTENT_TOO_LARGE,
             f"That is {len(uploads):,} files at once; add at most {MAX_FILES} at a time.",
         )
-    index = saved.index(person.sub)
+    kept, refused = await keep_files(request, person.sub, where, uploads, install)
+    if project_id is not None and kept and await store.project(person.sub, project_id) is None:
+        # The project was deleted while its files were added (MV7b): they go too, rather than
+        # wait unsearched under an id that no longer exists.
+        await saved.remove_documents(person.sub, [v["id"] for v in kept])
+        raise _problem(status.HTTP_404_NOT_FOUND, "There is no such project.")
+    if not kept and refused:
+        raise HTTPException(
+            status_code=refused[0]["status"],
+            detail={"message": refused[0]["message"], "refused": refused},
+        )
+    return {"documents": kept, "refused": refused}
+
+
+async def keep_files(
+    request: Request,
+    owner: str,
+    where: str,
+    uploads: list[UploadFile],
+    install: config.DocumentSettings,
+    *,
+    holder: str = "You already keep",
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Keep each upload in `owner`'s index (a person's, or a collection's), in `where`: what
+    was kept, as the Documents screen reads each, and what was refused, each on its own."""
+    saved = _saved(request)
+    index = saved.index(owner)
     assert index is not None
     kept: list[dict[str, Any]] = []
     refused: list[dict[str, Any]] = []
@@ -555,7 +588,7 @@ async def add_documents(
                 _refusal(
                     name,
                     status.HTTP_409_CONFLICT,
-                    f"You already keep {install.max_passages:,} passages, the limit. Remove a "
+                    f"{holder} {install.max_passages:,} passages, the limit. Remove a "
                     "document to add another, or ask the owner to raise it.",
                 )
             )
@@ -594,7 +627,7 @@ async def add_documents(
             continue
         size, digest = await asyncio.to_thread(hash_file, target)
         added = await saved.add(
-            person.sub,
+            owner,
             doc_id=doc_id,
             scope=where,
             name=name,
@@ -607,17 +640,7 @@ async def add_documents(
         view["unchanged"] = added.unchanged
         view["replaced"] = [d.id for d in added.replaced]
         kept.append(view)
-    if project_id is not None and kept and await store.project(person.sub, project_id) is None:
-        # The project was deleted while its files were added (MV7b): they go too, rather than
-        # wait unsearched under an id that no longer exists.
-        await saved.remove_documents(person.sub, [v["id"] for v in kept])
-        raise _problem(status.HTTP_404_NOT_FOUND, "There is no such project.")
-    if not kept and refused:
-        raise HTTPException(
-            status_code=refused[0]["status"],
-            detail={"message": refused[0]["message"], "refused": refused},
-        )
-    return {"documents": kept, "refused": refused}
+    return kept, refused
 
 
 @router.post("/api/documents/rebuild")
@@ -1457,10 +1480,12 @@ async def retrieve(
         return _finish(view, strict=strict, sent_whole=sent_whole)
 
     try:
+        # Row 47: the team's collections this chat uses, only those the person can read now.
+        shared = await team.for_chat(_store(request), person, chat, documents_on=switch)
         has_chat_docs = index is not None and bool(await index.documents(here))
-        if not switch and not has_chat_docs:
+        if not switch and not has_chat_docs and not shared:
             return Found()
-        if index is None:
+        if index is None and not shared:
             # Nothing has ever been kept, so there is nothing to search and no model to
             # ask about: a chat that answers only from documents says so.
             if not strict:
@@ -1473,18 +1498,33 @@ async def retrieve(
         if access.code in ("install_off", "no_model"):
             return Found()
         library_ok = switch and access.library
-        if switch and not access.library:
+        # A team's documents go only where the person's own may (row 47).
+        team_ok = bool(shared) and access.library
+        if (switch or shared) and not access.library:
             notes.append({"code": str(access.code), "message": str(access.reason)})
             if access.hint:
                 notes[-1]["hint"] = access.hint
         flags.update(library=library_ok, chat=has_chat_docs)
+        if shared:
+            flags["team"] = team_ok
         scopes = [
             *(await own_scopes(_store(request), person.sub, chat) if library_ok else []),
             *([here] if has_chat_docs else []),
         ]
-        if not scopes:
+        if index is None:
+            scopes = []
+        if not scopes and not team_ok:
             return done("skipped", code=access.code or "unavailable", message=access.reason)
-        documents, passages_n, waiting = await index.count_found(scopes)
+        documents, passages_n, waiting = (
+            await index.count_found(scopes) if index is not None and scopes else (0, 0, 0)
+        )
+        if team_ok:
+            more = await _team_counts(saved, shared)
+            documents, passages_n, waiting = (
+                documents + more[0],
+                passages_n + more[1],
+                waiting + more[2],
+            )
         known["searched"] = (documents, passages_n, waiting)
         if waiting:
             notes.append(
@@ -1506,11 +1546,12 @@ async def retrieve(
         known["query"] = query
         candidates = (
             await whole_candidates(index, scopes, last.content)
-            if whole.asked_for_whole(last.content)
+            if index is not None and scopes and whole.asked_for_whole(last.content)
             else []
         )
         if query.empty:
             if candidates:
+                assert index is not None
                 return await apply_whole(
                     request,
                     done("skipped", code="no_words"),
@@ -1535,18 +1576,34 @@ async def retrieve(
             return done("skipped", code="chat_full", message=_no_room(used, reserve, budget))
         started = time.perf_counter()
         progress({"stage": "documents", "phase": "searching"})
-        result = await saved.retriever.retrieve(
-            index,
-            query,
-            scopes,
-            question=last.content,
-            budget=budget.allowed - block_cost,
-            overhead=each,
-        )
+        if team_ok:
+            result = await search_with_team(
+                saved,
+                index if scopes else None,
+                scopes,
+                shared,
+                query,
+                question=last.content,
+                budget=budget.allowed - block_cost,
+                overhead=each,
+                notes=notes,
+            )
+        else:
+            assert index is not None
+            result = await saved.retriever.retrieve(
+                index,
+                query,
+                scopes,
+                question=last.content,
+                budget=budget.allowed - block_cost,
+                overhead=each,
+            )
         known.update(mode=result.mode, found=result.found, did_not_fit=result.did_not_fit)
         known["took"] = time.perf_counter() - started
         known["meaning"] = meaning_block(
-            result, await built_model(index), saved.meaning is not None
+            result,
+            await built_model(index) if index is not None else None,
+            saved.meaning is not None,
         )
         known["sort"] = sort_block(result, saved.sorting is not None)
         gone = result.reports.get("meaning")
@@ -1555,6 +1612,7 @@ async def retrieve(
             notes.append({"code": f"meaning_{gone.code}", "message": str(gone.message)})
         if not result.passages:
             if candidates:
+                assert index is not None
                 return await apply_whole(
                     request,
                     done("nothing_matched"),
@@ -1616,7 +1674,16 @@ async def retrieve(
         view["ms"],
     )
     sources = [context.passage_entry(p) for p in result.passages]
+    named = {c.id: c.name for c in shared}
+    for source, passage in zip(sources, result.passages, strict=True):
+        if passage.scope.startswith(team.KEY):
+            # Row 47: a team's passage says whose: "Acme handbook: Onboarding.pdf".
+            collection_id = passage.scope[len(team.KEY) :]
+            source["scope"] = "collection"
+            source["collection"] = {"id": collection_id, "name": named.get(collection_id, "")}
     for source in sources:
+        if index is None or source["scope"] == "collection":
+            continue
         document = await index.document(source["doc_id"])
         if (
             document
@@ -1630,7 +1697,7 @@ async def retrieve(
         ):
             source["readBy"] = document.read_by
     found = Found(block=block, sources=sources, retrieval=view)
-    if whole.asked_for_whole(last.content):
+    if index is not None and scopes and whole.asked_for_whole(last.content):
         selected = await whole_candidates(index, scopes, last.content)
         fallback = [
             await index.document(doc_id)
@@ -1650,6 +1717,86 @@ async def retrieve(
             select_by_question=bool(selected),
         )
     return found
+
+
+async def _team_counts(saved: SavedDocuments, shared: list[Any]) -> tuple[int, int, int]:
+    """How much the team's collections hold to search: `(documents, passages, waiting)`."""
+    total = [0, 0, 0]
+    for collection in shared:
+        index = saved.index(team.key(collection.id), create=False)
+        if index is None:
+            continue
+        try:
+            held = await index.count_found(list(team.SCOPES))
+        except IndexUnavailable:
+            continue  # said when it is searched
+        total = [a + b for a, b in zip(total, held, strict=True)]
+    return total[0], total[1], total[2]
+
+
+async def search_with_team(
+    saved: SavedDocuments,
+    index: Index | None,
+    scopes: list[str],
+    shared: list[Any],
+    query: Any,
+    *,
+    question: str,
+    budget: int,
+    overhead: int,
+    notes: list[dict[str, str]],
+) -> Retrieval:
+    """Search the person's own documents (when `index`) and each team collection they can read
+    (`shared`, checked by `team.for_chat`), each in its own index, and take the best of each in
+    turn, within one budget. A team passage is named for its collection ("Handbook: Rules.pdf")
+    and scoped `collection:<id>`. A collection that cannot be searched is said, by its name, and
+    the rest are searched."""
+    runs: list[Retrieval] = []
+    lists: list[list[Retrieved]] = []
+    if index is not None:
+        own = await saved.retriever.retrieve(
+            index, query, scopes, question=question, budget=None, overhead=overhead
+        )
+        runs.append(own)
+        lists.append(list(own.passages))
+    for collection in shared:
+        held = saved.index(team.key(collection.id), create=False)
+        if held is None:
+            continue
+        try:
+            got = await saved.retriever.retrieve(
+                held, query, list(team.SCOPES), question=question, budget=None, overhead=overhead
+            )
+        except IndexUnavailable as exc:
+            notes.append(
+                {
+                    "code": "team_unavailable",
+                    "message": f"{collection.name} could not be searched: {exc.message}",
+                }
+            )
+            continue
+        runs.append(got)
+        lists.append(
+            [
+                replace(p, name=f"{collection.name}: {p.name}", scope=team.KEY + collection.id)
+                for p in got.passages
+            ]
+        )
+    taken: list[Retrieved] = []
+    for n in range(max((len(x) for x in lists), default=0)):
+        taken.extend(x[n] for x in lists if n < len(x))
+    fit, dropped = pack(taken[:PASSAGES], budget, overhead)
+    first = next((r for r in runs if r.passages), runs[0] if runs else Retrieval(query))
+    return Retrieval(
+        query,
+        passages=fit,
+        found=sum(r.found for r in runs),
+        did_not_fit=dropped,
+        mode=first.mode,
+        ways=tuple(dict.fromkeys(w for r in runs for w in r.ways)),
+        reports=first.reports,
+        sort=first.sort,
+    )
 
 
 async def whole_plan(

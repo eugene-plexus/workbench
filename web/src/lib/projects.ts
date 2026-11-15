@@ -16,10 +16,31 @@ export function problemWords(error: unknown): string {
 /** The address of a project's page. */
 export const projectPath = (id: string) => `/projects/${encodeURIComponent(id)}`;
 
-/** The person's projects, by name. */
+interface SharedProject {
+  id: string;
+  name: string;
+  owner: string;
+  role: "read" | "contribute";
+  chats: number;
+}
+
+/** The person's projects, by name, then the projects shared with them (row 47). */
 export async function fetchProjects(): Promise<Project[]> {
-  const got = await api<{ projects?: Project[] }>("/api/projects");
-  return Array.isArray(got?.projects) ? got.projects : [];
+  const got = await api<{ projects?: Project[]; shared?: SharedProject[] }>("/api/projects");
+  const own = Array.isArray(got?.projects) ? got.projects : [];
+  const shared = (Array.isArray(got?.shared) ? got.shared : []).map((s): Project => ({
+    id: s.id,
+    name: s.name,
+    generalMemory: true,
+    generalDocuments: true,
+    createdAt: 0,
+    updatedAt: 0,
+    chats: s.chats,
+    notes: 0,
+    documents: 0,
+    shared: { owner: s.owner, role: s.role },
+  }));
+  return [...own, ...shared];
 }
 
 /** A project's chats, newest first. */

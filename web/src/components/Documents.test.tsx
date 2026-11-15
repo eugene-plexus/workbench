@@ -154,6 +154,8 @@ function listen() {
         message: "Off: scanned pages are skipped",
       };
     if (path === "/api/documents/folders") return server.folders;
+    // Row 47: no team collections here.
+    if (path === "/api/collections") return { collections: [], canCreate: false };
     if (path !== "/api/documents") throw new Error(`not served: ${path}`);
     reads += 1;
     if (server.refusing) throw server.refusing;

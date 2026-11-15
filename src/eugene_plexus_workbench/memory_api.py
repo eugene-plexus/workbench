@@ -399,14 +399,19 @@ async def get_memory(request: Request, where: str = "all") -> dict[str, Any]:
 
 async def _bodies(store: Store, owner: str, notes: list[MemoryNote]) -> dict[str, str]:
     """The bodies of these notes, by id, for the ones that have one."""
-    wanted = [n.id for n in notes if n.body_chars]
-    if not wanted:
-        return {}
-    return {
-        n.id: n.body or ""
-        for n in await store.memory_notes_by_ids(owner, wanted, with_body=True)
-        if n.body
-    }
+    out: dict[str, str] = {}
+    # Row 47: a shared project's notes are its owner's, read with their owner.
+    for whose in dict.fromkeys(n.owner or owner for n in notes):
+        wanted = [n.id for n in notes if n.body_chars and (n.owner or owner) == whose]
+        if wanted:
+            out.update(
+                {
+                    n.id: n.body or ""
+                    for n in await store.memory_notes_by_ids(whose, wanted, with_body=True)
+                    if n.body
+                }
+            )
+    return out
 
 
 @router.get("/api/memory/notes")
@@ -1855,7 +1860,14 @@ async def _current_pinned(
     if _switches(install, prefs, chat) is not None:
         return None, None
     snapshot = memory.Snapshot.from_json(chat.memory_snapshot)
-    if snapshot is None and await store.memory_count(person.sub) == 0:
+    place = await projects.place_of(store, chat)
+    if snapshot is not None and chat.project_id is not None and place.project_id is None:
+        # Row 47: its project is gone or no longer shared with them: nothing of it goes again.
+        own = {n.id for n in await projects.chat_notes(store, person.sub, chat)}
+        if any(sent.id not in own for sent in snapshot.sent):
+            await store.set_memory_snapshot(chat.id, person.sub, None)
+            snapshot = None
+    if snapshot is None and await store.memory_count(person.sub) == 0 and place.shared_from is None:
         return None, None  # nothing to send, so there is no model to ask about
     facts = await model_facts(_hub(request), model_id)
     decision = _placement(facts, install, prefs, chat)
