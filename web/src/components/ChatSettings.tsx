@@ -13,6 +13,7 @@ import type { ChatSettings as Settings, LongChatView, Project } from "../lib/typ
 import { ToolSelection } from "./Tools";
 import { FolderSelection } from "./Folders";
 import { SkillSelection } from "./Skills";
+import { ChatTeam } from "./ChatTeam";
 
 const FIELDS: {
   key: "temperature" | "topP" | "maxTokens";
@@ -390,6 +391,7 @@ export function ChatSettings({
               </p>
             </fieldset>
           )}
+          {chatId && <ChatTeam chatId={chatId} />}
           {onMove && (
             <fieldset className="flex min-w-0 flex-col gap-2" data-testid="chat-project-field">
               <legend className="eyebrow mb-3 text-muted">Project</legend>

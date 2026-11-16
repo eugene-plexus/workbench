@@ -107,13 +107,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import branch_store
+from . import branch_store, collection_store
 from .agui_store import SCHEMA as AGUI_SCHEMA
 from .agui_store import AGUIStore, allow_chat_write
 from .interaction_store import SCHEMA as INTERACTION_SCHEMA
 from .interaction_store import InteractionStore
 
-SCHEMA_VERSION = 34
+SCHEMA_VERSION = collection_store.COLLECTIONS_SCHEMA
 
 #: The oldest schema this migrates from: what Workbench v0.1.0 wrote. Schema 1 predates
 #: it, and nobody holds one.
@@ -957,6 +957,8 @@ _MIGRATIONS: dict[int, list[str | Callable[[sqlite3.Connection], None]]] = {
     33: [_memory_extras],
     # Skills (row 32): two new tables; nothing moves.
     SKILLS_SCHEMA: [_skills],
+    # Team knowledge and shared projects (row 47): five new tables; nothing moves.
+    collection_store.COLLECTIONS_SCHEMA: [collection_store.migration],
 }
 
 
@@ -1099,6 +1101,7 @@ def _initialize_schema(
         _linked_memory_server(db)
         _memory_extras(db)
         _skills(db)
+        collection_store.migration(db)
         db.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?)",
             (str(SCHEMA_VERSION),),
@@ -1164,6 +1167,12 @@ PERSON_TABLES: tuple[tuple[str, str], ...] = (
     # which of the install's skills they turned off. Their folder goes with removal's `skills`.
     ("skill_off", "sub"),
     ("skills", "owner"),
+    # Row 47: the collections they chose for their chats and projects, what they were granted,
+    # and what was shared with them. What they added to a collection stays, by "a former
+    # member" (`collection_store.purge_rows`).
+    ("collection_links", "owner"),
+    ("collection_grants", "subject"),
+    ("project_shares", "subject"),
     ("folder_grants", "subject"),
     ("sessions", "sub"),
     ("chats", "owner"),
@@ -1198,6 +1207,7 @@ def _purge_rows(
         ]
     found = {"chat_id": chats, "artifact_id": artifacts}
     gone: dict[str, int] = {}
+    collection_store.purge_rows(db, sub, have)
     for table, column in PERSON_TABLES:
         if column not in have.get(table, set()):
             continue
@@ -2285,6 +2295,8 @@ class Store:
         self._branch_forget: list[tuple[str, str, str, float]] = []
         self.interactions = InteractionStore(self)
         self.agui = AGUIStore(self)
+        #: Row 47: team knowledge and shared projects (`collection_store`).
+        self.collections = collection_store.CollectionStore(self)
         #: The copy that holds this store as it was before it was migrated, if it was: a
         #: new one, or the one an earlier start kept of the same content. What a failure
         #: after the copy points the person to.
@@ -2416,7 +2428,14 @@ class Store:
             )
             return [
                 (
-                    Person(sub=r["sub"], name=r["name"], role=r["role"], username=r["username"]),
+                    Person(
+                        sub=r["sub"],
+                        name=r["name"],
+                        role=r["role"],
+                        username=r["username"],
+                        # Row 47: who shares a group with whom (`team_api.shareable_people`).
+                        groups=None if r["groups_json"] is None else json.loads(r["groups_json"]),
+                    ),
                     int(r["chats"]),
                     int(r["media"]),
                 )
@@ -2609,6 +2628,40 @@ class Store:
                 .fetchone()
             )
             return self._project(row) if row is not None else None
+
+        return await self._run(go)
+
+    async def shared_project(self, project_id: str) -> Project | None:
+        """Row 47: a project by its id, whoever's it is, for the people it is shared with. Never
+        a hidden person's (row 7). Who may see it is `team.project_role`'s to say."""
+
+        def go() -> Project | None:
+            row = (
+                self._conn()
+                .execute(
+                    f"SELECT * FROM projects WHERE id = ? AND owner NOT IN {_HIDDEN}",
+                    (project_id,),
+                )
+                .fetchone()
+            )
+            return self._project(row) if row is not None else None
+
+        return await self._run(go)
+
+    async def others_chats_in(self, project_id: str, owner: str) -> int:
+        """Row 47: how many chats other people have in a project of `owner`'s. A count: what
+        the project's owner sees of them, never their content."""
+
+        def go() -> int:
+            return int(
+                self._conn()
+                .execute(
+                    f"SELECT COUNT(*) FROM chats WHERE project_id = ? AND owner != ? "
+                    f"AND owner NOT IN {_HIDDEN}",
+                    (project_id, owner),
+                )
+                .fetchone()[0]
+            )
 
         return await self._run(go)
 

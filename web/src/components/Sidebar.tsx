@@ -7,6 +7,7 @@ import {
   LogOut,
   Plus,
   Search,
+  Users,
   X,
 } from "lucide-react";
 import { type FormEvent, useState } from "react";
@@ -462,8 +463,15 @@ function ProjectsList({
                       : "pl-2 hover:bg-hover"
                   }`}
                 >
-                  <FolderOpen size={14} aria-hidden className="shrink-0 text-accent" />
+                  {project.shared ? (
+                    <Users size={14} aria-hidden className="shrink-0 text-accent" />
+                  ) : (
+                    <FolderOpen size={14} aria-hidden className="shrink-0 text-accent" />
+                  )}
                   <span className="truncate">{project.name}</span>
+                  {project.shared && (
+                    <span className="sr-only">, shared by {project.shared.owner}</span>
+                  )}
                 </button>
               </div>
               {isOpen && (

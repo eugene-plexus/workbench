@@ -34,6 +34,8 @@ records each step it finishes in `steps`, and is resumed after a restart. It is 
    cause is recorded: what the server keeps stays there.
 2. `knowledge`, 3. `files` and 4. `skills` (row 32): their directories, renamed out of the way and
    removed. A skill they made that the owner gave everyone is the install's, not theirs, and stays.
+   Before `files`, `collections` (row 47): their shared projects' own collections go with the
+   projects; what they added to the install's collections stays, by "a former member".
 5. `exports`: every download of theirs, or of them.
 6. `store`: every row `store.PERSON_TABLES` names, then the file written again.
 7. `copies`: the same, in every `*.schema-N.bak` copy, which stays for everyone else.
@@ -81,10 +83,20 @@ FORGET_TRIES = 3
 #: Tries at moving a directory that Windows says another program holds open.
 MOVE_TRIES = 5
 
-STEPS = ("memory", "knowledge", "files", "skills", "exports", "store", "copies")
+STEPS = (
+    "memory",
+    "knowledge",
+    "collections",
+    "files",
+    "skills",
+    "exports",
+    "store",
+    "copies",
+)
 #: What each step's failure leaves of the person's data, for the sentence that says so.
 _LEFT = {
     "knowledge": "their documents",
+    "collections": "their shared projects' documents",
     "files": "their files",
     "skills": "their skills",
     "exports": "their downloads",
@@ -520,6 +532,20 @@ class Removal:
             indexes.refuse(sub)
             await indexes.forget(sub)
         await asyncio.to_thread(remove_tree, self.data_dir / "knowledge" / files.person_key(sub))
+        return "done"
+
+    async def _step_collections(self, sub: str) -> str:
+        """Row 47: their shared projects' own collections, with everything in them, go with
+        their projects. What they added to an install collection stays, by a former member
+        (the store's step)."""
+        if self.saved is None:
+            return "done"
+        from . import team
+
+        for project in await self.store.projects(sub):
+            collection = await self.store.collections.of_project(project.id)
+            if collection is not None:
+                await team.drop(self.store, self.saved, collection)
         return "done"
 
     async def _step_files(self, sub: str) -> str:

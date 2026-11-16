@@ -86,6 +86,8 @@ class Preparation:
     #: Row 32: the skills this answer lists in `use_skill` (`skills.Skills.for_chat`); none
     #: offers neither of the two tools.
     skills: list[Any] = field(default_factory=list)
+    #: Row 47: the team collections the model may propose a note to (`suggest_team_note`).
+    team_notes: list[Any] = field(default_factory=list)
     #: How a `reply` ends, as a message's `finish` says it.
     finish: str = "documents_only"
     #: Row 26: the summaries this answer's request carries (`Message.summaries`), or None.
@@ -532,6 +534,7 @@ class Answers:
 
         memory_tool = chats_tool = remember_tool = False
         skills: list[Any] = []
+        team_notes: list[Any] = []
         recover: Callable[[HubError, Progress], Awaitable[list[dict[str, Any]]]] | None = None
         filled: Callable[[], None] | None = None
         try:
@@ -544,6 +547,7 @@ class Answers:
                 chats_tool = prepared.chats_tool
                 remember_tool = prepared.remember_tool
                 skills = prepared.skills
+                team_notes = prepared.team_notes
                 running.progress = None
                 told: dict[str, Any] = {}
                 if prepared.sources:
@@ -585,6 +589,7 @@ class Answers:
                     or chats_tool
                     or remember_tool
                     or skills
+                    or team_notes
                 ):
                     await self._with_tools(
                         running,
@@ -596,6 +601,7 @@ class Answers:
                         remember_tool=remember_tool,
                         interactions=bool(context),
                         skills=skills,
+                        team_notes=team_notes,
                     )
                 else:
                     await self._stream(running, body)
@@ -772,6 +778,7 @@ class Answers:
         remember_tool: bool = False,
         interactions: bool = False,
         skills: list[Any] | None = None,
+        team_notes: list[Any] | None = None,
     ) -> None:
         if self._tools is None:
             raise ToolError("Tools are unavailable. Restart Workbench and try again.")
@@ -792,6 +799,8 @@ class Answers:
                 with_remember_hint(body)
             if skills and person is not None:
                 session.add_skills(skills)
+            if team_notes and person is not None:
+                session.add_team_notes(running.chat_id, body.get("model"), team_notes)
             if not session.definitions:
                 raise ToolError("The selected servers offer no tools. Check them in Tools.")
             body["tools"] = session.definitions

@@ -42,6 +42,8 @@ SESSION_SECONDS = 30 * 24 * 3600
 #: Refresh this long before the access token's own expiry.
 _EARLY = 30.0
 _UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
+#: What a team collection's index is kept under (`team.KEY`): its work acts as its manager (row 47).
+COLLECTION = "collection:"
 
 
 def digest(value: str) -> str:
@@ -215,6 +217,30 @@ class Sessions:
                 identity.access_token,
             )
 
+    async def _collection_actor(self, collection_id: str) -> str:
+        """Whose sign-in a team collection's background work uses: its shared project's owner,
+        or for an install collection the owner of this Workbench who signed in last."""
+        from .hub import HubError
+
+        collection = await self._store.collections.get(collection_id)
+        if collection is not None and collection.project_id is not None:
+            project = await self._store.shared_project(collection.project_id)
+            if project is not None:
+                return project.owner
+        elif collection is not None:
+            now = time.time()
+            owners = [p.sub for p, _, _ in await self._store.people() if p.is_owner]
+            live = [
+                (r.created_at, r.sub)
+                for s in owners
+                if (r := await self._store.latest_session(s, now))
+            ]
+            if live:
+                return max(live)[1]
+        raise HubError(
+            "A team collection's search by meaning waits for its owner's sign-in.", status=401
+        )
+
     async def gateway_token(self) -> str:
         """Only a current owner's sign-in, never a process-wide service fallback."""
         from .hub import HubError
@@ -225,6 +251,9 @@ class Sessions:
                 "Sign in to use models. Background work waits for its owner's sign-in.", status=401
             )
         sub, session_id = identity
+        if sub.startswith(COLLECTION):
+            # Row 47: a team collection's own work (its meaning) acts with its manager's sign-in.
+            sub, session_id = await self._collection_actor(sub[len(COLLECTION) :]), None
         row = (
             await self._store.session(session_id)
             if session_id

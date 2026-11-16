@@ -439,6 +439,8 @@ export interface Project {
   notes: number;
   /** The documents kept to the project. */
   documents: number;
+  /** Row 47: a project someone shared with this person: whose it is, and what they may do. */
+  shared?: { owner: string; role: "read" | "contribute" };
 }
 
 /** One project with its chats, newest first (`GET /api/projects/{id}`). */
@@ -449,6 +451,12 @@ export interface ProjectDetail extends Project {
   models?: string[];
   modelProblem?: string | null;
   folders?: number;
+  /** Row 47: its own collection, once it is shared (its documents are there). */
+  collectionId?: string | null;
+  /** Row 47, for its owner: who it is shared with, and how many chats others have in it. */
+  sharing?: import("./team").Sharing;
+  /** Row 47, for someone it is shared with: its owner's instructions and pinned notes. */
+  instructions?: { id: string; text: string; kind: string }[];
 }
 
 export interface ChatDetail {
@@ -1831,7 +1839,13 @@ export interface ChatDocuments {
   /** Whether the next request searches anything: the person's documents, this
    * chat's own searched files, or both. */
   sending: boolean;
-  searching: { library: boolean; chat: boolean };
+  /** Row 47: `team` is whether team collections are sent. */
+  searching: { library: boolean; chat: boolean; team?: boolean };
+  /** Row 47: the team collections the next request is sent, and each other with why not. */
+  team?: {
+    sent: { id: string; name: string }[];
+    held: { id: string; name: string; why: string }[];
+  };
   reason: string | null;
   reasonCode: DocumentsReason | null;
   hint: string | null;

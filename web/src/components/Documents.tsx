@@ -59,6 +59,7 @@ import { DocumentFolders } from "./DocumentFolders";
 import { DocumentRow } from "./DocumentRow";
 import { DocumentsSearch } from "./DocumentsSearch";
 import { DocumentsSort } from "./DocumentsSort";
+import { TeamCollections } from "./TeamCollections";
 import { TestQuestion } from "./TestQuestion";
 
 type Working = <T>(work: () => Promise<T>) => Promise<T>;
@@ -431,6 +432,7 @@ export function Documents({
             onTools={onTools}
           />
         )}
+        {!bare && <TeamCollections />}
         {!off && (data.documents.length > 0 || fromFolders) && (
           <TestQuestion search={data.search} />
         )}

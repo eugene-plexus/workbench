@@ -68,6 +68,7 @@ from .sessions import Sessions
 from .settings import Settings
 from .signin import Provider, https_twin
 from .store import Store, public_cause
+from .team_api import router as team_router
 from .tools import Tools
 
 log = logging.getLogger(__name__)
@@ -315,6 +316,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if tidied:
             log.info("%d skill folder(s) a stop left half-made were removed", tidied)
         tools.skills = skills.run
+        # Team knowledge (row 47): a model proposes a note to a collection; a person accepts it.
+        from . import team
+
+        async def team_note(
+            person: Any, chat_id: str, model: str | None, arguments: dict[str, Any]
+        ) -> tuple[str, str]:
+            return await team.propose(store, saved, person, chat_id, model, arguments)
+
+        tools.team_note = team_note
         # Memory servers (MV5): a person's own, sent their answered exchanges in the
         # background and asked every turn.
         from .memory_servers import Courier, Servers
@@ -455,6 +465,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(memory_models_api.router)
     app.include_router(past_chats_router)
     app.include_router(projects_router)
+    app.include_router(team_router)
     app.include_router(memory_servers_router)
     app.include_router(groups_router)
     app.include_router(removal_router)

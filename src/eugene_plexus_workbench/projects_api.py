@@ -4,6 +4,13 @@
 `PATCH /api/chats/{id}` (`projectId`), and a note with `POST /api/memory/notes/{id}/move`.
 Deleting a project asks one question with two answers (`keep`): its chats and notes go with
 it, or they stay and become general. Either way nothing is left under its id.
+
+**Sharing a project** (row 47): its owner shares it with people and groups (`PUT
+/api/projects/{id}/sharing`), each `read` or `contribute`. They see it under Shared with me,
+read its instructions and pinned notes, search its documents, and start their own chats in it.
+**Chats are never shared**: each person sees only their own chats in it, and its owner a count
+of everyone else's. When it is first shared, the documents its owner added move into the
+project's own collection (`team.share_project`), where contributors add theirs.
 """
 
 from __future__ import annotations
@@ -15,10 +22,10 @@ from typing import Any
 from fastapi import APIRouter, Request, status
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
-from . import memory, memory_api, projects
+from . import memory, memory_api, projects, team, team_api
 from .api import _answers, _new_id, _person, _problem, _state, chat_view, remove_chat
 from .hub import HubError
-from .store import Project, Store
+from .store import Person, Project, Store
 
 log = logging.getLogger(__name__)
 
@@ -102,7 +109,8 @@ async def _put(request: Request, project: Project, *, retake: bool = False) -> N
 
 @router.get("/api/projects")
 async def list_projects(request: Request) -> dict[str, Any]:
-    """The asker's projects, by name, each with how many chats and notes it holds."""
+    """The asker's projects, by name, each with how many chats and notes it holds; and the
+    projects shared with them now (row 47), with how many of their own chats each holds."""
     person = await _person(request)
     store = _store(request)
     chats, notes = await _counts(store, person.sub)
@@ -110,7 +118,90 @@ async def list_projects(request: Request) -> dict[str, Any]:
         "projects": [
             project_view(p, chats.get(p.id, 0), notes.get(p.id, 0))
             for p in await store.projects(person.sub)
-        ]
+        ],
+        "shared": await shared_list(store, person, chats),
+    }
+
+
+async def shared_list(store: Store, person: Person, chats: dict[str, int]) -> list[dict[str, Any]]:
+    names = {p.sub: p.name for p, _, _ in await store.people()}
+    out = []
+    groups = [g["id"] for g in person.groups or []]
+    for project_id, role in (await store.collections.shared_with(person.sub, groups)).items():
+        project = await store.shared_project(project_id)
+        if project is None or project.owner == person.sub:
+            continue
+        out.append(
+            {
+                "id": project.id,
+                "name": project.name,
+                "owner": names.get(project.owner, "Someone"),
+                "role": role,
+                "chats": chats.get(project.id, 0),
+            }
+        )
+    return sorted(out, key=lambda v: (v["name"].casefold(), v["id"]))
+
+
+async def sharing_view(request: Request, project: Project) -> dict[str, Any]:
+    """Who a project is shared with, its collection, and how many chats others have in it."""
+    store = _store(request)
+    names = {p.sub: p.name for p, _, _ in await store.people()}
+    collection = await store.collections.of_project(project.id)
+    return {
+        "shares": [
+            {
+                "kind": g.kind,
+                "id": g.subject,
+                "name": names.get(g.subject, "a former member") if g.kind == "person" else None,
+                "role": g.role,
+            }
+            for g in await store.collections.shares(project.id)
+        ],
+        "collectionId": collection.id if collection is not None else None,
+        # What its owner sees of other people's chats in it: a count, never their content.
+        "othersChats": await store.others_chats_in(project.id, project.owner),
+        # Documents other people added, which deleting it takes too: what the question names.
+        "othersDocuments": (
+            sum(
+                i.kind == "document" and i.added_by != project.owner
+                for i in await store.collections.items(collection.id)
+            )
+            if collection is not None
+            else 0
+        ),
+        "outsideModels": collection.outside if collection is not None else False,
+    }
+
+
+async def _shared_project(request: Request, person: Person, project_id: str) -> dict[str, Any]:
+    """A project shared with the asker: its instructions and pinned notes (read only), its
+    documents, and the asker's own chats in it. The same 404 as a project that is not there
+    when it is not shared with them now."""
+    store = _store(request)
+    project = await store.shared_project(project_id)
+    role = await team.project_role(store, person, project) if project is not None else None
+    if project is None or role is None:
+        raise _problem(status.HTTP_404_NOT_FOUND, "There is no such project.")
+    names = {p.sub: p.name for p, _, _ in await store.people()}
+    mine = [c for c in await store.chats(person.sub) if c.project_id == project.id]
+    pinned = await projects.shared_notes(store, project.owner, project.id)
+    collection = await store.collections.of_project(project.id)
+    documents = (
+        sum(i.kind == "document" for i in await store.collections.items(collection.id))
+        if collection is not None
+        else 0
+    )
+    answers = _answers(request)
+    return {
+        **project_view(project, len(mine), 0),
+        **await model_view(request, project),
+        "shared": {"owner": names.get(project.owner, "Someone"), "role": role},
+        "instructions": [{"id": n.id, "text": n.text, "kind": n.kind} for n in pinned],
+        "documents": documents,
+        "collectionId": collection.id if collection is not None else None,
+        "folders": 0,
+        "chatList": [chat_view(c, running=answers.running(c.id) is not None) for c in mine],
     }
 
 
@@ -134,8 +225,10 @@ async def create_project(request: Request, body: ProjectCreate) -> dict[str, Any
 async def get_project(request: Request, project_id: str) -> dict[str, Any]:
     """One project, with its chats, newest first."""
     person = await _person(request)
-    project = await _own(request, person.sub, project_id)
     store = _store(request)
+    if await store.project(person.sub, project_id) is None:
+        return await _shared_project(request, person, project_id)
+    project = await _own(request, person.sub, project_id)
     mine = [c for c in await store.chats(person.sub) if c.project_id == project.id]
     notes = [n for n in await store.memory_notes(person.sub) if n.project_id == project.id]
     answers = _answers(request)
@@ -146,9 +239,17 @@ async def get_project(request: Request, project_id: str) -> dict[str, Any]:
         if index is not None
         else 0
     )
+    sharing = await sharing_view(request, project)
+    if sharing["collectionId"] is not None:
+        # Row 47: a shared project's documents are its collection's.
+        documents += sum(
+            i.kind == "document" for i in await store.collections.items(sharing["collectionId"])
+        )
     return {
         **project_view(project, len(mine), len(notes)),
         **await model_view(request, project),
+        "sharing": sharing,
+        "collectionId": sharing["collectionId"],
         # MV7b: how many documents are kept to it (what Delete project names).
         "documents": documents,
         "folders": sum(f.project_id == project.id for f in await store.folder_records(person.sub)),
@@ -172,6 +273,9 @@ async def update_project(request: Request, project_id: str, body: ProjectUpdate)
     project = await _own(request, person.sub, project_id)
     if body.name is not None:
         project.name = _name(body.name)
+        shared = await _store(request).collections.of_project(project.id)
+        if shared is not None:
+            await _store(request).collections.rename(shared.id, project.name, time.time())
     switched = body.generalMemory is not None and body.generalMemory != project.general_memory
     if body.generalMemory is not None:
         project.general_memory = body.generalMemory
@@ -231,6 +335,17 @@ async def delete_project(request: Request, project_id: str, keep: bool = False) 
                     "Workbench could not move this project's documents to My documents, so "
                     f"nothing was deleted ({type(exc).__name__}). Try again in a moment.",
                 ) from None
+        # Row 47: a shared project's documents move to My documents too, and its shares end.
+        try:
+            moved += await team.release_project(store, saved, project)
+        except Exception as exc:
+            log.warning("a shared project's documents were not moved: %s", type(exc).__name__)
+            raise _problem(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "Workbench could not move this project's shared documents to My documents, so "
+                f"nothing more was deleted ({type(exc).__name__}). Try again in a moment.",
+            ) from None
+        await team.end_project(store, saved, project.id)
         chats, notes = await store.release_project(person.sub, project.id)
         return {
             "kept": True,
@@ -259,6 +374,9 @@ async def delete_project(request: Request, project_id: str, keep: bool = False) 
                 f"and its other notes were kept ({type(exc).__name__}). Try again in a moment.",
             ) from None
     gone_documents = await saved.drop_project(person.sub, project.id) if saved is not None else 0
+    # Row 47: its collection, its shares and everyone's choices for it go too. Other people's
+    # chats in it stay theirs, in no project.
+    gone_documents += await team.end_project(store, saved, project.id)
     # Suggestions still waiting from its chats went with them (`delete_chat`).
     await store.drop_project_row(person.sub, project.id)
     return {
@@ -267,6 +385,31 @@ async def delete_project(request: Request, project_id: str, keep: bool = False) 
         "notes": gone_notes,
         "documents": gone_documents,
     }
+
+
+class SharingUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    shares: list[team_api.GrantIn] = Field(max_length=200)
+
+
+@router.put("/api/projects/{project_id}/sharing")
+async def put_sharing(request: Request, project_id: str, body: SharingUpdate) -> dict[str, Any]:
+    """Share a project with people and groups, each `read` or `contribute`, or with nobody.
+    Its owner only. Shared the first time, the documents its owner added move into its own
+    collection. Someone taken off the share loses its notes and documents at their next answer;
+    their chats in it stay theirs."""
+    person = await _person(request)
+    project = await _own(request, person.sub, project_id)
+    store = _store(request)
+    shares = await team_api.check_grantees(request, person, body.shares, any_group=person.is_owner)
+    if shares:
+        # Every time: a first share cut short moves the rest now.
+        try:
+            await team.share_project(store, _state(request).saved, project)
+        except team.ShareIncomplete as exc:
+            raise _problem(status.HTTP_503_SERVICE_UNAVAILABLE, exc.message) from None
+    await store.collections.set_shares(project.id, shares)
+    return await sharing_view(request, project)
 
 
 class NoteMove(BaseModel):

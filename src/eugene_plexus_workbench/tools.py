@@ -68,6 +68,8 @@ REMEMBER_TOOL_NAME = "remember"
 #: Row 32: `use_skill` and `read_skill_file` (`skills.py`), run by Workbench over the asking
 #: person's skills, as `search_memory` is over their notes.
 SKILLS_SERVER = "skills"
+#: Row 47: `suggest_team_note`, which Workbench runs itself.
+TEAM_SERVER = "team-notes"
 SkillRunner = Callable[
     [Person, list[Any], str, dict[str, Any], list[str]], Awaitable[tuple[str, str]]
 ]
@@ -378,6 +380,11 @@ class Tools:
         #: person, the skills the answer listed, the tool, its arguments and the job sites this
         #: answer may run commands on; its status and what the model is told.
         self.skills: SkillRunner | None = None
+        #: Row 47: runs one `suggest_team_note` call (`team.propose`): the person, the chat,
+        #: the model and its arguments; its status and what the model is told.
+        self.team_note: (
+            Callable[[Person, str, str | None, dict[str, Any]], Awaitable[tuple[str, str]]] | None
+        ) = None
 
     @asynccontextmanager
     async def connect(
@@ -670,6 +677,8 @@ class ToolSession:
         self.remember = tools.remember
         self.remember_calls = 0
         self.skills = tools.skills
+        self.team_note = tools.team_note
+        self.team_calls = 0
         #: The skills this answer lists (row 32), as the answer began.
         self.skill_listing: list[Any] = []
         #: What the answer has read so far this turn (`memory_write.TurnContext`), for
@@ -776,6 +785,25 @@ class ToolSession:
             self.metadata[function["name"]] = {}
             self.model_names.add(function["name"])
             self.definitions.append(definition)
+
+    def add_team_notes(self, chat_id: str, model: str | None, collections: list[Any]) -> None:
+        """Offer `suggest_team_note` (row 47) for the team collections the person adds to in
+        this chat. The person approves each call, seeing its words, before anything leaves the
+        chat; a note it proposes then waits for a contributor."""
+        from .team import TOOL, tool_definition
+
+        self.chat_id, self.model = chat_id, model or self.model
+        if self.team_note is None or not collections or TOOL in self.tools:
+            return
+        definition = tool_definition(collections)
+        server = {"id": TEAM_SERVER, "name": "Team notes", "transport": "team-notes"}
+        self.tools[TOOL] = (server, None, TOOL, definition["function"]["parameters"])
+        # Asked about each time: the words leave the person's chat for other people's eyes,
+        # and a document or page the model read may have written them.
+        self.asks[TOOL] = True
+        self.metadata[TOOL] = {}
+        self.model_names.add(TOOL)
+        self.definitions.append(definition)
 
     def _command_sites(self) -> list[str]:
         """The job sites this answer may run a command on: those whose tools offer `run_command`."""
@@ -919,6 +947,23 @@ class ToolSession:
             else:
                 state, text = await self.skills(
                     self.person, self.skill_listing, tool, call["arguments"], self._command_sites()
+                )
+                call.update(status=state, result=text)
+            return
+        if server["transport"] == "team-notes":
+            from .team import TOOL_CALLS
+
+            self.team_calls += 1
+            if self.team_note is None or self.person is None or self.chat_id is None:
+                call.update(status="failed", result="Proposing team notes is unavailable.")
+            elif self.team_calls > TOOL_CALLS:
+                call.update(
+                    status="failed",
+                    result=f"This answer has proposed {TOOL_CALLS} notes, the most it may.",
+                )
+            else:
+                state, text = await self.team_note(
+                    self.person, self.chat_id, self.model, call["arguments"]
                 )
                 call.update(status=state, result=text)
             return

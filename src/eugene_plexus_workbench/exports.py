@@ -220,6 +220,13 @@ class Exports:
             keeper = getattr(self.state, "skills", None)
             if keeper is not None:
                 skills = await keeper.exported(sub)
+        #: Row 47: their shared projects' documents, kept in each project's own collection.
+        shared: list[tuple[str, str]] = []
+        if full:
+            for project in snapshot["projects"]:
+                collection = await self.store.collections.of_project(project.id)
+                if collection is not None:
+                    shared.append((project.name, files.person_key(f"collection:{collection.id}")))
         root, target = self.data_dir, self.path_of(row["id"])
         abort = threading.Event()
 
@@ -346,6 +353,14 @@ class Exports:
                         where = scope.split(":", 1)[0]
                         archive.write(original, unique(f"documents/{where}/{_safe(doc_name)}"))
                         holds["documents"] += 1
+                    for project_name, key in shared:
+                        index_dir = root / "knowledge" / key
+                        place = f"documents/shared project {_safe(project_name, 'project')}"
+                        for doc_id, _, doc_name in _documents(index_dir):
+                            original = index_dir / "originals" / doc_id
+                            if original.is_file():
+                                archive.write(original, unique(f"{place}/{_safe(doc_name)}"))
+                                holds["documents"] += 1
                 for skill_name, folder in skills:
                     # A skill's name is lowercase letters, digits and hyphens: a safe folder.
                     kept = [p for p in sorted(folder.rglob("*")) if p.is_file()]
