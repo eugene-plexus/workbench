@@ -505,6 +505,9 @@ class FakeEugene:
     #: Row 70c: what `/oidc/groups` lists, or None for an Eugene too old to have it (404).
     groups: list[dict[str, str]] | None = field(default_factory=list)
     access: dict[str, str] = field(default_factory=dict)
+    #: Row 40: what `/oidc/usage` answers for each person, or None for an Eugene too old
+    #: to count usage (404).
+    usage: dict[str, dict[str, Any]] | None = field(default_factory=dict)
 
     @property
     def issuer(self) -> str:
@@ -666,6 +669,21 @@ class FakeEugene:
                 told = self.claims.get(sub, {})
                 extra = {k: v for k, v in told.items() if k != "eugene_groups_truncated"}
             return {"sub": sub, "name": person["name"], "eugene_role": person["role"], **extra}
+
+        @app.get("/oidc/usage")
+        async def usage(request: Request) -> Any:
+            if self.usage is None:
+                return JSONResponse({"detail": "Not Found"}, status_code=404)
+            token = request.headers.get("authorization", "").removeprefix("Bearer ")
+            sub = self.access.get(token)
+            if sub is None or sub in self.disabled:
+                return JSONResponse({"error": "invalid_token"}, status_code=401)
+            return self.usage.get(sub) or {
+                "day": "2026-11-16",
+                "month": "2026-11",
+                "kept": {"days": 62, "months": 13},
+                "subjects": [],
+            }
 
         @app.get("/oidc/groups")
         async def groups(request: Request) -> Any:

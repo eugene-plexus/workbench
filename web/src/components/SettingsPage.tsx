@@ -17,6 +17,7 @@ import { GroupServers, YourGroups } from "./GroupsSettings";
 import { MemorySettings } from "./MemorySettings";
 import { RemovedPeople } from "./RemovedPeople";
 import { YourData } from "./YourData";
+import { YourUsage } from "./YourUsage";
 
 export function SettingsPage({
   onClose,
@@ -55,6 +56,7 @@ export function SettingsPage({
         <MemorySettings onOpenMemory={onOpenMemory} />
         <DocumentsSettings onOpenDocuments={onOpenDocuments} />
         <YourGroups />
+        <YourUsage />
         {owner && (
           <div id="groups" className="scroll-mt-4">
             <GroupServers />
