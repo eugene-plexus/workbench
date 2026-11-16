@@ -1162,6 +1162,41 @@ export interface GroupsPage {
   why: string | null;
 }
 
+/** Row 40: one allowance and how much of it is used, as Eugene's root says it. Money is an exact
+ * decimal string in dollars (twelve places); tokens are whole-number strings. */
+export interface UsageAllowance {
+  kind: "tokensPerDay" | "tokensPerMonth" | "costPerMonth";
+  limit: string;
+  used: string;
+  left: string;
+  spent: boolean;
+  resetsAt: string;
+  setBy?: string;
+}
+
+export interface UsageTotals {
+  requests: number;
+  promptTokens: number;
+  completionTokens: number;
+  tokens: number;
+  costUsd: string;
+  unpricedRequests: number;
+}
+
+export interface UsageSubject {
+  kind: "key" | "person" | "group";
+  id: string;
+  name: string;
+  day: UsageTotals;
+  month: UsageTotals;
+  allowances: UsageAllowance[];
+}
+
+/** Row 40: `GET /api/usage`, the signed-in person's own usage, or why there is none to show. */
+export type UsagePage =
+  | { known: true; report: { day: string; month: string; subjects: UsageSubject[] } }
+  | { known: false; why: string };
+
 /** Row 70c: `GET /api/groups/manage`, the owner's: a memory server per group. */
 export interface GroupServersPage {
   allowed: boolean;
