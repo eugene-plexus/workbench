@@ -2529,9 +2529,14 @@ class Store:
         await self.interactions.sweep()
 
     async def sweep_sessions(self, now: float) -> None:
-        await self._run(
+        """Delete every session whose month is over: the row is the whole session, the cookie
+        and secret hashes and Eugene's two tokens. One still inside its month is kept. As with
+        `delete_session`, an action waiting on a deleted session is then cancelled."""
+        cursor = await self._run(
             lambda: self._conn().execute("DELETE FROM sessions WHERE expires_at < ?", (now,))
         )
+        if cursor.rowcount:
+            await self.interactions.sweep()
 
     # --- chats ----------------------------------------------------------
 

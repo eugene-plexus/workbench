@@ -15,7 +15,11 @@ is never sent to a server, so no other port's server ever sees it. The
 header is also the CSRF defence, and a changing call must carry this
 origin's `Origin` as well.
 
-Only hashes are stored. A copy of the database opens no session.
+The cookie and the secret are stored only as hashes, so a copy of the database
+holds nothing that opens a session in the browser. It does hold Eugene's access
+and refresh tokens for each session that has not yet expired, in clear text: a
+session is deleted when it expires and is presented, and by the sweep that runs
+soon after the start and then each hour (`Removal.sweep_sessions`).
 """
 
 from __future__ import annotations
