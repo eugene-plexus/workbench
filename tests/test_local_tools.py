@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import signal
@@ -46,16 +47,62 @@ def alive(pid: int) -> bool:
         return False
 
 
-def assert_stopped(record: Path) -> None:
+#: How long the product itself may take to reap a hung local server, from `mcp` 2.3.0's
+#: `mcp/client/stdio.py` (`_stop_server_process`), which `local_tools.connect` uses: it lets
+#: the writer flush for 0.5 s (`_WRITER_FLUSH_TIMEOUT`), closes stdin and waits 2.0 s for the
+#: server to exit by itself (`PROCESS_TERMINATION_TIMEOUT`), sends SIGTERM to the group and
+#: waits 2.0 s before SIGKILL (`FORCE_KILL_TIMEOUT`), then waits 2.0 s for the death to be seen
+#: (`_KILL_REAP_TIMEOUT`): 0.5 + 2.0 + 2.0 + 2.0 = 6.5 s. Windows kills hard at once. The check
+#: request waits for that shutdown before it answers (a hung server was seen dead 6 ms after
+#: the 502), so on a green run the wait below ends at once; the bound only decides how long a
+#: failing run waits. Twice the product's worst case, 13 s, leaves room for a loaded runner.
+SHUTDOWN_WORST_CASE = 0.5 + 2.0 + 2.0 + 2.0
+REAPED_WITHIN = 2 * SHUTDOWN_WORST_CASE
+
+
+def assert_stopped(record: Path, bound: float = REAPED_WITHIN) -> None:
     pids = [row["pid"] for row in events(record) if "pid" in row]
-    deadline = time.perf_counter() + 8
+    deadline = time.perf_counter() + bound
     while any(alive(pid) for pid in pids) and time.perf_counter() < deadline:
         time.sleep(0.03)
     survivors = [pid for pid in pids if alive(pid)]
-    # Clean up only fixture processes whose PIDs this test recorded, even on failure.
+    # Clean up only fixture processes whose PIDs this test recorded, even on failure. One that
+    # exits between the check and the kill is gone, which is what the cleanup wants: Linux
+    # raises ProcessLookupError, Windows PermissionError or OSError for an exited pid. The
+    # assertion below still names every process that outlived the bound.
     for pid in survivors:
-        os.kill(pid, signal.SIGTERM)
-    assert not survivors, f"Local fixture processes survived shutdown: {survivors}"
+        with contextlib.suppress(OSError):
+            os.kill(pid, signal.SIGTERM)
+    assert not survivors, (
+        f"Local fixture processes survived shutdown, {bound:.1f} s after it ended: {survivors}"
+    )
+
+
+@pytest.mark.parametrize("gone", [ProcessLookupError, PermissionError, OSError])
+def test_cleanup_kill_of_a_process_that_just_exited_still_reports_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gone: type[OSError]
+) -> None:
+    """`assert_stopped` saw a pid alive, and it exited before the kill: the kill error must
+    not hide the assertion that names the pid (weekly rehearsal, 2026-11-16)."""
+    record = tmp_path / "events.jsonl"
+    record.write_text(json.dumps({"event": "start", "pid": 4242}) + "\n", encoding="utf-8")
+
+    def exited(pid: int, sig: int) -> None:
+        raise gone(3, "No such process")
+
+    monkeypatch.setattr(sys.modules[__name__], "alive", lambda pid: True)
+    monkeypatch.setattr(os, "kill", exited)
+    with pytest.raises(AssertionError, match="4242"):
+        assert_stopped(record, bound=0.1)
+
+
+def test_a_process_that_is_already_gone_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = tmp_path / "events.jsonl"
+    record.write_text(json.dumps({"event": "start", "pid": 4242}) + "\n", encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "alive", lambda pid: False)
+    assert_stopped(record, bound=0.1)
 
 
 def configuration(record: Path, mode: str = "normal") -> dict[str, Any]:

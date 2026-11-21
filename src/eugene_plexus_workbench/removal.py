@@ -215,6 +215,7 @@ class Removal:
                 self.purge_soon(row["sub"])
         while True:
             self._later = None
+            await self.sweep_sessions()
             try:
                 await self.check()
                 await self.due()
@@ -227,6 +228,22 @@ class Removal:
             self._wake.clear()
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._wake.wait(), timeout=CHECK_SECONDS)
+
+    async def sweep_sessions(self) -> None:
+        """Delete the sessions past their month, with the Eugene tokens in them (issue 25).
+
+        Apart from the rest of the tick: a failed check must not keep the tokens of an
+        abandoned sign-in, and a failed sweep must not end the loop. It runs at the start
+        and then with every tick, each hour."""
+        try:
+            await self.store.sweep_sessions(self.clock())
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning(
+                "Workbench could not delete its expired sign-ins and will try again in an hour: %s",
+                exc,
+            )
 
     # --- asking Eugene -------------------------------------------------------
 
