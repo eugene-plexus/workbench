@@ -70,6 +70,39 @@ def test_the_loop_removes_an_expired_session_and_its_tokens_and_keeps_a_live_one
     assert rows == [("id-live", "refresh-token-live", "access-token-live")]
 
 
+def test_a_wake_that_arrives_during_a_tick_is_not_lost(tmp_path: Path) -> None:
+    """The loop cleared its wake after the tick's work, so a wake set while the tick ran was
+    wiped and the next tick came an hour later (workbench `main`, Windows, 2026-11-21: the
+    test below set the wake while the first tick was still asking Eugene)."""
+
+    async def go() -> int:
+        store = Store(tmp_path / "workbench.sqlite3")
+        await store.open()
+        removal = Removal(store, None, tmp_path)  # type: ignore[arg-type]
+        calls = 0
+
+        async def sweep(now: float) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                removal._wake.set()  # arrives in the middle of the first tick
+
+        store.sweep_sessions = sweep  # type: ignore[method-assign]
+        try:
+            removal.start()
+
+            async def ticked_again() -> bool:
+                return calls >= 2
+
+            await _until(ticked_again, "the tick the wake asked for")
+            return calls
+        finally:
+            await removal.aclose()
+            await store.close()
+
+    assert asyncio.run(go()) >= 2
+
+
 def test_one_failed_sweep_is_logged_and_the_next_tick_tries_again(
     tmp_path: Path, caplog: object
 ) -> None:
