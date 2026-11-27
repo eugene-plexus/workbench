@@ -300,6 +300,9 @@ try {
   await toolDialog
     .getByRole("option", { name: /^Revision 2 of 2, edited/ })
     .waitFor({ state: "attached" });
+  await toolDialog
+    .getByRole("option", { name: /^Revision 1 of 2, from fetch_page's result/ })
+    .waitFor({ state: "attached" });
   await toolDialog.getByRole("combobox", { name: "Revision", exact: true }).selectOption("1");
   // The Source box shows revision 1 after React redraws it; reading it at once can
   // still see the edit (workbench#22, Firefox). Wait on the box itself, then check.
