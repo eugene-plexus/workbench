@@ -111,8 +111,12 @@ export default function ArtifactDialog({
 
   // What is kept of it, if anything: shown at its last revision.
   const summaryId = summary?.id;
+  const knownId = kept?.id;
   useEffect(() => {
-    if (!summaryId) return;
+    // Saving returns the complete view. The chat subsequently learns its id;
+    // reading that same view again would reset a revision the person chose
+    // after saving while the parent's refresh was still in flight.
+    if (!summaryId || summaryId === knownId) return;
     let gone = false;
     api<ArtifactView>(`/api/chats/${scope.chatId}/artifacts/${summaryId}`).then(
       (view) => {
@@ -132,7 +136,7 @@ export default function ArtifactDialog({
     return () => {
       gone = true;
     };
-  }, [scope.chatId, summaryId]);
+  }, [scope.chatId, summaryId, knownId]);
 
   // A revision's source, read when it is first shown.
   const missing = !sources.has(selected) && kept !== null;
@@ -214,6 +218,7 @@ export default function ArtifactDialog({
           );
       const last = view.revisionList[view.revisionList.length - 1]?.number ?? 1;
       setKept(view);
+      setLoading(false);
       setSources((was) => new Map(was).set(last, draft));
       setSelected(last);
       setDraft(null);

@@ -1,11 +1,12 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { api } from "../lib/api";
-import { digest, type ArtifactView } from "../lib/artifacts";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { api, post } from "../lib/api";
+import { digest, keepDraft, type ArtifactView } from "../lib/artifacts";
 import ArtifactDialog from "./ArtifactDialog";
 
 vi.mock("../lib/api", async (actual) => ({
   ...(await actual<typeof import("../lib/api")>()),
   api: vi.fn(),
+  post: vi.fn(),
 }));
 
 const original = "same\nold\nend";
@@ -109,4 +110,73 @@ it("names a failed revision read and offers downloads when a comparison is too l
   fireEvent.change(screen.getByLabelText("Compare with revision"), { target: { value: "1" } });
   expect(await screen.findByText("Too long to compare here. Download both.")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Download both" })).toBeEnabled();
+});
+
+it("keeps the chosen revision when the chat learns about the artifact just saved", async () => {
+  const saved: ArtifactView = {
+    ...artifact,
+    revisions: 2,
+    revisionList: artifact.revisionList.slice(0, 2),
+    origin: "tool",
+    tool: "pages/fetch_page",
+  };
+  vi.mocked(post).mockResolvedValue(saved);
+  let finishRead!: (value: ArtifactView) => void;
+  vi.mocked(api).mockReturnValue(
+    new Promise((resolve) => {
+      finishRead = resolve;
+    }),
+  );
+  const scope = {
+    chatId: "c1",
+    messageId: "m1",
+    artifacts: [] as ArtifactView[],
+    readOnly: false,
+    writing: false,
+    tool: "pages/fetch_page",
+    onKept: vi.fn(),
+  };
+  const props = {
+    scope,
+    opened: { kind: "markdown" as const, language: "md", original, title: "Notes" },
+    onClose() {},
+  };
+  const view = render(<ArtifactDialog {...props} />);
+  fireEvent.click(screen.getByRole("tab", { name: "Source" }));
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "edited tool result" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save as revision 2" }));
+  await waitFor(() => expect(scope.onKept).toHaveBeenCalledOnce());
+  fireEvent.change(screen.getByLabelText("Revision"), { target: { value: "1" } });
+  expect(screen.getByRole("textbox")).toHaveValue(original);
+
+  // The parent refresh arrives after the person has already chosen revision one.
+  view.rerender(<ArtifactDialog {...props} scope={{ ...scope, artifacts: [saved] }} />);
+  await act(async () => {
+    finishRead(saved);
+  });
+  expect(screen.getByLabelText("Revision")).toHaveValue("1");
+  expect(screen.getByRole("textbox")).toHaveValue(original);
+  expect(screen.getByLabelText("Revision").querySelector('option[value="1"]')).toHaveTextContent(
+    "from fetch_page's result",
+  );
+});
+
+it("finishes loading when a retained draft saves before the initial revision read", async () => {
+  vi.mocked(api).mockReturnValue(new Promise(() => {}));
+  const saved = {
+    ...artifact,
+    revisions: 4,
+    revisionList: [
+      ...artifact.revisionList,
+      { number: 4, author: "person", size: 10, createdAt: 4 },
+    ],
+  };
+  vi.mocked(post).mockResolvedValue(saved);
+  keepDraft(`m1:markdown:${digest(original)}`, { text: "retained draft", base: 3 });
+  show();
+  fireEvent.click(screen.getByRole("tab", { name: "Source" }));
+  fireEvent.click(screen.getByRole("button", { name: /Save as revision/ }));
+  await waitFor(() => expect(screen.getByLabelText("Revision")).toHaveValue("4"));
+  expect(screen.getByLabelText("Revision")).not.toBeDisabled();
+  expect(screen.queryByText("Reading the revision…")).not.toBeInTheDocument();
 });

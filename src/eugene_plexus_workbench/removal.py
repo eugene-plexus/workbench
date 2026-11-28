@@ -215,6 +215,9 @@ class Removal:
                 self.purge_soon(row["sub"])
         while True:
             self._later = None
+            # A wake during this tick requests another tick. Clearing it after
+            # the work would discard that request until the next hourly check.
+            self._wake.clear()
             await self.sweep_sessions()
             try:
                 await self.check()
@@ -225,7 +228,6 @@ class Removal:
                 raise
             except Exception:
                 log.exception("checking for people removed from Eugene failed in Workbench itself")
-            self._wake.clear()
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._wake.wait(), timeout=CHECK_SECONDS)
 
